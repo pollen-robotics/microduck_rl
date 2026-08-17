@@ -622,3 +622,79 @@ def test_motion_blockers_stay_light():
     assert weights == sorted(weights, reverse=True), "la rampe doit durcir"
     # -1.0 pas avant 1500 iters (contre 500 dans la version précédente).
     assert min(s["step"] for s in stages if s["weight"] == -1.0) >= 1500 * NUM_STEPS_PER_ENV
+
+
+# ── Variante backlash ─────────────────────────────────────────────────────────
+# ±1° de jeu d'engrenage en série par servo, avec le PD firmware qui boucle sur
+# l'encodeur À TRAVERS le jeu — comme le vrai servo, dont l'encodeur est en sortie
+# de réducteur. Toutes les autres familles (Rollers, RollerCrouch, RollerSlope,
+# StandUp, Sit, SitStand…) ont leur variante ; celle-ci manquait, parce que
+# « register backlash for all envs » a été fait pendant que cet env vivait sur une
+# autre branche.
+#
+# Elle n'est SÛRE que depuis le passage aux indices servo-only : sur le modèle
+# backlash le tableau de joints passe à 32 entrées (18 passives), donc les anciens
+# indices [0-4, 11-15] auraient silencieusement récompensé des roues et des
+# charnières de jeu.
+
+
+def _load(task_id):
+    from mjlab.tasks.registry import load_env_cfg
+
+    import mjlab_microduck.tasks  # noqa: F401  (l'import déclenche l'enregistrement)
+
+    return load_env_cfg(task_id)
+
+
+def test_backlash_variant_is_registered():
+    from mjlab.tasks.registry import list_tasks
+
+    import mjlab_microduck.tasks  # noqa: F401
+
+    assert "Mjlab-RollerStandUp-Flat-Backlash-MicroDuck" in list_tasks()
+
+
+def test_backlash_variant_keeps_the_recovery_recipe():
+    # Le backlash ne doit changer QUE le modèle robot et la lecture des joints.
+    # Récompenses, poids, reset au sol et curricula sont ceux de la tâche de base.
+    bl = _load("Mjlab-RollerStandUp-Flat-Backlash-MicroDuck")
+    base = _load("Mjlab-RollerStandUp-Flat-MicroDuck")
+
+    assert set(bl.rewards.keys()) == set(base.rewards.keys())
+    for name in bl.rewards:
+        assert bl.rewards[name].weight == base.rewards[name].weight, name
+
+    assert "set_ground_state" in bl.events
+    assert bl.events["set_ground_state"].params["prone_z_min"] == 0.076
+    for cur in ("ground_state_mix", "wheel_friction", "arrival_damping_weight",
+                "torque_rate_weight", "push_magnitude"):
+        assert cur in bl.curriculum, f"curriculum perdu dans la variante : {cur}"
+    assert "fell_over" not in bl.terminations
+
+
+def test_backlash_variant_reads_joints_through_the_backlash():
+    from mjlab_microduck.tasks import mdp as microduck_mdp
+
+    bl = _load("Mjlab-RollerStandUp-Flat-Backlash-MicroDuck")
+    for grp in ("actor", "critic"):
+        terms = bl.observations[grp].terms
+        assert terms["joint_pos"].func is microduck_mdp.joint_pos_rel_backlash
+        assert terms["joint_vel"].func is microduck_mdp.joint_vel_rel_backlash
+    # nan_policy conservé (make_backlash_variant n'y touche pas)
+    assert bl.observations["actor"].nan_policy == "sanitize"
+
+
+def test_backlash_variant_wheel_friction_targets_only_wheels():
+    """La DR de roulement ne doit PAS toucher les charnières de jeu.
+
+    Sur le modèle backlash, `^passive_.*` matcherait aussi
+    `passive_left_hip_yaw_backlash` : on appliquerait de la friction de roulement au
+    jeu d'engrenage. L'env roller a resserré la regex en `^passive_.*wheel` ; cette
+    variante doit en hériter.
+    """
+    bl = _load("Mjlab-RollerStandUp-Flat-Backlash-MicroDuck")
+    names = bl.events["randomize_wheel_friction"].params["asset_cfg"].joint_names
+    assert all("wheel" in n for n in names), names
+    # Et la valeur de départ reste le palier 0 du curriculum inversé.
+    stage0 = bl.curriculum["wheel_friction"].params["ranges_stages"][0]["ranges"]
+    assert bl.events["randomize_wheel_friction"].params["ranges"] == stage0

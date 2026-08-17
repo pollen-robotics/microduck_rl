@@ -267,6 +267,10 @@ _BACKLASH_TASKS = (
     ("Mjlab-Velocity-Swizzle-Backlash-MicroDuck", make_microduck_velocity_swizzle_env_cfg, {}, MicroduckSwizzleRlCfg, _BL_ROLLERS),
     ("Mjlab-RollerCrouch-Flat-Backlash-MicroDuck", make_microduck_roller_crouch_env_cfg, {}, MicroduckRollerCrouchRlCfg, _BL_ROLLERS),
     ("Mjlab-RollerSlope-Flat-Backlash-MicroDuck", make_microduck_roller_slope_env_cfg, {}, MicroduckRollerSlopeRlCfg, _BL_ROLLERS),
+    # Sûre uniquement depuis le passage de roller_standup aux indices servo-only :
+    # le modèle backlash a 32 joints (18 passifs), donc des indices écrits contre le
+    # tableau complet auraient silencieusement récompensé roues et charnières de jeu.
+    ("Mjlab-RollerStandUp-Flat-Backlash-MicroDuck", make_microduck_roller_standup_env_cfg, {}, MicroduckRollerStandUpRlCfg, _BL_ROLLERS),
 )
 for _task_id, _make_cfg, _kw, _rl_cfg, _robot_cfg in _BACKLASH_TASKS:
     register_mjlab_task(

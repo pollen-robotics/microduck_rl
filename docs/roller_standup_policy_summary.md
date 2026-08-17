@@ -100,6 +100,30 @@ choix que le `standup`). Slots `head_pose` / `body_pose` **zero-paddés** (conve
 
 **Réserve** : `infer_policy.py` est le script de sim/clavier local. Le runtime robot est le binaire Rust `microduck_runtime`, absent du repo — il n'est pas vérifié qu'il expose un équivalent `--standing`. Le doc de passation du crouch ne liste que `--model`, `--ground-pick`, `--fold-policy`. À confirmer.
 
+## Variante backlash
+
+`Mjlab-RollerStandUp-Flat-Backlash-MicroDuck` — ±1° de jeu d'engrenage en série par servo,
+avec le PD firmware qui boucle sur l'encodeur **à travers** le jeu, comme le vrai servo dont
+l'encodeur est en sortie de réducteur. Modèle `MICRODUCK_ROLLERS_BACKLASH_ROBOT_CFG`
+(roues + backlash, 32 joints dont 18 passifs). Obs et actions restent à 14 joints, donc
+runtime et export sont inchangés.
+
+```bash
+uv run train Mjlab-RollerStandUp-Flat-Backlash-MicroDuck --env.scene.num-envs 4096 --agent.max_iterations 15000
+```
+
+Récompenses, poids, reset au sol et curricula sont **identiques** à la tâche de base
+(vérifié par `test_backlash_variant_keeps_the_recovery_recipe`) : seuls le modèle et la
+lecture des joints changent.
+
+⚠️ Cette variante n'est **sûre que depuis le passage aux indices servo-only**. Avec les
+anciens indices écrits contre le tableau complet, elle aurait silencieusement récompensé des
+roues et des charnières de jeu, sans planter.
+
+**Pourquoi elle vaut le détour ici** : le relevé pousse sur le sol avec des servos souples, et
+le jeu d'engrenage est exactement le type d'écart sim2real qui fait échouer en vrai ce qui
+passe en simu — le symptôme observé sur le dos. À comparer avec la tâche de base pour trancher.
+
 ## Terminaisons
 
 `fell_over` **supprimée** (le robot démarre tombé). `nan_state` héritée. `nan_policy="sanitize"` sur les obs actor/critic.
