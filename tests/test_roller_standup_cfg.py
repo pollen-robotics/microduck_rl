@@ -119,41 +119,63 @@ def test_task_is_registered():
     assert "Mjlab-RollerStandUp-Flat-MicroDuck" in list_tasks()
 
 
-def test_joint_indices_match_actual_roller_model():
-    """Verrou : les roues passives sont intercalées dans l'ordre des joints.
+def test_joint_indices_are_in_the_canonical_servo_space():
+    """Verrou : les indices visent la vue SERVO-ONLY, pas le tableau complet.
 
-    Réutiliser les indices du standup ([0-4, 9-13]) donnerait des récompenses
-    qui pointent sur des roues. Ce test compile le vrai MjSpec du robot rollers
-    et vérifie les noms aux indices utilisés. Pur CPU, pas de sim.
+    pose_target_match / pose_l1_penalty / standing_composite_score indexent via
+    mdp._servo_joint_pos, qui sélectionne `^(?!passive_).*` — donc les 14 servos,
+    en excluant TOUS les joints passifs (roues ET charnières de backlash). Les
+    indices sont donc à écrire dans la disposition canonique à 14 joints, la même
+    que celle du marcheur, et PAS dans le tableau à 18 joints de l'entité rollers.
+
+    Historique : ce fichier utilisait [0-4, 11-15] (positions réelles dans le
+    tableau complet du modèle rollers). Après la migration de mdp.py vers
+    _servo_joint_pos, les indices 14 et 15 sont sortis des bornes d'un tenseur à
+    14 colonnes → « index out of bounds » sur GPU, env inentraînable. Les tests de
+    config ne pouvaient pas l'attraper : ils n'appellent jamais les récompenses.
+
+    On vérifie sur les DEUX modèles rollers — normal et backlash — parce que
+    l'invariant « la vue servo-only est identique » est exactement ce qui rend une
+    variante backlash de cet env sûre à enregistrer.
     """
     import mujoco
 
-    from mjlab_microduck.robot.microduck_constants import get_walk_rollers_spec
+    from mjlab_microduck.robot.microduck_constants import (
+        get_rollers_backlash_spec,
+        get_walk_rollers_spec,
+    )
     from mjlab_microduck.tasks.microduck_roller_standup_env_cfg import (
         _LEG_JOINTS,
         _NECK_JOINTS,
-        _WHEEL_JOINTS,
     )
 
-    model = get_walk_rollers_spec().compile()
-    articulated = [
-        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j)
-        for j in range(model.njnt)
-        if model.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE
-    ]
-
-    assert [articulated[i] for i in _LEG_JOINTS] == [
+    expected_legs = [
         "left_hip_yaw", "left_hip_roll", "left_hip_pitch", "left_knee", "left_ankle",
         "right_hip_yaw", "right_hip_roll", "right_hip_pitch", "right_knee", "right_ankle",
     ]
-    assert [articulated[i] for i in _NECK_JOINTS] == [
-        "neck_pitch", "head_pitch", "head_yaw", "head_roll",
-    ]
-    assert [articulated[i] for i in _WHEEL_JOINTS] == [
-        "passive_LF_wheel", "passive_LR_wheel", "passive_RF_wheel", "passive_RR_wheel",
-    ]
-    # Aucun recouvrement, et les trois listes couvrent tous les joints.
-    assert len(set(_LEG_JOINTS) | set(_NECK_JOINTS) | set(_WHEEL_JOINTS)) == len(articulated)
+    expected_neck = ["neck_pitch", "head_pitch", "head_yaw", "head_roll"]
+
+    for label, spec_fn in (
+        ("rollers", get_walk_rollers_spec),
+        ("rollers_backlash", get_rollers_backlash_spec),
+    ):
+        model = spec_fn().compile()
+        servo = []
+        for j in range(model.njnt):
+            if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE:
+                continue
+            name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j)
+            if not name.startswith("passive_"):
+                servo.append(name)
+
+        assert len(servo) == 14, f"{label} : {len(servo)} servos au lieu de 14"
+        assert max(_LEG_JOINTS + _NECK_JOINTS) < len(servo), (
+            f"{label} : indice hors bornes de la vue servo-only"
+        )
+        assert [servo[i] for i in _LEG_JOINTS] == expected_legs, label
+        assert [servo[i] for i in _NECK_JOINTS] == expected_neck, label
+        # Les deux listes couvrent exactement les 14 servos, sans recouvrement.
+        assert len(set(_LEG_JOINTS) | set(_NECK_JOINTS)) == 14, label
 
 
 def test_recovery_rewards_present_with_expected_weights():

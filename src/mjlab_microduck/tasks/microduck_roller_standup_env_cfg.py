@@ -91,24 +91,38 @@ def _resolve_play_face_up():
         print(f"[roller_standup] STANDUP_PLAY_FACE_UP='{raw}' invalide -> défaut {PLAY_FACE_UP}")
         return PLAY_FACE_UP
 
-# ── Indices de joints — les roues passives sont INTERCALÉES ───────────────────
-# Ordre réel du modèle rollers (18 joints après le free-joint), vérifié dans
-# MuJoCo via get_walk_rollers_spec().compile() :
+# ── Indices de joints — disposition canonique SERVO-ONLY (14 joints) ──────────
+# pose_target_match / pose_l1_penalty / standing_composite_score indexent via
+# mdp._servo_joint_pos, qui sélectionne `^(?!passive_).*` : les 14 servos, en
+# excluant TOUS les joints passifs — roues ET charnières de backlash. Les indices
+# s'écrivent donc dans cette vue à 14 joints, identique pour le marcheur et pour
+# les rollers :
 #   0-4   left_hip_yaw, left_hip_roll, left_hip_pitch, left_knee, left_ankle
-#   5-6   passive_LF_wheel, passive_LR_wheel
-#   7-10  neck_pitch, head_pitch, head_yaw, head_roll
-#   11-15 right_hip_yaw, right_hip_roll, right_hip_pitch, right_knee, right_ankle
-#   16-17 passive_RF_wheel, passive_RR_wheel
-# Le standup utilise [0-4, 9-13] / [5-8] : ce sont les indices du modèle SANS
-# roues, ils ne valent PAS ici. Verrouillé par tests/test_roller_standup_cfg.py.
+#   5-8   neck_pitch, head_pitch, head_yaw, head_roll
+#   9-13  right_hip_yaw, right_hip_roll, right_hip_pitch, right_knee, right_ankle
 #
-# Seul _LEG_JOINTS est consommé (par les récompenses de pose). _NECK_JOINTS et
-# _WHEEL_JOINTS servent à la documentation et au test d'indices : le cou est
-# résolu par NOM (neck_joint_pos_l2 appelle find_joints(r".*(neck|head).*") à
-# chaque pas) et les roues par la regex ^passive_.*.
-_LEG_JOINTS   = [0, 1, 2, 3, 4, 11, 12, 13, 14, 15]
-_NECK_JOINTS  = [7, 8, 9, 10]
-_WHEEL_JOINTS = [5, 6, 16, 17]
+# ⚠️ HISTORIQUE — ne pas « corriger » vers les positions du tableau complet.
+# Ce fichier utilisait [0-4, 11-15] / [7-10], les positions réelles dans le
+# tableau à 18 joints de l'entité rollers (roues intercalées aux positions 5,6 et
+# 16,17). C'était juste à l'époque, où les récompenses indexaient
+# asset.data.joint_pos directement. Depuis la migration de mdp.py vers
+# _servo_joint_pos, les indices 14 et 15 sortent des bornes d'un tenseur à 14
+# colonnes → « index out of bounds » sur GPU, env inentraînable. Les tests de
+# config ne l'attrapent pas : ils ne font que construire cfg, jamais appeler les
+# récompenses. Seul un vrai run le révèle.
+#
+# Bénéfice de la vue servo-only : elle est IDENTIQUE sur le modèle rollers et sur
+# le modèle rollers+backlash (32 joints dont 18 passifs), donc ces indices sont
+# désormais robustes au backlash. Vérifié sur les deux modèles par
+# tests/test_roller_standup_cfg.py::test_joint_indices_are_in_the_canonical_servo_space.
+#
+# Seul _LEG_JOINTS est consommé (récompenses de pose). _NECK_JOINTS sert à la
+# documentation et au test : le cou est résolu par NOM (neck_joint_pos_l2 appelle
+# find_joints(r".*(neck|head).*") à chaque pas). Plus de _WHEEL_JOINTS : les roues
+# n'existent pas dans la vue servo-only, et leur DR les cible par la regex
+# `^passive_.*wheel`.
+_LEG_JOINTS  = [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]
+_NECK_JOINTS = [5, 6, 7, 8]
 
 # Récompenses de PATINAGE de l'env roller : aucun sens quand on est par terre.
 # feet_flat : les lames ne sont PAS à plat pendant la montée → combattrait le geste.
