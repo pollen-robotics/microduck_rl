@@ -2,6 +2,7 @@ import pytest
 
 from mjlab_microduck.tasks.microduck_roller_standup_env_cfg import (
     EPISODE_LENGTH_S,
+    NUM_STEPS_PER_ENV,
     make_microduck_roller_standup_env_cfg,
 )
 from mjlab_microduck.tasks.microduck_velocity_rollers_env_cfg import (
@@ -179,28 +180,34 @@ def test_joint_indices_are_in_the_canonical_servo_space():
 
 
 def test_recovery_rewards_present_with_expected_weights():
+    """Poids alignés sur la recette évoluée du standup (bloc de tâche / 4).
+
+    Le bloc de tâche entier a été divisé par 4 pendant que les amortisseurs
+    gardaient leurs valeurs : c'est la correction du rapport tâche/amortissement,
+    qui était mesuré à ~35:1 (task ≈ +41.6 contre ≈ -1.2 d'amortisseurs) et ne
+    laissait aucune raison d'être doux. Diviser la tâche plutôt que monter les
+    amortisseurs évite d'en transformer un en bloqueur de mouvement.
+    """
     cfg = make_microduck_roller_standup_env_cfg()
     expected = {
-        "pose_stand_legs":      8.0,
-        "pose_stand_l1":        5.0,
-        "height_stand":         4.0,
-        "height_stand_sharp":   4.0,
-        "height_stand_l1":     30.0,
-        "com_upward_velocity":  3.0,
-        # gentle_rise : poids POSITIF. trunk_vertical_accel_penalty renvoie déjà
-        # -|a_z|, donc un poids négatif en faisait une RÉCOMPENSE de la violence
-        # (bug mesuré : Episode_Reward/gentle_rise loggée à +0.0118).
-        "gentle_rise":         +0.02,
-        "upright_linear":       6.0,
-        "upright_sharp":        6.0,
-        "standing_composite":  15.0,
-        # -2e-3 ne contribuait que -0.0002/pas face à +41.6 de tâche : nul.
-        # -2.0 a mesuré -0.255/pas (run d8rnko6p) — pas le gel, mais on redescend
-        # à -0.2 pour dégager le budget d'amortissement pendant qu'on isole.
-        "joint_torque_rate_l2": -0.2,
+        "pose_stand_legs":      2.0,
+        "pose_stand_l1":        1.25,
+        "height_stand":         1.0,
+        "height_stand_sharp":   1.0,
+        "height_stand_l1":      7.5,
+        "com_upward_velocity":  0.75,
+        # POSITIF : trunk_vertical_accel_penalty renvoie déjà -|a_z|.
+        "gentle_rise":          0.005,
+        "upright_linear":       1.5,
+        "upright_sharp":        1.5,
+        "standing_composite":   3.75,
+        # 0 au départ : introduit tardivement par torque_rate_weight (voir
+        # test_anti_violence_terms_are_introduced_late).
+        "joint_torque_rate_l2": 0.0,
+        "arrival_damping":      0.0,
     }
     for name, weight in expected.items():
-        assert name in cfg.rewards, f"récompense de relevé manquante : {name}"
+        assert name in cfg.rewards, f"récompense manquante : {name}"
         assert cfg.rewards[name].weight == weight, f"poids inattendu sur {name}"
 
 
@@ -358,18 +365,6 @@ def test_wheel_friction_event_default_matches_stage_zero():
     assert cfg.events["randomize_wheel_friction"].params["ranges"] == stage0
 
 
-def test_action_rate_ramp_is_the_standup_one_not_the_roller_one():
-    # L'env roller monte à -2.0 (gait calme) : c'est un bloqueur de mouvement,
-    # il ralentit l'action rapide dont le relevé depuis le dos a besoin. On
-    # reprend la rampe du standup, qui plafonne à -1.0.
-    cfg = make_microduck_roller_standup_env_cfg()
-    weights = [
-        s["weight"] for s in cfg.curriculum["action_rate_weight"].params["weight_stages"]
-    ]
-    assert weights == [-0.4, -0.8, -1.0]
-    assert cfg.rewards["action_rate_l2"].weight == -0.6
-
-
 def test_push_curriculum_ramps_from_zero():
     # Poussées héritées (±0.2 m/s), mais rampées : une bourrade dès le pas 0
     # parasite le bootstrap du relevé.
@@ -493,9 +488,12 @@ def test_already_negative_penalties_use_positive_weights():
             f"{name} appelle une fonction qui renvoie déjà du négatif : "
             f"un poids négatif en ferait une récompense"
         )
-    # Et ces termes renvoient une magnitude positive → poids négatif.
-    for name in ("joint_torques_l2", "joint_torque_rate_l2", "action_rate_l2"):
+    # Et ces termes renvoient une magnitude positive → poids négatif (ou 0 quand
+    # un curriculum tardif les introduit : joint_torque_rate_l2, arrival_damping).
+    for name in ("joint_torques_l2", "action_rate_l2"):
         assert cfg.rewards[name].weight < 0, f"{name} attend un poids négatif"
+    for name in ("joint_torque_rate_l2", "arrival_damping"):
+        assert cfg.rewards[name].weight <= 0, f"{name} ne doit jamais être positif"
 
 
 def test_no_ungated_head_impact_penalty():
@@ -529,33 +527,98 @@ def test_inherited_sensors_intact():
     assert "self_collision" in names
 
 
-def test_lazy_prone_optimum_is_documented_risk():
+def test_height_l1_stays_the_dominant_task_term():
     """Le gel vient d'un optimum paresseux : couché, jambes à HOME, ça paye.
 
     pose_stand_legs restait à +7.72 sur 8 alors que le robot était allongé — les
     jambes sont à HOME en position couchée, donc la récompense de pose est encaissée
-    quasi gratuitement. C'est le contrepoids qui rend « ne rien faire » viable dès
-    qu'on ajoute un coût au mouvement. height_stand_l1 (poids +30) est le terme
-    censé rendre « rester au sol » net négatif : il doit rester fort.
+    quasi gratuitement. height_stand_l1 est le terme qui contrebalance ça en rendant
+    « rester au sol » net NÉGATIF (il vaut -|z - cible|, donc -0.063 × poids à plat
+    ventre). Il doit rester le plus lourd du bloc de tâche.
+
+    Assertion invariante d'échelle : tout le bloc a déjà été divisé par 4 une fois,
+    donc on vérifie le RAPPORT et non une valeur absolue.
     """
     cfg = make_microduck_roller_standup_env_cfg()
-    assert cfg.rewards["height_stand_l1"].weight >= 30.0
+    task_terms = (
+        "pose_stand_legs", "pose_stand_l1", "height_stand", "height_stand_sharp",
+        "height_stand_l1", "upright_linear", "upright_sharp", "standing_composite",
+    )
+    weights = {n: abs(cfg.rewards[n].weight) for n in task_terms}
+    assert weights["height_stand_l1"] == max(weights.values()), (
+        f"height_stand_l1 doit dominer le bloc de tâche, or {weights}"
+    )
+    # Et il doit rester nettement au-dessus de la pose, qui est le terme « gratuit
+    # en position couchée » qu'il contrebalance.
+    assert weights["height_stand_l1"] >= 3.0 * weights["pose_stand_legs"]
     assert cfg.rewards["com_upward_velocity"].weight > 0.0
 
 
-def test_damping_terms_are_not_numerically_negligible():
-    """Les amortisseurs dédiés ne pesaient littéralement rien.
+def test_anti_violence_terms_are_introduced_late():
+    """Le gel venait du TIMING, pas de la magnitude.
 
-    Mesuré à convergence : joint_torque_rate_l2 -0.0002/pas et joint_torques_l2
-    -0.0001/pas, face à ~+41.6 de récompense de tâche (rapport ~35:1 pour tous
-    les amortisseurs réunis). joint_torque_rate_l2 est le levier SÛR à remonter :
-    il pénalise la VARIATION de couple, pas le mouvement, donc il n'agit pas comme
-    bloqueur de mouvement — le standup documente que body_ang_vel et action_rate,
-    eux, gelaient le relevé depuis le dos.
+    Leçon établie sur deux runs cassés du standup, citée dans ses commentaires :
+    « the same weights active from step 0 prevent the flips from ever being
+    DISCOVERED (attempt-tax on exploration) ». ground_state_mix finit de rampe les
+    poses dures à l'itération 2500 ; les pénalités anti-violence n'entrent donc
+    qu'à 3000, quand les compétences existent et que les resets au sol continuent
+    de les exercer.
+
+    C'est exactement ce qui a gelé cet env : head_impact_penalty (-1.0) et
+    joint_torque_rate_l2 (-2.0) étaient actifs dès le pas 0.
     """
     cfg = make_microduck_roller_standup_env_cfg()
-    assert abs(cfg.rewards["joint_torque_rate_l2"].weight) >= 0.1
-    # Les bloqueurs de mouvement restent à leurs valeurs « se relève de partout ».
+    for cur_name, reward_name in (
+        ("arrival_damping_weight", "arrival_damping"),
+        ("torque_rate_weight", "joint_torque_rate_l2"),
+    ):
+        assert cur_name in cfg.curriculum, f"curriculum manquant : {cur_name}"
+        stages = cfg.curriculum[cur_name].params["weight_stages"]
+        assert cfg.curriculum[cur_name].params["reward_name"] == reward_name
+        assert stages[0]["step"] == 0 and stages[0]["weight"] == 0.0, (
+            f"{reward_name} doit démarrer à 0"
+        )
+        # Rien avant 3000 iters : ground_state_mix finit de rampe à 2500.
+        first_active = min(s["step"] for s in stages if s["weight"] != 0.0)
+        assert first_active >= 3000 * NUM_STEPS_PER_ENV, (
+            f"{reward_name} introduit trop tôt (taxe sur l'exploration)"
+        )
+
+
+def test_arrival_damping_gates_are_scaled_to_roller_height():
+    """La porte doit être relative à la hauteur debout du ROLLER, pas du marcheur.
+
+    Le standup utilise 0.09/0.11 pour STAND_Z=0.115, soit -25 mm et -5 mm sous la
+    station. Copiées telles quelles sur le roller (0.138), ces bornes ouvriraient
+    la porte alors que le robot est encore ~3 cm sous sa hauteur debout, donc en
+    pleine montée — exactement ce que la porte est censée épargner.
+    """
+    from mjlab_microduck.tasks.microduck_roller_standup_env_cfg import ROLLER_STAND_Z
+
+    params = make_microduck_roller_standup_env_cfg().rewards["arrival_damping"].params
+    assert params["height_low"] == pytest.approx(ROLLER_STAND_Z - 0.025)
+    assert params["height_high"] == pytest.approx(ROLLER_STAND_Z - 0.005)
+    assert params["height_low"] < params["height_high"] < ROLLER_STAND_Z
+    # La porte d'inclinaison est indispensable : sans elle, le redressement final
+    # d'une montée pliée est lui-même une grande rotation du tronc, et la taxer
+    # dresse un mur juste avant l'arrivée (leçon du standup).
+    assert params["tilt_full_deg"] == 20.0
+    assert params["tilt_zero_deg"] == 45.0
+
+
+def test_motion_blockers_stay_light():
+    """body_ang_vel et action_rate restent des bloqueurs de mouvement.
+
+    Le standup documente qu'à -0.15 et -1.2 respectivement, ils GELAIENT le relevé
+    depuis le dos. Sa rampe action_rate est aussi bien plus douce qu'avant :
+    -0.1 au départ, -1.0 seulement à 1500 iters.
+    """
+    cfg = make_microduck_roller_standup_env_cfg()
     assert cfg.rewards["body_ang_vel"].weight == -0.05
-    weights = [s["weight"] for s in cfg.curriculum["action_rate_weight"].params["weight_stages"]]
-    assert min(weights) >= -1.0, "action_rate au-delà de -1.0 gelait le relevé (standup)"
+    stages = cfg.curriculum["action_rate_weight"].params["weight_stages"]
+    weights = [s["weight"] for s in stages]
+    assert weights[0] == -0.1, "démarrage doux exigé"
+    assert min(weights) >= -1.0, "au-delà de -1.0 gelait le relevé (standup)"
+    assert weights == sorted(weights, reverse=True), "la rampe doit durcir"
+    # -1.0 pas avant 1500 iters (contre 500 dans la version précédente).
+    assert min(s["step"] for s in stages if s["weight"] == -1.0) >= 1500 * NUM_STEPS_PER_ENV

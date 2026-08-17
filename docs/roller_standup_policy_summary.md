@@ -110,83 +110,91 @@ STANDUP_PLAY_FACE_UP=none md-play   # défaut (palier 0, pas de dos)
 Le reste (`1 - face_up`) est réparti ventre:debout dans le rapport 2:1 du dernier palier,
 si bien que `0.4` reproduit exactement le mélange de fin d'entraînement (0.40 / 0.20 / 0.40).
 
-## 🔧 Correction anti-violence (après premier test robot)
+## 🔧 Historique des échecs et de la resynchronisation
 
-**Symptômes** sur un checkpoint 4000+ : mouvements très brusques, la tête tape le sol,
-échec du relevé depuis le dos sur le robot. **Présents en simu aussi** → ce n'était donc
-ni du sim2real, ni un checkpoint trop jeune, mais la conception des récompenses.
+### Bug de signe : `gentle_rise` récompensait la violence
 
-**Root cause : `gentle_rise` récompensait la violence.** `trunk_vertical_accel_penalty`
-renvoie déjà `-|a_z|` (`mdp.py:2171`) ; multiplié par le poids **−0.02** hérité du
-`standup`, ça faisait un double négatif, donc `+0.02·|a_z|` — **plus le tronc accélérait
-brutalement, plus la policy était payée**. Confirmé par le log : `Episode_Reward/gentle_rise
-= +0.0118` sur le run `vweolw91`, seul terme de pénalité loggé positif.
+**Symptômes** (checkpoint 4000+) : mouvements très brusques, la tête tape le sol,
+échec du relevé depuis le dos. **Présents en simu aussi** → ni sim2real, ni checkpoint jeune.
 
-`mdp.py` mélange deux conventions de signe, et c'est le piège :
+`trunk_vertical_accel_penalty` renvoie déjà `-|a_z|` (`mdp.py`) ; multiplié par le poids
+**−0.02** hérité du `standup`, ça donnait `+0.02·|a_z|` — **plus le tronc accélérait
+brutalement, plus la policy était payée**. Confirmé : `Episode_Reward/gentle_rise = +0.0118`
+sur le run `vweolw91`, seul terme de pénalité loggé positif.
+
+`mdp.py` mélange deux conventions de signe :
 
 | terme | la fonction renvoie | poids correct |
 |---|---|---|
 | `height_stand_l1`, `pose_stand_l1`, `gentle_rise` | `-abs(...)`, déjà négatif | **positif** |
 | `joint_torques_l2`, `joint_torque_rate_l2`, `action_rate_l2`, `body_impact_cost` | magnitude positive | **négatif** |
 
-Verrouillé par `test_already_negative_penalties_use_positive_weights`.
+Verrouillé par `test_already_negative_penalties_use_positive_weights`. Le même bug existait
+dans `standup` et `sitstand` (run `7ev90yd9`) ; **les deux ont été corrigés depuis**.
 
-⚠️ **Le `standup` du marcheur a exactement le même bug** (même fonction, même poids −0.02).
-Ça explique la série de tentatives d'amortissement infructueuses documentées dans ses
-commentaires (« *violent / shaky / overshoot-tip-repeat on the real robot* ») : elles
-combattaient un terme qui poussait activement dans l'autre sens. **Non corrigé ici** — c'est
-un autre env, à trancher séparément.
+### Échec n°1 : pénalité d'impact tête → policy gelée
 
-**Problème structurel associé.** À convergence les récompenses de tâche totalisaient **≈ +41.6**
-saturées à 95–99 %, contre **≈ −1.2** pour tous les amortisseurs réunis — dont
-`joint_torque_rate_l2` à **−0.0002/pas** et `joint_torques_l2` à **−0.0001/pas**, soit rien.
-Rapport ~35:1 : aucune raison d'être doux.
-
-**État actuel des corrections :**
-
-| | avant | maintenant | pourquoi |
-|---|---|---|---|
-| `gentle_rise` | −0.02 (récompense) | **+0.02** (pénalité) | signe corrigé ; magnitude gardée PETITE exprès — `\|a_z\|` est forcément élevé pendant un retournement, un gros poids serait un bloqueur de mouvement |
-| `joint_torque_rate_l2` | −2e-3 | **−0.2** | le levier SÛR : pénalise la variation de couple, pas le mouvement |
-| `head_impact_penalty` | absent | **toujours absent** | essayé à −1.0, a gelé la policy — voir ci-dessous |
-
-### ⚠️ La pénalité d'impact tête a gelé la policy — ne pas la remettre telle quelle
-
-Tentative avec les valeurs de `velstand` (`body_impact_cost`, sous-arbre `neck`, −1.0,
-seuil 2.0) : **la policy a convergé vers rester couchée, inerte.** Mesuré (run `d8rnko6p`) :
-
-| terme | avant (violent) | avec head_impact (gelé) |
-|---|---|---|
-| `standing_composite` | +14.32 | **+3.26** |
-| `upright_sharp` | +5.76 | +1.06 |
-| `head_impact_penalty` | — | **−1.01** ← plus gros terme négatif |
-| `joint_torque_rate_l2` | −0.0002 | −0.255 (donc **pas** le coupable) |
-
-L'erreur de raisonnement : croire qu'une pénalité « ciblée » ne bride pas le mouvement.
-**Faux ici — pour se relever du dos, ce robot pivote sur sa tête et ses épaules.** La tête
-est le point d'appui du retournement, pas un dégât collatéral ; la pénaliser bloque le seul
-mécanisme disponible, et le dos était déjà le cas qui échouait.
+Essayée avec les valeurs de `velstand` (−1.0, seuil 2.0) : **la policy a convergé vers rester
+couchée, inerte.** Mesuré (run `d8rnko6p`) : `head_impact_penalty` −1.01/pas, plus gros terme
+négatif, `standing_composite` effondré de +14.3 à +3.3.
 
 **L'optimum paresseux qui rend ce gel possible** : `pose_stand_legs` restait à **+7.72 sur 8**
-alors que le robot était allongé — les jambes sont à HOME en position couchée, donc cette
-récompense est encaissée quasi gratuitement. C'est `height_stand_l1` (poids +30) qui doit
-rendre « rester au sol » net négatif ; il ne faut pas l'affaiblir.
+alors que le robot était allongé — les jambes sont à HOME en position couchée, donc la
+récompense est encaissée quasi gratuitement. `height_stand_l1` est le terme qui contrebalance
+ça (verrouillé par `test_height_l1_stays_the_dominant_task_term`).
 
-**Hypothèse en cours de test** : taper la tête était un *symptôme* de la violence (le bug de
-signe payait la brutalité, et une montée brutale finit sur la tête), pas un défaut séparé.
-Si le slam revient maintenant que le signe est corrigé, la reprise doit être une pénalité
-**gatée en hauteur** (comme `upright_sharp` l'est), qui épargne la phase de retournement au sol.
+### La vraie leçon : c'est le TIMING, pas la magnitude
 
-**Leçon de méthode** : les trois corrections ont été appliquées d'un coup, donc le gel n'a pas
-pu être attribué avec certitude — seul le suspect le plus probable a pu être désigné. Une
-correction à la fois, à l'avenir.
+Le `standup` a établi la loi générale sur deux runs cassés : *« the same weights active from
+step 0 prevent the flips from ever being DISCOVERED (attempt-tax on exploration) »*, et
+*« the fix is timing, not magnitude »*. Toute taxe sur les tentatives pendant la phase de
+découverte fait gagner « ne rien faire ». Les deux ajouts de cet env (`head_impact_penalty`
+à −1.0 **et** `joint_torque_rate_l2` à −2.0) étaient actifs dès le pas 0.
 
-**Recalibrage si c'est encore violent** : `|Δτ|²` vaut ~0.1 à convergence, donc la
-contribution de `joint_torque_rate_l2` ≈ `0.1 × |poids|`. Monter **ce** terme, **pas**
-`body_ang_vel` (−0.05) ni `action_rate_l2` (rampe → −1.0) : ceux-là sont des bloqueurs de
-mouvement et le `standup` documente qu'à −0.15 et −1.2 respectivement, ils **gelaient** le
-relevé depuis le dos. Si au contraire le dos cesse de fonctionner, **baisser**
-`joint_torque_rate_l2` en premier.
+### État actuel — recette resynchronisée sur `standup`
+
+| | avant | maintenant |
+|---|---|---|
+| bloc de tâche entier | poids ×4 | **÷4** (`standing_composite` 3.75, `pose_stand_legs` 2.0, `height_stand_l1` 7.5…) |
+| `gentle_rise` | −0.02 (récompense) | **+0.005** — plafond mesuré : 0.01 contribuait au gel |
+| `com_upward_velocity` | 3.0 | **0.75** |
+| `arrival_damping` | absent | **`body_ang_vel_at_height`**, gaté hauteur+inclinaison, 0 → −0.025 à 3000 → −0.05 à 4000 |
+| `joint_torque_rate_l2` | −0.2 dès le pas 0 | **0** → −1e-3 à 3000 |
+| rampe `action_rate_l2` | −0.4 → −1.0 dès 500 | **−0.1 → −1.0 à 1500** |
+| `head_impact_penalty` | testé à −1.0 | **absent** |
+
+Diviser la tâche plutôt que monter les amortisseurs corrige le rapport tâche/amortissement
+(mesuré à ~35:1, maintenant ~9:1) **sans** transformer un amortisseur en bloqueur de mouvement.
+
+`arrival_damping` vise la boucle d'échec réelle — monter → dépasser la verticale → basculer →
+recommencer. Ses portes de hauteur sont transposées sur `ROLLER_STAND_Z` (0.113 / 0.133) et
+**pas** copiées du marcheur (0.09 / 0.11), qui ouvriraient la porte alors que le robot roller
+est encore 3 cm sous sa station, donc en pleine montée. La porte d'inclinaison est
+indispensable : sans elle, le redressement final d'une montée pliée est lui-même une grande
+rotation, et la taxer dresse un mur juste avant l'arrivée.
+
+⚠️ **Si le relevé se dégrade après 3000, adoucir le DERNIER palier — ne pas avancer
+l'introduction.**
+
+### 🐛 Régression : indices de joints hors bornes
+
+La migration de `mdp.py` vers `_servo_joint_pos` a rendu l'env **inentraînable** sans que rien
+ne le signale. `joint_indices` s'interprète désormais dans la vue **servo-only à 14 joints**
+(`^(?!passive_).*`, donc sans roues ni backlash) ; les constantes visaient le tableau complet à
+18 joints, donc les indices 14 et 15 sortaient des bornes → `index out of bounds` sur GPU.
+
+**Les 37 tests de config passaient quand même** : ils construisent `cfg` sans jamais appeler
+les récompenses. Seul un vrai run le révèle — c'est la limite structurelle de ces tests, et il
+faut lancer 3 itérations réelles après tout changement d'indices ou de capteur.
+
+Bénéfice : la vue servo-only est **identique** sur le modèle rollers et sur rollers+backlash
+(32 joints dont 18 passifs), donc les indices sont maintenant robustes au backlash — vérifié
+sur les deux modèles par `test_joint_indices_are_in_the_canonical_servo_space`.
+
+### Leçon de méthode
+
+Les trois premières corrections ont été appliquées d'un coup, donc le gel n'a pas pu être
+attribué avec certitude. Une correction à la fois.
 
 ## Hors périmètre
 

@@ -8,13 +8,15 @@ Dérive de l'env roller (`make_microduck_velocity_rollers_env_cfg`) → hérite 
 quel le robot rollers, les capteurs, toute la DR et l'observation 61D, donc
 interchangeable au runtime (--new-cmd-obs). C'est le pattern de roller_slope.
 
-Deux différences structurelles avec `standup` :
-  - les roues passives sont INTERCALÉES dans l'ordre des joints → indices
-    remappés (_LEG_JOINTS ci-dessous), verrouillés par
-    tests/test_roller_standup_cfg.py ;
-  - pas de commande head_pose : les slots head/body restent zero-paddés
-    (convention de la famille roller) et la tête est tenue droite par
-    neck_joint_pos_l2, qui résout par NOM.
+Une seule différence structurelle avec `standup` : pas de commande head_pose —
+les slots head/body restent zero-paddés (convention de la famille roller) et la
+tête est tenue droite par neck_joint_pos_l2, qui résout par NOM. Les indices de
+joints sont ceux de la disposition canonique à 14 servos, comme le marcheur (voir
+_LEG_JOINTS) : mdp indexe via _servo_joint_pos, qui exclut roues et backlash.
+
+Poids de récompense alignés sur la recette évoluée du standup (bloc de tâche à
+1/4, pénalités anti-violence introduites seulement à l'itération 3000). Voir
+docs/roller_standup_policy_summary.md pour l'historique des échecs qui y ont mené.
 
 La pièce nouvelle est le curriculum de friction de roulement, INVERSÉ (roues
 freinées → libres) : les roues roulent, donc il n'y a aucune adhérence pour
@@ -189,9 +191,16 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
 
     # Pose cible = HOME (target_overrides=None), JAMBES seulement : le cou et la
     # tête sont tenus par neck_joint_pos_l2 (hérité), qui résout par NOM.
+    # ⚠️ Tout le bloc de tâche ci-dessous est à 1/4 des poids d'origine, aligné sur
+    # la recette évoluée du standup. Les amortisseurs gardent leurs valeurs, donc
+    # diviser la tâche corrige le rapport tâche/amortissement — mesuré à ~35:1
+    # (tâche ≈ +41.6 contre ≈ -1.2 d'amortisseurs, run vweolw91), ce qui ne laissait
+    # aucune raison d'être doux. Diviser la tâche plutôt que monter les amortisseurs
+    # évite d'en transformer un en bloqueur de mouvement. Les ratios INTERNES au bloc
+    # sont inchangés, ainsi que tous les std.
     cfg.rewards["pose_stand_legs"] = RewardTermCfg(
         func=microduck_mdp.pose_target_match,
-        weight=8.0,
+        weight=2.0,
         params={
             "std": 0.5,
             "joint_indices": _LEG_JOINTS,
@@ -201,7 +210,7 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
     # Bootstrap L1 : gradient constant même loin de HOME (la gaussienne sature).
     cfg.rewards["pose_stand_l1"] = RewardTermCfg(
         func=microduck_mdp.pose_l1_penalty,
-        weight=5.0,
+        weight=1.25,
         params={
             "joint_indices": _LEG_JOINTS,
             "target_overrides": None,
@@ -214,7 +223,7 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
     # se contente de l'optimum paresseux « immobile au sol ».
     cfg.rewards["height_stand"] = RewardTermCfg(
         func=microduck_mdp.height_target_gaussian,
-        weight=4.0,
+        weight=1.0,
         params={
             "std": 0.04,
             "target_height": ROLLER_STAND_Z,
@@ -223,7 +232,7 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
     )
     cfg.rewards["height_stand_sharp"] = RewardTermCfg(
         func=microduck_mdp.height_target_gaussian,
-        weight=4.0,
+        weight=1.0,
         params={
             "std": 0.015,
             "target_height": ROLLER_STAND_Z,
@@ -232,7 +241,7 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
     )
     cfg.rewards["height_stand_l1"] = RewardTermCfg(
         func=microduck_mdp.height_l1_penalty,
-        weight=30.0,
+        weight=7.5,
         params={
             "target_height": ROLLER_STAND_Z,
             "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
@@ -245,7 +254,7 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
     # coupure et ne finit pas la montée.
     cfg.rewards["com_upward_velocity"] = RewardTermCfg(
         func=microduck_mdp.com_upward_velocity,
-        weight=3.0,
+        weight=0.75,
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
             "max_height": ROLLER_STAND_Z + 0.010,
@@ -265,14 +274,48 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
     # tentatives d'amortissement infructueuses documentées dans le standup, qui
     # combattaient un terme poussant activement dans l'autre sens.
     #
-    # On garde la magnitude 0.02 (celle voulue à l'origine) DÉLIBÉRÉMENT petite :
+    # Magnitude 0.005, le PLAFOND mesuré par le standup : « the 2026-07-24 attempt to
+    # double it to -0.01 contributed to the face-up freeze; -0.005 is the ceiling
+    # unless it gets a height/tilt gate like arrival_damping ». Ce terme est GLOBAL
+    # (non gaté), donc les retournements au sol le paient en plein — d'où le plafond.
+    # Volontairement petit :
     # |a_z| est forcément élevé pendant un retournement depuis le dos, donc un gros
     # poids ici serait un bloqueur de mouvement. L'amortissement réel est porté par
     # joint_torque_rate_l2, qui pénalise la VARIATION de couple et pas le mouvement.
     cfg.rewards["gentle_rise"] = RewardTermCfg(
         func=microduck_mdp.trunk_vertical_accel_penalty,
-        weight=+0.02,
+        weight=0.005,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",))},
+    )
+
+    # Amortisseur d'ARRIVÉE — ω_xy² du tronc, gaté en hauteur ET en inclinaison.
+    # Vise précisément la boucle d'échec décrite sur le robot : monter → dépasser la
+    # verticale → basculer → recommencer. C'est ça, la « violence ».
+    #
+    # Portes de hauteur transposées sur ROLLER_STAND_Z : le standup utilise
+    # 0.09/0.11 pour STAND_Z=0.115, soit -25 mm et -5 mm sous la station. Copiées
+    # telles quelles sur le roller (0.138), elles ouvriraient la porte alors que le
+    # robot est encore ~3 cm sous sa hauteur debout, donc EN PLEINE MONTÉE — exactement
+    # ce que la porte doit épargner.
+    #
+    # La porte d'INCLINAISON est indispensable, pas un raffinement : sans elle, le
+    # redressement final d'une montée pliée (inclinaison 60°→0 à l'intérieur de la
+    # porte de hauteur) est lui-même une grande rotation du tronc ; la taxer dresse un
+    # mur de récompense juste avant l'arrivée et la policy se gare pliée sous la porte.
+    #
+    # DÉMARRE À 0 — introduit à l'itération 3000 par arrival_damping_weight. Voir le
+    # bloc de curricula pour la leçon de timing, qui est la vraie cause du gel de cet
+    # env.
+    cfg.rewards["arrival_damping"] = RewardTermCfg(
+        func=microduck_mdp.body_ang_vel_at_height,
+        weight=0.0,
+        params={
+            "height_low":    ROLLER_STAND_Z - 0.025,
+            "height_high":   ROLLER_STAND_Z - 0.005,
+            "tilt_full_deg": 20.0,
+            "tilt_zero_deg": 45.0,
+            "asset_cfg":     SceneEntityCfg("robot", body_names=("trunk_base",)),
+        },
     )
 
     # Tronc vertical en deux couches : cos(tilt) a un fort gradient quand on est
@@ -281,12 +324,12 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
     # standup : basculer en arrière en tendant les jambes).
     cfg.rewards["upright_linear"] = RewardTermCfg(
         func=microduck_mdp.body_upright_linear,
-        weight=6.0,
+        weight=1.5,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",))},
     )
     cfg.rewards["upright_sharp"] = RewardTermCfg(
         func=microduck_mdp.upright_gaussian_at_height,
-        weight=6.0,
+        weight=1.5,
         params={
             "std": 0.3,
             "height_low": ROLLER_PRONE_Z,
@@ -302,7 +345,7 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
     # montée (des stds serrées donnaient un score ~5e-5, donc zéro gradient).
     cfg.rewards["standing_composite"] = RewardTermCfg(
         func=microduck_mdp.standing_composite_score,
-        weight=15.0,
+        weight=3.75,
         params={
             "target_height": ROLLER_STAND_Z,
             "height_std": 0.04,
@@ -331,9 +374,14 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
     # Si c'est encore violent, monter CE terme (formule ci-dessus) plutôt que
     # body_ang_vel ou action_rate, qui sont des bloqueurs de mouvement et gelaient
     # le relevé depuis le dos.
+    # DÉMARRE À 0 — introduit à l'itération 3000 par torque_rate_weight. À -0.2 dès
+    # le pas 0 (run d8rnko6p) il faisait partie de la taxe sur les tentatives qui a
+    # gelé la policy. Le standup a fini par le mettre à -1e-3 seulement, et
+    # seulement après 3000 : l'amortissement d'arrivée est porté par
+    # arrival_damping, qui est gaté et donc chirurgical.
     cfg.rewards["joint_torque_rate_l2"] = RewardTermCfg(
         func=microduck_mdp.joint_torque_rate_l2,
-        weight=-0.2,
+        weight=0.0,
     )
 
     # PAS de pénalité d'impact tête. Essayée avec les valeurs de velstand
@@ -487,15 +535,58 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
     # mouvement : il ralentit l'action rapide dont le relevé depuis le dos a
     # besoin (le standup documente qu'un action_rate trop fort tuait cette
     # récupération). La douceur est portée ici par joint_torque_rate_l2.
-    cfg.rewards["action_rate_l2"].weight = -0.6
+    cfg.rewards["action_rate_l2"].weight = -0.1
     cfg.curriculum["action_rate_weight"] = CurriculumTermCfg(
         func=microduck_mdp.reward_weight,
         params={
             "reward_name": "action_rate_l2",
+            # Rampe du standup : bien plus douce qu'avant (-0.4 -> -1.0 dès 500).
+            # Un action_rate fort tôt est une taxe sur l'exploration ; -1.0 n'arrive
+            # qu'à 1500, après que les compétences de relevé se soient installées.
             "weight_stages": [
-                {"step": 0,                       "weight": -0.4},
-                {"step": 250 * NUM_STEPS_PER_ENV, "weight": -0.8},
-                {"step": 500 * NUM_STEPS_PER_ENV, "weight": -1.0},
+                {"step": 0,                        "weight": -0.1},
+                {"step": 500 * NUM_STEPS_PER_ENV,  "weight": -0.2},
+                {"step": 750 * NUM_STEPS_PER_ENV,  "weight": -0.4},
+                {"step": 1000 * NUM_STEPS_PER_ENV, "weight": -0.6},
+                {"step": 1250 * NUM_STEPS_PER_ENV, "weight": -0.8},
+                {"step": 1500 * NUM_STEPS_PER_ENV, "weight": -1.0},
+            ],
+        },
+    )
+
+    # ── Curricula de POLISSAGE, introduits TARD ─────────────────────────────
+    # C'est la vraie cause du gel de cet env, et la leçon est empruntée au standup,
+    # qui l'a établie sur deux runs cassés : « the same weights active from step 0
+    # prevent the flips from ever being DISCOVERED (attempt-tax on exploration) ».
+    # Autrement dit : TOUTE taxe sur les tentatives pendant la phase de découverte
+    # rend « ne rien faire » gagnant. Le raffinement des portes et la baisse des
+    # magnitudes n'y changeaient rien — « the fix is timing, not magnitude ».
+    #
+    # ground_state_mix finit de rampe les poses dures à l'itération 2500 ; à partir
+    # de 3000 les compétences existent et les resets au sol continuent de les
+    # exercer, donc ces pénalités affinent l'exécution au lieu de bloquer la
+    # découverte.
+    #
+    # ⚠️ Si le relevé se dégrade APRÈS 3000, adoucir le DERNIER palier — ne PAS
+    # avancer l'introduction.
+    cfg.curriculum["arrival_damping_weight"] = CurriculumTermCfg(
+        func=microduck_mdp.reward_weight,
+        params={
+            "reward_name":   "arrival_damping",
+            "weight_stages": [
+                {"step": 0,                         "weight": 0.0},
+                {"step": 3000 * NUM_STEPS_PER_ENV,  "weight": -0.025},
+                {"step": 4000 * NUM_STEPS_PER_ENV,  "weight": -0.05},
+            ],
+        },
+    )
+    cfg.curriculum["torque_rate_weight"] = CurriculumTermCfg(
+        func=microduck_mdp.reward_weight,
+        params={
+            "reward_name":   "joint_torque_rate_l2",
+            "weight_stages": [
+                {"step": 0,                        "weight": 0.0},
+                {"step": 3000 * NUM_STEPS_PER_ENV, "weight": -1e-3},
             ],
         },
     )
