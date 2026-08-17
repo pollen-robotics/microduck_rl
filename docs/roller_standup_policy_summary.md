@@ -18,13 +18,23 @@
 
 Les hauteurs de repos au sol sont identiques aux deux modèles : c'est la coque du tronc qui touche, pas les pieds.
 
-## ⚠️ Indices de joints — les roues sont INTERCALÉES
+## ⚠️ Indices de joints — vue SERVO-ONLY (14 joints)
+
+Les récompenses de pose indexent via `mdp._servo_joint_pos`, qui sélectionne
+`^(?!passive_).*` : les 14 servos, **sans** les roues ni les charnières de backlash. Les
+indices s'écrivent donc dans cette vue canonique, identique au marcheur :
 
 ```
-0-4   jambe gauche      5-6   roues gauches
-7-10  cou / tête       11-15  jambe droite      16-17  roues droites
+0-4   jambe gauche      5-8   cou / tête      9-13  jambe droite
 ```
-`_LEG_JOINTS = [0-4, 11-15]`. Les indices du `standup` (`[0-4, 9-13]`) valent pour le modèle **sans** roues et pointeraient sur des roues ici. Verrouillé par `tests/test_roller_standup_cfg.py::test_joint_indices_match_actual_roller_model`.
+`_LEG_JOINTS = [0-4, 9-13]`, `_NECK_JOINTS = [5-8]`. Plus de `_WHEEL_JOINTS` : les roues
+n'existent pas dans cette vue, et leur DR les cible par la regex `^passive_.*wheel`.
+
+**Ne pas « corriger » vers les positions du tableau complet** (`[0-4, 11-15]`, roues
+intercalées en 5,6 et 16,17) : c'était juste avant la migration de `mdp.py`, et ça rend l'env
+inentraînable depuis. Voir la régression décrite en bas de ce document. Verrouillé sur les
+modèles rollers ET rollers+backlash par
+`tests/test_roller_standup_cfg.py::test_joint_indices_are_in_the_canonical_servo_space`.
 
 ## Reset — départ au sol
 
@@ -41,9 +51,27 @@ Les hauteurs de repos au sol sont identiques aux deux modèles : c'est la coque 
 
 ## Récompenses
 
-Dix termes repris du `standup` avec leurs poids déjà réglés : `pose_stand_legs` (+8), `pose_stand_l1` (+5), `height_stand` (+4, std 0.04), `height_stand_sharp` (+4, std 0.015), `height_stand_l1` (+30), `com_upward_velocity` (+3), `gentle_rise` (−0.02), `upright_linear` (+6), `upright_sharp` (+6), `standing_composite` (+15). Plus `joint_torque_rate_l2` (−2e-3), l'anti-jitter qui n'empêche pas le retournement.
+**Bloc de tâche**, aligné sur la recette évoluée du `standup` (poids à 1/4 de la version
+initiale ; les ratios internes et tous les `std` sont inchangés) :
 
-Régularisateurs hérités : `body_ang_vel` **−0.05** (bloqueur de mouvement, à garder LÉGER), `angular_momentum` −0.02, `action_rate_l2` (rampe −0.4 → −1.0, **pas** le −2.0 du roller), `neck_action_rate_l2` −0.5, `neck_joint_pos_l2` −0.5 (tête droite), `joint_torques_l2` −1e-3, `action_over_limit` −0.5, `self_collisions` −1.0.
+| reward | poids | |
+|---|---|---|
+| `height_stand_l1` | **7.5** | doit dominer le bloc — c'est lui qui rend « rester au sol » net négatif |
+| `standing_composite` | 3.75 | score multiplicatif hauteur × droit × pose |
+| `pose_stand_legs` | 2.0 | pose cible = HOME (std 0.5) |
+| `upright_linear` / `upright_sharp` | 1.5 / 1.5 | `upright_sharp` gatée en hauteur, std 0.3 |
+| `pose_stand_l1` | 1.25 | bootstrap L1 |
+| `height_stand` / `height_stand_sharp` | 1.0 / 1.0 | std 0.04 (large) et 0.015 (serrée) |
+| `com_upward_velocity` | 0.75 | paye la montée, coupée à `ROLLER_STAND_Z + 0.010` |
+| `gentle_rise` | **+0.005** | poids POSITIF (voir bug de signe plus bas) ; 0.005 = plafond mesuré |
+
+**Anti-violence, introduits seulement à l'itération 3000** (voir la leçon de timing plus bas) :
+`arrival_damping` (0 → −0.025 → −0.05) et `joint_torque_rate_l2` (0 → −1e-3).
+
+Régularisateurs hérités : `body_ang_vel` **−0.05** (bloqueur de mouvement, à garder LÉGER),
+`angular_momentum` −0.02, `action_rate_l2` (base −0.1, rampe douce jusqu'à −1.0 **à 1500**),
+`neck_action_rate_l2` −0.5, `neck_joint_pos_l2` −0.5 (tête droite), `joint_torques_l2` −1e-3,
+`action_over_limit` −0.5, `self_collisions` −1.0.
 
 Retirées : toutes les récompenses de patinage, plus `feet_flat` (les lames ne sont pas à plat pendant la montée) et `hip_roll_neutral` (se relever demande d'écarter les jambes).
 
