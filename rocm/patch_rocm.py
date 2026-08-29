@@ -176,7 +176,14 @@ class TextureGuard(Patch):
     def status(self) -> str:
         if not self.path or not self.path.exists():
             return "target-missing"
-        return "present" if self.MARK in self.path.read_text() else "missing"
+        s = self.path.read_text()
+        if self.MARK in s:
+            return "present"
+        # Already guarded by an equivalent edit (e.g. a newer mujoco-warp that
+        # honors use_textures, or a prior run): treat as present, do not re-patch.
+        if "if use_textures:\n    for i in range(mjm.ntex):" in s:
+            return "present"
+        return "missing"
 
     def apply(self) -> str:
         st = self.status()
