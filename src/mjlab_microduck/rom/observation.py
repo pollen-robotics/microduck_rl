@@ -72,8 +72,10 @@ def _vector(value: ArrayLike, length: int, name: str) -> NDArray[np.float32]:
 def project_gravity_wxyz(quaternion_wxyz: ArrayLike) -> NDArray[np.float32]:
     """Rotate world down into the body frame with MuJoCo ``wxyz`` convention."""
     quaternion = _vector(quaternion_wxyz, 4, "base_orientation_wxyz")
-    if float(np.linalg.norm(quaternion)) <= np.finfo(np.float32).eps:
+    norm = float(np.linalg.norm(quaternion))
+    if norm <= np.finfo(np.float32).eps:
         raise ValueError("base_orientation_wxyz must be a non-zero quaternion")
+    quaternion = quaternion / norm
     world_gravity = np.array([0.0, 0.0, -1.0], dtype=np.float32)
     scalar = quaternion[0]
     vector = quaternion[1:4]

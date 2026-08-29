@@ -64,6 +64,11 @@ exclude = [
   "typings",
 ]
 
+[tool.pytest.ini_options]
+filterwarnings = [
+  "ignore:Using `httpx` with `starlette.testclient` is deprecated.*:starlette.exceptions.StarletteDeprecationWarning",
+]
+
 [tool.uv]
 override-dependencies = [
     # NOTE: do NOT override mujoco — mjlab 1.3.0's mujoco-warp pins a compatible

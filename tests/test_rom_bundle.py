@@ -14,6 +14,7 @@ from onnx import TensorProto, helper
 
 from mjlab_microduck.robot.microduck_constants import MICRODUCK_WALK_XML
 from mjlab_microduck.rom.action_catalog import ACTION_TEMPLATES
+from mjlab_microduck.rom.action_specs import ACTION_RUNTIME_SPECS
 from mjlab_microduck.rom.bundle import BundleBuildRequest, build_bundle
 from mjlab_microduck.rom.contracts import sha256_prefixed
 
@@ -35,6 +36,28 @@ def write_minimal_onnx(path: Path) -> Path:
         "microduck-test-policy",
         [helper.make_tensor_value_info("observation", TensorProto.FLOAT, [1, 61])],
         [helper.make_tensor_value_info("action", TensorProto.FLOAT, [1, 14])],
+    )
+    onnx.save(helper.make_model(graph), path)
+    return path
+
+
+def write_normalized_onnx(path: Path) -> Path:
+    graph = helper.make_graph(
+        [
+            helper.make_node("Sub", ["observation", "mean"], ["centered"]),
+            helper.make_node("Div", ["centered", "std"], ["normalized"]),
+            helper.make_node("MatMul", ["normalized", "weights"], ["action"]),
+        ],
+        "microduck-normalized-test-policy",
+        [helper.make_tensor_value_info("observation", TensorProto.FLOAT, [1, 61])],
+        [helper.make_tensor_value_info("action", TensorProto.FLOAT, [1, 14])],
+        [
+            helper.make_tensor("mean", TensorProto.FLOAT, [61], [0.0] * 61),
+            helper.make_tensor("std", TensorProto.FLOAT, [61], [1.0] * 61),
+            helper.make_tensor(
+                "weights", TensorProto.FLOAT, [61, 14], [0.0] * (61 * 14)
+            ),
+        ],
     )
     onnx.save(helper.make_model(graph), path)
     return path
@@ -98,6 +121,55 @@ def test_catalog_covers_every_user_intent_once():
         "ROLLER_STAND_UP",
         "SPIN",
     }
+    slope = next(
+        item for item in ACTION_TEMPLATES if item.action_code == "ROLLER_SLOPE"
+    )
+    assert slope.execution_mode == "CONTINUOUS_LEASE"
+    assert slope.lease is not None
+    assert set(ACTION_RUNTIME_SPECS) == {
+        template.action_code for template in ACTION_TEMPLATES
+    }
+    for spec in ACTION_RUNTIME_SPECS.values():
+        assert spec.required_capabilities
+        assert spec.reset_profile
+        assert spec.command_profile
+        assert spec.fall_policy
+        assert spec.metric_keys
+        if not spec.supported:
+            assert spec.unavailable_reason == "RUNTIME_SEMANTICS_UNSUPPORTED"
+    assert ACTION_RUNTIME_SPECS["GROUND_PICK"].phase_period_s == 4.0
+    assert ACTION_RUNTIME_SPECS["ROLLER_CROUCH"].phase_period_s == 5.0
+    assert ACTION_RUNTIME_SPECS["SPIN"].phase_period_s == 4.0
+    assert ACTION_RUNTIME_SPECS["KICK_LEFT"].kick_mirror == "LEFT_RIGHT_EXACT"
+    assert "BALL_FREEJOINT" in ACTION_RUNTIME_SPECS["KICK_RIGHT"].required_capabilities
+
+
+def test_actions_without_exact_runtime_scenario_semantics_remain_unavailable(
+    tmp_path: Path,
+):
+    policy = write_minimal_onnx(tmp_path / "standup.onnx")
+    bundle = build_bundle(
+        minimal_request(tmp_path, artifacts={"STAND_UP": policy})
+    ).manifest
+
+    standup = next(
+        action for action in bundle.actions if action.actionCode == "STAND_UP"
+    )
+    assert standup.availability == "UNAVAILABLE"
+    assert standup.unavailableReason == "RUNTIME_SEMANTICS_UNSUPPORTED"
+
+
+def test_roller_policy_is_unavailable_without_roller_model_capability(tmp_path: Path):
+    policy = write_minimal_onnx(tmp_path / "roller.onnx")
+    bundle = build_bundle(
+        minimal_request(tmp_path, artifacts={"ROLLER_VELOCITY": policy})
+    ).manifest
+
+    roller = next(
+        action for action in bundle.actions if action.actionCode == "ROLLER_VELOCITY"
+    )
+    assert roller.availability == "UNAVAILABLE"
+    assert roller.unavailableReason == "MODEL_CAPABILITY_MISSING"
 
 
 def test_missing_artifact_is_explicitly_unavailable(tmp_path: Path):
@@ -358,7 +430,8 @@ def test_shared_kick_artifact_requires_the_exact_declared_mirroring_transform(
         for action in bundle.manifest.actions
         if action.actionCode == "KICK_RIGHT"
     )
-    assert left.availability == "AVAILABLE"
+    assert left.availability == "UNAVAILABLE"
+    assert left.unavailableReason == "RUNTIME_SEMANTICS_UNSUPPORTED"
     assert right.availability == "UNAVAILABLE"
     assert right.unavailableReason == "POLICY_ARTIFACT_MISSING"
 
@@ -421,7 +494,7 @@ def test_bundle_cli_writes_release_archive_from_named_artifact(tmp_path: Path):
 
 def test_export_metadata_preserves_baked_normalizer_graph(tmp_path: Path):
     """Replacing the exported ONNX graph while adding metadata would discard baked normalization."""
-    policy = write_minimal_onnx(tmp_path / "policy.onnx")
+    policy = write_normalized_onnx(tmp_path / "policy.onnx")
     graph_before = onnx.load(policy).graph.SerializeToString()
 
     _export_module().attach_microduck_metadata(
@@ -442,4 +515,21 @@ def test_export_metadata_preserves_baked_normalizer_graph(tmp_path: Path):
         "microduck.action_contract": "MICRODUCK_ACTION_14_V1",
         "microduck.checkpoint": "model_100.pt",
         "microduck.run_identity": "entity/project/run",
+        "microduck.normalization": "EMPIRICAL_NORMALIZATION_V1",
+        "microduck.normalization_graph_sha256": hashlib.sha256(
+            graph_before
+        ).hexdigest(),
     }
+
+
+def test_export_metadata_refuses_graph_without_baked_normalizer(tmp_path: Path):
+    policy = write_minimal_onnx(tmp_path / "policy.onnx")
+
+    with pytest.raises(ValueError, match="empirical normalizer"):
+        _export_module().attach_microduck_metadata(
+            policy,
+            task_id="Mjlab-Velocity-Flat-MicroDuck",
+            source_commit="b" * 40,
+            checkpoint="model_100.pt",
+            run_identity="entity/project/run",
+        )

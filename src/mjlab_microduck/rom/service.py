@@ -177,14 +177,22 @@ class SimulatorTaskService:
             active = self._active
             if active is None or active.request.taskId != task_id:
                 return snapshot
-            if snapshot.state in {"SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT", "UNKNOWN"}:
+            if snapshot.state in {
+                "SUCCEEDED",
+                "FAILED",
+                "CANCELLED",
+                "TIMED_OUT",
+                "UNKNOWN",
+            }:
                 return snapshot
             if active.continuous:
                 return self._stop_continuous_locked(active, "CANCELLED", "CANCELLED")
             active.stop_event.set()
             if not active.cancel_recorded:
                 active.cancel_recorded = True
-                self._store.append_event(task_id, "TASK_CANCEL_REQUESTED", {"code": "CANCELLED"})
+                self._store.append_event(
+                    task_id, "TASK_CANCEL_REQUESTED", {"code": "CANCELLED"}
+                )
             return self._store.get(task_id) or snapshot
 
     def events_after(self, task_id: str, sequence: int):
@@ -203,11 +211,18 @@ class SimulatorTaskService:
             if snapshot is None:
                 raise TaskNotFound(f"task not found: {task_id}")
             active = self._active
-            if active is None or active.request.taskId != task_id or not active.continuous:
+            if (
+                active is None
+                or active.request.taskId != task_id
+                or not active.continuous
+            ):
                 raise InvalidParameters("task does not accept continuous commands")
             if snapshot.state != "RUNNING" or active.handle is None:
                 raise InvalidParameters("task is not running")
-            if active.deadline is not None and self._monotonic_clock() >= active.deadline:
+            if (
+                active.deadline is not None
+                and self._monotonic_clock() >= active.deadline
+            ):
                 self._stop_continuous_locked(active, "TIMED_OUT", "LEASE_EXPIRED")
                 raise InvalidParameters("task is not running")
             assert active.action is not None
@@ -248,18 +263,40 @@ class SimulatorTaskService:
             request.bundleVersion != self._bundle.bundleVersion
             or request.bundleDigest != self._bundle.bundleDigest
         ):
-            raise BundleMismatch("requested bundle version or digest does not match the installed bundle")
-        action = next((item for item in self._bundle.actions if item.actionCode == request.actionCode), None)
+            raise BundleMismatch(
+                "requested bundle version or digest does not match the installed bundle"
+            )
+        action = next(
+            (
+                item
+                for item in self._bundle.actions
+                if item.actionCode == request.actionCode
+            ),
+            None,
+        )
         if action is None or action.availability != "AVAILABLE":
             raise ActionUnavailable(f"action is unavailable: {request.actionCode}")
+        _validate_json_schema(request.parameters, action.parameterSchema)
         if action.executionMode == "DISCRETE" and request.leaseMs is not None:
             raise InvalidParameters("discrete actions do not accept leaseMs")
-        if action.executionMode == "DISCRETE":
-            _validate_json_schema(request.parameters, action.parameterSchema)
+        if action.executionMode == "CONTINUOUS_LEASE":
+            if request.leaseMs is None:
+                raise InvalidParameters("continuous actions require leaseMs")
+            assert action.lease is not None
+            if (
+                not action.lease.minLeaseMs
+                <= request.leaseMs
+                <= action.lease.maxLeaseMs
+            ):
+                raise InvalidParameters("leaseMs is outside the action lease bounds")
+            if request.leaseMs < action.lease.commandCadenceMs:
+                raise InvalidParameters("leaseMs is shorter than the command cadence")
         self._require_preconditions(action, request)
         return action
 
-    def _validate_command(self, command: TaskCommandRequest, action: ActionDefinition) -> None:
+    def _validate_command(
+        self, command: TaskCommandRequest, action: ActionDefinition
+    ) -> None:
         assert action.lease is not None
         _validate_json_schema(command.parameters, action.parameterSchema)
         if not action.lease.minLeaseMs <= command.leaseMs <= action.lease.maxLeaseMs:
@@ -271,29 +308,43 @@ class SimulatorTaskService:
         """Synchronously establish continuous ownership so command/tick share one state owner."""
         request = active.request
         try:
-            self._store.transition(request.taskId, "VALIDATING", event_type="TASK_VALIDATING")
+            self._store.transition(
+                request.taskId, "VALIDATING", event_type="TASK_VALIDATING"
+            )
             self._require_preconditions(action, request)
             self._runtime.validate(action, request)
-            running = self._store.transition(request.taskId, "RUNNING", event_type="TASK_STARTED")
             active.handle = self._runtime.start(action, request)
+            assert request.leaseMs is not None
+            deadline = self._monotonic_clock() + request.leaseMs / 1_000
+            active.deadline = deadline
+            running = self._store.start_continuous(request.taskId, deadline)
             return running
         except Exception as exc:
             stop_evidence = RuntimeEvidence()
             try:
-                stop_evidence = self._runtime.safe_stop(active.handle, "RUNTIME_EXCEPTION")
+                stop_evidence = self._runtime.safe_stop(
+                    active.handle, "RUNTIME_EXCEPTION"
+                )
             except Exception:  # noqa: BLE001 - the runtime can fail with implementation-defined errors.
                 stop_evidence = RuntimeEvidence()
             try:
                 current = self._store.get(request.taskId)
                 if current is not None and current.state == "VALIDATING":
-                    self._store.transition(request.taskId, "RUNNING", event_type="TASK_STARTED")
+                    self._store.transition(
+                        request.taskId, "RUNNING", event_type="TASK_STARTED"
+                    )
                 if self._store.get(request.taskId) is not None:
                     self._store.transition(
                         request.taskId,
                         "FAILED",
                         event_type="TASK_FAILED",
                         payload={"code": "RUNTIME_EXCEPTION"},
-                        evidence=self._evidence_for(action, _Outcome("FAILED", "RUNTIME_EXCEPTION"), {}, stop_evidence),
+                        evidence=self._evidence_for(
+                            action,
+                            _Outcome("FAILED", "RUNTIME_EXCEPTION"),
+                            {},
+                            stop_evidence,
+                        ),
                         stop_reason="RUNTIME_EXCEPTION",
                     )
             except IllegalTaskTransition:
@@ -323,7 +374,9 @@ class SimulatorTaskService:
             safety_code = "_AND_".join(safety_failures) if safety_failures else None
             if safety_code is not None:
                 stop_evidence = RuntimeEvidence(metrics={"safetyFailure": safety_code})
-            evidence = self._evidence_for(active.action, _Outcome(state, reason), {}, stop_evidence)
+            evidence = self._evidence_for(
+                active.action, _Outcome(state, reason), {}, stop_evidence
+            )
             payload: dict[str, str] = {"code": reason}
             if safety_code is not None:
                 payload["safetyCode"] = safety_code
@@ -339,11 +392,16 @@ class SimulatorTaskService:
             if self._active is active:
                 self._active = None
 
-    def _require_preconditions(self, action: ActionDefinition, request: TaskCreateRequest) -> None:
+    def _require_preconditions(
+        self, action: ActionDefinition, request: TaskCreateRequest
+    ) -> None:
         scenario_terrain = request.scenario.get("terrain")
         conditions = action.preconditions or {}
         allowed_terrains = conditions.get("allowedTerrains", ("flat",))
-        if not isinstance(scenario_terrain, str) or scenario_terrain not in allowed_terrains:
+        if (
+            not isinstance(scenario_terrain, str)
+            or scenario_terrain not in allowed_terrains
+        ):
             raise PreconditionFailed("scenario terrain is not allowed for this action")
         try:
             status = self._runtime.status()
@@ -364,7 +422,9 @@ class SimulatorTaskService:
         handle: RuntimeHandle | None = None
         started = False
         try:
-            self._store.transition(request.taskId, "VALIDATING", event_type="TASK_VALIDATING")
+            self._store.transition(
+                request.taskId, "VALIDATING", event_type="TASK_VALIDATING"
+            )
             self._require_preconditions(action, request)
             self._runtime.validate(action, request)
             self._store.transition(request.taskId, "RUNNING", event_type="TASK_STARTED")
@@ -382,7 +442,9 @@ class SimulatorTaskService:
         finally:
             if not started:
                 try:
-                    self._store.transition(request.taskId, "RUNNING", event_type="TASK_STARTED")
+                    self._store.transition(
+                        request.taskId, "RUNNING", event_type="TASK_STARTED"
+                    )
                     started = True
                 except IllegalTaskTransition:
                     # The store remains the source of truth if an external recovery won a race.
@@ -391,8 +453,12 @@ class SimulatorTaskService:
             try:
                 stop_evidence = self._runtime.safe_stop(handle, outcome.reason)
             except Exception:  # noqa: BLE001 - a failed safe stop is itself a runtime failure.
-                outcome = _Outcome(state="FAILED", reason="RUNTIME_EXCEPTION", metrics=sample_metrics)
-            evidence = self._evidence_for(action, outcome, sample_metrics, stop_evidence)
+                outcome = _Outcome(
+                    state="FAILED", reason="RUNTIME_EXCEPTION", metrics=sample_metrics
+                )
+            evidence = self._evidence_for(
+                action, outcome, sample_metrics, stop_evidence
+            )
             if started:
                 try:
                     self._store.transition(
@@ -421,12 +487,16 @@ class SimulatorTaskService:
             if sample.terminalState is not None:
                 return _Outcome(
                     state=sample.terminalState,
-                    reason=_terminal_result_code(sample.terminalState, sample.stopReason),
+                    reason=_terminal_result_code(
+                        sample.terminalState, sample.stopReason
+                    ),
                     metrics=dict(sample.metrics),
                 )
             if time.monotonic() >= deadline:
                 return _Outcome(state="TIMED_OUT", reason="MAX_DURATION_EXCEEDED")
-            active.stop_event.wait(min(self._poll_interval_s, max(0.0, deadline - time.monotonic())))
+            active.stop_event.wait(
+                min(self._poll_interval_s, max(0.0, deadline - time.monotonic()))
+            )
 
     def _evidence_for(
         self,
@@ -468,14 +538,17 @@ def _zero_parameters(action: ActionDefinition) -> dict[str, float]:
 
 def _policy_for(bundle: PolicyBundle, action: ActionDefinition) -> PolicyArtifact:
     assert action.policyRef is not None
-    policy = next((item for item in bundle.policies if item.policyRef == action.policyRef), None)
+    policy = next(
+        (item for item in bundle.policies if item.policyRef == action.policyRef), None
+    )
     if policy is None:
         raise RuntimeError(f"missing policy artifact: {action.policyRef}")
     return policy
 
 
 def _merge_metrics(
-    stop_metrics: Mapping[str, RuntimeMetric], sample_metrics: Mapping[str, RuntimeMetric]
+    stop_metrics: Mapping[str, RuntimeMetric],
+    sample_metrics: Mapping[str, RuntimeMetric],
 ) -> dict[str, RuntimeMetric]:
     """Keep primary runtime outcome metrics before lower-priority safe-stop diagnostics."""
     merged: dict[str, RuntimeMetric] = {}
@@ -501,7 +574,9 @@ def _terminal_result_code(state: str, runtime_reason: str | None) -> str:
     return "RUNTIME_FAILED"
 
 
-def _validate_json_schema(value: Any, schema: Mapping[str, Any], path: str = "parameters") -> None:
+def _validate_json_schema(
+    value: Any, schema: Mapping[str, Any], path: str = "parameters"
+) -> None:
     """Validate the small JSON Schema subset emitted by the action catalog."""
     expected = schema.get("type")
     if expected is not None and not _matches_type(value, expected):
@@ -525,14 +600,22 @@ def _matches_type(value: Any, expected: str | list[str]) -> bool:
         or (item == "array" and isinstance(value, list))
         or (item == "string" and isinstance(value, str))
         or (item == "boolean" and isinstance(value, bool))
-        or (item == "integer" and isinstance(value, int) and not isinstance(value, bool))
-        or (item == "number" and isinstance(value, int | float) and not isinstance(value, bool))
+        or (
+            item == "integer" and isinstance(value, int) and not isinstance(value, bool)
+        )
+        or (
+            item == "number"
+            and isinstance(value, int | float)
+            and not isinstance(value, bool)
+        )
         or (item == "null" and value is None)
         for item in expected_types
     )
 
 
-def _validate_object(value: Mapping[str, Any], schema: Mapping[str, Any], path: str) -> None:
+def _validate_object(
+    value: Mapping[str, Any], schema: Mapping[str, Any], path: str
+) -> None:
     properties = schema.get("properties", {})
     required = schema.get("required", [])
     for name in required:

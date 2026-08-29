@@ -92,11 +92,11 @@ ACTION_TEMPLATES: tuple[ActionTemplate, ...] = (
     ),
     ActionTemplate(
         "ROLLER_SLOPE",
-        "DISCRETE",
+        "CONTINUOUS_LEASE",
         ("Mjlab-RollerSlope-Flat-MicroDuck",),
-        _discrete_schema(),
-        _COMPLETION,
+        _velocity_schema(vx=(0.0, 0.0), vy=(0.0, 0.0), yaw=(0.0, 0.0)),
         None,
+        _LEASE,
     ),
     ActionTemplate(
         "STAND_UP",

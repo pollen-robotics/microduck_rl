@@ -52,7 +52,9 @@ class SqliteTaskStore:
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize_schema()
 
-    def create(self, request: TaskCreateRequest, request_hash: str) -> tuple[TaskSnapshot, bool]:
+    def create(
+        self, request: TaskCreateRequest, request_hash: str
+    ) -> tuple[TaskSnapshot, bool]:
         """Persist an accepted task or return the existing task for an idempotent retry."""
         request_content = canonical_json(request).decode("utf-8")
         timestamp = _timestamp()
@@ -112,7 +114,9 @@ class SqliteTaskStore:
             task = self._get_in_connection(connection, task_id)
             if state not in _ALLOWED_TRANSITIONS.get(task.state, frozenset()):
                 connection.rollback()
-                raise IllegalTaskTransition(f"cannot transition {task.state} to {state}")
+                raise IllegalTaskTransition(
+                    f"cannot transition {task.state} to {state}"
+                )
             connection.execute(
                 "UPDATE task SET state = ?, updated_at = ?, stop_reason = ? WHERE task_id = ?",
                 (state, timestamp, stop_reason, task_id),
@@ -128,7 +132,36 @@ class SqliteTaskStore:
                     """,
                     (task_id, canonical_json(evidence).decode("utf-8"), timestamp),
                 )
-            self._append_event_in_connection(connection, task_id, event_type, payload or {}, timestamp)
+            self._append_event_in_connection(
+                connection, task_id, event_type, payload or {}, timestamp
+            )
+            snapshot = self._get_in_connection(connection, task_id)
+            connection.commit()
+            return snapshot
+
+    def start_continuous(self, task_id: str, deadline_at: float) -> TaskSnapshot:
+        """Atomically enter RUNNING with the target-owned initial lease deadline."""
+        timestamp = _timestamp()
+        deadline = _monotonic_deadline(deadline_at)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task = self._get_in_connection(connection, task_id)
+            if task.state != "VALIDATING":
+                connection.rollback()
+                raise IllegalTaskTransition(
+                    f"cannot transition {task.state} to RUNNING"
+                )
+            connection.execute(
+                """
+                UPDATE task
+                SET state = 'RUNNING', deadline_at = ?, lease_expires_at = ?, updated_at = ?
+                WHERE task_id = ?
+                """,
+                (deadline, deadline, timestamp, task_id),
+            )
+            self._append_event_in_connection(
+                connection, task_id, "TASK_STARTED", {"initialLease": True}, timestamp
+            )
             snapshot = self._get_in_connection(connection, task_id)
             connection.commit()
             return snapshot
@@ -168,7 +201,9 @@ class SqliteTaskStore:
             if sequence is not None:
                 if command.commandSequence < sequence:
                     connection.rollback()
-                    raise StaleCommand(f"command sequence is stale: {command.commandSequence}")
+                    raise StaleCommand(
+                        f"command sequence is stale: {command.commandSequence}"
+                    )
                 if command.commandSequence == sequence:
                     if (
                         row["command_canonical_json"] == command_content
@@ -299,7 +334,9 @@ class SqliteTaskStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self._database_path, isolation_level=None, timeout=5.0)
+        connection = sqlite3.connect(
+            self._database_path, isolation_level=None, timeout=5.0
+        )
         try:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA busy_timeout = 5000")

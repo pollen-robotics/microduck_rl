@@ -23,7 +23,9 @@ def _bounded_metrics(metrics: Mapping[str, RuntimeMetric]) -> dict[str, RuntimeM
     bounded: dict[str, RuntimeMetric] = {}
     for key, value in metrics.items():
         if not isinstance(key, str) or not key or len(key) > _MAX_METRIC_KEY_LENGTH:
-            raise ValueError("runtime metric names must be non-empty strings of bounded length")
+            raise ValueError(
+                "runtime metric names must be non-empty strings of bounded length"
+            )
         if not isinstance(value, str | int | float | bool | type(None)):
             raise TypeError("runtime metrics must be scalar values")
         if isinstance(value, float) and not math.isfinite(value):
@@ -32,7 +34,9 @@ def _bounded_metrics(metrics: Mapping[str, RuntimeMetric]) -> dict[str, RuntimeM
             raise ValueError("runtime metric string values must have bounded length")
         bounded[key] = value
     if len(canonical_json(bounded)) > _MAX_METRICS_ENCODED_BYTES:
-        raise ValueError("runtime metrics encoded size exceeds the bounded evidence limit")
+        raise ValueError(
+            "runtime metrics encoded size exceeds the bounded evidence limit"
+        )
     return bounded
 
 
@@ -54,7 +58,9 @@ class RuntimeSample:
 
     def __post_init__(self) -> None:
         if self.running == (self.terminalState is not None):
-            raise ValueError("a runtime sample must be running or have one terminal state")
+            raise ValueError(
+                "a runtime sample must be running or have one terminal state"
+            )
         object.__setattr__(self, "metrics", _bounded_metrics(self.metrics))
 
 
@@ -72,14 +78,22 @@ class RuntimeEvidence:
 class SimulationRuntime(Protocol):
     """Runtime operations required by the durable discrete-task service."""
 
-    def validate(self, action: ActionDefinition, request: TaskCreateRequest) -> None: ...
+    def validate(
+        self, action: ActionDefinition, request: TaskCreateRequest
+    ) -> None: ...
 
-    def start(self, action: ActionDefinition, request: TaskCreateRequest) -> RuntimeHandle: ...
+    def start(
+        self, action: ActionDefinition, request: TaskCreateRequest
+    ) -> RuntimeHandle: ...
 
-    def command(self, handle: RuntimeHandle, parameters: Mapping[str, object]) -> None: ...
+    def command(
+        self, handle: RuntimeHandle, parameters: Mapping[str, object]
+    ) -> None: ...
 
     def sample(self, handle: RuntimeHandle) -> RuntimeSample: ...
 
-    def safe_stop(self, handle: RuntimeHandle | None, reason: str) -> RuntimeEvidence: ...
+    def safe_stop(
+        self, handle: RuntimeHandle | None, reason: str
+    ) -> RuntimeEvidence: ...
 
     def status(self) -> RobotStatus: ...

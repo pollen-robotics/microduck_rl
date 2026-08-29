@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hmac
+from contextlib import asynccontextmanager
+from threading import Event, Thread
 from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Path, Query, Request, Security
@@ -141,7 +143,38 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
     bearer_scheme = HTTPBearer(
         auto_error=False, scheme_name="bearerAuth", bearerFormat="opaque-token"
     )
-    app = FastAPI(docs_url=None, redoc_url=None)
+    watchdog_stop = Event()
+
+    def watchdog() -> None:
+        while not watchdog_stop.is_set():
+            if service is not None:
+                try:
+                    service.tick()
+                except Exception:  # noqa: BLE001 - one tick must not kill the deadman.
+                    app.state.watchdog_healthy = False
+            watchdog_stop.wait(0.01)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        watchdog_thread = Thread(
+            target=watchdog, name="microduck-lease-watchdog", daemon=True
+        )
+        watchdog_stop.clear()
+        app.state.watchdog_thread = watchdog_thread
+        watchdog_thread.start()
+        try:
+            yield
+        finally:
+            watchdog_stop.set()
+            watchdog_thread.join(timeout=2.0)
+            if watchdog_thread.is_alive():
+                app.state.watchdog_healthy = False
+                app.state.watchdog_thread = watchdog_thread
+            else:
+                app.state.watchdog_thread = None
+
+    app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
+    app.state.watchdog_healthy = True
 
     async def require_bearer(
         request: Request,
@@ -188,6 +221,8 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
 
     def ready_response() -> ReadyResponse:
         reason_codes = list(getattr(app.state, "readiness_reason_codes", ()))
+        if not app.state.watchdog_healthy:
+            reason_codes.append("WATCHDOG_UNHEALTHY")
         bundle = getattr(
             service, "_bundle", getattr(app.state, "installed_bundle", None)
         )

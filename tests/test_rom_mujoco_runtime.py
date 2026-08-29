@@ -44,6 +44,8 @@ def _write_policy(
     *,
     output: np.ndarray | None = None,
     input_dimension: int = 61,
+    tensor_type: int = TensorProto.FLOAT,
+    observation_dependent: bool = False,
     metadata_overrides: dict[str, str] | None = None,
 ) -> None:
     output_values = (
@@ -52,25 +54,42 @@ def _write_policy(
         else np.asarray(output, dtype=np.float32)
     )
     observations = helper.make_tensor_value_info(
-        "observations", TensorProto.FLOAT, [1, input_dimension]
+        "observations", tensor_type, [1, input_dimension]
     )
-    actions = helper.make_tensor_value_info("actions", TensorProto.FLOAT, [1, 14])
+    actions = helper.make_tensor_value_info("actions", tensor_type, [1, 14])
+    normalizer_mean = helper.make_tensor(
+        "normalizer_mean",
+        tensor_type,
+        [input_dimension],
+        np.zeros(input_dimension).ravel(),
+    )
+    normalizer_std = helper.make_tensor(
+        "normalizer_std",
+        tensor_type,
+        [input_dimension],
+        np.ones(input_dimension).ravel(),
+    )
+    weight_values = np.zeros((input_dimension, 14), dtype=np.float32)
+    if observation_dependent and input_dimension == 61:
+        weight_values[48, 0] = 0.5
     weights = helper.make_tensor(
         "weights",
         TensorProto.FLOAT,
         [input_dimension, 14],
-        np.zeros((input_dimension, 14), dtype=np.float32).ravel(),
+        weight_values.ravel(),
     )
     bias = helper.make_tensor("bias", TensorProto.FLOAT, [14], output_values.ravel())
     graph = helper.make_graph(
         [
-            helper.make_node("MatMul", ["observations", "weights"], ["linear"]),
+            helper.make_node("Sub", ["observations", "normalizer_mean"], ["centered"]),
+            helper.make_node("Div", ["centered", "normalizer_std"], ["normalized"]),
+            helper.make_node("MatMul", ["normalized", "weights"], ["linear"]),
             helper.make_node("Add", ["linear", "bias"], ["actions"]),
         ],
         "fixture-policy",
         [observations],
         [actions],
-        [weights, bias],
+        [normalizer_mean, normalizer_std, weights, bias],
     )
     model = helper.make_model(
         graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=10
@@ -82,6 +101,10 @@ def _write_policy(
         "microduck.action_contract": ACTION_CONTRACT,
         "microduck.checkpoint": "model_100.pt",
         "microduck.run_identity": "entity/project/run-id",
+        "microduck.normalization": "EMPIRICAL_NORMALIZATION_V1",
+        "microduck.normalization_graph_sha256": hashlib.sha256(
+            model.graph.SerializeToString()
+        ).hexdigest(),
     }
     metadata.update(metadata_overrides or {})
     for key, value in sorted(metadata.items()):
@@ -91,7 +114,13 @@ def _write_policy(
     onnx.save(model, path)
 
 
-def _write_model(path: Path) -> None:
+def _write_model(
+    path: Path,
+    *,
+    backlash: bool = False,
+    actuator_kind: str = "position",
+    include_file: str | None = None,
+) -> None:
     bodies: list[str] = []
     closing: list[str] = []
     for index, joint in enumerate(CONTROLLED_SERVO_JOINTS):
@@ -99,18 +128,28 @@ def _write_model(path: Path) -> None:
             [
                 f'<body name="link_{index}" pos="0 0 0.005">',
                 f'<joint name="{joint}" type="hinge" axis="0 0 1" range="-2 2" armature="0.01" damping="0.1"/>',
+                *(
+                    [
+                        f'<joint name="passive_{joint}_backlash" type="hinge" axis="0 0 1" range="-0.1 0.1"/>'
+                    ]
+                    if backlash
+                    else []
+                ),
                 '<geom type="sphere" size="0.002" mass="0.01"/>',
             ]
         )
         closing.append("</body>")
     actuators = "\n".join(
-        f'<position name="servo_{joint}" joint="{joint}" kp="1" ctrlrange="-2 2"/>'
+        f'<{actuator_kind} name="servo_{joint}" joint="{joint}" kp="1" ctrlrange="-2 2"/>'
+        if actuator_kind == "position"
+        else f'<{actuator_kind} name="servo_{joint}" joint="{joint}" ctrlrange="-2 2"/>'
         for joint in reversed(CONTROLLED_SERVO_JOINTS)
     )
     path.write_text(
         f"""
 <mujoco model="microduck-runtime-fixture">
   <compiler angle="radian"/>
+  {f'<include file="{include_file}"/>' if include_file else ""}
   <option timestep="0.005" gravity="0 0 0"/>
   <worldbody>
     <body name="trunk_base" pos="0 0 0.12">
@@ -134,6 +173,12 @@ def _write_verified_bundle(
     *,
     policy_output: np.ndarray | None = None,
     input_dimension: int = 61,
+    tensor_type: int = TensorProto.FLOAT,
+    backlash: bool = False,
+    actuator_kind: str = "position",
+    include_dependency: bool = False,
+    declare_dependency: bool = True,
+    observation_dependent: bool = False,
     metadata_overrides: dict[str, str] | None = None,
     runtime_requirements: dict[str, str] | None = None,
 ) -> PolicyBundle:
@@ -141,11 +186,21 @@ def _write_verified_bundle(
     policy_path = root / "policies" / "walk.onnx"
     model_path.parent.mkdir(parents=True)
     policy_path.parent.mkdir(parents=True)
-    _write_model(model_path)
+    dependency_path = root / "models" / "extra.xml"
+    if include_dependency:
+        dependency_path.write_text("<mujoco><default/></mujoco>")
+    _write_model(
+        model_path,
+        backlash=backlash,
+        actuator_kind=actuator_kind,
+        include_file="extra.xml" if include_dependency else None,
+    )
     _write_policy(
         policy_path,
         output=policy_output,
         input_dimension=input_dimension,
+        tensor_type=tensor_type,
+        observation_dependent=observation_dependent,
         metadata_overrides=metadata_overrides,
     )
     policy = PolicyArtifact(
@@ -237,13 +292,23 @@ def _write_verified_bundle(
         model=ModelArtifact(path="models/robot.xml", digest=_digest(model_path)),
         policies=[policy],
         actions=[action],
-        qualification={"artifacts": [], "modelClosure": []},
+        qualification={
+            "artifacts": [],
+            "modelTerrain": "flat",
+            "modelClosure": (
+                [{"path": "models/extra.xml", "digest": _digest(dependency_path)}]
+                if include_dependency and declare_dependency
+                else []
+            ),
+        },
         license={"artifacts": []},
     )
     artifact_digests = {
         unsigned.model.path: unsigned.model.digest,
         policy.path: policy.digest,
     }
+    if include_dependency and declare_dependency:
+        artifact_digests["models/extra.xml"] = _digest(dependency_path)
     bundle = unsigned.model_copy(
         update={
             "bundleDigest": sha256_prefixed(
@@ -334,6 +399,72 @@ def test_runtime_contract_exposes_only_controlled_servos() -> None:
     )
 
 
+def test_backlash_encoder_observation_and_status_sum_exact_named_companions(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root, backlash=True)
+    runtime = MicroduckMujocoRuntime(root, bundle, realtime=False)
+    runtime._data.qpos[runtime._joint_qpos_indices] = DEFAULT_JOINT_POSE + 0.1
+    runtime._data.qpos[runtime._backlash_qpos_indices] = 0.025
+    runtime._data.qvel[runtime._joint_qvel_indices] = 0.2
+    runtime._data.qvel[runtime._backlash_qvel_indices] = -0.05
+    mujoco.mj_forward(runtime._model, runtime._data)
+
+    status = runtime.status()
+
+    np.testing.assert_allclose(status.jointPositionsRad, DEFAULT_JOINT_POSE + 0.125)
+    np.testing.assert_allclose(status.jointVelocitiesRadps, 0.15)
+    assert not any(
+        actuator in runtime._actuator_indices
+        for actuator in np.flatnonzero(
+            np.isin(runtime._model.actuator_trnid[:, 0], runtime._backlash_joint_ids)
+        )
+    )
+
+
+def test_runtime_rejects_non_position_actuator_semantics(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root, actuator_kind="motor")
+
+    with pytest.raises(ValueError, match="position actuator"):
+        MicroduckMujocoRuntime(root, bundle, realtime=False)
+
+
+def test_governed_loop_measures_start_cadence_and_faults_repeated_overruns(
+    tmp_path: Path,
+) -> None:
+    class Clock:
+        now = 10.0
+
+        def __call__(self) -> float:
+            return self.now
+
+    clock = Clock()
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root)
+    runtime = MicroduckMujocoRuntime(
+        root, bundle, realtime=False, monotonic_clock=clock
+    )
+    request = _request().model_copy(update={"bundleDigest": bundle.bundleDigest})
+    runtime.start(bundle.actions[0], request)
+    real_step = runtime._control_step
+
+    def slow_step() -> None:
+        real_step()
+        clock.now += 0.03
+
+    runtime._control_step = slow_step
+    runtime._wait = lambda _: False
+    runtime._governed_loop()
+
+    status = runtime.status()
+    assert runtime._loop_overruns == 3
+    assert status.loopFrequencyHz == pytest.approx(100.0 / 3.0)
+    assert status.health["ready"] is False
+    assert status.health["reasonCodes"] == ["CONTROL_LOOP_OVERRUN"]
+
+
 def test_runtime_executes_real_onnx_at_50hz_and_maps_actions_by_joint_name(
     tmp_path: Path,
 ) -> None:
@@ -375,7 +506,13 @@ def test_runtime_executes_real_onnx_at_50hz_and_maps_actions_by_joint_name(
     assert len(status.jointPositionsRad) == len(status.jointVelocitiesRadps) == 14
     assert status.fallen is False
     assert status.limp is False
-    assert status.health == {"ready": True, "healthy": True, "reasonCodes": []}
+    assert status.health == {
+        "ready": True,
+        "healthy": True,
+        "reasonCodes": [],
+        "baseLinearVelocityFrame": "WORLD",
+        "baseAngularVelocityFrame": "TRUNK_BODY",
+    }
 
     evidence = runtime.safe_stop(handle, "LEASE_EXPIRED")
     assert evidence.stopReason == "LEASE_EXPIRED"
@@ -395,12 +532,53 @@ def test_runtime_executes_real_onnx_at_50hz_and_maps_actions_by_joint_name(
         "onnxDigest": bundle.policies[0].digest,
         "runIdentity": "entity/project/run-id",
         "seed": 7,
+        "appliedTerrain": "flat",
+        "appliedSeed": 7,
+        "resetProfile": "DEFAULT_STANDING",
+        "modelIdentity": bundle.model.digest,
         "sourceCommit": SOURCE_COMMIT,
         "steps": 1,
+        "loopOverruns": 0,
         "terrain": "flat",
+        "trackingError": pytest.approx(0.355688, abs=1e-6),
     }
     assert runtime.status().limp is False
     assert runtime.status().activeTaskId is None
+
+
+def test_runtime_policy_output_depends_on_exact_command_observation_slot(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(
+        root,
+        policy_output=np.zeros(14, dtype=np.float32),
+        observation_dependent=True,
+    )
+    runtime = MicroduckMujocoRuntime(root, bundle, realtime=False)
+    request = _request().model_copy(update={"bundleDigest": bundle.bundleDigest})
+    handle = runtime.start(bundle.actions[0], request)
+
+    runtime.sample(handle)
+
+    assert runtime._previous_action[0] == pytest.approx(0.05)
+
+
+def test_runtime_rejects_requested_terrain_not_bound_to_loaded_model(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root)
+    runtime = MicroduckMujocoRuntime(root, bundle, realtime=False)
+    request = _request().model_copy(
+        update={
+            "bundleDigest": bundle.bundleDigest,
+            "scenario": {"terrain": "slope", "seed": 7},
+        }
+    )
+
+    with pytest.raises(ValueError, match="qualified loaded model"):
+        runtime.validate(bundle.actions[0], request)
 
 
 def test_runtime_rechecks_artifact_hash_immediately_before_loading(
@@ -430,6 +608,29 @@ def test_runtime_rejects_symlink_escape_after_bundle_verification(
         MicroduckMujocoRuntime(root, bundle, realtime=False)
 
 
+def test_runtime_requires_exact_declared_mjcf_dependency_closure(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(
+        root, include_dependency=True, declare_dependency=False
+    )
+
+    with pytest.raises(ValueError, match="model dependency closure"):
+        MicroduckMujocoRuntime(root, bundle, realtime=False)
+
+
+def test_runtime_loads_declared_mjcf_dependency_from_verified_snapshot(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root, include_dependency=True)
+
+    runtime = MicroduckMujocoRuntime(root, bundle, realtime=False)
+
+    assert runtime.status().health["ready"] is True
+
+
 @pytest.mark.parametrize(
     ("fixture_options", "message"),
     [
@@ -439,6 +640,11 @@ def test_runtime_rejects_symlink_escape_after_bundle_verification(
             "metadata",
         ),
         ({"policy_output": np.full(14, np.nan, dtype=np.float32)}, "finite"),
+        ({"tensor_type": TensorProto.DOUBLE}, r"tensor\(float\)"),
+        (
+            {"metadata_overrides": {"microduck.normalization": ""}},
+            "normalization",
+        ),
     ],
 )
 def test_runtime_rejects_incompatible_or_non_finite_onnx(
@@ -468,6 +674,32 @@ def test_runtime_fail_safe_stops_when_state_becomes_non_finite(tmp_path: Path) -
     assert sample.stopReason == "NON_FINITE_STATE"
     assert runtime.status().limp is True
     assert runtime.status().health["ready"] is False
+    assert np.all(runtime._model.actuator_gainprm[runtime._actuator_indices, 0] == 0.0)
+
+
+def test_invalid_handle_has_no_sampling_or_stop_side_effect_and_valid_stop_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root)
+    runtime = MicroduckMujocoRuntime(root, bundle, realtime=False)
+    request = _request().model_copy(update={"bundleDigest": bundle.bundleDigest})
+    handle = runtime.start(bundle.actions[0], request)
+    invalid = type(handle)(taskId="f" * 32)
+    initial_time = runtime._data.time
+
+    with pytest.raises(RuntimeError, match="does not own"):
+        runtime.sample(invalid)
+    assert runtime._data.time == initial_time
+    assert runtime._stop_event.is_set() is False
+    with pytest.raises(RuntimeError, match="does not own"):
+        runtime.safe_stop(invalid, "INVALID")
+    assert runtime._stop_event.is_set() is False
+    assert runtime.status().activeTaskId == request.taskId
+
+    first = runtime.safe_stop(handle, "CANCELLED")
+    second = runtime.safe_stop(handle, "CANCELLED")
+    assert second == first
 
 
 def test_runtime_reports_requested_and_safety_limited_command_separately(
@@ -488,10 +720,10 @@ def test_runtime_reports_requested_and_safety_limited_command_separately(
     assert status.limitingReason == "COMMAND_LIMIT"
 
 
-def test_discrete_completion_uses_internal_action_mapping_and_pose_gate(
+def test_discrete_action_without_exact_runtime_semantics_is_refused(
     tmp_path: Path,
 ) -> None:
-    """A manifest Python name or a 100 ms timer must not declare a maneuver complete."""
+    """A manifest Python name must never turn an unsupported maneuver into success."""
     root = tmp_path / "bundle"
     bundle = _rewrite_as_stand_bundle(root, _write_verified_bundle(root))
     runtime = MicroduckMujocoRuntime(root, bundle, realtime=False)
@@ -505,17 +737,8 @@ def test_discrete_completion_uses_internal_action_mapping_and_pose_gate(
         scenario={"terrain": "flat", "seed": 11},
         requestedBy="test",
     )
-    handle = runtime.start(bundle.actions[0], request)
-
-    for _ in range(5):
-        early = runtime.sample(handle)
-    assert early.running is True
-    for _ in range(95):
-        terminal = runtime.sample(handle)
-
-    assert terminal.running is False
-    assert terminal.terminalState == "SUCCEEDED"
-    assert terminal.stopReason == "TASK_COMPLETE"
+    with pytest.raises(ValueError, match="semantics are unavailable"):
+        runtime.start(bundle.actions[0], request)
 
 
 def test_configured_app_composes_verified_ready_concrete_runtime(

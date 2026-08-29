@@ -68,7 +68,10 @@ class ContractModel(BaseModel):
     """Base for strict, camel-case wire records."""
 
     model_config = ConfigDict(
-        extra="forbid", validate_by_alias=True, validate_by_name=True, serialize_by_alias=True
+        extra="forbid",
+        validate_by_alias=True,
+        validate_by_name=True,
+        serialize_by_alias=True,
     )
 
 
@@ -87,7 +90,9 @@ class LeaseContract(ContractModel):
     @model_validator(mode="after")
     def validate_lease_bounds(self) -> LeaseContract:
         if not self.minLeaseMs <= self.defaultLeaseMs <= self.maxLeaseMs:
-            raise ValueError("lease bounds must satisfy minLeaseMs <= defaultLeaseMs <= maxLeaseMs")
+            raise ValueError(
+                "lease bounds must satisfy minLeaseMs <= defaultLeaseMs <= maxLeaseMs"
+            )
         if self.commandCadenceMs > self.minLeaseMs:
             raise ValueError("commandCadenceMs must not exceed minLeaseMs")
         return self
@@ -288,10 +293,44 @@ class RobotStatus(ContractModel):
     timestamp: datetime
     basePositionM: tuple[float, float, float]
     baseOrientationXyzw: tuple[float, float, float, float]
-    baseLinearVelocityMps: tuple[float, float, float]
-    baseAngularVelocityRadps: tuple[float, float, float]
-    jointPositionsRad: tuple[float, float, float, float, float, float, float, float, float, float, float, float, float, float]
-    jointVelocitiesRadps: tuple[float, float, float, float, float, float, float, float, float, float, float, float, float, float]
+    baseLinearVelocityMps: tuple[float, float, float] = Field(
+        description="World-frame trunk-base linear velocity."
+    )
+    baseAngularVelocityRadps: tuple[float, float, float] = Field(
+        description="Trunk-body-frame angular velocity, matching the training IMU gyro."
+    )
+    jointPositionsRad: tuple[
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+    ]
+    jointVelocitiesRadps: tuple[
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+    ]
     policyTarget: dict[str, Any]
     requestedMotion: dict[str, Any]
     appliedMotion: dict[str, Any]
@@ -314,9 +353,14 @@ def _canonical_value(value: Any) -> Any:
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError("non-finite floats are not valid canonical JSON")
     if isinstance(value, BaseModel):
-        return _canonical_value(value.model_dump(mode="json", by_alias=True, exclude_none=True))
+        return _canonical_value(
+            value.model_dump(mode="json", by_alias=True, exclude_none=True)
+        )
     if isinstance(value, Mapping):
-        return {str(key): _canonical_value(nested_value) for key, nested_value in value.items()}
+        return {
+            str(key): _canonical_value(nested_value)
+            for key, nested_value in value.items()
+        }
     if isinstance(value, tuple | list):
         return [_canonical_value(nested_value) for nested_value in value]
     return value
@@ -325,7 +369,10 @@ def _canonical_value(value: Any) -> Any:
 def canonical_json(value: BaseModel | Mapping[str, Any]) -> bytes:
     """Return UTF-8 JSON with a stable key order and no insignificant whitespace."""
     return json.dumps(
-        _canonical_value(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        _canonical_value(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
     ).encode()
 
 

@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .action_catalog import ACTION_TEMPLATES
+from .action_specs import ACTION_RUNTIME_SPECS
 from .contracts import (
     ACTION_CONTRACT,
     OBSERVATION_CONTRACT,
@@ -197,6 +198,12 @@ def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
     model_path = request.model_path.resolve()
     model_root = model_path.parent.resolve()
     model_sources = _model_closure(model_path)
+    model_capabilities = {
+        "ROLLER_FEET"
+        for source in model_sources
+        if source.name == "roller_blade.stl"
+        or (source.suffix == ".xml" and b"roller_blade" in source.read_bytes())
+    }
     staged: list[tuple[str, Path]] = [
         (_archive_path("models", source, model_root), source)
         for source in model_sources
@@ -267,14 +274,33 @@ def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
             if _is_exact_kick_mirroring_transform(transform) and other in policy_refs:
                 policy_ref = policy_refs[other]
                 safety = {"mirroringTransform": dict(transform)}
-        available = policy_ref is not None
+        runtime_spec = ACTION_RUNTIME_SPECS[template.action_code]
+        missing_model_capabilities = {
+            capability
+            for capability in runtime_spec.required_capabilities
+            if capability == "ROLLER_FEET" and capability not in model_capabilities
+        }
+        available = (
+            policy_ref is not None
+            and runtime_spec.supported
+            and not missing_model_capabilities
+        )
+        unavailable_reason = (
+            "POLICY_ARTIFACT_MISSING"
+            if policy_ref is None
+            else (
+                runtime_spec.unavailable_reason
+                if not runtime_spec.supported
+                else "MODEL_CAPABILITY_MISSING"
+            )
+        )
         actions.append(
             ActionDefinition(
                 actionCode=template.action_code,
                 executionMode=template.execution_mode,
                 availability="AVAILABLE" if available else "UNAVAILABLE",
                 policyRef=policy_ref,
-                unavailableReason=None if available else "POLICY_ARTIFACT_MISSING",
+                unavailableReason=None if available else unavailable_reason,
                 parameterSchema=template.parameter_schema,
                 completion=template.completion,
                 lease=template.lease,

@@ -5,7 +5,9 @@ from datetime import UTC, datetime
 from math import nan
 
 import pytest
+from fastapi.testclient import TestClient
 
+from mjlab_microduck.rom.api import create_app
 from mjlab_microduck.rom.contracts import (
     CONTROLLED_SERVO_JOINTS,
     OBSERVATION_FIELDS,
@@ -41,7 +43,9 @@ class ControllableClock:
         self._now += milliseconds / 1_000
 
 
-def command(*, sequence: int, vx: float = 0.0, lease_ms: int = 500) -> TaskCommandRequest:
+def command(
+    *, sequence: int, vx: float = 0.0, lease_ms: int = 500
+) -> TaskCommandRequest:
     return TaskCommandRequest(
         commandSequence=sequence,
         parameters={"vxMps": vx, "vyMps": 0.0, "yawRateRadps": 0.0},
@@ -49,7 +53,9 @@ def command(*, sequence: int, vx: float = 0.0, lease_ms: int = 500) -> TaskComma
     )
 
 
-def test_expired_lease_zeros_velocity_stops_and_times_out(service, walk_request, clock, runtime):
+def test_expired_lease_zeros_velocity_stops_and_times_out(
+    service, walk_request, clock, runtime
+):
     """Removing target-side expiry would leave the last nonzero velocity active indefinitely."""
     service.create_task(walk_request)
     service.command(walk_request.taskId, command(sequence=1, vx=0.2, lease_ms=500))
@@ -64,6 +70,60 @@ def test_expired_lease_zeros_velocity_stops_and_times_out(service, walk_request,
         ("safe_stop", "LEASE_EXPIRED"),
     ]
     assert service.get_task(walk_request.taskId).state == "TIMED_OUT"
+
+
+def test_continuous_create_requires_initial_lease(service, walk_request):
+    invalid = walk_request.model_copy(update={"leaseMs": None})
+
+    with pytest.raises(InvalidParameters):
+        service.create_task(invalid)
+
+
+def test_continuous_create_requires_typed_initial_command(service, walk_request):
+    invalid = walk_request.model_copy(update={"parameters": {}})
+
+    with pytest.raises(InvalidParameters):
+        service.create_task(invalid)
+
+
+def test_continuous_create_persists_initial_deadline_before_return(
+    service, walk_request, db_path
+):
+    running = service.create_task(walk_request)
+
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT state, deadline_at FROM task WHERE task_id = ?",
+            (walk_request.taskId,),
+        ).fetchone()
+    assert running.state == "RUNNING"
+    assert row == ("RUNNING", "100.500000000")
+
+
+def test_app_watchdog_expires_initial_lease_without_http_traffic(
+    service, walk_request, clock, runtime
+):
+    """The target deadman is owned by application lifecycle, not request traffic."""
+    app = create_app(service, "watchdog-token")
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/tasks",
+            headers={"Authorization": "Bearer watchdog-token"},
+            json=walk_request.model_dump(mode="json"),
+        )
+        assert response.status_code == 202
+        clock.advance_ms(501)
+        assert runtime.safe_stopped.wait(timeout=1.0)
+        with service._lock:
+            pass
+
+        terminal = service.get_task(walk_request.taskId)
+        assert terminal.state == "TIMED_OUT"
+        assert runtime.operation_log == [
+            ("command", {"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0}),
+            ("safe_stop", "LEASE_EXPIRED"),
+        ]
+    assert app.state.watchdog_thread is None
 
 
 def test_stale_command_does_not_renew_lease(service, walk_request, clock, runtime):
@@ -126,10 +186,14 @@ def test_reused_command_sequence_with_different_content_is_a_command_conflict(
         command(sequence=1, lease_ms=99),
         command(sequence=1, lease_ms=5_001),
         command(sequence=1, vx=nan),
-        TaskCommandRequest(commandSequence=1, parameters={"vxMps": 0.0, "vyMps": 0.0}, leaseMs=100),
+        TaskCommandRequest(
+            commandSequence=1, parameters={"vxMps": 0.0, "vyMps": 0.0}, leaseMs=100
+        ),
     ],
 )
-def test_command_rejects_out_of_manifest_parameter_or_lease_bounds(service, walk_request, invalid):
+def test_command_rejects_out_of_manifest_parameter_or_lease_bounds(
+    service, walk_request, invalid
+):
     """Clamping or accepting partial commands would make ROM intent differ from the manifest."""
     service.create_task(walk_request)
 
@@ -160,7 +224,8 @@ def test_late_higher_sequence_expires_before_command_persistence(
     service.command(walk_request.taskId, command(sequence=1, vx=0.2, lease_ms=100))
     with sqlite3.connect(db_path) as connection:
         before = connection.execute(
-            "SELECT command_sequence, deadline_at FROM task WHERE task_id = ?", (walk_request.taskId,)
+            "SELECT command_sequence, deadline_at FROM task WHERE task_id = ?",
+            (walk_request.taskId,),
         ).fetchone()
     clock.advance_ms(101)
 
@@ -169,7 +234,8 @@ def test_late_higher_sequence_expires_before_command_persistence(
 
     with sqlite3.connect(db_path) as connection:
         after = connection.execute(
-            "SELECT command_sequence, deadline_at FROM task WHERE task_id = ?", (walk_request.taskId,)
+            "SELECT command_sequence, deadline_at FROM task WHERE task_id = ?",
+            (walk_request.taskId,),
         ).fetchone()
     assert error.value.code == "PARAMETER_INVALID"
     assert before == after == (1, "100.100000000")
@@ -200,7 +266,9 @@ def test_safety_operation_failure_persists_requested_terminal_and_releases_slot(
         service.tick()
     else:
         service.cancel_task(walk_request.taskId)
-    next_task = service.create_task(walk_request.model_copy(update={"taskId": "3" * 32}))
+    next_task = service.create_task(
+        walk_request.model_copy(update={"taskId": "3" * 32})
+    )
 
     terminal = service.get_task(walk_request.taskId)
     assert terminal.state == terminal_state
@@ -253,7 +321,10 @@ def test_command_and_deadline_are_durable_with_the_accepted_command_event(
         ).fetchone()
 
     assert task[0] == 3
-    assert task[1] == '{"commandSequence":3,"leaseMs":500,"parameters":{"vxMps":0.2,"vyMps":0.0,"yawRateRadps":0.0}}'
+    assert (
+        task[1]
+        == '{"commandSequence":3,"leaseMs":500,"parameters":{"vxMps":0.2,"vyMps":0.0,"yawRateRadps":0.0}}'
+    )
     assert task[2].startswith("sha256:")
     assert task[3] == task[4]
     assert event == ("TASK_COMMAND_ACCEPTED",)
@@ -292,8 +363,9 @@ def walk_request() -> TaskCreateRequest:
         actionCode="WALK_VELOCITY",
         bundleVersion="1.0.0",
         bundleDigest="sha256:" + "a" * 64,
-        parameters={},
+        parameters={"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0},
         scenario={"terrain": "flat", "seed": 1},
+        leaseMs=500,
         requestedBy="test-continuous",
     )
 
@@ -344,7 +416,11 @@ def bundle() -> PolicyBundle:
                     "properties": {
                         "vxMps": {"type": "number", "minimum": -0.4, "maximum": 0.4},
                         "vyMps": {"type": "number", "minimum": -0.3, "maximum": 0.3},
-                        "yawRateRadps": {"type": "number", "minimum": -1.0, "maximum": 1.0},
+                        "yawRateRadps": {
+                            "type": "number",
+                            "minimum": -1.0,
+                            "maximum": 1.0,
+                        },
                     },
                     "required": ["vxMps", "vyMps", "yawRateRadps"],
                 },

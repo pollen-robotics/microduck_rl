@@ -13,6 +13,7 @@ from mjlab_microduck.rom.observation import (
     DeploymentCommand,
     DeploymentState,
     build_actor_observation,
+    project_gravity_wxyz,
 )
 
 
@@ -95,6 +96,13 @@ def test_actor_observation_rejects_non_finite_inputs(field: str) -> None:
 
     with pytest.raises(ValueError, match="finite"):
         build_actor_observation(state, command)
+
+
+def test_projected_gravity_normalizes_finite_non_unit_quaternion() -> None:
+    np.testing.assert_allclose(
+        project_gravity_wxyz([2.0, 0.0, 0.0, 0.0]),
+        project_gravity_wxyz([1.0, 0.0, 0.0, 0.0]),
+    )
 
 
 def test_inference_rehearsal_uses_shared_finite_61d_builder() -> None:
