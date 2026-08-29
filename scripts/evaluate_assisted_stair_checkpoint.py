@@ -35,6 +35,7 @@ TASK_IDS = (
     "Mjlab-Stairs-Roulade-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
+    "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
 )
 RESET_MODES = {
     0: "lip_release",
@@ -218,6 +219,7 @@ def main() -> int:
     if args.task in {
         "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
         "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
+        "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
     }:
         reset_modes = TREAD_CONTACT_BANK_RESET_MODES
     elif args.task == "Mjlab-Stairs-Roulade-Bank-Specialist-MicroDuck":
