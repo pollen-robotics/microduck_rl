@@ -38,6 +38,11 @@ STAIR_TARGETS = {
         "experiment": "microduck_stair_assisted_specialist",
         "iterations": 100,
     },
+    "specialist-bridge": {
+        "task": "Mjlab-Stairs-Bridge-Specialist-MicroDuck",
+        "experiment": "microduck_stair_bridge_specialist",
+        "iterations": 200,
+    },
     "low": {
         "task": "Mjlab-Stairs-MicroDuck",
         "experiment": "microduck_stairs",
@@ -86,8 +91,10 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--walking-checkpoint",
+        "--source-checkpoint",
+        dest="walking_checkpoint",
         type=Path,
-        help="Existing flat-walking model_*.pt. If omitted, use the newest local walking checkpoint.",
+        help="Compatible source model_*.pt. If omitted, use the newest local walking checkpoint.",
     )
     parser.add_argument(
         "--stage",

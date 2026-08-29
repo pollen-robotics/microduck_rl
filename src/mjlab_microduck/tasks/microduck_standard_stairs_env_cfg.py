@@ -607,6 +607,46 @@ def make_microduck_assisted_stair_specialist_env_cfg(
     return cfg
 
 
+def make_microduck_stair_bridge_specialist_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A2: connect lip clearance to a secured full-height tread landing."""
+    cfg = make_microduck_assisted_stair_specialist_env_cfg(play=False)
+    reset = cfg.events["route_state_curriculum"].params
+    reset.update(
+        {
+            "lip_release_fraction": 0.30,
+            "shell_brace_fraction": 0.40,
+            "tread_recovery_fraction": 0.25,
+            "real_handoff_fraction": 0.05,
+        }
+    )
+    clearance = cfg.rewards["stair_first_riser_clearance"]
+    clearance.weight = 300.0
+    clearance.params.update(
+        {
+            "z_margin": 0.025,
+            "max_vertical_speed": 0.45,
+            "hold_time_s": 0.12,
+        }
+    )
+    cfg.rewards["stair_assisted_lift"].weight = 4.0
+    cfg.rewards["stair_assisted_crossing"].weight = 6.0
+    cfg.rewards["stair_first_tread_stable"].weight = 50.0
+    cfg.rewards["stair_first_tread_secured"] = RewardTermCfg(
+        func=microduck_mdp.stair_first_tread_secured,
+        weight=300.0,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )
+    cfg.rewards["stair_first_tread_settle_quality"] = RewardTermCfg(
+        func=microduck_mdp.stair_first_tread_settle_quality,
+        weight=2.0,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )
+    del play
+    return cfg
+
+
 MicroduckStandardStairsRlCfg = deepcopy(MicroduckRlCfg)
 MicroduckStandardStairsRlCfg.experiment_name = "microduck_standard_stairs"
 MicroduckStandardStairsRlCfg.run_name = "microduck_standard_stairs"
@@ -649,3 +689,13 @@ MicroduckAssistedStairSpecialistRlCfg.algorithm.num_mini_batches = 4
 MicroduckAssistedStairSpecialistRlCfg.algorithm.gamma = 0.99
 MicroduckAssistedStairSpecialistRlCfg.algorithm.lam = 0.95
 MicroduckAssistedStairSpecialistRlCfg.algorithm.max_grad_norm = 0.5
+
+MicroduckStairBridgeSpecialistRlCfg = deepcopy(MicroduckAssistedStairSpecialistRlCfg)
+MicroduckStairBridgeSpecialistRlCfg.experiment_name = (
+    "microduck_stair_bridge_specialist"
+)
+MicroduckStairBridgeSpecialistRlCfg.run_name = "microduck_stair_bridge_specialist"
+MicroduckStairBridgeSpecialistRlCfg.max_iterations = 200
+MicroduckStairBridgeSpecialistRlCfg.actor.distribution_cfg["init_std"] = 0.35
+MicroduckStairBridgeSpecialistRlCfg.algorithm.learning_rate = 3.0e-5
+MicroduckStairBridgeSpecialistRlCfg.algorithm.entropy_coef = 0.0002

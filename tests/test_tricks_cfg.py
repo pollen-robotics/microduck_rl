@@ -26,9 +26,11 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     STANDARD_TOP_ROOT_HEIGHT,
     STANDARD_TREAD_DEPTH,
     MicroduckAssistedStairSpecialistRlCfg,
+    MicroduckStairBridgeSpecialistRlCfg,
     MicroduckRouteStairsRlCfg,
     MicroduckStairSpecialistRlCfg,
     make_microduck_assisted_stair_specialist_env_cfg,
+    make_microduck_stair_bridge_specialist_env_cfg,
     make_microduck_route_stairs_env_cfg,
     make_microduck_stair_specialist_env_cfg,
     make_microduck_standard_stairs_env_cfg,
@@ -219,6 +221,32 @@ def test_assisted_stair_specialist_keeps_full_geometry_and_stage_a_gates():
         MicroduckAssistedStairSpecialistRlCfg.algorithm.learning_rate == 5.0e-5
     )
     assert MicroduckAssistedStairSpecialistRlCfg.algorithm.max_grad_norm == 0.5
+
+
+def test_stair_bridge_keeps_full_height_and_prioritizes_shell_and_tread():
+    cfg = make_microduck_stair_bridge_specialist_env_cfg()
+    reset = cfg.events["route_state_curriculum"].params
+    clearance = cfg.rewards["stair_first_riser_clearance"]
+
+    for terrain in cfg.scene.terrain.terrain_generator.sub_terrains.values():
+        assert terrain.riser_height == 0.17
+        assert terrain.riser_height_range is None
+        assert terrain.tread_depth == 0.28
+    assert reset["lip_release_fraction"] == 0.30
+    assert reset["shell_brace_fraction"] == 0.40
+    assert reset["tread_recovery_fraction"] == 0.25
+    assert reset["real_handoff_fraction"] == 0.05
+    assert clearance.params["z_margin"] == 0.025
+    assert clearance.params["max_vertical_speed"] == 0.45
+    assert clearance.params["hold_time_s"] == 0.12
+    assert cfg.rewards["stair_first_tread_secured"].weight == 300.0
+    assert cfg.rewards["stair_first_tread_settle_quality"].weight == 2.0
+    assert MicroduckStairBridgeSpecialistRlCfg.max_iterations == 200
+    assert (
+        MicroduckStairBridgeSpecialistRlCfg.actor.distribution_cfg["init_std"]
+        == 0.35
+    )
+    assert MicroduckStairBridgeSpecialistRlCfg.algorithm.learning_rate == 3.0e-5
 
 
 def test_headstand_has_exclusive_contact_gate_and_shared_actor_layout():

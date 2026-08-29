@@ -1148,6 +1148,18 @@ def reset_assisted_stair_states(
     tread_ids = env_ids[(draw >= shell_end) & (draw < tread_end)]
     handoff_ids = env_ids[draw >= tread_end]
 
+    # Keep the sampled reset family available to evaluators.  Aggregate
+    # clearance rates are otherwise misleading because tread-recovery starts
+    # are intentionally ineligible for the first-riser clearance latch.
+    if not hasattr(env, "_stair_assisted_reset_mode"):
+        env._stair_assisted_reset_mode = torch.full(
+            (env.num_envs,), -1, dtype=torch.long, device=env.device
+        )
+    env._stair_assisted_reset_mode[lip_ids] = 0
+    env._stair_assisted_reset_mode[shell_ids] = 1
+    env._stair_assisted_reset_mode[tread_ids] = 2
+    env._stair_assisted_reset_mode[handoff_ids] = 3
+
     if not hasattr(env, "_stair_skip_first_clearance"):
         env._stair_skip_first_clearance = torch.zeros(
             env.num_envs, dtype=torch.bool, device=env.device
@@ -1322,6 +1334,85 @@ def stair_first_tread_stable(
     ) & ~env._stair_first_tread_latched
     env._stair_first_tread_latched |= newly_stable
     return newly_stable.float()
+
+
+def stair_first_tread_secured(
+    env: ManagerBasedRlEnv,
+    min_x: float = 0.70,
+    max_x: float = 0.94,
+    min_height: float = 0.195,
+    max_linear_speed: float = 0.40,
+    max_angular_speed: float = 2.5,
+    hold_time_s: float = 0.12,
+    support_sensor_name: str = "robot_ground_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay once when any mechanically settled pose is secured on tread one.
+
+    Unlike ``stair_first_tread_stable``, this bridge milestone deliberately has
+    no upright requirement.  A shell landing or head-supported brace is valid
+    if the robot is fully beyond the 170 mm lip and has stopped tumbling.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    linear_speed = torch.linalg.vector_norm(asset.data.root_link_lin_vel_w, dim=-1)
+    angular_speed = torch.linalg.vector_norm(asset.data.root_link_ang_vel_w, dim=-1)
+    support = torch.zeros_like(x, dtype=torch.bool)
+    if support_sensor_name in env.scene.sensors:
+        found = env.scene.sensors[support_sensor_name].data.found
+        support = (found.view(found.shape[0], -1) > 0).any(dim=-1)
+    candidate = (
+        (x >= min_x)
+        & (x <= max_x)
+        & (z >= min_height)
+        & (linear_speed <= max_linear_speed)
+        & (angular_speed <= max_angular_speed)
+        & support
+    )
+    if not hasattr(env, "_stair_first_tread_secured_steps"):
+        env._stair_first_tread_secured_steps = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+        env._stair_first_tread_secured_latched = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    fresh = env.episode_length_buf <= 1
+    env._stair_first_tread_secured_steps[fresh] = 0
+    env._stair_first_tread_secured_latched[fresh] = False
+    env._stair_first_tread_secured_steps = torch.where(
+        candidate,
+        env._stair_first_tread_secured_steps + 1,
+        torch.zeros_like(env._stair_first_tread_secured_steps),
+    )
+    required_steps = max(1, int(round(hold_time_s / env.step_dt)))
+    newly_secured = (
+        env._stair_first_tread_secured_steps >= required_steps
+    ) & ~env._stair_first_tread_secured_latched
+    env._stair_first_tread_secured_latched |= newly_secured
+    return newly_secured.float()
+
+
+def stair_first_tread_settle_quality(
+    env: ManagerBasedRlEnv,
+    min_x: float = 0.70,
+    max_x: float = 0.94,
+    min_height: float = 0.195,
+    linear_speed_scale: float = 0.35,
+    angular_speed_scale: float = 2.5,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Dense bridge shaping for slowing down after a full-height mantle."""
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    x_gate = torch.sigmoid((x - min_x) / 0.015) * torch.sigmoid(
+        (max_x - x) / 0.020
+    )
+    z_gate = torch.sigmoid((z - min_height) / 0.010)
+    linear_speed = torch.linalg.vector_norm(asset.data.root_link_lin_vel_w, dim=-1)
+    angular_speed = torch.linalg.vector_norm(asset.data.root_link_ang_vel_w, dim=-1)
+    settle = 0.6 * torch.exp(-((linear_speed / linear_speed_scale) ** 2))
+    settle += 0.4 * torch.exp(-((angular_speed / angular_speed_scale) ** 2))
+    return x_gate * z_gate * settle
 
 
 def stair_goal_progress(
