@@ -138,7 +138,9 @@
   function renderMedia(data) {
     const grid = $("#media-grid");
     grid.replaceChildren();
-    const media = (data.media || []).filter((item) => item.kind === "video");
+    const media = (data.media || [])
+      .filter((item) => item.kind === "video")
+      .sort((left, right) => left.name.localeCompare(right.name));
     $("#media-empty").hidden = media.length !== 0;
     for (const item of media) {
       const card = el("article", "media-card");
