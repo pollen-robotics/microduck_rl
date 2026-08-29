@@ -23,6 +23,10 @@ from .contracts import (
     PolicyBundle,
     sha256_prefixed,
 )
+from .mirroring import (
+    MICRODUCK_JOINT_MIRROR_PERMUTATION,
+    MICRODUCK_JOINT_MIRROR_SIGNS,
+)
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,12 @@ class BuiltBundle:
     artifact_digests: dict[str, str]
 
 
+@dataclass(frozen=True)
+class _AssetDirectories:
+    mesh_dir: Path
+    texture_dir: Path
+
+
 def _file_digest(path: Path) -> str:
     return f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
 
@@ -62,36 +72,71 @@ def _archive_path(prefix: str, source: Path, root: Path) -> str:
     return str(PurePosixPath(prefix, *relative.parts))
 
 
+def _compiler_asset_directories(
+    source: Path, tree: ET.ElementTree, inherited: _AssetDirectories
+) -> _AssetDirectories:
+    compiler = tree.getroot().find("compiler")
+    if compiler is None:
+        return inherited
+    mesh_dir = compiler.get("meshdir")
+    texture_dir = compiler.get("texturedir")
+    return _AssetDirectories(
+        mesh_dir=(source.parent / mesh_dir).resolve()
+        if mesh_dir is not None
+        else inherited.mesh_dir,
+        texture_dir=(source.parent / texture_dir).resolve()
+        if texture_dir is not None
+        else inherited.texture_dir,
+    )
+
+
+def _is_exact_kick_mirroring_transform(transform: Mapping[str, Any] | None) -> bool:
+    return transform is not None and dict(transform) == {
+        "jointPermutation": list(MICRODUCK_JOINT_MIRROR_PERMUTATION),
+        "signFlips": list(MICRODUCK_JOINT_MIRROR_SIGNS),
+    }
+
+
 def _model_closure(model_path: Path) -> list[Path]:
     root = model_path.parent.resolve()
-    pending = [model_path.resolve()]
-    closure: list[Path] = []
-    seen: set[Path] = set()
+    initial_directories = _AssetDirectories(mesh_dir=root, texture_dir=root)
+    pending = [(model_path.resolve(), initial_directories)]
+    closure: set[Path] = set()
+    seen: set[tuple[Path, _AssetDirectories]] = set()
     while pending:
-        source = pending.pop()
-        if source in seen:
+        source, inherited_directories = pending.pop()
+        context = (source, inherited_directories)
+        if context in seen:
             continue
         if not source.is_file():
             raise FileNotFoundError(source)
         _archive_path("models", source, root)
-        seen.add(source)
-        closure.append(source)
+        seen.add(context)
+        closure.add(source)
         if source.suffix.lower() != ".xml":
             continue
         tree = ET.parse(source)
+        directories = _compiler_asset_directories(source, tree, inherited_directories)
         for element in tree.iter():
             referenced = element.get("file")
             if not referenced:
                 continue
-            target = (source.parent / referenced).resolve()
+            tag = element.tag.rsplit("}", 1)[-1]
+            if tag == "include":
+                target = (source.parent / referenced).resolve()
+            elif tag == "mesh":
+                target = (directories.mesh_dir / referenced).resolve()
+            elif tag == "texture":
+                target = (directories.texture_dir / referenced).resolve()
+            else:
+                target = (source.parent / referenced).resolve()
             _archive_path("models", target, root)
             if not target.is_file():
                 raise FileNotFoundError(target)
-            if element.tag == "include" or target.suffix.lower() == ".xml":
-                pending.append(target)
-            elif target not in seen:
-                seen.add(target)
-                closure.append(target)
+            if tag == "include":
+                pending.append((target, directories))
+            else:
+                closure.add(target)
     return sorted(closure, key=lambda item: _archive_path("models", item, root))
 
 
@@ -166,16 +211,29 @@ def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
     policies: list[PolicyArtifact] = []
     policy_refs: dict[str, str] = {}
     policy_refs_by_digest: dict[str, str] = {}
+    policy_owner_by_digest: dict[str, str] = {}
+    mirror_transforms = request.mirroring_transforms or {}
     for action_code, source in sorted(request.artifacts.items()):
         source = Path(source).resolve()
         if not source.is_file():
             raise FileNotFoundError(source)
         digest = _file_digest(source)
         policy_ref = policy_refs_by_digest.get(digest)
+        owner_action = policy_owner_by_digest.get(digest)
+        opposite_kick = (
+            {action_code, owner_action} == {"KICK_LEFT", "KICK_RIGHT"}
+            if owner_action is not None
+            else False
+        )
+        if opposite_kick and not _is_exact_kick_mirroring_transform(
+            mirror_transforms.get(action_code)
+        ):
+            continue
         if policy_ref is None:
             archive_path = f"policies/{digest.removeprefix('sha256:')}.onnx"
             policy_ref = f"{action_code.lower()}-{digest.removeprefix('sha256:')[:12]}"
             policy_refs_by_digest[digest] = policy_ref
+            policy_owner_by_digest[digest] = action_code
             staged.append((archive_path, source))
             task_id = next(
                 template.task_ids[0]
@@ -199,7 +257,6 @@ def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
             )
         policy_refs[action_code] = policy_ref
 
-    mirror_transforms = request.mirroring_transforms or {}
     actions: list[ActionDefinition] = []
     for template in ACTION_TEMPLATES:
         policy_ref = policy_refs.get(template.action_code)
@@ -207,7 +264,7 @@ def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
         if policy_ref is None and template.action_code in {"KICK_LEFT", "KICK_RIGHT"}:
             other = "KICK_RIGHT" if template.action_code == "KICK_LEFT" else "KICK_LEFT"
             transform = mirror_transforms.get(template.action_code)
-            if transform is not None and other in policy_refs:
+            if _is_exact_kick_mirroring_transform(transform) and other in policy_refs:
                 policy_ref = policy_refs[other]
                 safety = {"mirroringTransform": dict(transform)}
         available = policy_ref is not None

@@ -9,8 +9,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import onnx
+import pytest
 from onnx import TensorProto, helper
 
+from mjlab_microduck.robot.microduck_constants import MICRODUCK_WALK_XML
 from mjlab_microduck.rom.action_catalog import ACTION_TEMPLATES
 from mjlab_microduck.rom.bundle import BundleBuildRequest, build_bundle
 from mjlab_microduck.rom.contracts import sha256_prefixed
@@ -168,6 +170,71 @@ def test_bundle_contains_complete_declared_model_and_supporting_file_closure(
     )
 
 
+def test_bundle_resolves_compiler_mesh_and_texture_directories_through_includes(
+    tmp_path: Path,
+):
+    """Ignoring an included file's compiler directories would omit deploy-time mesh and texture assets."""
+    model_root = tmp_path / "model"
+    (model_root / "root_meshes").mkdir(parents=True)
+    (model_root / "root_textures").mkdir()
+    (model_root / "nested").mkdir()
+    (model_root / "child_meshes").mkdir()
+    (model_root / "child_textures").mkdir()
+    for relative in (
+        "root_meshes/root.stl",
+        "root_textures/root.png",
+        "child_meshes/child.stl",
+        "child_textures/child.png",
+    ):
+        (model_root / relative).write_bytes(relative.encode())
+    (model_root / "robot.xml").write_text(
+        '<mujoco><compiler meshdir="root_meshes" texturedir="root_textures"/>'
+        '<include file="nested/child.xml"/><asset><mesh file="root.stl"/>'
+        '<texture file="root.png"/></asset></mujoco>'
+    )
+    (model_root / "nested" / "child.xml").write_text(
+        '<mujoco><compiler meshdir="../child_meshes" texturedir="../child_textures"/>'
+        '<asset><mesh file="child.stl"/><texture file="child.png"/></asset></mujoco>'
+    )
+    built = build_bundle(
+        BundleBuildRequest(
+            release="1.0.0",
+            output_zip=tmp_path / "compiler-paths.zip",
+            artifacts={},
+            model_path=model_root / "robot.xml",
+            source_repository="microduck-rl",
+            source_commit="a" * 40,
+            created_at=datetime(2026, 8, 29, tzinfo=UTC),
+        )
+    )
+
+    with zipfile.ZipFile(built.output_zip) as archive:
+        assert {
+            "models/root_meshes/root.stl",
+            "models/root_textures/root.png",
+            "models/child_meshes/child.stl",
+            "models/child_textures/child.png",
+        } <= set(archive.namelist())
+
+
+def test_bundle_accepts_the_default_walk_mjcf_compiler_meshdir(tmp_path: Path):
+    """Resolving default CLI model assets from the XML directory would make release creation fail."""
+    built = build_bundle(
+        BundleBuildRequest(
+            release="1.0.0",
+            output_zip=tmp_path / "default-walk.zip",
+            artifacts={},
+            model_path=MICRODUCK_WALK_XML,
+            source_repository="microduck-rl",
+            source_commit="a" * 40,
+            created_at=datetime(2026, 8, 29, tzinfo=UTC),
+        )
+    )
+
+    with zipfile.ZipFile(built.output_zip) as archive:
+        assert "models/assets/xl330.stl" in archive.namelist()
+
+
 def test_bundle_zip_is_byte_deterministic_for_a_fixed_request(tmp_path: Path):
     """Using archive clock or host metadata would make identical releases produce different evidence."""
     policy = write_minimal_onnx(tmp_path / WALK_ONNX)
@@ -204,8 +271,38 @@ def test_declared_kick_mirror_can_reuse_only_the_named_opposite_side(tmp_path: P
             | {
                 "mirroring_transforms": {
                     "KICK_RIGHT": {
-                        "jointPermutation": list(range(14)),
-                        "signFlips": [1] * 14,
+                        "jointPermutation": [
+                            9,
+                            10,
+                            11,
+                            12,
+                            13,
+                            5,
+                            6,
+                            7,
+                            8,
+                            0,
+                            1,
+                            2,
+                            3,
+                            4,
+                        ],
+                        "signFlips": [
+                            -1,
+                            -1,
+                            -1,
+                            -1,
+                            -1,
+                            1,
+                            1,
+                            -1,
+                            -1,
+                            -1,
+                            -1,
+                            -1,
+                            -1,
+                            -1,
+                        ],
                     }
                 }
             }
@@ -224,10 +321,46 @@ def test_declared_kick_mirror_can_reuse_only_the_named_opposite_side(tmp_path: P
     assert right.policyRef == left.policyRef
     assert right.safety == {
         "mirroringTransform": {
-            "jointPermutation": list(range(14)),
-            "signFlips": [1] * 14,
+            "jointPermutation": [9, 10, 11, 12, 13, 5, 6, 7, 8, 0, 1, 2, 3, 4],
+            "signFlips": [-1, -1, -1, -1, -1, 1, 1, -1, -1, -1, -1, -1, -1, -1],
         }
     }
+
+
+@pytest.mark.parametrize(
+    "transform",
+    [
+        None,
+        {},
+        {"jointPermutation": list(range(14)), "signFlips": [1] * 14},
+        {"jointPermutation": [9] * 14, "signFlips": [-1] * 14},
+    ],
+)
+def test_shared_kick_artifact_requires_the_exact_declared_mirroring_transform(
+    tmp_path: Path, transform: dict[str, object] | None
+):
+    """Deduplicating opposite kick actions without the exact transform would execute the wrong leg motion."""
+    policy = write_minimal_onnx(tmp_path / "kick.onnx")
+    request = minimal_request(
+        tmp_path, artifacts={"KICK_LEFT": policy, "KICK_RIGHT": policy}
+    )
+    if transform is not None:
+        request = BundleBuildRequest(
+            **(request.__dict__ | {"mirroring_transforms": {"KICK_RIGHT": transform}})
+        )
+    bundle = build_bundle(request)
+
+    left = next(
+        action for action in bundle.manifest.actions if action.actionCode == "KICK_LEFT"
+    )
+    right = next(
+        action
+        for action in bundle.manifest.actions
+        if action.actionCode == "KICK_RIGHT"
+    )
+    assert left.availability == "AVAILABLE"
+    assert right.availability == "UNAVAILABLE"
+    assert right.unavailableReason == "POLICY_ARTIFACT_MISSING"
 
 
 def test_sit_and_stand_can_share_the_same_sitstand_policy_artifact(tmp_path: Path):
