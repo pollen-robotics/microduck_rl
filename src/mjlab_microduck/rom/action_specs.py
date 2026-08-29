@@ -26,6 +26,8 @@ class RuntimeActionSpec:
     metric_keys: tuple[str, ...]
     supported: bool
     unavailable_reason: str | None = None
+    scenario_fields: tuple[str, ...] = ("terrain", "seed")
+    scenario_profile: str = "SEEDED_SERVO_RESET_V1"
 
 
 def _unsupported(

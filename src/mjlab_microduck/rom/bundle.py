@@ -11,6 +11,11 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import mujoco
+import numpy as np
+import onnx
+import onnxruntime as ort
+
 from .action_catalog import ACTION_TEMPLATES
 from .action_specs import ACTION_RUNTIME_SPECS
 from .contracts import (
@@ -28,6 +33,13 @@ from .mirroring import (
     MICRODUCK_JOINT_MIRROR_PERMUTATION,
     MICRODUCK_JOINT_MIRROR_SIGNS,
 )
+from .model_semantics import (
+    has_exact_deployment_frames,
+    has_exact_passive_roller_topology,
+    has_exact_position_actuator_topology,
+    has_flat_world_floor,
+)
+from .onnx_policy import inspect_normalized_actor
 
 
 @dataclass(frozen=True)
@@ -39,6 +51,8 @@ class BundleBuildRequest:
     source_repository: str
     source_commit: str
     created_at: datetime
+    model_terrain: str | None = None
+    scenario_profile: str | None = None
     checkpoint: str | None = None
     experiment_ref: str | None = None
     qualification_files: tuple[Path, ...] = ()
@@ -182,6 +196,59 @@ def _contracts() -> tuple[ObservationContract, ActionContract]:
     )
 
 
+_SUPPORTED_SCENARIO_PROFILE = "SEEDED_SERVO_RESET_V1"
+
+
+def _qualified_model_capabilities(
+    model_path: Path, terrain: str | None, scenario_profile: str | None
+) -> tuple[bool, bool, set[str]]:
+    """Compile the exact scene and derive only physically demonstrated capabilities."""
+    if terrain is None or scenario_profile != _SUPPORTED_SCENARIO_PROFILE:
+        return False, False, set()
+    try:
+        model = mujoco.MjModel.from_xml_path(str(model_path))
+    except ValueError:
+        return False, False, set()
+    free_joints = np.flatnonzero(model.jnt_type == mujoco.mjtJoint.mjJNT_FREE)
+    if free_joints.size != 1:
+        return False, False, set()
+    capabilities: set[str] = set()
+    if terrain == "flat":
+        if has_flat_world_floor(model):
+            capabilities.add("FLAT_TERRAIN")
+    elif terrain in {"ramp", "slope"}:
+        # No checked-in deployment scene currently materializes the procedural
+        # ramp used by training, so a label alone cannot qualify it.
+        return False, False, set()
+    else:
+        return False, False, set()
+    if "FLAT_TERRAIN" not in capabilities:
+        return False, False, set()
+    if has_exact_passive_roller_topology(model):
+        capabilities.add("ROLLER_FEET")
+    from .contracts import CONTROLLED_SERVO_JOINTS
+
+    runtime_compatible = has_exact_position_actuator_topology(
+        model, CONTROLLED_SERVO_JOINTS
+    ) and has_exact_deployment_frames(model)
+    return True, runtime_compatible, capabilities
+
+
+def _task_id_for(action_code: str) -> str:
+    return next(
+        template.task_ids[0]
+        for template in ACTION_TEMPLATES
+        if template.action_code == action_code
+    )
+
+
+def _policy_archive_path(task_id: str, digest: str) -> str:
+    safe_task_id = "".join(
+        character.lower() if character.isalnum() else "-" for character in task_id
+    ).strip("-")
+    return f"policies/{safe_task_id}-{digest.removeprefix('sha256:')}.onnx"
+
+
 def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
     """Build a policy bundle once; existing release archives are never overwritten."""
     output_zip = request.output_zip.resolve()
@@ -198,12 +265,13 @@ def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
     model_path = request.model_path.resolve()
     model_root = model_path.parent.resolve()
     model_sources = _model_closure(model_path)
-    model_capabilities = {
-        "ROLLER_FEET"
-        for source in model_sources
-        if source.name == "roller_blade.stl"
-        or (source.suffix == ".xml" and b"roller_blade" in source.read_bytes())
-    }
+    (
+        model_qualified,
+        model_runtime_compatible,
+        model_capabilities,
+    ) = _qualified_model_capabilities(
+        model_path, request.model_terrain, request.scenario_profile
+    )
     staged: list[tuple[str, Path]] = [
         (_archive_path("models", source, model_root), source)
         for source in model_sources
@@ -217,16 +285,70 @@ def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
 
     policies: list[PolicyArtifact] = []
     policy_refs: dict[str, str] = {}
-    policy_refs_by_digest: dict[str, str] = {}
-    policy_owner_by_digest: dict[str, str] = {}
+    policy_refs_by_identity: dict[tuple[str, str], str] = {}
+    policy_owner_by_identity: dict[tuple[str, str], str] = {}
+    policy_task_matches: dict[str, bool] = {}
+    policy_normalization_valid: dict[str, bool] = {}
+    policy_provenance_valid: dict[str, bool] = {}
+    policy_inference_valid: dict[str, bool] = {}
     mirror_transforms = request.mirroring_transforms or {}
     for action_code, source in sorted(request.artifacts.items()):
         source = Path(source).resolve()
         if not source.is_file():
             raise FileNotFoundError(source)
         digest = _file_digest(source)
-        policy_ref = policy_refs_by_digest.get(digest)
-        owner_action = policy_owner_by_digest.get(digest)
+        expected_task_id = _task_id_for(action_code)
+        onnx_model = onnx.load(source, load_external_data=False)
+        metadata = {item.key: item.value for item in onnx_model.metadata_props}
+        normalized_graph_fingerprint: str | None = None
+        try:
+            normalized_graph = inspect_normalized_actor(onnx_model)
+            graph_metadata_valid = (
+                metadata.get("microduck.normalization") == "EMPIRICAL_NORMALIZATION_V1"
+                and metadata.get("microduck.normalization_graph_sha256")
+                == normalized_graph.graph_sha256
+            )
+            if graph_metadata_valid:
+                normalized_graph_fingerprint = normalized_graph.fingerprint
+        except ValueError:
+            pass
+        expected_provenance = {
+            "microduck.source_commit": request.source_commit,
+            "microduck.observation_contract": OBSERVATION_CONTRACT,
+            "microduck.action_contract": ACTION_CONTRACT,
+            "microduck.checkpoint": request.checkpoint or "",
+            "microduck.run_identity": request.experiment_ref or "",
+        }
+        provenance_valid = all(
+            metadata.get(key) == value for key, value in expected_provenance.items()
+        )
+        inference_valid = False
+        try:
+            session = ort.InferenceSession(
+                source.read_bytes(), providers=["CPUExecutionProvider"]
+            )
+            inputs = session.get_inputs()
+            outputs = session.get_outputs()
+            if (
+                len(inputs) == 1
+                and inputs[0].type == "tensor(float)"
+                and inputs[0].shape == [1, 61]
+                and len(outputs) == 1
+                and outputs[0].type == "tensor(float)"
+                and outputs[0].shape == [1, 14]
+            ):
+                output = session.run(
+                    [outputs[0].name],
+                    {inputs[0].name: np.zeros((1, 61), dtype=np.float32)},
+                )[0]
+                inference_valid = output.shape == (1, 14) and bool(
+                    np.isfinite(output).all()
+                )
+        except Exception:  # noqa: BLE001 - invalid exports remain packaged but unavailable.
+            inference_valid = False
+        identity = (digest, expected_task_id)
+        policy_ref = policy_refs_by_identity.get(identity)
+        owner_action = policy_owner_by_identity.get(identity)
         opposite_kick = (
             {action_code, owner_action} == {"KICK_LEFT", "KICK_RIGHT"}
             if owner_action is not None
@@ -237,32 +359,41 @@ def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
         ):
             continue
         if policy_ref is None:
-            archive_path = f"policies/{digest.removeprefix('sha256:')}.onnx"
+            archive_path = _policy_archive_path(expected_task_id, digest)
             policy_ref = f"{action_code.lower()}-{digest.removeprefix('sha256:')[:12]}"
-            policy_refs_by_digest[digest] = policy_ref
-            policy_owner_by_digest[digest] = action_code
+            policy_refs_by_identity[identity] = policy_ref
+            policy_owner_by_identity[identity] = action_code
             staged.append((archive_path, source))
-            task_id = next(
-                template.task_ids[0]
-                for template in ACTION_TEMPLATES
-                if template.action_code == action_code
-            )
+            metadata_task_id = metadata.get("microduck.task_id", "")
+            runtime_requirements = {
+                "observationContract": OBSERVATION_CONTRACT,
+                "actionContract": ACTION_CONTRACT,
+                "normalization": "BAKED_IN_ONNX",
+            }
+            if normalized_graph_fingerprint is not None:
+                runtime_requirements["normalizedGraphFingerprint"] = (
+                    normalized_graph_fingerprint
+                )
             policies.append(
                 PolicyArtifact(
                     policyRef=policy_ref,
                     path=archive_path,
                     digest=digest,
-                    taskId=task_id,
+                    taskId=metadata_task_id or expected_task_id,
                     checkpoint=request.checkpoint,
                     experimentRef=request.experiment_ref,
-                    runtimeRequirements={
-                        "observationContract": OBSERVATION_CONTRACT,
-                        "actionContract": ACTION_CONTRACT,
-                        "normalization": "BAKED_IN_ONNX",
-                    },
+                    runtimeRequirements=runtime_requirements,
                 )
             )
         policy_refs[action_code] = policy_ref
+        policy_task_matches[action_code] = (
+            metadata.get("microduck.task_id") == expected_task_id
+        )
+        policy_normalization_valid[action_code] = (
+            normalized_graph_fingerprint is not None
+        )
+        policy_provenance_valid[action_code] = provenance_valid
+        policy_inference_valid[action_code] = inference_valid
 
     actions: list[ActionDefinition] = []
     for template in ACTION_TEMPLATES:
@@ -283,7 +414,13 @@ def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
         available = (
             policy_ref is not None
             and runtime_spec.supported
+            and model_qualified
+            and model_runtime_compatible
             and not missing_model_capabilities
+            and policy_task_matches.get(template.action_code, False)
+            and policy_normalization_valid.get(template.action_code, False)
+            and policy_provenance_valid.get(template.action_code, False)
+            and policy_inference_valid.get(template.action_code, False)
         )
         unavailable_reason = (
             "POLICY_ARTIFACT_MISSING"
@@ -291,7 +428,37 @@ def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
             else (
                 runtime_spec.unavailable_reason
                 if not runtime_spec.supported
-                else "MODEL_CAPABILITY_MISSING"
+                else (
+                    "MODEL_QUALIFICATION_INCOMPATIBLE"
+                    if not model_qualified
+                    else (
+                        "MODEL_CAPABILITY_MISSING"
+                        if missing_model_capabilities
+                        else (
+                            "MODEL_RUNTIME_INCOMPATIBLE"
+                            if not model_runtime_compatible
+                            else (
+                                "POLICY_NORMALIZATION_INVALID"
+                                if not policy_normalization_valid.get(
+                                    template.action_code, False
+                                )
+                                else (
+                                    "POLICY_TASK_ID_MISMATCH"
+                                    if not policy_task_matches.get(
+                                        template.action_code, False
+                                    )
+                                    else (
+                                        "POLICY_PROVENANCE_MISMATCH"
+                                        if not policy_provenance_valid.get(
+                                            template.action_code, False
+                                        )
+                                        else "POLICY_INFERENCE_INVALID"
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
             )
         )
         actions.append(
@@ -304,6 +471,14 @@ def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
                 parameterSchema=template.parameter_schema,
                 completion=template.completion,
                 lease=template.lease,
+                preconditions=(
+                    {
+                        "allowedTerrains": [request.model_terrain],
+                        "scenarioProfile": request.scenario_profile,
+                    }
+                    if model_qualified
+                    else None
+                ),
                 safety=safety,
             )
         )
@@ -340,7 +515,16 @@ def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
                 artifact.model_dump() for artifact in qualification_artifacts
             ],
             "modelClosure": [artifact.model_dump() for artifact in model_closure],
-        },
+        }
+        | (
+            {
+                "modelTerrain": request.model_terrain,
+                "scenarioProfile": request.scenario_profile,
+                "modelCapabilities": sorted(model_capabilities),
+            }
+            if model_qualified
+            else {}
+        ),
         license={
             "artifacts": [artifact.model_dump() for artifact in license_artifacts]
         },

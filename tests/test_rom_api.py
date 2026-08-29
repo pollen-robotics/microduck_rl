@@ -554,6 +554,30 @@ def test_placeholder_startup_does_not_reconcile_existing_running_task(
     ]
 
 
+def test_catalog_masks_manifest_availability_when_concrete_runtime_cannot_start(
+    tmp_path: Path, service: SimulatorTaskService
+):
+    """An installed manifest must not advertise executable motion while runtime readiness failed."""
+    bundle_dir = tmp_path / "bundle"
+    _write_verified_bundle(bundle_dir, service._bundle)
+    app = create_configured_app(
+        {
+            "MICRODUCK_ROM_BUNDLE_DIR": str(bundle_dir),
+            "MICRODUCK_ROM_STATE_DB": str(tmp_path / "state.sqlite3"),
+            "MICRODUCK_ROM_BEARER_TOKEN": "startup-token",
+        }
+    )
+
+    with TestClient(app) as client:
+        catalog = client.get(
+            "/v1/catalog", headers={"Authorization": "Bearer startup-token"}
+        )
+
+    assert catalog.status_code == 200
+    assert catalog.json()["actions"][0]["availability"] == "UNAVAILABLE"
+    assert catalog.json()["actions"][0]["unavailableReason"] == "RUNTIME_UNAVAILABLE"
+
+
 def test_database_startup_failure_has_its_own_readiness_reason(
     tmp_path: Path, service: SimulatorTaskService
 ):

@@ -72,6 +72,37 @@ def test_expired_lease_zeros_velocity_stops_and_times_out(
     assert service.get_task(walk_request.taskId).state == "TIMED_OUT"
 
 
+def test_watchdog_stops_terminal_runtime_fault_before_the_lease_deadline(
+    service, walk_request, runtime
+):
+    """Polling only the lease would leave a fatally stopped control loop durably RUNNING."""
+    service.create_task(walk_request)
+    service.command(walk_request.taskId, command(sequence=1, vx=0.2, lease_ms=500))
+    runtime.complete_next(
+        state="FAILED",
+        metrics={"loopOverruns": 3, "fallen": False},
+        stop_reason="CONTROL_LOOP_OVERRUN",
+    )
+
+    service.tick()
+
+    terminal = service.get_task(walk_request.taskId)
+    assert terminal.state == "FAILED"
+    assert terminal.stopReason == "CONTROL_LOOP_OVERRUN"
+    assert terminal.evidence is not None
+    assert terminal.evidence.stopReason == "CONTROL_LOOP_OVERRUN"
+    assert terminal.evidence.metrics["loopOverruns"] == 3
+    assert runtime.last_command == {
+        "vxMps": 0.0,
+        "vyMps": 0.0,
+        "yawRateRadps": 0.0,
+    }
+    assert runtime.operation_log[-2:] == [
+        ("command", {"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0}),
+        ("safe_stop", "CONTROL_LOOP_OVERRUN"),
+    ]
+
+
 def test_continuous_create_requires_initial_lease(service, walk_request):
     invalid = walk_request.model_copy(update={"leaseMs": None})
 
@@ -124,6 +155,37 @@ def test_app_watchdog_expires_initial_lease_without_http_traffic(
             ("safe_stop", "LEASE_EXPIRED"),
         ]
     assert app.state.watchdog_thread is None
+
+
+def test_app_watchdog_observes_runtime_fault_before_lease_without_http_traffic(
+    service, walk_request, runtime
+):
+    """The lifecycle watchdog must poll runtime safety, not only the monotonic lease."""
+    app = create_app(service, "watchdog-token")
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/tasks",
+            headers={"Authorization": "Bearer watchdog-token"},
+            json=walk_request.model_dump(mode="json"),
+        )
+        assert response.status_code == 202
+        runtime.complete_next(
+            state="FAILED",
+            metrics={"loopOverruns": 3},
+            stop_reason="CONTROL_LOOP_OVERRUN",
+        )
+        assert runtime.safe_stopped.wait(timeout=1.0)
+        with service._lock:
+            pass
+
+        terminal = service.get_task(walk_request.taskId)
+        assert terminal.state == "FAILED"
+        assert terminal.stopReason == "CONTROL_LOOP_OVERRUN"
+        assert runtime.last_command == {
+            "vxMps": 0.0,
+            "vyMps": 0.0,
+            "yawRateRadps": 0.0,
+        }
 
 
 def test_stale_command_does_not_renew_lease(service, walk_request, clock, runtime):

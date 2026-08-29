@@ -270,11 +270,31 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
     )
     def catalog() -> CatalogResponse:
         bundle = installed_bundle()
+        runtime_ready = False
+        if service is not None:
+            try:
+                health = service.robot_status().health
+                runtime_ready = bool(health.get("ready") and health.get("healthy"))
+            except Exception:  # noqa: BLE001 - catalog availability must fail closed.
+                runtime_ready = False
+        actions = bundle.actions
+        if not runtime_ready:
+            actions = [
+                action.model_copy(
+                    update={
+                        "availability": "UNAVAILABLE",
+                        "unavailableReason": "RUNTIME_UNAVAILABLE",
+                    }
+                )
+                if action.availability == "AVAILABLE"
+                else action
+                for action in bundle.actions
+            ]
         return CatalogResponse(
             bundleId=bundle.bundleId,
             bundleVersion=bundle.bundleVersion,
             bundleDigest=bundle.bundleDigest,
-            actions=bundle.actions,
+            actions=actions,
         )
 
     @app.get(

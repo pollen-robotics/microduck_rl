@@ -17,7 +17,13 @@ from .contracts import (
     TaskCreateRequest,
     TaskEvidence,
 )
-from .runtime import RuntimeEvidence, RuntimeHandle, RuntimeMetric, SimulationRuntime
+from .runtime import (
+    RuntimeEvidence,
+    RuntimeHandle,
+    RuntimeMetric,
+    RuntimeSample,
+    SimulationRuntime,
+)
 from .store import (
     CommandSequenceConflict as StoreCommandSequenceConflict,
 )
@@ -247,13 +253,26 @@ class SimulatorTaskService:
             return accepted
 
     def tick(self) -> None:
-        """Enforce continuous leases using the target's injected monotonic clock."""
+        """Observe runtime safety before enforcing the continuous lease deadline."""
         with self._lock:
             active = self._active
+            if active is None or not active.continuous or active.handle is None:
+                return
+            try:
+                sample = self._runtime.sample(active.handle)
+            except Exception:  # noqa: BLE001 - runtime faults must terminalize ownership.
+                self._stop_continuous_locked(active, "FAILED", "RUNTIME_EXCEPTION")
+                return
+            if sample.terminalState is not None:
+                self._stop_continuous_locked(
+                    active,
+                    "FAILED",
+                    _continuous_terminal_reason(sample),
+                    sample_metrics=sample.metrics,
+                )
+                return
             if (
-                active is not None
-                and active.continuous
-                and active.deadline is not None
+                active.deadline is not None
                 and self._monotonic_clock() >= active.deadline
             ):
                 self._stop_continuous_locked(active, "TIMED_OUT", "LEASE_EXPIRED")
@@ -352,7 +371,14 @@ class SimulatorTaskService:
             self._active = None
             raise RuntimeException("could not start simulator runtime") from exc
 
-    def _stop_continuous_locked(self, active: _ActiveTask, state: str, reason: str):
+    def _stop_continuous_locked(
+        self,
+        active: _ActiveTask,
+        state: str,
+        reason: str,
+        *,
+        sample_metrics: Mapping[str, RuntimeMetric] | None = None,
+    ):
         """Send the manifest zero intent, then stop, then persist exactly one terminal state."""
         if active.stopped:
             return self._store.get(active.request.taskId)
@@ -375,7 +401,10 @@ class SimulatorTaskService:
             if safety_code is not None:
                 stop_evidence = RuntimeEvidence(metrics={"safetyFailure": safety_code})
             evidence = self._evidence_for(
-                active.action, _Outcome(state, reason), {}, stop_evidence
+                active.action,
+                _Outcome(state, reason),
+                sample_metrics or {},
+                stop_evidence,
             )
             payload: dict[str, str] = {"code": reason}
             if safety_code is not None:
@@ -571,6 +600,24 @@ def _terminal_result_code(state: str, runtime_reason: str | None) -> str:
         return "TASK_COMPLETE"
     if runtime_reason == "FALLEN":
         return "FALLEN"
+    return "RUNTIME_FAILED"
+
+
+_CONTINUOUS_FATAL_REASONS = frozenset(
+    {
+        "CONTROL_LOOP_OVERRUN",
+        "FALLEN",
+        "JOINT_LIMIT",
+        "NON_FINITE_POLICY_OUTPUT",
+        "NON_FINITE_STATE",
+        "RUNTIME_EXCEPTION",
+    }
+)
+
+
+def _continuous_terminal_reason(sample: RuntimeSample) -> str:
+    if sample.stopReason in _CONTINUOUS_FATAL_REASONS:
+        return sample.stopReason
     return "RUNTIME_FAILED"
 
 

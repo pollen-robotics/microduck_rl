@@ -34,6 +34,7 @@ from .contracts import (
     TaskCreateRequest,
     sha256_prefixed,
 )
+from .model_semantics import has_exact_passive_roller_topology, has_flat_world_floor
 from .observation import (
     DEFAULT_JOINT_POSE,
     OBSERVATION_NORMALIZATION,
@@ -42,6 +43,7 @@ from .observation import (
     build_actor_observation,
     project_gravity_wxyz,
 )
+from .onnx_policy import inspect_normalized_actor
 from .runtime import RuntimeEvidence, RuntimeHandle, RuntimeSample
 
 _CONTROL_PERIOD_S = 0.02
@@ -126,6 +128,9 @@ class MicroduckMujocoRuntime:
         self._min_base_height_m = math.inf
         self._max_tilt_rad = 0.0
         self._max_abs_action = 0.0
+        self._upright_steps = 0
+        self._last_yaw_rad = 0.0
+        self._yaw_rotation_rad = 0.0
         self._start_base_position = np.zeros(3, dtype=np.float64)
         self._last_loop_start: float | None = None
         self._loop_frequency_hz = 50.0 if not realtime else 0.0
@@ -133,6 +138,7 @@ class MicroduckMujocoRuntime:
         self._consecutive_overruns = 0
         self._applied_seed = 0
         self._rng = np.random.default_rng(0)
+        self._reset_perturbation_l2_rad = 0.0
 
         artifact_bytes = self._verify_bundle_identity_and_artifacts()
         model_closure = self._derive_model_closure(artifact_bytes)
@@ -157,10 +163,17 @@ class MicroduckMujocoRuntime:
             raise ValueError(
                 "MuJoCo timestep must divide the 20 ms policy period exactly"
             )
+        required_policy_refs = {
+            action.policyRef
+            for action in bundle.actions
+            if action.availability == "AVAILABLE" and action.policyRef is not None
+        }
         self._sessions = {
             policy.policyRef: self._load_policy(policy, artifact_bytes[policy.path])
             for policy in bundle.policies
+            if policy.policyRef in required_policy_refs
         }
+        self._validate_installed_actions()
         self._reset_model_locked()
 
     def _safe_path(self, declared_path: str) -> Path:
@@ -310,23 +323,31 @@ class MicroduckMujocoRuntime:
             != onnx.TensorProto.FLOAT
         ):
             raise ValueError("ONNX policy input and output must be tensor(float)")
+        input_dims = [
+            dimension.dim_value
+            for dimension in model.graph.input[0].type.tensor_type.shape.dim
+        ]
+        output_dims = [
+            dimension.dim_value
+            for dimension in model.graph.output[0].type.tensor_type.shape.dim
+        ]
+        if input_dims != [1, 61]:
+            raise ValueError("ONNX policy must have one input of shape [1, 61]")
+        if output_dims != [1, 14]:
+            raise ValueError("ONNX policy must have one output of shape [1, 14]")
         metadata_proto = {item.key: item.value for item in model.metadata_props}
         graph_digest = hashlib.sha256(model.graph.SerializeToString()).hexdigest()
-        nodes = list(model.graph.node)
-        has_normalizer = (
-            len(nodes) >= 2
-            and nodes[0].op_type == "Sub"
-            and nodes[0].input[0] == model.graph.input[0].name
-            and nodes[1].op_type == "Div"
-            and nodes[1].input[0] == nodes[0].output[0]
-        )
+        normalized_graph = inspect_normalized_actor(model)
         if (
-            not has_normalizer
-            or metadata_proto.get("microduck.normalization")
+            metadata_proto.get("microduck.normalization")
             != "EMPIRICAL_NORMALIZATION_V1"
             or not hmac.compare_digest(
                 metadata_proto.get("microduck.normalization_graph_sha256", ""),
                 graph_digest,
+            )
+            or not hmac.compare_digest(
+                str(requirements.get("normalizedGraphFingerprint", "")),
+                normalized_graph.fingerprint,
             )
         ):
             raise ValueError("ONNX policy normalization provenance is invalid")
@@ -357,6 +378,8 @@ class MicroduckMujocoRuntime:
         return session
 
     def _configure_model_addresses(self) -> None:
+        if self._model.nu != len(self.controlled_joint_names):
+            raise ValueError("deployment model must have exactly 14 total actuators")
         joint_ids: list[int] = []
         qpos_indices: list[int] = []
         qvel_indices: list[int] = []
@@ -379,6 +402,20 @@ class MicroduckMujocoRuntime:
             if self._model.jnt_type[joint_id] != mujoco.mjtJoint.mjJNT_HINGE:
                 raise ValueError("radian controlled joint must be a scalar hinge")
             actuator_id = int(matching_actuators[0])
+            gear = self._model.actuator_gear[actuator_id]
+            if not np.allclose(
+                gear, np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0]), atol=1e-12
+            ):
+                raise ValueError(
+                    "controlled joint actuator requires unit positive joint gear"
+                )
+            if (
+                self._model.actuator_gaintype[actuator_id]
+                != mujoco.mjtGain.mjGAIN_FIXED
+            ):
+                raise ValueError("position actuator requires fixed gain semantics")
+            if self._model.actuator_dyntype[actuator_id] != mujoco.mjtDyn.mjDYN_NONE:
+                raise ValueError("position actuator must not declare actuator dynamics")
             if (
                 self._model.actuator_trntype[actuator_id] != mujoco.mjtTrn.mjTRN_JOINT
                 or self._model.actuator_biastype[actuator_id]
@@ -439,6 +476,13 @@ class MicroduckMujocoRuntime:
         )
         if self._trunk_body_id < 0 or freejoint_id < 0:
             raise ValueError("model must declare trunk_base and trunk_base_freejoint")
+        if (
+            self._model.jnt_type[freejoint_id] != mujoco.mjtJoint.mjJNT_FREE
+            or self._model.jnt_bodyid[freejoint_id] != self._trunk_body_id
+        ):
+            raise ValueError(
+                "trunk_base_freejoint must be a FREE joint owned by trunk_base"
+            )
         self._free_qpos_address = int(self._model.jnt_qposadr[freejoint_id])
         self._free_qvel_address = int(self._model.jnt_dofadr[freejoint_id])
         self._gyro_sensor_id = mujoco.mj_name2id(
@@ -446,24 +490,42 @@ class MicroduckMujocoRuntime:
         )
         if self._gyro_sensor_id < 0:
             raise ValueError("model must provide trunk-frame imu_ang_vel gyro")
+        sensor_id = self._gyro_sensor_id
+        if (
+            self._model.sensor_type[sensor_id] != mujoco.mjtSensor.mjSENS_GYRO
+            or self._model.sensor_dim[sensor_id] != 3
+            or self._model.sensor_objtype[sensor_id] != mujoco.mjtObj.mjOBJ_SITE
+        ):
+            raise ValueError("imu_ang_vel must be a three-axis gyro sensor")
+        site_id = int(self._model.sensor_objid[sensor_id])
+        if self._model.site_bodyid[site_id] != self._trunk_body_id or not np.allclose(
+            self._model.site_quat[site_id],
+            np.array([1.0, 0.0, 0.0, 0.0]),
+            atol=1e-7,
+        ):
+            raise ValueError("imu_ang_vel site must be identity-aligned on trunk_base")
 
-    def _reset_model_locked(self) -> None:
+    def _reset_model_locked(self, rng: np.random.Generator | None = None) -> None:
         mujoco.mj_resetData(self._model, self._data)
-        self._data.qpos[self._joint_qpos_indices] = DEFAULT_JOINT_POSE
-        self._data.ctrl[self._actuator_indices] = DEFAULT_JOINT_POSE
+        perturbation = (
+            np.zeros(14, dtype=np.float64)
+            if rng is None
+            else rng.uniform(-0.005, 0.005, size=14)
+        )
+        reset_pose = DEFAULT_JOINT_POSE.astype(np.float64) + perturbation
+        self._data.qpos[self._joint_qpos_indices] = reset_pose
+        self._data.ctrl[self._actuator_indices] = reset_pose
+        self._reset_perturbation_l2_rad = float(np.linalg.norm(perturbation))
         mujoco.mj_forward(self._model, self._data)
 
     def _detect_model_capabilities(self) -> frozenset[str]:
         capabilities: set[str] = set()
         terrain = self._bundle.qualification.get("modelTerrain")
-        if terrain == "flat":
+        if terrain == "flat" and has_flat_world_floor(self._model):
             capabilities.add("FLAT_TERRAIN")
         if terrain in {"ramp", "slope"}:
             capabilities.add("RAMP_TERRAIN")
-        if (
-            mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_MESH, "roller_blade")
-            >= 0
-        ):
+        if has_exact_passive_roller_topology(self._model):
             capabilities.add("ROLLER_FEET")
         return frozenset(capabilities)
 
@@ -476,6 +538,38 @@ class MicroduckMujocoRuntime:
             raise ValueError(
                 "action contract clipping is incompatible with position targets"
             )
+
+    def _validate_installed_actions(self) -> None:
+        """Make readiness prove every manifest-available action can reach start()."""
+        policies = {item.policyRef: item for item in self._bundle.policies}
+        for action in self._bundle.actions:
+            if action.availability != "AVAILABLE":
+                continue
+            spec = ACTION_RUNTIME_SPECS.get(action.actionCode)
+            if spec is None or not spec.supported:
+                raise ValueError("available action has no runtime semantics")
+            if action.executionMode != spec.execution_mode:
+                raise ValueError("available action execution mode is incompatible")
+            policy = policies.get(action.policyRef or "")
+            if policy is None or policy.policyRef not in self._sessions:
+                raise ValueError("available action has no verified policy")
+            if policy.taskId not in spec.task_ids:
+                raise ValueError("policy task identity does not match action semantics")
+            if set(spec.required_capabilities) - self._model_capabilities:
+                raise ValueError("available action lacks qualified model capabilities")
+            if (
+                self._bundle.qualification.get("scenarioProfile")
+                != spec.scenario_profile
+            ):
+                raise ValueError(
+                    "available action lacks its code-owned scenario profile"
+                )
+            expected_preconditions = {
+                "allowedTerrains": [self._bundle.qualification.get("modelTerrain")],
+                "scenarioProfile": spec.scenario_profile,
+            }
+            if action.preconditions != expected_preconditions:
+                raise ValueError("action preconditions do not match qualification")
 
     def validate(self, action: ActionDefinition, request: TaskCreateRequest) -> None:
         if request.bundleDigest != self._bundle.bundleDigest:
@@ -507,7 +601,11 @@ class MicroduckMujocoRuntime:
                 "policy task identity does not match code-owned action semantics"
             )
         self._command_for(action.actionCode, request.parameters, action)
-        seed = request.scenario.get("seed", 0)
+        if set(request.scenario) != set(spec.scenario_fields):
+            raise ValueError("scenario must contain exact terrain and seed fields")
+        if self._bundle.qualification.get("scenarioProfile") != spec.scenario_profile:
+            raise ValueError("bundle scenario profile is incompatible")
+        seed = request.scenario.get("seed")
         if not isinstance(seed, int) or isinstance(seed, bool) or not 0 <= seed < 2**32:
             raise ValueError("scenario seed must be an unsigned 32-bit integer")
         terrain = request.scenario.get("terrain")
@@ -525,9 +623,9 @@ class MicroduckMujocoRuntime:
                 raise RuntimeError("runtime already has an active task")
             if self._fatal_reason is not None:
                 raise RuntimeError("runtime requires restart after a safety fault")
-            self._reset_model_locked()
             self._applied_seed = int(request.scenario.get("seed", 0))
             self._rng = np.random.default_rng(self._applied_seed)
+            self._reset_model_locked(self._rng)
             self._active_handle = RuntimeHandle(taskId=request.taskId)
             self._active_action = action
             self._active_request = request
@@ -554,6 +652,9 @@ class MicroduckMujocoRuntime:
             self._min_base_height_m = float(self._base_position()[2])
             self._max_tilt_rad = 0.0
             self._max_abs_action = 0.0
+            self._upright_steps = 0
+            self._last_yaw_rad = self._yaw_rad()
+            self._yaw_rotation_rad = 0.0
             self._start_base_position = self._base_position()
             self._last_loop_start = None
             self._loop_frequency_hz = 50.0 if not self._realtime else 0.0
@@ -600,6 +701,8 @@ class MicroduckMujocoRuntime:
 
     def safe_stop(self, handle: RuntimeHandle | None, reason: str) -> RuntimeEvidence:
         with self._lock:
+            if handle is None and self._active_handle is not None:
+                raise RuntimeError("an active task requires its owned runtime handle")
             if handle is not None:
                 if (
                     self._active_handle is None
@@ -874,6 +977,12 @@ class MicroduckMujocoRuntime:
         self._max_abs_action = max(
             self._max_abs_action, float(np.max(np.abs(action), initial=0.0))
         )
+        if height >= 0.025 and tilt <= math.radians(75.0):
+            self._upright_steps += 1
+        yaw = self._yaw_rad()
+        yaw_delta = (yaw - self._last_yaw_rad + math.pi) % (2.0 * math.pi) - math.pi
+        self._yaw_rotation_rad += yaw_delta
+        self._last_yaw_rad = yaw
 
     def _fail_locked(self, reason: str, *, fallen: bool = False) -> None:
         self._fatal_reason = reason
@@ -916,6 +1025,10 @@ class MicroduckMujocoRuntime:
         address = int(self._model.sensor_adr[self._gyro_sensor_id])
         return self._data.sensordata[address : address + 3].copy()
 
+    def _yaw_rad(self) -> float:
+        w, x, y, z = self._base_quaternion_wxyz()
+        return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
     def _duration_locked(self) -> float:
         return max(0.0, float(self._data.time) - self._start_sim_time)
 
@@ -956,6 +1069,12 @@ class MicroduckMujocoRuntime:
             metrics["trackingError"] = round(
                 float(np.linalg.norm(measured - np.asarray(self._command.twist))), 6
             )
+        if self._active_action.actionCode == "VELSTAND_VELOCITY":
+            metrics["standFraction"] = round(
+                self._upright_steps / max(self._step_count, 1), 6
+            )
+        if self._active_action.actionCode == "SWIZZLE":
+            metrics["yawRotationRad"] = round(self._yaw_rotation_rad, 6)
         return metrics
 
     def _evidence_metrics_locked(self) -> dict[str, int | float | bool | str | None]:
@@ -969,10 +1088,12 @@ class MicroduckMujocoRuntime:
             "sourceCommit": self._bundle.sourceCommit,
             "checkpoint": self._active_policy.checkpoint,
             "runIdentity": self._active_policy.experimentRef,
-            "terrain": str(self._active_request.scenario.get("terrain", "")),
-            "seed": int(self._active_request.scenario.get("seed", 0)),
-            "appliedTerrain": str(self._active_request.scenario.get("terrain", "")),
-            "appliedSeed": self._applied_seed,
+            "terrainIdentity": str(self._bundle.qualification.get("modelTerrain", "")),
+            "rngSeed": self._applied_seed,
+            "scenarioProfile": str(
+                self._bundle.qualification.get("scenarioProfile", "")
+            ),
+            "resetPerturbationL2Rad": round(self._reset_perturbation_l2_rad, 8),
             "resetProfile": ACTION_RUNTIME_SPECS[
                 self._active_action.actionCode
             ].reset_profile,

@@ -37,7 +37,12 @@ def write_minimal_onnx(path: Path) -> Path:
         [helper.make_tensor_value_info("observation", TensorProto.FLOAT, [1, 61])],
         [helper.make_tensor_value_info("action", TensorProto.FLOAT, [1, 14])],
     )
-    onnx.save(helper.make_model(graph), path)
+    onnx.save(
+        helper.make_model(
+            graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=10
+        ),
+        path,
+    )
     return path
 
 
@@ -59,7 +64,65 @@ def write_normalized_onnx(path: Path) -> Path:
             ),
         ],
     )
-    onnx.save(helper.make_model(graph), path)
+    onnx.save(
+        helper.make_model(
+            graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=10
+        ),
+        path,
+    )
+    return path
+
+
+def write_bypassed_normalizer_onnx(path: Path) -> Path:
+    graph = helper.make_graph(
+        [
+            helper.make_node("Sub", ["observation", "mean"], ["centered"]),
+            helper.make_node("Div", ["centered", "std"], ["normalized"]),
+            helper.make_node("MatMul", ["observation", "weights"], ["action"]),
+        ],
+        "microduck-bypassed-normalizer-policy",
+        [helper.make_tensor_value_info("observation", TensorProto.FLOAT, [1, 61])],
+        [helper.make_tensor_value_info("action", TensorProto.FLOAT, [1, 14])],
+        [
+            helper.make_tensor("mean", TensorProto.FLOAT, [61], [0.0] * 61),
+            helper.make_tensor("std", TensorProto.FLOAT, [61], [1.0] * 61),
+            helper.make_tensor(
+                "weights", TensorProto.FLOAT, [61, 14], [0.0] * (61 * 14)
+            ),
+        ],
+    )
+    model = helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=10
+    )
+    metadata = {
+        "microduck.task_id": "Mjlab-Velocity-Flat-MicroDuck",
+        "microduck.source_commit": "a" * 40,
+        "microduck.observation_contract": "MICRODUCK_OBS_61_V1",
+        "microduck.action_contract": "MICRODUCK_ACTION_14_V1",
+        "microduck.checkpoint": "model_100.pt",
+        "microduck.run_identity": "mjlab_microduck/test-run",
+        "microduck.normalization": "EMPIRICAL_NORMALIZATION_V1",
+        "microduck.normalization_graph_sha256": hashlib.sha256(
+            graph.SerializeToString()
+        ).hexdigest(),
+    }
+    for key, value in sorted(metadata.items()):
+        item = model.metadata_props.add()
+        item.key = key
+        item.value = value
+    onnx.save(model, path)
+    return path
+
+
+def write_release_onnx(path: Path, *, task_id: str) -> Path:
+    write_normalized_onnx(path)
+    _export_module().attach_microduck_metadata(
+        path,
+        task_id=task_id,
+        source_commit="a" * 40,
+        checkpoint="model_100.pt",
+        run_identity="mjlab_microduck/test-run",
+    )
     return path
 
 
@@ -169,7 +232,291 @@ def test_roller_policy_is_unavailable_without_roller_model_capability(tmp_path: 
         action for action in bundle.actions if action.actionCode == "ROLLER_VELOCITY"
     )
     assert roller.availability == "UNAVAILABLE"
+    assert roller.unavailableReason == "MODEL_QUALIFICATION_INCOMPATIBLE"
+
+
+def test_robot_only_mjcf_cannot_qualify_an_action_as_executable(tmp_path: Path):
+    """A robot asset without a floor is not an executable deployment scene."""
+    policy = write_release_onnx(
+        tmp_path / WALK_ONNX, task_id="Mjlab-Velocity-Flat-MicroDuck"
+    )
+    request = minimal_request(tmp_path, artifacts={"WALK_VELOCITY": policy})
+    qualified = BundleBuildRequest(
+        **(
+            request.__dict__
+            | {
+                "model_terrain": "flat",
+                "scenario_profile": "SEEDED_SERVO_RESET_V1",
+            }
+        )
+    )
+
+    bundle = build_bundle(qualified).manifest
+
+    walk = next(item for item in bundle.actions if item.actionCode == "WALK_VELOCITY")
+    assert walk.availability == "UNAVAILABLE"
+    assert walk.unavailableReason == "MODEL_QUALIFICATION_INCOMPATIBLE"
+    assert "modelTerrain" not in bundle.qualification
+
+
+def test_real_scene_floor_emits_qualified_terrain_and_available_walk(tmp_path: Path):
+    """Qualification must name terrain only after the packaged scene proves it materializes it."""
+    policy = write_release_onnx(
+        tmp_path / WALK_ONNX, task_id="Mjlab-Velocity-Flat-MicroDuck"
+    )
+    scene = MICRODUCK_WALK_XML.with_name("scene_walk.xml")
+
+    built = build_bundle(
+        BundleBuildRequest(
+            release="1.0.0",
+            output_zip=tmp_path / "qualified-scene.zip",
+            artifacts={"WALK_VELOCITY": policy},
+            model_path=scene,
+            model_terrain="flat",
+            scenario_profile="SEEDED_SERVO_RESET_V1",
+            source_repository="microduck-rl",
+            source_commit="a" * 40,
+            created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            checkpoint="model_100.pt",
+            experiment_ref="mjlab_microduck/test-run",
+        )
+    )
+
+    assert built.manifest.qualification["modelTerrain"] == "flat"
+    assert built.manifest.qualification["scenarioProfile"] == "SEEDED_SERVO_RESET_V1"
+    walk = next(
+        item for item in built.manifest.actions if item.actionCode == "WALK_VELOCITY"
+    )
+    assert walk.availability == "AVAILABLE"
+    policy_artifact = next(
+        item for item in built.manifest.policies if item.policyRef == walk.policyRef
+    )
+    assert policy_artifact.runtimeRequirements["normalizedGraphFingerprint"].startswith(
+        "sha256:"
+    )
+    assert walk.preconditions == {
+        "allowedTerrains": ["flat"],
+        "scenarioProfile": "SEEDED_SERVO_RESET_V1",
+    }
+
+
+def test_identical_policy_bytes_do_not_cross_deduplicate_task_identities(
+    tmp_path: Path,
+):
+    """Digest equality cannot make a Walk actor valid for the distinct VelStand task."""
+    policy = write_release_onnx(
+        tmp_path / WALK_ONNX, task_id="Mjlab-Velocity-Flat-MicroDuck"
+    )
+    scene = MICRODUCK_WALK_XML.with_name("scene_walk.xml")
+    bundle = build_bundle(
+        BundleBuildRequest(
+            release="1.0.0",
+            output_zip=tmp_path / "identity.zip",
+            artifacts={
+                "WALK_VELOCITY": policy,
+                "VELSTAND_VELOCITY": policy,
+            },
+            model_path=scene,
+            model_terrain="flat",
+            scenario_profile="SEEDED_SERVO_RESET_V1",
+            source_repository="microduck-rl",
+            source_commit="a" * 40,
+            created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            checkpoint="model_100.pt",
+            experiment_ref="mjlab_microduck/test-run",
+        )
+    ).manifest
+
+    walk = next(item for item in bundle.actions if item.actionCode == "WALK_VELOCITY")
+    velstand = next(
+        item for item in bundle.actions if item.actionCode == "VELSTAND_VELOCITY"
+    )
+    assert walk.policyRef != velstand.policyRef
+    assert len(bundle.policies) == 2
+    assert len({item.path for item in bundle.policies}) == 2
+    assert walk.availability == "AVAILABLE"
+    assert velstand.availability == "UNAVAILABLE"
+    assert velstand.unavailableReason == "POLICY_TASK_ID_MISMATCH"
+
+
+def test_roller_mesh_and_joint_names_without_collision_topology_do_not_qualify(
+    tmp_path: Path,
+):
+    """Names alone cannot prove that four passive wheels physically contact the terrain."""
+    model = tmp_path / "name-only-rollers.xml"
+    wheels = "".join(
+        f'<body name="wheel_{index}"><joint name="{name}" type="hinge"/>'
+        '<geom type="sphere" size="0.002" mass="0.001" contype="0" conaffinity="0"/></body>'
+        for index, name in enumerate(
+            (
+                "passive_LF_wheel",
+                "passive_LR_wheel",
+                "passive_RF_wheel",
+                "passive_RR_wheel",
+            )
+        )
+    )
+    model.write_text(
+        '<mujoco><option timestep="0.005"/><worldbody>'
+        '<geom name="floor" type="plane" size="0 0 0.05"/>'
+        '<body name="trunk_base" pos="0 0 0.12">'
+        '<freejoint name="trunk_base_freejoint"/>'
+        '<geom type="sphere" size="0.01" mass="0.1"/>'
+        f"{wheels}</body></worldbody></mujoco>"
+    )
+    policy = write_release_onnx(
+        tmp_path / "roller.onnx",
+        task_id="Mjlab-Velocity-Flat-MicroDuck-Rollers",
+    )
+    bundle = build_bundle(
+        BundleBuildRequest(
+            release="1.0.0",
+            output_zip=tmp_path / "name-only.zip",
+            artifacts={"ROLLER_VELOCITY": policy},
+            model_path=model,
+            model_terrain="flat",
+            scenario_profile="SEEDED_SERVO_RESET_V1",
+            source_repository="microduck-rl",
+            source_commit="a" * 40,
+            created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            checkpoint="model_100.pt",
+            experiment_ref="mjlab_microduck/test-run",
+        )
+    ).manifest
+
+    roller = next(
+        item for item in bundle.actions if item.actionCode == "ROLLER_VELOCITY"
+    )
+    assert roller.availability == "UNAVAILABLE"
     assert roller.unavailableReason == "MODEL_CAPABILITY_MISSING"
+
+
+def test_checked_in_roller_scene_qualifies_exact_passive_wheel_topology(
+    tmp_path: Path,
+):
+    policy = write_release_onnx(
+        tmp_path / "roller.onnx",
+        task_id="Mjlab-Velocity-Flat-MicroDuck-Rollers",
+    )
+    bundle = build_bundle(
+        BundleBuildRequest(
+            release="1.0.0",
+            output_zip=tmp_path / "rollers.zip",
+            artifacts={"ROLLER_VELOCITY": policy},
+            model_path=MICRODUCK_WALK_XML.with_name("scene_rollers.xml"),
+            model_terrain="flat",
+            scenario_profile="SEEDED_SERVO_RESET_V1",
+            source_repository="microduck-rl",
+            source_commit="a" * 40,
+            created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            checkpoint="model_100.pt",
+            experiment_ref="mjlab_microduck/test-run",
+        )
+    ).manifest
+
+    roller = next(
+        item for item in bundle.actions if item.actionCode == "ROLLER_VELOCITY"
+    )
+    assert roller.availability == "AVAILABLE"
+    assert "ROLLER_FEET" in bundle.qualification["modelCapabilities"]
+
+
+def test_floor_scene_without_exact_position_actuator_contract_is_unavailable(
+    tmp_path: Path,
+):
+    """A scene can be executable MuJoCo while still being incompatible with 14D radian targets."""
+    model = tmp_path / "no-servos.xml"
+    model.write_text(
+        '<mujoco><option timestep="0.005"/><worldbody>'
+        '<geom name="floor" type="plane" size="0 0 0.05"/>'
+        '<body name="trunk_base" pos="0 0 0.12">'
+        '<freejoint name="trunk_base_freejoint"/>'
+        '<geom type="sphere" size="0.01" mass="0.1"/>'
+        '<site name="imu"/></body></worldbody>'
+        '<sensor><gyro name="imu_ang_vel" site="imu"/></sensor></mujoco>'
+    )
+    policy = write_release_onnx(
+        tmp_path / WALK_ONNX, task_id="Mjlab-Velocity-Flat-MicroDuck"
+    )
+    bundle = build_bundle(
+        BundleBuildRequest(
+            release="1.0.0",
+            output_zip=tmp_path / "no-servos.zip",
+            artifacts={"WALK_VELOCITY": policy},
+            model_path=model,
+            model_terrain="flat",
+            scenario_profile="SEEDED_SERVO_RESET_V1",
+            source_repository="microduck-rl",
+            source_commit="a" * 40,
+            created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            checkpoint="model_100.pt",
+            experiment_ref="mjlab_microduck/test-run",
+        )
+    ).manifest
+
+    walk = next(item for item in bundle.actions if item.actionCode == "WALK_VELOCITY")
+    assert walk.availability == "UNAVAILABLE"
+    assert walk.unavailableReason == "MODEL_RUNTIME_INCOMPATIBLE"
+
+
+def test_builder_marks_dead_or_bypassed_normalizer_graph_unavailable(tmp_path: Path):
+    """Export-looking metadata cannot make a normalization prefix attest itself."""
+    model = MICRODUCK_WALK_XML.with_name("scene_walk.xml")
+    policy = write_bypassed_normalizer_onnx(tmp_path / WALK_ONNX)
+    bundle = build_bundle(
+        BundleBuildRequest(
+            release="1.0.0",
+            output_zip=tmp_path / "bypassed.zip",
+            artifacts={"WALK_VELOCITY": policy},
+            model_path=model,
+            model_terrain="flat",
+            scenario_profile="SEEDED_SERVO_RESET_V1",
+            source_repository="microduck-rl",
+            source_commit="a" * 40,
+            created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            checkpoint="model_100.pt",
+            experiment_ref="mjlab_microduck/test-run",
+        )
+    ).manifest
+
+    walk = next(item for item in bundle.actions if item.actionCode == "WALK_VELOCITY")
+    assert walk.availability == "UNAVAILABLE"
+    assert walk.unavailableReason == "POLICY_NORMALIZATION_INVALID"
+
+
+def test_builder_marks_non_finite_cpu_policy_inference_unavailable(tmp_path: Path):
+    """A structurally normalized actor is still not executable if its dry output is NaN."""
+    policy = write_normalized_onnx(tmp_path / WALK_ONNX)
+    model = onnx.load(policy)
+    weights = next(item for item in model.graph.initializer if item.name == "weights")
+    weights.float_data[0] = float("nan")
+    onnx.save(model, policy)
+    _export_module().attach_microduck_metadata(
+        policy,
+        task_id="Mjlab-Velocity-Flat-MicroDuck",
+        source_commit="a" * 40,
+        checkpoint="model_100.pt",
+        run_identity="mjlab_microduck/test-run",
+    )
+    bundle = build_bundle(
+        BundleBuildRequest(
+            release="1.0.0",
+            output_zip=tmp_path / "nan.zip",
+            artifacts={"WALK_VELOCITY": policy},
+            model_path=MICRODUCK_WALK_XML.with_name("scene_walk.xml"),
+            model_terrain="flat",
+            scenario_profile="SEEDED_SERVO_RESET_V1",
+            source_repository="microduck-rl",
+            source_commit="a" * 40,
+            created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            checkpoint="model_100.pt",
+            experiment_ref="mjlab_microduck/test-run",
+        )
+    ).manifest
+
+    walk = next(item for item in bundle.actions if item.actionCode == "WALK_VELOCITY")
+    assert walk.availability == "UNAVAILABLE"
+    assert walk.unavailableReason == "POLICY_INFERENCE_INVALID"
 
 
 def test_missing_artifact_is_explicitly_unavailable(tmp_path: Path):
@@ -454,8 +801,10 @@ def test_sit_and_stand_can_share_the_same_sitstand_policy_artifact(tmp_path: Pat
 
 
 def test_bundle_cli_writes_release_archive_from_named_artifact(tmp_path: Path):
-    """Breaking argument parsing would prevent a trained policy from becoming a verifiable release."""
-    policy = write_minimal_onnx(tmp_path / WALK_ONNX)
+    """The CLI default must package the executable walk scene with explicit qualification."""
+    policy = write_release_onnx(
+        tmp_path / WALK_ONNX, task_id="Mjlab-Velocity-Flat-MicroDuck"
+    )
     request = minimal_request(tmp_path, artifacts={})
     output = tmp_path / "cli.zip"
     completed = subprocess.run(
@@ -467,14 +816,20 @@ def test_bundle_cli_writes_release_archive_from_named_artifact(tmp_path: Path):
             "1.0.0",
             "--artifact",
             f"WALK_VELOCITY={policy}",
-            "--model",
-            str(request.model_path),
+            "--terrain",
+            "flat",
+            "--scenario-profile",
+            "SEEDED_SERVO_RESET_V1",
             "--source-repository",
             "microduck-rl",
             "--source-commit",
             "a" * 40,
             "--created-at",
             "2026-08-29T00:00:00Z",
+            "--checkpoint",
+            "model_100.pt",
+            "--experiment-ref",
+            "mjlab_microduck/test-run",
             "--qualification-file",
             str(request.qualification_files[0]),
             "--license-file",
@@ -490,6 +845,14 @@ def test_bundle_cli_writes_release_archive_from_named_artifact(tmp_path: Path):
 
     assert completed.returncode == 0, completed.stderr
     assert output.is_file()
+    with zipfile.ZipFile(output) as archive:
+        manifest = json.loads(archive.read("microduck-policy-bundle.json"))
+    assert manifest["model"]["path"] == "models/scene_walk.xml"
+    assert manifest["qualification"]["modelTerrain"] == "flat"
+    walk = next(
+        item for item in manifest["actions"] if item["actionCode"] == "WALK_VELOCITY"
+    )
+    assert walk["availability"] == "AVAILABLE"
 
 
 def test_export_metadata_preserves_baked_normalizer_graph(tmp_path: Path):
@@ -519,6 +882,9 @@ def test_export_metadata_preserves_baked_normalizer_graph(tmp_path: Path):
         "microduck.normalization_graph_sha256": hashlib.sha256(
             graph_before
         ).hexdigest(),
+        "microduck.normalized_graph_fingerprint": (
+            "sha256:81402e65d7faf69d346f1e8b9c4a0346a2de4ce01dec402aeed5fb96be333c73"
+        ),
     }
 
 
@@ -526,6 +892,21 @@ def test_export_metadata_refuses_graph_without_baked_normalizer(tmp_path: Path):
     policy = write_minimal_onnx(tmp_path / "policy.onnx")
 
     with pytest.raises(ValueError, match="empirical normalizer"):
+        _export_module().attach_microduck_metadata(
+            policy,
+            task_id="Mjlab-Velocity-Flat-MicroDuck",
+            source_commit="b" * 40,
+            checkpoint="model_100.pt",
+            run_identity="entity/project/run",
+        )
+
+
+def test_export_metadata_refuses_dead_normalizer_that_actor_output_bypasses(
+    tmp_path: Path,
+):
+    policy = write_bypassed_normalizer_onnx(tmp_path / "policy.onnx")
+
+    with pytest.raises(ValueError, match="normalizer"):
         _export_module().attach_microduck_metadata(
             policy,
             task_id="Mjlab-Velocity-Flat-MicroDuck",

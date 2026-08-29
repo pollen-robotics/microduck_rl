@@ -30,7 +30,11 @@ def main() -> None:
     parser.add_argument("--release", required=True)
     parser.add_argument("--artifact", action="append", default=[], type=_artifact)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--model", type=Path, default=MICRODUCK_WALK_XML)
+    parser.add_argument(
+        "--model", type=Path, default=MICRODUCK_WALK_XML.with_name("scene_walk.xml")
+    )
+    parser.add_argument("--terrain", choices=("flat", "ramp", "slope"))
+    parser.add_argument("--scenario-profile", choices=("SEEDED_SERVO_RESET_V1",))
     parser.add_argument("--source-repository", default="microduck-rl")
     parser.add_argument("--source-commit")
     parser.add_argument(
@@ -59,6 +63,8 @@ def main() -> None:
             source_repository=arguments.source_repository,
             source_commit=source_commit,
             created_at=arguments.created_at,
+            model_terrain=arguments.terrain,
+            scenario_profile=arguments.scenario_profile,
             checkpoint=arguments.checkpoint,
             experiment_ref=arguments.experiment_ref,
             qualification_files=tuple(arguments.qualification_file),

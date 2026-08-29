@@ -1,6 +1,5 @@
 """Script to play RL agent with RSL-RL."""
 
-import hashlib
 import os
 import re
 import subprocess
@@ -20,6 +19,8 @@ from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
 from rsl_rl.runners import OnPolicyRunner
 
+from mjlab_microduck.rom.onnx_policy import inspect_normalized_actor
+
 
 def attach_microduck_metadata(
     onnx_path: str | Path,
@@ -33,18 +34,12 @@ def attach_microduck_metadata(
     import onnx
 
     model = onnx.load(str(onnx_path))
-    nodes = list(model.graph.node)
-    input_name = model.graph.input[0].name if model.graph.input else ""
-    if not (
-        len(nodes) >= 2
-        and nodes[0].op_type == "Sub"
-        and nodes[0].input[0] == input_name
-        and nodes[1].op_type == "Div"
-        and nodes[1].input[0] == nodes[0].output[0]
-    ):
+    try:
+        normalized_graph = inspect_normalized_actor(model)
+    except ValueError as exc:
         raise ValueError(
             "exported actor does not contain the expected empirical normalizer"
-        )
+        ) from exc
     metadata = {entry.key: entry.value for entry in model.metadata_props}
     metadata.update(
         {
@@ -55,9 +50,8 @@ def attach_microduck_metadata(
             "microduck.checkpoint": checkpoint or "",
             "microduck.run_identity": run_identity or "",
             "microduck.normalization": "EMPIRICAL_NORMALIZATION_V1",
-            "microduck.normalization_graph_sha256": hashlib.sha256(
-                model.graph.SerializeToString()
-            ).hexdigest(),
+            "microduck.normalization_graph_sha256": normalized_graph.graph_sha256,
+            "microduck.normalized_graph_fingerprint": normalized_graph.fingerprint,
         }
     )
     del model.metadata_props[:]
