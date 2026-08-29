@@ -67,6 +67,10 @@ from .microduck_roulade_env_cfg import (
     make_microduck_roulade_env_cfg,
     MicroduckRouladeRlCfg,
 )
+from .growbot_roulade_env_cfg import (
+    GrowbotRouladeRlCfg,
+    make_growbot_roulade_env_cfg,
+)
 from .backlash import make_backlash_variant
 
 # Standard velocity task
@@ -222,6 +226,15 @@ register_mjlab_task(
     env_cfg=make_microduck_roulade_env_cfg(),
     play_env_cfg=make_microduck_roulade_env_cfg(play=True),
     rl_cfg=MicroduckRouladeRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Growbot — footed Microduck lower body plus collision-enabled elbow arms.
+register_mjlab_task(
+    task_id="Mjlab-Growbot-Roulade-Flat",
+    env_cfg=make_growbot_roulade_env_cfg(),
+    play_env_cfg=make_growbot_roulade_env_cfg(play=True),
+    rl_cfg=GrowbotRouladeRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
