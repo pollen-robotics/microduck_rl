@@ -8,15 +8,23 @@ import tomllib
 from pathlib import Path
 
 _DISTRIBUTION = "mjlab-microduck"
-_GOVERNED_MODULES = (
+GOVERNED_RUNTIME_MODULES = (
+    "action_catalog.py",
     "action_specs.py",
+    "api.py",
+    "bundle.py",
+    "contracts.py",
     "main.py",
+    "mirroring.py",
     "model_semantics.py",
     "mujoco_runtime.py",
     "observation.py",
     "onnx_policy.py",
     "qualification.py",
     "runtime.py",
+    "runtime_identity.py",
+    "service.py",
+    "store.py",
 )
 
 
@@ -27,10 +35,7 @@ def _package_version() -> str:
         package_dir = Path(__file__).resolve().parent
         candidates = (
             Path("/app/pyproject.toml"),
-            *(
-                parent / "pyproject.toml"
-                for parent in package_dir.parents
-            ),
+            *(parent / "pyproject.toml" for parent in package_dir.parents),
         )
         for candidate in candidates:
             if candidate.is_file():
@@ -44,7 +49,7 @@ def runtime_revision() -> str:
     """Return package version plus a digest of the exact governed source bytes."""
     package_dir = Path(__file__).resolve().parent
     hasher = hashlib.sha256()
-    for name in _GOVERNED_MODULES:
+    for name in GOVERNED_RUNTIME_MODULES:
         content = (package_dir / name).read_bytes()
         hasher.update(name.encode("utf-8"))
         hasher.update(b"\0")

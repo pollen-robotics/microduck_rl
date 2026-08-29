@@ -14,10 +14,15 @@ import pytest
 from onnx import TensorProto, helper
 
 from mjlab_microduck.robot.microduck_constants import MICRODUCK_WALK_XML
-from mjlab_microduck.rom.action_catalog import ACTION_TEMPLATES
+from mjlab_microduck.rom.action_catalog import (
+    ACTION_TEMPLATES,
+    CODE_OWNED_ACTION_CODES,
+    validate_bundle_action_envelope,
+)
 from mjlab_microduck.rom.action_specs import ACTION_RUNTIME_SPECS
 from mjlab_microduck.rom.bundle import BundleBuildRequest, build_bundle
-from mjlab_microduck.rom.contracts import sha256_prefixed
+from mjlab_microduck.rom.contracts import PolicyBundle, sha256_prefixed
+from mjlab_microduck.rom.main import load_verified_bundle
 
 WALK_ONNX = "walk.onnx"
 
@@ -208,6 +213,79 @@ def test_catalog_covers_every_user_intent_once():
     assert "BALL_FREEJOINT" in ACTION_RUNTIME_SPECS["KICK_RIGHT"].required_capabilities
 
 
+def test_builder_emits_the_complete_code_owned_action_envelope(tmp_path: Path) -> None:
+    """The builder must not make manifest data authoritative for any V1 safety field."""
+    policy = write_minimal_onnx(tmp_path / WALK_ONNX)
+
+    manifest = build_bundle(
+        minimal_request(tmp_path, artifacts={"WALK_VELOCITY": policy})
+    ).manifest
+
+    assert tuple(action.actionCode for action in manifest.actions) == (
+        "WALK_VELOCITY",
+        "VELSTAND_VELOCITY",
+        "ROLLER_VELOCITY",
+        "SWIZZLE",
+        "ROLLER_SLOPE",
+        "STAND_UP",
+        "SIT",
+        "STAND",
+        "GROUND_PICK",
+        "KICK_LEFT",
+        "KICK_RIGHT",
+        "ROULADE",
+        "ROLLER_CROUCH",
+        "ROLLER_STAND_UP",
+        "SPIN",
+    )
+    assert (
+        tuple(action.actionCode for action in manifest.actions)
+        == CODE_OWNED_ACTION_CODES
+    )
+    validate_bundle_action_envelope(manifest)
+
+
+def test_candidate_loader_rejects_a_resigned_widened_action_envelope(
+    tmp_path: Path,
+) -> None:
+    """Re-hashing a WALK schema change must not make a builder candidate trusted."""
+    policy = write_minimal_onnx(tmp_path / WALK_ONNX)
+    built = build_bundle(minimal_request(tmp_path, artifacts={"WALK_VELOCITY": policy}))
+    installed = tmp_path / "installed"
+    with zipfile.ZipFile(built.output_zip) as archive:
+        archive.extractall(installed)
+    manifest_path = installed / "microduck-policy-bundle.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["actions"][0]["parameterSchema"]["properties"]["vxMps"]["maximum"] = (
+        1_000.0
+    )
+    manifest["bundleDigest"] = None
+    artifact_digests = {
+        item["path"]: item["digest"]
+        for item in [
+            manifest["model"],
+            *manifest["policies"],
+            *manifest["qualification"].get("artifacts", []),
+            *manifest["qualification"].get("modelClosure", []),
+            *manifest["license"].get("artifacts", []),
+        ]
+    }
+    manifest["bundleDigest"] = sha256_prefixed(
+        {
+            "manifest": PolicyBundle.model_validate(manifest).model_dump(
+                mode="json", by_alias=True, exclude={"bundleDigest"}
+            ),
+            "artifacts": artifact_digests,
+        }
+    )
+    manifest_path.write_bytes(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    )
+
+    with pytest.raises(ValueError, match="code-owned V1 action"):
+        load_verified_bundle(installed)
+
+
 def test_actions_without_exact_runtime_scenario_semantics_remain_unavailable(
     tmp_path: Path,
 ):
@@ -295,10 +373,10 @@ def test_real_scene_floor_emits_qualified_terrain_and_available_walk(tmp_path: P
     assert policy_artifact.runtimeRequirements["normalizedGraphFingerprint"].startswith(
         "sha256:"
     )
-    assert walk.preconditions == {
-        "allowedTerrains": ["flat"],
-        "scenarioProfile": "SEEDED_SERVO_RESET_V1",
-    }
+    assert walk.preconditions is not None
+    assert walk.preconditions["allowedTerrains"] == ["flat"]
+    assert walk.preconditions["scenarioProfile"] == "SEEDED_SERVO_RESET_V1"
+    assert walk.preconditions["requiredCapabilities"] == ["FLAT_TERRAIN"]
 
 
 @pytest.mark.parametrize(
@@ -1079,11 +1157,10 @@ def test_declared_kick_mirror_can_reuse_only_the_named_opposite_side(tmp_path: P
         if action.actionCode == "KICK_RIGHT"
     )
     assert right.policyRef == left.policyRef
-    assert right.safety == {
-        "mirroringTransform": {
-            "jointPermutation": [9, 10, 11, 12, 13, 5, 6, 7, 8, 0, 1, 2, 3, 4],
-            "signFlips": [-1, -1, -1, -1, -1, 1, 1, -1, -1, -1, -1, -1, -1, -1],
-        }
+    assert right.safety is not None
+    assert right.safety["mirroringTransform"] == {
+        "jointPermutation": [9, 10, 11, 12, 13, 5, 6, 7, 8, 0, 1, 2, 3, 4],
+        "signFlips": [-1, -1, -1, -1, -1, 1, 1, -1, -1, -1, -1, -1, -1, -1],
     }
 
 

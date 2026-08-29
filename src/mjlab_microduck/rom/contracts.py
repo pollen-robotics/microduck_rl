@@ -85,7 +85,8 @@ class LeaseContract(ContractModel):
     defaultLeaseMs: int = Field(gt=0)
     maxLeaseMs: int = Field(gt=0)
     commandCadenceMs: int = Field(gt=0)
-    safeStopBehavior: str | None = None
+    zeroCommand: dict[str, float]
+    safeStopBehavior: Literal["ZERO_TWIST"]
 
     @model_validator(mode="after")
     def validate_lease_bounds(self) -> LeaseContract:

@@ -9,6 +9,12 @@ from dataclasses import dataclass, field
 from threading import Event, Lock, Thread
 from typing import Any
 
+from .action_catalog import (
+    action_template,
+    code_owned_action_definition,
+    validate_action_definition_envelope,
+    validate_bundle_action_envelope,
+)
 from .contracts import (
     ActionDefinition,
     PolicyArtifact,
@@ -119,6 +125,7 @@ class SimulatorTaskService:
     ) -> None:
         if bundle.bundleDigest is None:
             raise ValueError("an executable bundle requires a bundle digest")
+        validate_bundle_action_envelope(bundle)
         if pollIntervalS <= 0:
             raise ValueError("pollIntervalS must be positive")
         self._bundle = bundle
@@ -295,33 +302,44 @@ class SimulatorTaskService:
         )
         if action is None or action.availability != "AVAILABLE":
             raise ActionUnavailable(f"action is unavailable: {request.actionCode}")
-        _validate_json_schema(request.parameters, action.parameterSchema)
-        if action.executionMode == "DISCRETE" and request.leaseMs is not None:
+        template = action_template(action.actionCode)
+        _validate_json_schema(request.parameters, template.parameter_schema)
+        if template.execution_mode == "DISCRETE" and request.leaseMs is not None:
             raise InvalidParameters("discrete actions do not accept leaseMs")
-        if action.executionMode == "CONTINUOUS_LEASE":
+        if template.execution_mode == "CONTINUOUS_LEASE":
             if request.leaseMs is None:
                 raise InvalidParameters("continuous actions require leaseMs")
-            assert action.lease is not None
+            assert template.lease is not None
             if (
-                not action.lease.minLeaseMs
+                not template.lease.minLeaseMs
                 <= request.leaseMs
-                <= action.lease.maxLeaseMs
+                <= template.lease.maxLeaseMs
             ):
                 raise InvalidParameters("leaseMs is outside the action lease bounds")
-            if request.leaseMs < action.lease.commandCadenceMs:
+            if request.leaseMs < template.lease.commandCadenceMs:
                 raise InvalidParameters("leaseMs is shorter than the command cadence")
+        validate_action_definition_envelope(action)
+        policy = _policy_for(self._bundle, action)
+        if policy.taskId not in template.task_ids:
+            raise ActionUnavailable("action policy identity is not executable")
         self._require_preconditions(action, request)
         return action
 
     def _validate_command(
         self, command: TaskCommandRequest, action: ActionDefinition
     ) -> None:
-        assert action.lease is not None
-        _validate_json_schema(command.parameters, action.parameterSchema)
-        if not action.lease.minLeaseMs <= command.leaseMs <= action.lease.maxLeaseMs:
+        template = action_template(action.actionCode)
+        assert template.lease is not None
+        _validate_json_schema(command.parameters, template.parameter_schema)
+        if (
+            not template.lease.minLeaseMs
+            <= command.leaseMs
+            <= template.lease.maxLeaseMs
+        ):
             raise InvalidParameters("leaseMs is outside the action lease bounds")
-        if command.leaseMs < action.lease.commandCadenceMs:
+        if command.leaseMs < template.lease.commandCadenceMs:
             raise InvalidParameters("leaseMs is shorter than the command cadence")
+        validate_action_definition_envelope(action)
 
     def _start_continuous_locked(self, active: _ActiveTask, action: ActionDefinition):
         """Synchronously establish continuous ownership so command/tick share one state owner."""
@@ -425,8 +443,15 @@ class SimulatorTaskService:
         self, action: ActionDefinition, request: TaskCreateRequest
     ) -> None:
         scenario_terrain = request.scenario.get("terrain")
-        conditions = action.preconditions or {}
-        allowed_terrains = conditions.get("allowedTerrains", ("flat",))
+        expected = code_owned_action_definition(
+            action.actionCode,
+            availability=action.availability,
+            policy_ref=action.policyRef,
+            unavailable_reason=action.unavailableReason,
+            qualification_refs=action.qualificationRefs,
+        )
+        conditions = expected.preconditions or {}
+        allowed_terrains = conditions["allowedTerrains"]
         if (
             not isinstance(scenario_terrain, str)
             or scenario_terrain not in allowed_terrains
@@ -507,8 +532,9 @@ class SimulatorTaskService:
     def _sample_until_terminal(
         self, active: _ActiveTask, action: ActionDefinition, handle: RuntimeHandle
     ) -> _Outcome:
-        assert action.completion is not None
-        deadline = time.monotonic() + action.completion.maxDurationMs / 1_000
+        completion = action_template(action.actionCode).completion
+        assert completion is not None
+        deadline = time.monotonic() + completion.maxDurationMs / 1_000
         while True:
             if active.stop_event.is_set():
                 return _Outcome(state="CANCELLED", reason="CANCELLED")
@@ -558,10 +584,11 @@ def _command_hash(command: TaskCommandRequest) -> str:
 
 
 def _zero_parameters(action: ActionDefinition) -> dict[str, float]:
-    """Derive the exact neutral command from the action's declared numeric intent."""
-    properties = action.parameterSchema.get("properties", {})
-    zero = {name: 0.0 for name in properties}
-    _validate_json_schema(zero, action.parameterSchema)
+    """Return the exact neutral command from the code-owned lease contract."""
+    template = action_template(action.actionCode)
+    assert template.lease is not None
+    zero = dict(template.lease.zeroCommand)
+    _validate_json_schema(zero, template.parameter_schema)
     return zero
 
 

@@ -290,10 +290,14 @@ def validate_release_configuration(
     unknown = set(configured) - set(definitions)
     if unknown:
         raise ReleaseConfigurationError(f"unknown release actions: {sorted(unknown)}")
-    uncovered = set(definitions) - set(configured)
+    uncovered = {
+        code
+        for code, definition in definitions.items()
+        if definition.availability == "AVAILABLE" and code not in configured
+    }
     if uncovered:
         raise ReleaseConfigurationError(
-            f"bundle actions require explicit release policy: {sorted(uncovered)}"
+            f"available bundle actions require explicit release policy: {sorted(uncovered)}"
         )
     for code, declaration in configured.items():
         definition = definitions[code]
@@ -362,6 +366,46 @@ def validate_release_configuration(
             raise ReleaseConfigurationError(
                 f"action {code} scenario profile does not match code-owned semantics"
             )
+
+
+def _code_owned_unavailable_declaration(action_code: str) -> ActionQualificationConfig:
+    """Carry a pre-unavailable catalog entry without caller-selected rollout policy."""
+    spec = ACTION_RUNTIME_SPECS[action_code]
+    metric, operator = spec.qualification_metric_operators[0]
+    return ActionQualificationConfig(
+        actionCode=action_code,
+        mandatory=False,
+        terrain=spec.qualification_terrain,
+        resetProfile=spec.reset_profile,
+        seeds=(0, 1, 2),
+        maxSteps=spec.qualification_min_steps,
+        parameters=dict(spec.qualification_parameters),
+        thresholds=QualificationThresholds(
+            minSuccessRate=1.0,
+            maxFallRate=0.0,
+            maxMeanTrackingError=10.0,
+            minMeanDistanceM=0.0,
+            maxMeanEnergyProxy=10_000.0,
+            maxActuatorClampSteps=100,
+            maxPhysicalJointLimitViolations=0,
+            actionMetric=metric,
+            actionMetricOperator=operator,
+            actionMetricThreshold=0.0 if operator == "gte" else 100.0,
+        ),
+    )
+
+
+def release_action_declarations(
+    bundle: PolicyBundle, configuration: ReleaseConfiguration
+) -> tuple[ActionQualificationConfig, ...]:
+    """Expand sparse release policy to exact catalog coverage using only code-owned carryovers."""
+    validate_release_configuration(bundle, configuration)
+    configured = {action.actionCode: action for action in configuration.actions}
+    return tuple(
+        configured.get(action.actionCode)
+        or _code_owned_unavailable_declaration(action.actionCode)
+        for action in bundle.actions
+    )
 
 
 def _unavailable_result(
@@ -567,9 +611,7 @@ def _validate_rollout_semantics(
     metric_domain = dict(spec.qualification_metric_domains).get(rollout.actionMetric)
     if metric_domain == "NONNEGATIVE" and derived_action_metric < 0.0:
         raise ValueError("qualification rollout action metric must be nonnegative")
-    if metric_domain == "UNIT_INTERVAL" and not (
-        0.0 <= derived_action_metric <= 1.0
-    ):
+    if metric_domain == "UNIT_INTERVAL" and not (0.0 <= derived_action_metric <= 1.0):
         raise ValueError("qualification rollout action metric must be a fraction")
     if metric_domain not in {"NONNEGATIVE", "SIGNED", "UNIT_INTERVAL"}:
         raise ValueError("qualification rollout action metric domain is undefined")
@@ -928,11 +970,11 @@ def qualify_bundle(
     """Run bounded batteries through the exact installed runtime implementation."""
     root = Path(bundle_root).resolve()
     bundle = load_verified_bundle(root)
-    validate_release_configuration(bundle, configuration)
+    declarations = release_action_declarations(bundle, configuration)
     installed_runtime_revision = runtime_revision()
     definitions = {action.actionCode: action for action in bundle.actions}
     results: list[ActionQualificationResult] = []
-    for declaration in configuration.actions:
+    for declaration in declarations:
         definition = definitions[declaration.actionCode]
         if definition.availability != "AVAILABLE":
             result = _unavailable_result(
@@ -1000,7 +1042,7 @@ def _validate_qualification_correspondence(
     installed = load_verified_bundle(root)
     if installed != bundle:
         raise ValueError("qualification bundle does not match installed candidate")
-    validate_release_configuration(bundle, configuration)
+    effective_declarations = release_action_declarations(bundle, configuration)
     if (
         report.subjectBundleId != bundle.bundleId
         or report.subjectBundleVersion != bundle.bundleVersion
@@ -1014,11 +1056,11 @@ def _validate_qualification_correspondence(
     ):
         raise ValueError("qualification report identity does not match candidate")
     results = {item.actionCode: item for item in report.actions}
-    declarations = {item.actionCode: item for item in configuration.actions}
+    declarations = {item.actionCode: item for item in effective_declarations}
     definitions = {item.actionCode: item for item in bundle.actions}
     if (
         len(results) != len(report.actions)
-        or len(declarations) != len(configuration.actions)
+        or len(declarations) != len(effective_declarations)
         or set(results) != set(definitions)
         or set(declarations) != set(definitions)
     ):
@@ -1044,15 +1086,20 @@ def promoted_action_definition(
     result: ActionQualificationResult,
 ) -> ActionDefinition:
     """Reconstruct the only promoted action contract allowed by qualification."""
-    updates: dict[str, Any] = {"qualificationRefs": [QUALIFICATION_REPORT_PATH]}
+    from .action_catalog import code_owned_action_definition
+
+    availability = subject_action.availability
+    unavailable_reason = subject_action.unavailableReason
     if result.status == "FAILED":
-        updates.update(
-            {
-                "availability": "UNAVAILABLE",
-                "unavailableReason": "QUALIFICATION_FAILED",
-            }
-        )
-    return subject_action.model_copy(update=updates)
+        availability = "UNAVAILABLE"
+        unavailable_reason = "QUALIFICATION_FAILED"
+    return code_owned_action_definition(
+        subject_action.actionCode,
+        availability=availability,
+        policy_ref=subject_action.policyRef,
+        unavailable_reason=unavailable_reason,
+        qualification_refs=[QUALIFICATION_REPORT_PATH],
+    )
 
 
 def _promote_qualified_bundle(

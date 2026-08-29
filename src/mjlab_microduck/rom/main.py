@@ -14,6 +14,7 @@ from typing import Any
 
 import uvicorn
 
+from .action_catalog import validate_bundle_action_envelope
 from .api import create_app
 from .contracts import (
     ModelArtifact,
@@ -161,6 +162,7 @@ def load_verified_bundle(bundle_dir: Path) -> PolicyBundle:
         sha256_prefixed({"manifest": unsigned_manifest, "artifacts": digests}),
     ):
         raise ValueError("bundle digest verification failed")
+    validate_bundle_action_envelope(bundle)
     return bundle
 
 
@@ -177,6 +179,7 @@ def load_qualified_bundle(bundle_dir: Path) -> PolicyBundle:
             ReleaseConfiguration,
             promoted_action_definition,
             recompute_action_qualification,
+            release_action_declarations,
             validate_release_configuration,
         )
         from .runtime_identity import runtime_revision
@@ -200,7 +203,9 @@ def load_qualified_bundle(bundle_dir: Path) -> PolicyBundle:
             if declared_digest != matching[0].digest:
                 raise ValueError
             content = _bundle_path(root, declared_path).read_bytes()
-            if not hmac_compare(_digest(_bundle_path(root, declared_path)), declared_digest):
+            if not hmac_compare(
+                _digest(_bundle_path(root, declared_path)), declared_digest
+            ):
                 raise ValueError
             return content, declared_digest
 
@@ -246,6 +251,7 @@ def load_qualified_bundle(bundle_dir: Path) -> PolicyBundle:
         )
         if subject.bundleDigest != expected_subject_digest:
             raise ValueError
+        validate_bundle_action_envelope(subject)
         for path, digest in subject_artifacts.items():
             if _digest(_bundle_path(root, path)) != digest:
                 raise ValueError
@@ -259,8 +265,7 @@ def load_qualified_bundle(bundle_dir: Path) -> PolicyBundle:
             or qualification.get("subjectBundleVersion") != subject.bundleVersion
             or qualification.get("subjectBundleDigest") != subject.bundleDigest
             or report.releaseConfigurationDigest != configuration_digest
-            or qualification.get("releaseConfigurationDigest")
-            != configuration_digest
+            or qualification.get("releaseConfigurationDigest") != configuration_digest
             or report.sourceRepository != subject.sourceRepository
             or report.sourceCommit != subject.sourceCommit
             or report.modelDigest != subject.model.digest
@@ -276,13 +281,14 @@ def load_qualified_bundle(bundle_dir: Path) -> PolicyBundle:
             raise ValueError
         validate_release_configuration(subject, configuration)
         results = {item.actionCode: item for item in report.actions}
-        declarations = {item.actionCode: item for item in configuration.actions}
+        effective_declarations = release_action_declarations(subject, configuration)
+        declarations = {item.actionCode: item for item in effective_declarations}
         installed_actions = {item.actionCode: item for item in bundle.actions}
         subject_actions = {item.actionCode: item for item in subject.actions}
         expected_codes = set(installed_actions)
         if (
             len(results) != len(report.actions)
-            or len(declarations) != len(configuration.actions)
+            or len(declarations) != len(effective_declarations)
             or set(results) != expected_codes
             or set(declarations) != expected_codes
             or set(subject_actions) != expected_codes

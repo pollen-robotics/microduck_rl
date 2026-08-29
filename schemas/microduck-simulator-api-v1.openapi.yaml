@@ -154,8 +154,8 @@ components:
       type: object
       additionalProperties: false
       x-unergy-invariants: [minLeaseMs <= defaultLeaseMs <= maxLeaseMs, commandCadenceMs <= minLeaseMs]
-      required: [minLeaseMs, defaultLeaseMs, maxLeaseMs, commandCadenceMs]
-      properties: {minLeaseMs: {type: integer, exclusiveMinimum: 0}, defaultLeaseMs: {type: integer, exclusiveMinimum: 0}, maxLeaseMs: {type: integer, exclusiveMinimum: 0}, commandCadenceMs: {type: integer, exclusiveMinimum: 0}, safeStopBehavior: {type: [string, 'null']}}
+      required: [minLeaseMs, defaultLeaseMs, maxLeaseMs, commandCadenceMs, zeroCommand, safeStopBehavior]
+      properties: {minLeaseMs: {type: integer, exclusiveMinimum: 0}, defaultLeaseMs: {type: integer, exclusiveMinimum: 0}, maxLeaseMs: {type: integer, exclusiveMinimum: 0}, commandCadenceMs: {type: integer, exclusiveMinimum: 0}, zeroCommand: {type: object, additionalProperties: {type: number}}, safeStopBehavior: {const: ZERO_TWIST}}
     ActionDefinition:
       type: object
       additionalProperties: false

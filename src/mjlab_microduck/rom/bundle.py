@@ -16,7 +16,7 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 
-from .action_catalog import ACTION_TEMPLATES
+from .action_catalog import ACTION_TEMPLATES, code_owned_action_definition
 from .action_specs import ACTION_RUNTIME_SPECS
 from .contracts import (
     ACTION_CONTRACT,
@@ -398,13 +398,11 @@ def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
     actions: list[ActionDefinition] = []
     for template in ACTION_TEMPLATES:
         policy_ref = policy_refs.get(template.action_code)
-        safety: dict[str, Any] | None = None
         if policy_ref is None and template.action_code in {"KICK_LEFT", "KICK_RIGHT"}:
             other = "KICK_RIGHT" if template.action_code == "KICK_LEFT" else "KICK_LEFT"
             transform = mirror_transforms.get(template.action_code)
             if _is_exact_kick_mirroring_transform(transform) and other in policy_refs:
                 policy_ref = policy_refs[other]
-                safety = {"mirroringTransform": dict(transform)}
         runtime_spec = ACTION_RUNTIME_SPECS[template.action_code]
         missing_model_capabilities = {
             capability
@@ -462,24 +460,11 @@ def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
             )
         )
         actions.append(
-            ActionDefinition(
-                actionCode=template.action_code,
-                executionMode=template.execution_mode,
+            code_owned_action_definition(
+                template.action_code,
                 availability="AVAILABLE" if available else "UNAVAILABLE",
-                policyRef=policy_ref,
-                unavailableReason=None if available else unavailable_reason,
-                parameterSchema=template.parameter_schema,
-                completion=template.completion,
-                lease=template.lease,
-                preconditions=(
-                    {
-                        "allowedTerrains": [request.model_terrain],
-                        "scenarioProfile": request.scenario_profile,
-                    }
-                    if model_qualified
-                    else None
-                ),
-                safety=safety,
+                policy_ref=policy_ref,
+                unavailable_reason=None if available else unavailable_reason,
             )
         )
 

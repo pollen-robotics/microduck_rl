@@ -138,7 +138,9 @@ def test_available_action_requires_policy_artifact():
 
 def test_continuous_action_requires_lease_contract():
     """Removing the target-side deadman contract must reject continuous motion."""
-    with pytest.raises(ValidationError, match="continuous action requires lease contract"):
+    with pytest.raises(
+        ValidationError, match="continuous action requires lease contract"
+    ):
         ActionDefinition(
             actionCode="WALK_VELOCITY",
             executionMode="CONTINUOUS_LEASE",
@@ -208,9 +210,17 @@ def test_canonical_digest_ignores_mapping_insertion_order():
 
 def test_canonical_json_normalizes_nested_models():
     """Failing to normalize embedded models would make manifest digest construction non-serializable."""
-    lease = LeaseContract(minLeaseMs=100, defaultLeaseMs=200, maxLeaseMs=500, commandCadenceMs=50)
+    lease = LeaseContract(
+        minLeaseMs=100,
+        defaultLeaseMs=200,
+        maxLeaseMs=500,
+        commandCadenceMs=50,
+        zeroCommand={"vxMps": 0.0},
+        safeStopBehavior="ZERO_TWIST",
+    )
     assert canonical_json({"lease": lease}) == (
-        b'{"lease":{"commandCadenceMs":50,"defaultLeaseMs":200,"maxLeaseMs":500,"minLeaseMs":100}}'
+        b'{"lease":{"commandCadenceMs":50,"defaultLeaseMs":200,"maxLeaseMs":500,'
+        b'"minLeaseMs":100,"safeStopBehavior":"ZERO_TWIST","zeroCommand":{"vxMps":0.0}}}'
     )
 
 
@@ -255,7 +265,11 @@ def test_published_v1_models_require_explicit_schema_identifiers():
     bundle.pop("schema")
     status.pop("schema")
 
-    for model, payload in ((TaskCreateRequest, task), (PolicyBundle, bundle), (RobotStatus, status)):
+    for model, payload in (
+        (TaskCreateRequest, task),
+        (PolicyBundle, bundle),
+        (RobotStatus, status),
+    ):
         with pytest.raises(ValidationError):
             model.model_validate(payload)
 
@@ -263,9 +277,23 @@ def test_published_v1_models_require_explicit_schema_identifiers():
 def test_lease_contract_rejects_invalid_semantic_bounds():
     """Ignoring lease ordering would let a manifest declare an impossible deadman interval."""
     with pytest.raises(ValidationError, match="lease bounds"):
-        LeaseContract(minLeaseMs=200, defaultLeaseMs=100, maxLeaseMs=500, commandCadenceMs=50)
+        LeaseContract(
+            minLeaseMs=200,
+            defaultLeaseMs=100,
+            maxLeaseMs=500,
+            commandCadenceMs=50,
+            zeroCommand={"vxMps": 0.0},
+            safeStopBehavior="ZERO_TWIST",
+        )
     with pytest.raises(ValidationError, match="commandCadenceMs"):
-        LeaseContract(minLeaseMs=100, defaultLeaseMs=200, maxLeaseMs=500, commandCadenceMs=101)
+        LeaseContract(
+            minLeaseMs=100,
+            defaultLeaseMs=200,
+            maxLeaseMs=500,
+            commandCadenceMs=101,
+            zeroCommand={"vxMps": 0.0},
+            safeStopBehavior="ZERO_TWIST",
+        )
 
 
 def test_checked_in_schemas_lock_layouts_error_codes_and_portable_lease_invariants():
@@ -278,24 +306,36 @@ def test_checked_in_schemas_lock_layouts_error_codes_and_portable_lease_invarian
         (repository / "schemas/microduck-simulator-api-v1.openapi.yaml").read_text()
     )
 
-    observation_fields = bundle_schema["$defs"]["ObservationContract"]["properties"]["fields"]
+    observation_fields = bundle_schema["$defs"]["ObservationContract"]["properties"][
+        "fields"
+    ]
     action_joints = bundle_schema["$defs"]["ActionContract"]["properties"]["joints"]
     assert [entry["const"] for entry in observation_fields["prefixItems"]] == list(
         OBSERVATION_FIELDS
     )
     assert observation_fields["minItems"] == observation_fields["maxItems"] == 61
-    assert [entry["const"] for entry in action_joints["prefixItems"]] == list(CONTROLLED_JOINTS)
+    assert [entry["const"] for entry in action_joints["prefixItems"]] == list(
+        CONTROLLED_JOINTS
+    )
     assert action_joints["minItems"] == action_joints["maxItems"] == 14
-    assert bundle_schema["$defs"]["LeaseContract"]["x-unergy-invariants"] == [
+    lease_schema = bundle_schema["$defs"]["LeaseContract"]
+    assert lease_schema["x-unergy-invariants"] == [
         "minLeaseMs <= defaultLeaseMs <= maxLeaseMs",
         "commandCadenceMs <= minLeaseMs",
     ]
-    assert "TASK_NOT_FOUND" in openapi["components"]["schemas"]["Error"]["properties"][
-        "code"
-    ]["enum"]
-    assert "COMMAND_SEQUENCE_CONFLICT" in openapi["components"]["schemas"]["Error"][
-        "properties"
-    ]["code"]["enum"]
+    assert {"zeroCommand", "safeStopBehavior"} <= set(lease_schema["required"])
+    assert lease_schema["properties"]["safeStopBehavior"]["const"] == "ZERO_TWIST"
+    openapi_lease = openapi["components"]["schemas"]["LeaseContract"]
+    assert {"zeroCommand", "safeStopBehavior"} <= set(openapi_lease["required"])
+    assert openapi_lease["properties"]["safeStopBehavior"]["const"] == "ZERO_TWIST"
+    assert (
+        "TASK_NOT_FOUND"
+        in openapi["components"]["schemas"]["Error"]["properties"]["code"]["enum"]
+    )
+    assert (
+        "COMMAND_SEQUENCE_CONFLICT"
+        in openapi["components"]["schemas"]["Error"]["properties"]["code"]["enum"]
+    )
     assert "schema" in bundle_schema["required"]
     assert "schema" in openapi["components"]["schemas"]["TaskCreateRequest"]["required"]
     assert "schema" in openapi["components"]["schemas"]["RobotStatus"]["required"]

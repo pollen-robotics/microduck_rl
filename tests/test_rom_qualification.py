@@ -15,8 +15,8 @@ from pydantic import ValidationError
 
 import mjlab_microduck.rom.qualification as qualification_module
 from mjlab_microduck.rom.action_catalog import ACTION_TEMPLATES
+from mjlab_microduck.rom.bundle import BundleBuildRequest, build_bundle
 from mjlab_microduck.rom.contracts import (
-    ActionDefinition,
     PolicyBundle,
     canonical_json,
     sha256_prefixed,
@@ -185,7 +185,18 @@ def _qualified_components(installed: Path):
     report = QualificationReport.model_validate_json(
         (installed / "qualification/qualification-v1.json").read_bytes()
     )
-    return subject, configuration.actions[0], subject.actions[0], report.actions[0]
+    declaration = configuration.actions[0]
+    definition = next(
+        action
+        for action in subject.actions
+        if action.actionCode == declaration.actionCode
+    )
+    result = next(
+        action
+        for action in report.actions
+        if action.actionCode == declaration.actionCode
+    )
+    return subject, declaration, definition, result
 
 
 def _resign_mutated_promoted_bundle(
@@ -246,44 +257,135 @@ def _resign_mutated_promoted_bundle(
 
 
 def _candidate_with_unavailable_spin(root: Path):
-    bundle = _write_verified_bundle(root)
-    template = next(item for item in ACTION_TEMPLATES if item.action_code == "SPIN")
-    spin = ActionDefinition(
-        actionCode="SPIN",
-        executionMode=template.execution_mode,
-        availability="UNAVAILABLE",
-        unavailableReason="POLICY_ARTIFACT_MISSING",
-        parameterSchema=template.parameter_schema,
-        completion=template.completion,
-        lease=template.lease,
-    )
-    unsigned = bundle.model_copy(
-        update={"bundleDigest": None, "actions": [*bundle.actions, spin]}
-    )
-    artifact_digests = {
-        unsigned.model.path: unsigned.model.digest,
-        unsigned.policies[0].path: unsigned.policies[0].digest,
-        **{
-            item["path"]: item["digest"]
-            for item in unsigned.license.get("artifacts", [])
-        },
-    }
-    rewritten = unsigned.model_copy(
-        update={
-            "bundleDigest": sha256_prefixed(
-                {
-                    "manifest": unsigned.model_dump(
-                        mode="json", by_alias=True, exclude={"bundleDigest"}
-                    ),
-                    "artifacts": artifact_digests,
-                }
-            )
+    return _write_verified_bundle(root)
+
+
+def _resign_bundle_document(document: dict[str, object]) -> str:
+    document["bundleDigest"] = None
+    normalized = PolicyBundle.model_validate(document)
+    artifacts: dict[str, str] = {}
+    for artifact in [
+        document["model"],
+        *document["policies"],
+        *document["qualification"].get("artifacts", []),
+        *document["qualification"].get("modelClosure", []),
+        *document["license"].get("artifacts", []),
+    ]:
+        artifacts[artifact["path"]] = artifact["digest"]
+    digest = sha256_prefixed(
+        {
+            "manifest": normalized.model_dump(
+                mode="json", by_alias=True, exclude={"bundleDigest"}
+            ),
+            "artifacts": artifacts,
         }
     )
-    (root / "microduck-policy-bundle.json").write_text(
-        rewritten.model_dump_json(by_alias=True, exclude_none=True)
+    document["bundleDigest"] = digest
+    return digest
+
+
+def test_fully_resigned_subject_and_release_cannot_widen_walk_safety_envelope(
+    tmp_path: Path,
+) -> None:
+    """Artifact hashing authenticates inputs; it must not authorize attacker safety limits."""
+    installed, _ = _extract_promoted_bundle(tmp_path)
+    manifest_path = installed / "microduck-policy-bundle.json"
+    subject_path = installed / "qualification/subject-manifest-v1.json"
+    report_path = installed / "qualification/qualification-v1.json"
+    manifest = json.loads(manifest_path.read_text())
+    subject = json.loads(subject_path.read_text())
+    report = json.loads(report_path.read_text())
+
+    def widen_walk(document: dict[str, object]) -> None:
+        walk = next(
+            action
+            for action in document["actions"]
+            if action["actionCode"] == "WALK_VELOCITY"
+        )
+        walk["parameterSchema"]["properties"]["vxMps"]["maximum"] = 1_000.0
+        walk["lease"]["maxLeaseMs"] = 1_000_000
+        walk["lease"]["commandCadenceMs"] = 99
+        walk["lease"]["zeroCommand"]["vxMps"] = 100.0
+
+    widen_walk(subject)
+    subject_digest = _resign_bundle_document(subject)
+    subject_path.write_bytes(canonical_json(subject))
+    subject_artifact_digest = (
+        "sha256:" + hashlib.sha256(subject_path.read_bytes()).hexdigest()
     )
-    return rewritten
+
+    report["subjectBundleDigest"] = subject_digest
+    for result in report["actions"]:
+        for rollout in result["rollouts"]:
+            rollout["bundleDigest"] = subject_digest
+    report_path.write_bytes(canonical_json(report))
+    report_artifact_digest = (
+        "sha256:" + hashlib.sha256(report_path.read_bytes()).hexdigest()
+    )
+
+    qualification = manifest["qualification"]
+    qualification["subjectBundleDigest"] = subject_digest
+    qualification["subjectManifestDigest"] = subject_artifact_digest
+    qualification["reportDigest"] = report_artifact_digest
+    for artifact in qualification["artifacts"]:
+        if artifact["path"] == "qualification/subject-manifest-v1.json":
+            artifact["digest"] = subject_artifact_digest
+        if artifact["path"] == "qualification/qualification-v1.json":
+            artifact["digest"] = report_artifact_digest
+    widen_walk(manifest)
+    _resign_bundle_document(manifest)
+    manifest_path.write_bytes(canonical_json(manifest))
+
+    with pytest.raises(ValueError, match="code-owned.*action envelope"):
+        load_qualified_bundle(installed)
+
+
+def test_fully_resigned_subject_alone_cannot_widen_walk_safety_envelope(
+    tmp_path: Path,
+) -> None:
+    """A canonical final action must not conceal a widened embedded candidate subject."""
+    installed, _ = _extract_promoted_bundle(tmp_path)
+    manifest_path = installed / "microduck-policy-bundle.json"
+    subject_path = installed / "qualification/subject-manifest-v1.json"
+    report_path = installed / "qualification/qualification-v1.json"
+    manifest = json.loads(manifest_path.read_text())
+    subject = json.loads(subject_path.read_text())
+    report = json.loads(report_path.read_text())
+    walk = next(
+        action
+        for action in subject["actions"]
+        if action["actionCode"] == "WALK_VELOCITY"
+    )
+    walk["parameterSchema"]["properties"]["vxMps"]["maximum"] = 1_000.0
+    walk["lease"]["maxLeaseMs"] = 1_000_000
+    walk["lease"]["zeroCommand"]["vxMps"] = 100.0
+    subject_digest = _resign_bundle_document(subject)
+    subject_path.write_bytes(canonical_json(subject))
+    subject_artifact_digest = (
+        "sha256:" + hashlib.sha256(subject_path.read_bytes()).hexdigest()
+    )
+    report["subjectBundleDigest"] = subject_digest
+    for result in report["actions"]:
+        for rollout in result["rollouts"]:
+            rollout["bundleDigest"] = subject_digest
+    report_path.write_bytes(canonical_json(report))
+    report_artifact_digest = (
+        "sha256:" + hashlib.sha256(report_path.read_bytes()).hexdigest()
+    )
+    qualification = manifest["qualification"]
+    qualification["subjectBundleDigest"] = subject_digest
+    qualification["subjectManifestDigest"] = subject_artifact_digest
+    qualification["reportDigest"] = report_artifact_digest
+    for artifact in qualification["artifacts"]:
+        if artifact["path"] == "qualification/subject-manifest-v1.json":
+            artifact["digest"] = subject_artifact_digest
+        if artifact["path"] == "qualification/qualification-v1.json":
+            artifact["digest"] = report_artifact_digest
+    _resign_bundle_document(manifest)
+    manifest_path.write_bytes(canonical_json(manifest))
+
+    with pytest.raises(ValueError, match="qualification verification"):
+        load_qualified_bundle(installed)
 
 
 def test_failed_mandatory_action_blocks_promotion(tmp_path: Path):
@@ -360,6 +462,53 @@ def test_optional_action_without_runtime_support_is_not_falsely_qualified(
     loaded_spin = next(item for item in loaded.actions if item.actionCode == "SPIN")
     assert loaded_spin.availability == "UNAVAILABLE"
     assert loaded_spin.unavailableReason == "POLICY_ARTIFACT_MISSING"
+
+
+def test_production_builder_walk_only_release_promotes_with_complete_catalog(
+    tmp_path: Path,
+) -> None:
+    """Requiring declarations for 14 already-unavailable actions breaks the documented workflow."""
+    fixture_root = tmp_path / "builder-input"
+    fixture = _write_verified_bundle(fixture_root)
+    policy = fixture_root / fixture.policies[0].path
+    candidate_zip = tmp_path / "candidate.zip"
+    built = build_bundle(
+        BundleBuildRequest(
+            release="1.0.0-candidate.1",
+            output_zip=candidate_zip,
+            artifacts={"WALK_VELOCITY": policy},
+            model_path=fixture_root / fixture.model.path,
+            model_terrain="flat",
+            scenario_profile="SEEDED_SERVO_RESET_V1",
+            source_repository="microduck-rl",
+            source_commit="a" * 40,
+            created_at=NOW,
+            checkpoint="model_100.pt",
+            experiment_ref="entity/project/run-id",
+        )
+    )
+    assert len(built.manifest.actions) == 15
+    candidate = tmp_path / "candidate"
+    with zipfile.ZipFile(candidate_zip) as archive:
+        archive.extractall(candidate)
+
+    promoted = qualify_and_promote(
+        candidate,
+        tmp_path / "qualified.zip",
+        _config(mandatory=True),
+        timestamp=lambda: NOW,
+    )
+
+    assert len(promoted.manifest.actions) == 15
+    assert len(promoted.report.actions) == 15
+    assert [action.actionCode for action in promoted.manifest.actions] == [
+        template.action_code for template in ACTION_TEMPLATES
+    ]
+    assert promoted.manifest.actions[0].availability == "AVAILABLE"
+    assert all(
+        action.availability == "UNAVAILABLE" and action.unavailableReason
+        for action in promoted.manifest.actions[1:]
+    )
 
 
 def test_mandatory_action_must_be_supported_by_candidate_capabilities(tmp_path: Path):
@@ -448,7 +597,9 @@ def test_stand_qualification_promotes_exact_discrete_runtime_success(
         timestamp=lambda: NOW,
     )
 
-    result = promoted.report.actions[0]
+    result = next(
+        action for action in promoted.report.actions if action.actionCode == "STAND"
+    )
     assert result.status == "PASSED"
     assert result.actionCode == "STAND"
     assert all(rollout.success for rollout in result.rollouts)
@@ -456,7 +607,10 @@ def test_stand_qualification_promotes_exact_discrete_runtime_success(
         rollout.stopReason == "STAND_POSE_SETTLED" for rollout in result.rollouts
     )
     assert result.policyDigest == candidate.policies[0].digest
-    assert promoted.manifest.actions[0].availability == "AVAILABLE"
+    stand = next(
+        action for action in promoted.manifest.actions if action.actionCode == "STAND"
+    )
+    assert stand.availability == "AVAILABLE"
 
 
 def test_qualification_rejects_runtime_evidence_with_wrong_seed_identity(
@@ -553,7 +707,7 @@ def test_runtime_loader_rejects_candidate_and_accepts_exact_promoted_report(
     candidate = tmp_path / "candidate-only"
     _write_verified_bundle(candidate)
 
-    with pytest.raises(ValueError, match="qualification"):
+    with pytest.raises(ValueError, match="qualification|code-owned"):
         load_qualified_bundle(candidate)
 
     installed, promoted = _extract_promoted_bundle(tmp_path / "promoted-case")
@@ -625,7 +779,7 @@ def test_runtime_loader_rejects_semantically_forged_or_partial_reports(
         mutate_manifest=mutate_manifest,
     )
 
-    with pytest.raises(ValueError, match="qualification"):
+    with pytest.raises(ValueError, match="qualification|code-owned"):
         load_qualified_bundle(installed)
 
 
@@ -637,8 +791,8 @@ def test_runtime_loader_rejects_semantically_forged_or_partial_reports(
             id="lease-max",
         ),
         pytest.param(
-            lambda action: action["lease"].update({"safeStopBehavior": "FORGED_STOP"}),
-            id="lease-safe-stop",
+            lambda action: action["lease"]["zeroCommand"].update({"vxMps": 0.1}),
+            id="lease-zero-command",
         ),
         pytest.param(
             lambda action: action["lease"].update({"commandCadenceMs": 25}),
@@ -685,7 +839,7 @@ def test_runtime_loader_rejects_resigned_promoted_action_contract_mutations(
         mutate_manifest=lambda manifest: mutate_action(manifest["actions"][0]),
     )
 
-    with pytest.raises(ValueError, match="qualification"):
+    with pytest.raises(ValueError, match="qualification|code-owned"):
         load_qualified_bundle(installed)
 
 
@@ -1077,7 +1231,11 @@ def test_runtime_loader_rejects_resigned_forged_stand_completion(
         installed,
         mutate_report=lambda report: [
             rollout.pop("settledSteps", None)
-            for rollout in report["actions"][0]["rollouts"]
+            for rollout in next(
+                action
+                for action in report["actions"]
+                if action["actionCode"] == "STAND"
+            )["rollouts"]
         ],
     )
 

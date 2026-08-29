@@ -7,12 +7,15 @@ from math import nan
 import pytest
 from fastapi.testclient import TestClient
 
+from mjlab_microduck.rom.action_catalog import (
+    CODE_OWNED_ACTION_CODES,
+    code_owned_action_definition,
+)
 from mjlab_microduck.rom.api import create_app
 from mjlab_microduck.rom.contracts import (
     CONTROLLED_SERVO_JOINTS,
     OBSERVATION_FIELDS,
     ActionContract,
-    ActionDefinition,
     ModelArtifact,
     ObservationContract,
     PolicyArtifact,
@@ -115,6 +118,54 @@ def test_continuous_create_requires_typed_initial_command(service, walk_request)
 
     with pytest.raises(InvalidParameters):
         service.create_task(invalid)
+
+
+@pytest.mark.parametrize(
+    ("parameters", "lease_ms"),
+    [
+        ({"vxMps": 0.400001, "vyMps": 0.0, "yawRateRadps": 0.0}, 500),
+        ({"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0}, 5_001),
+    ],
+)
+def test_service_enforces_code_owned_command_and_lease_bounds_even_if_manifest_is_widened(
+    bundle, store, runtime, clock, walk_request, parameters, lease_ms
+) -> None:
+    """A widened in-memory manifest must not widen the service execution boundary."""
+    walk = bundle.actions[0]
+    assert walk.lease is not None
+    widened = walk.model_copy(
+        update={
+            "parameterSchema": {
+                **walk.parameterSchema,
+                "properties": {
+                    **walk.parameterSchema["properties"],
+                    "vxMps": {"type": "number", "minimum": -1_000, "maximum": 1_000},
+                },
+            },
+            "lease": walk.lease.model_copy(update={"maxLeaseMs": 1_000_000}),
+        }
+    )
+    unsafe_bundle = bundle.model_copy(
+        update={"actions": [widened, *bundle.actions[1:]]}
+    )
+    service = SimulatorTaskService(bundle, store, runtime, monotonic_clock=clock)
+    service._bundle = unsafe_bundle
+    request = walk_request.model_copy(
+        update={"parameters": parameters, "leaseMs": lease_ms}
+    )
+
+    with pytest.raises(InvalidParameters):
+        service.create_task(request)
+
+
+def test_service_constructor_rejects_a_partial_action_catalog(
+    bundle, store, runtime
+) -> None:
+    """Direct service composition must not bypass the complete catalog trust boundary."""
+    partial = bundle.model_copy(update={"actions": bundle.actions[:1]})
+
+    with pytest.raises(ValueError, match="complete code-owned V1 action catalog"):
+        SimulatorTaskService(partial, store, runtime)
 
 
 def test_continuous_create_persists_initial_deadline_before_return(
@@ -434,6 +485,17 @@ def walk_request() -> TaskCreateRequest:
 
 @pytest.fixture
 def bundle() -> PolicyBundle:
+    actions = [
+        code_owned_action_definition(
+            code,
+            availability="AVAILABLE" if code == "WALK_VELOCITY" else "UNAVAILABLE",
+            policy_ref="walk" if code == "WALK_VELOCITY" else None,
+            unavailable_reason=(
+                None if code == "WALK_VELOCITY" else "POLICY_ARTIFACT_MISSING"
+            ),
+        )
+        for code in CODE_OWNED_ACTION_CODES
+    ]
     return PolicyBundle(
         schema="MICRODUCK_POLICY_BUNDLE_V1",
         bundleId="microduck-test",
@@ -464,38 +526,13 @@ def bundle() -> PolicyBundle:
                 policyRef="walk",
                 path="policies/walk.onnx",
                 digest="sha256:" + "b" * 64,
+                taskId="Mjlab-Velocity-Flat-MicroDuck",
             )
         ],
-        actions=[
-            ActionDefinition(
-                actionCode="WALK_VELOCITY",
-                executionMode="CONTINUOUS_LEASE",
-                availability="AVAILABLE",
-                policyRef="walk",
-                parameterSchema={
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "vxMps": {"type": "number", "minimum": -0.4, "maximum": 0.4},
-                        "vyMps": {"type": "number", "minimum": -0.3, "maximum": 0.3},
-                        "yawRateRadps": {
-                            "type": "number",
-                            "minimum": -1.0,
-                            "maximum": 1.0,
-                        },
-                    },
-                    "required": ["vxMps", "vyMps", "yawRateRadps"],
-                },
-                lease={
-                    "minLeaseMs": 100,
-                    "defaultLeaseMs": 500,
-                    "maxLeaseMs": 5_000,
-                    "commandCadenceMs": 50,
-                    "safeStopBehavior": "ZERO_TWIST",
-                },
-                preconditions={"allowedTerrains": ["flat"]},
-            )
-        ],
-        qualification={},
+        actions=actions,
+        qualification={
+            "modelTerrain": "flat",
+            "scenarioProfile": "SEEDED_SERVO_RESET_V1",
+        },
         license={},
     )

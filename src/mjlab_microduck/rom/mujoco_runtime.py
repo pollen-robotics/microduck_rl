@@ -21,6 +21,13 @@ import onnx
 import onnxruntime as ort
 from numpy.typing import NDArray
 
+from .action_catalog import (
+    action_template,
+    validate_action_definition_envelope,
+    validate_bundle_action_envelope,
+    validate_code_owned_lease,
+    validate_code_owned_parameters,
+)
 from .action_specs import ACTION_RUNTIME_SPECS, STAND_SETTLEMENT_LIMITS
 from .contracts import (
     ACTION_CONTRACT,
@@ -598,6 +605,7 @@ class MicroduckMujocoRuntime:
 
     def _validate_installed_actions(self) -> None:
         """Make readiness prove every manifest-available action can reach start()."""
+        validate_bundle_action_envelope(self._bundle)
         policies = {item.policyRef: item for item in self._bundle.policies}
         for action in self._bundle.actions:
             if action.availability != "AVAILABLE":
@@ -626,12 +634,6 @@ class MicroduckMujocoRuntime:
                 raise ValueError(
                     "available action lacks its code-owned scenario profile"
                 )
-            expected_preconditions = {
-                "allowedTerrains": [self._bundle.qualification.get("modelTerrain")],
-                "scenarioProfile": spec.scenario_profile,
-            }
-            if action.preconditions != expected_preconditions:
-                raise ValueError("action preconditions do not match qualification")
 
     def validate(self, action: ActionDefinition, request: TaskCreateRequest) -> None:
         if request.bundleDigest != self._bundle.bundleDigest:
@@ -645,6 +647,9 @@ class MicroduckMujocoRuntime:
             raise ValueError("runtime action does not match the installed bundle")
         if action.availability != "AVAILABLE" or action.policyRef not in self._sessions:
             raise ValueError("runtime action has no verified policy")
+        validate_code_owned_parameters(action.actionCode, request.parameters)
+        validate_code_owned_lease(action.actionCode, request.leaseMs)
+        validate_action_definition_envelope(action)
         spec = ACTION_RUNTIME_SPECS.get(action.actionCode)
         if spec is None or not spec.supported:
             raise ValueError("runtime action semantics are unavailable")
@@ -1004,7 +1009,7 @@ class MicroduckMujocoRuntime:
                 )
             requested: list[float] = []
             applied: list[float] = []
-            properties = action.parameterSchema.get("properties", {})
+            validate_code_owned_parameters(action_code, parameters)
             for name in expected:
                 value = parameters[name]
                 if (
@@ -1015,10 +1020,7 @@ class MicroduckMujocoRuntime:
                     raise ValueError("continuous command values must be finite numbers")
                 numeric = float(value)
                 requested.append(numeric)
-                schema = properties.get(name, {})
-                low = float(schema.get("minimum", numeric))
-                high = float(schema.get("maximum", numeric))
-                applied.append(float(np.clip(numeric, low, high)))
+                applied.append(numeric)
             zero_head = np.zeros(4, dtype=np.float32)
             zero_body = np.zeros(6, dtype=np.float32)
             return (
@@ -1035,10 +1037,10 @@ class MicroduckMujocoRuntime:
                 "COMMAND_LIMIT" if applied != requested else None,
             )
         if action_code == "STAND":
-            if parameters:
-                raise ValueError("STAND command does not accept parameters")
-            if action.parameterSchema.get("x-microduck-fixed-goal") != "STAND":
-                raise ValueError("STAND fixed posture goal is invalid")
+            validate_code_owned_parameters(action_code, parameters)
+            template = action_template(action_code)
+            if template.parameter_schema.get("x-microduck-fixed-goal") != "STAND":
+                raise ValueError("code-owned STAND fixed posture goal is invalid")
             command = DeploymentCommand.zero()
             return command, command, None
         raise ValueError("runtime action has no implemented typed command profile")

@@ -14,15 +14,16 @@ import pytest
 from fastapi.testclient import TestClient
 from onnx import TensorProto, helper
 
+from mjlab_microduck.rom.action_catalog import (
+    CODE_OWNED_ACTION_CODES,
+    code_owned_action_definition,
+)
 from mjlab_microduck.rom.action_specs import ACTION_RUNTIME_SPECS
 from mjlab_microduck.rom.contracts import (
     ACTION_CONTRACT,
     CONTROLLED_SERVO_JOINTS,
     OBSERVATION_CONTRACT,
     ActionContract,
-    ActionDefinition,
-    CompletionContract,
-    LeaseContract,
     ModelArtifact,
     ObservationContract,
     PolicyArtifact,
@@ -540,33 +541,17 @@ def _write_verified_bundle(
             else default_runtime_requirements
         ),
     )
-    action = ActionDefinition(
-        actionCode=action_code,
-        executionMode="CONTINUOUS_LEASE",
-        availability="AVAILABLE",
-        policyRef=policy.policyRef,
-        parameterSchema={
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "vxMps": {"type": "number", "minimum": -0.4, "maximum": 0.4},
-                "vyMps": {"type": "number", "minimum": -0.3, "maximum": 0.3},
-                "yawRateRadps": {"type": "number", "minimum": -1.0, "maximum": 1.0},
-            },
-            "required": ["vxMps", "vyMps", "yawRateRadps"],
-        },
-        lease=LeaseContract(
-            minLeaseMs=100,
-            defaultLeaseMs=500,
-            maxLeaseMs=5_000,
-            commandCadenceMs=50,
-            safeStopBehavior="ZERO_TWIST",
-        ),
-        preconditions={
-            "allowedTerrains": ["flat"],
-            "scenarioProfile": "SEEDED_SERVO_RESET_V1",
-        },
-    )
+    actions = [
+        code_owned_action_definition(
+            code,
+            availability="AVAILABLE" if code == action_code else "UNAVAILABLE",
+            policy_ref=policy.policyRef if code == action_code else None,
+            unavailable_reason=(
+                None if code == action_code else "POLICY_ARTIFACT_MISSING"
+            ),
+        )
+        for code in CODE_OWNED_ACTION_CODES
+    ]
     observation_contract = ObservationContract(
         identifier=OBSERVATION_CONTRACT,
         dimension=61,
@@ -617,7 +602,7 @@ def _write_verified_bundle(
         actionContract=action_contract,
         model=ModelArtifact(path="models/robot.xml", digest=_digest(model_path)),
         policies=[policy],
-        actions=[action],
+        actions=actions,
         qualification={
             "artifacts": [],
             "modelTerrain": "flat",
@@ -684,28 +669,17 @@ def _rewrite_as_stand_bundle(root: Path, source: PolicyBundle) -> PolicyBundle:
             | {"completionEvaluator": "os.system('must-not-run')"}
         }
     )
-    action = ActionDefinition(
-        actionCode="STAND",
-        executionMode="DISCRETE",
-        availability="AVAILABLE",
-        policyRef=policy.policyRef,
-        parameterSchema={
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {},
-            "x-microduck-fixed-goal": "STAND",
-        },
-        completion=CompletionContract(
-            terminalConditions=["TASK_COMPLETE", "FALLEN", "TIMEOUT"],
-            maxDurationMs=15_000,
-        ),
-        preconditions={
-            "allowedTerrains": ["flat"],
-            "scenarioProfile": "SEEDED_SERVO_RESET_V1",
-        },
-    )
+    actions = [
+        code_owned_action_definition(
+            code,
+            availability="AVAILABLE" if code == "STAND" else "UNAVAILABLE",
+            policy_ref=policy.policyRef if code == "STAND" else None,
+            unavailable_reason=(None if code == "STAND" else "POLICY_ARTIFACT_MISSING"),
+        )
+        for code in CODE_OWNED_ACTION_CODES
+    ]
     unsigned = source.model_copy(
-        update={"bundleDigest": None, "policies": [policy], "actions": [action]}
+        update={"bundleDigest": None, "policies": [policy], "actions": actions}
     )
     digests = {
         source.model.path: source.model.digest,
@@ -748,8 +722,12 @@ def test_runtime_readiness_rejects_available_action_with_wrong_policy_task_ident
     """Deferring task-family validation until POST would create false catalog availability."""
     root = tmp_path / "bundle"
     source = _write_verified_bundle(root)
-    action = source.actions[0].model_copy(update={"actionCode": "VELSTAND_VELOCITY"})
-    unsigned = source.model_copy(update={"bundleDigest": None, "actions": [action]})
+    wrong_policy = source.policies[0].model_copy(
+        update={"taskId": "Mjlab-VelStand-Flat-MicroDuck"}
+    )
+    unsigned = source.model_copy(
+        update={"bundleDigest": None, "policies": [wrong_policy]}
+    )
     artifact_digests = {
         source.model.path: source.model.digest,
         source.policies[0].path: source.policies[0].digest,
@@ -772,10 +750,8 @@ def test_runtime_readiness_rejects_available_action_with_wrong_policy_task_ident
     (root / "microduck-policy-bundle.json").write_text(
         rewritten.model_dump_json(by_alias=True, exclude_none=True)
     )
-    verified = load_verified_bundle(root)
-
-    with pytest.raises(ValueError, match="policy task identity"):
-        MicroduckMujocoRuntime(root, verified, realtime=False)
+    with pytest.raises(ValueError, match="policy identity"):
+        load_verified_bundle(root)
 
 
 @pytest.mark.parametrize(
@@ -857,7 +833,9 @@ def test_runtime_readiness_rejects_action_preconditions_outside_qualification(
             }
         }
     )
-    unsigned = source.model_copy(update={"bundleDigest": None, "actions": [action]})
+    unsigned = source.model_copy(
+        update={"bundleDigest": None, "actions": [action, *source.actions[1:]]}
+    )
     artifacts = {
         source.model.path: source.model.digest,
         source.policies[0].path: source.policies[0].digest,
@@ -881,8 +859,8 @@ def test_runtime_readiness_rejects_action_preconditions_outside_qualification(
         rewritten.model_dump_json(by_alias=True, exclude_none=True)
     )
 
-    with pytest.raises(ValueError, match="preconditions do not match qualification"):
-        MicroduckMujocoRuntime(root, load_verified_bundle(root), realtime=False)
+    with pytest.raises(ValueError, match="code-owned.*action envelope"):
+        load_verified_bundle(root)
 
 
 def test_backlash_encoder_observation_and_status_sum_exact_named_companions(
@@ -1384,7 +1362,10 @@ def test_every_supported_action_emits_all_code_owned_compact_metrics(
             "parameters": {"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0},
         }
     )
-    handle = runtime.start(bundle.actions[0], request)
+    action = next(
+        action for action in bundle.actions if action.actionCode == action_code
+    )
+    handle = runtime.start(action, request)
 
     metrics = runtime.sample(handle).metrics
 
@@ -1556,22 +1537,65 @@ def test_runtime_rejects_wrong_root_ownership_or_imu_frame(
         MicroduckMujocoRuntime(root, bundle, realtime=False)
 
 
-def test_runtime_reports_requested_and_safety_limited_command_separately(
+def test_runtime_rejects_commands_outside_code_owned_bounds(
     tmp_path: Path,
 ) -> None:
-    """Overwriting requested intent with a clamp would hide why motion was limited."""
+    """A runtime clamp cannot substitute for rejecting intent outside the safe API."""
     root = tmp_path / "bundle"
     bundle = _write_verified_bundle(root)
     runtime = MicroduckMujocoRuntime(root, bundle, realtime=False)
     request = _request().model_copy(update={"bundleDigest": bundle.bundleDigest})
     handle = runtime.start(bundle.actions[0], request)
 
-    runtime.command(handle, {"vxMps": 1.0, "vyMps": -0.5, "yawRateRadps": 2.0})
-    status = runtime.status()
+    with pytest.raises(ValueError, match="code-owned action bounds"):
+        runtime.command(handle, {"vxMps": 1.0, "vyMps": -0.5, "yawRateRadps": 2.0})
 
-    assert status.requestedMotion["twist"] == [1.0, -0.5, 2.0]
-    assert status.appliedMotion["twist"] == [0.4, -0.3, 1.0]
-    assert status.limitingReason == "COMMAND_LIMIT"
+
+@pytest.mark.parametrize(
+    ("parameters", "lease_ms"),
+    [
+        ({"vxMps": 0.400001, "vyMps": 0.0, "yawRateRadps": 0.0}, 500),
+        ({"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0}, 5_001),
+    ],
+)
+def test_runtime_enforces_code_owned_command_and_lease_bounds_after_manifest_widening(
+    tmp_path: Path, parameters: dict[str, float], lease_ms: int
+) -> None:
+    """Runtime validation must remain safe even if an in-memory manifest is widened."""
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root)
+    runtime = MicroduckMujocoRuntime(root, bundle, realtime=False)
+    walk = bundle.actions[0]
+    assert walk.lease is not None
+    widened = walk.model_copy(
+        update={
+            "parameterSchema": {
+                **walk.parameterSchema,
+                "properties": {
+                    **walk.parameterSchema["properties"],
+                    "vxMps": {"type": "number", "minimum": -1_000, "maximum": 1_000},
+                },
+            },
+            "lease": walk.lease.model_copy(update={"maxLeaseMs": 1_000_000}),
+        }
+    )
+    runtime._bundle = bundle.model_copy(
+        update={"actions": [widened, *bundle.actions[1:]]}
+    )
+    request = TaskCreateRequest(
+        schema="MICRODUCK_SIM_TASK_V1",
+        taskId="9" * 32,
+        actionCode="WALK_VELOCITY",
+        bundleVersion=bundle.bundleVersion,
+        bundleDigest=bundle.bundleDigest,
+        parameters=parameters,
+        scenario={"terrain": "flat", "seed": 7},
+        leaseMs=lease_ms,
+        requestedBy="runtime-boundary-test",
+    )
+
+    with pytest.raises(ValueError, match="code-owned"):
+        runtime.validate(widened, request)
 
 
 def test_stand_uses_trained_sitting_reset_fixed_goal_and_settled_completion(
@@ -1598,8 +1622,11 @@ def test_stand_uses_trained_sitting_reset_fixed_goal_and_settled_completion(
         requestedBy="stand-runtime-test",
     )
 
-    runtime.validate(bundle.actions[0], request)
-    handle = runtime.start(bundle.actions[0], request)
+    stand_action = next(
+        action for action in bundle.actions if action.actionCode == "STAND"
+    )
+    runtime.validate(stand_action, request)
+    handle = runtime.start(stand_action, request)
     assert runtime._data.qpos[runtime._joint_qpos_indices[3]] == pytest.approx(
         1.35, abs=0.01
     )

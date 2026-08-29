@@ -49,6 +49,11 @@ catalog. Every candidate action currently marked `AVAILABLE` must appear in the
 release configuration. A mandatory action must already have verified policy,
 model, scenario, and runtime support. Optional actions without that support stay
 `UNAVAILABLE` with their original reason; they are not falsely qualified.
+The builder and promoted bundle always retain the complete ordered 15-action V1
+catalog. Actions already marked `UNAVAILABLE` may be omitted from `release.json`;
+qualification carries each one deterministically as `UNAVAILABLE` using its
+code-owned reason. Any action a release intends to qualify, and every action the
+candidate marks `AVAILABLE`, still requires an explicit governed declaration.
 
 Example `release.json` for the currently supported flat walking runtime:
 
@@ -102,6 +107,13 @@ the installed `mjlab-microduck` package version and a digest of the exact
 governed runtime modules. Batteries require 3–16 unique seeds and 100–2,000
 steps, and action commands, terrain, reset, action metric, and metric direction
 must match the code-owned action specification.
+
+The auditable runtime-revision source set is `action_catalog.py`,
+`action_specs.py`, `api.py`, `bundle.py`, `contracts.py`, `main.py`,
+`mirroring.py`, `model_semantics.py`, `mujoco_runtime.py`, `observation.py`,
+`onnx_policy.py`, `qualification.py`, `runtime.py`, `runtime_identity.py`,
+`service.py`, and `store.py`. Tests require that changing any one of these files
+changes the revision.
 
 The qualification report contains bounded per-seed success, fall, stepwise
 tracking statistics, distance, normalized-action energy proxy, separately

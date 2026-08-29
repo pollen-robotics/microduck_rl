@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from threading import Event
 
 import pytest
 
+from mjlab_microduck.rom.action_catalog import (
+    CODE_OWNED_ACTION_CODES,
+    code_owned_action_definition,
+)
 from mjlab_microduck.rom.contracts import (
     CONTROLLED_SERVO_JOINTS,
     OBSERVATION_FIELDS,
     ActionContract,
-    ActionDefinition,
     ModelArtifact,
     ObservationContract,
     PolicyArtifact,
@@ -38,7 +42,9 @@ def test_discrete_task_records_terminal_evidence(service, stand_request, runtime
     runtime.complete_next(state="SUCCEEDED", metrics={"upright": True})
 
     created = service.create_task(stand_request)
-    terminal = wait_for_state(service, created.taskId, "SUCCEEDED", runtime.safe_stopped)
+    terminal = wait_for_state(
+        service, created.taskId, "SUCCEEDED", runtime.safe_stopped
+    )
 
     assert terminal.evidence is not None
     assert terminal.evidence.bundleDigest == stand_request.bundleDigest
@@ -58,12 +64,20 @@ def test_only_one_motion_task_runs(service, stand_request, kick_request, runtime
     assert error.value.code == "ROBOT_BUSY"
 
 
-def test_rejects_unavailable_action_before_creating_task(runtime, store, stand_request, bundle):
+def test_rejects_unavailable_action_before_creating_task(
+    runtime, store, stand_request, bundle
+):
     """Treating unavailable artifacts as executable would start a policy with no release evidence."""
     unavailable = bundle.model_copy(
         update={
             "actions": [
-                action.model_copy(update={"availability": "UNAVAILABLE", "policyRef": None})
+                action.model_copy(
+                    update={
+                        "availability": "UNAVAILABLE",
+                        "policyRef": None,
+                        "unavailableReason": "POLICY_ARTIFACT_MISSING",
+                    }
+                )
                 if action.actionCode == "STAND"
                 else action
                 for action in bundle.actions
@@ -81,7 +95,9 @@ def test_rejects_unavailable_action_before_creating_task(runtime, store, stand_r
 
 def test_rejects_bundle_mismatch_before_creating_task(service, stand_request, store):
     """Ignoring a requested release digest could silently run a different policy than selected."""
-    wrong_digest = stand_request.model_copy(update={"bundleDigest": "sha256:" + "f" * 64})
+    wrong_digest = stand_request.model_copy(
+        update={"bundleDigest": "sha256:" + "f" * 64}
+    )
 
     with pytest.raises(BundleMismatch) as error:
         service.create_task(wrong_digest)
@@ -128,7 +144,9 @@ def test_rejects_nonflat_or_unhealthy_runtime_before_creating_task(
     assert store.get(stand_request.taskId) is None
 
 
-def test_status_runtime_exception_has_a_stable_public_code(service, stand_request, runtime):
+def test_status_runtime_exception_has_a_stable_public_code(
+    service, stand_request, runtime
+):
     """Leaking a runtime status exception would make callers branch on implementation details."""
     runtime.status_error = RuntimeError("status transport failed")
 
@@ -151,7 +169,9 @@ def test_start_exception_safely_stops_before_recording_runtime_failure(
     assert len(runtime.safe_stop_calls) == 1
 
 
-def test_runtime_exception_safely_stops_and_records_failed_evidence(service, stand_request, runtime):
+def test_runtime_exception_safely_stops_and_records_failed_evidence(
+    service, stand_request, runtime
+):
     """Letting runtime failures escape would leave the active robot slot and evidence ambiguous."""
     runtime.fail_next_sample(RuntimeError("simulator fault"))
     created = service.create_task(stand_request)
@@ -164,22 +184,35 @@ def test_runtime_exception_safely_stops_and_records_failed_evidence(service, sta
     assert len(runtime.safe_stop_calls) == 1
 
 
-def test_discrete_max_duration_times_out_and_safely_stops(bundle, store, runtime, stand_request):
+def test_discrete_max_duration_times_out_and_safely_stops(
+    bundle, store, runtime, stand_request, monkeypatch
+):
     """Ignoring a discrete deadline would permit a policy to hold robot ownership indefinitely."""
-    short_bundle = bundle.model_copy(
-        update={
-            "actions": [
-                action.model_copy(update={"completion": action.completion.model_copy(update={"maxDurationMs": 1})})
-                if action.actionCode == "STAND"
-                else action
-                for action in bundle.actions
-            ]
-        }
+    from mjlab_microduck.rom import service as service_module
+
+    original_action_template = service_module.action_template
+    installed_template = original_action_template("STAND")
+    assert installed_template.completion is not None
+    monkeypatch.setattr(
+        service_module,
+        "action_template",
+        lambda code: (
+            replace(
+                installed_template,
+                completion=installed_template.completion.model_copy(
+                    update={"maxDurationMs": 1}
+                ),
+            )
+            if code == "STAND"
+            else original_action_template(code)
+        ),
     )
-    service = SimulatorTaskService(short_bundle, store, runtime, pollIntervalS=0.001)
+    service = SimulatorTaskService(bundle, store, runtime, pollIntervalS=0.001)
     created = service.create_task(stand_request)
 
-    terminal = wait_for_state(service, created.taskId, "TIMED_OUT", runtime.safe_stopped)
+    terminal = wait_for_state(
+        service, created.taskId, "TIMED_OUT", runtime.safe_stopped
+    )
 
     assert terminal.stopReason == "MAX_DURATION_EXCEEDED"
     assert len(runtime.safe_stop_calls) == 1
@@ -196,7 +229,9 @@ def test_runtime_terminal_reason_is_mapped_to_a_stable_public_result_code(
     )
     created = service.create_task(stand_request)
 
-    terminal = wait_for_state(service, created.taskId, "SUCCEEDED", runtime.safe_stopped)
+    terminal = wait_for_state(
+        service, created.taskId, "SUCCEEDED", runtime.safe_stopped
+    )
     events = service.events_after(created.taskId, -1)
 
     assert terminal.stopReason == "TASK_COMPLETE"
@@ -226,7 +261,11 @@ def test_runtime_metrics_reject_oversize_trajectory_shaped_payloads(factory, mes
 
 def test_runtime_metrics_allow_bounded_scalar_summary():
     """Overly broad metric rejection would discard normal task-summary evidence."""
-    sample = RuntimeSample(running=False, terminalState="SUCCEEDED", metrics={"upright": True, "score": 0.25})
+    sample = RuntimeSample(
+        running=False,
+        terminalState="SUCCEEDED",
+        metrics={"upright": True, "score": 0.25},
+    )
 
     assert sample.metrics == {"upright": True, "score": 0.25}
 
@@ -242,7 +281,9 @@ def test_terminal_evidence_drops_lower_priority_metrics_to_stay_aggregate_bounde
     runtime.complete_next(state="SUCCEEDED", metrics=sample_metrics)
 
     created = service.create_task(stand_request)
-    terminal = wait_for_state(service, created.taskId, "SUCCEEDED", runtime.safe_stopped)
+    terminal = wait_for_state(
+        service, created.taskId, "SUCCEEDED", runtime.safe_stopped
+    )
 
     assert terminal.evidence is not None
     assert terminal.evidence.metrics == sample_metrics | {"stop-00": "t" * 60}
@@ -295,7 +336,9 @@ def test_cancelled_running_task_safely_stops_once_and_releases_slot(
     assert runtime.started.wait(timeout=1.0)
 
     service.cancel_task(created.taskId)
-    terminal = wait_for_state(service, created.taskId, "CANCELLED", runtime.safe_stopped)
+    terminal = wait_for_state(
+        service, created.taskId, "CANCELLED", runtime.safe_stopped
+    )
     service.cancel_task(created.taskId)
 
     assert terminal.stopReason == "CANCELLED"
@@ -334,18 +377,24 @@ def bundle() -> PolicyBundle:
         observationContract=observation,
         actionContract=action_contract,
         model=ModelArtifact(path="models/robot.xml", digest="sha256:" + "c" * 64),
-        policies=[PolicyArtifact(policyRef="stand", path="policies/stand.onnx", digest="sha256:" + "b" * 64)],
-        actions=[
-            ActionDefinition(
-                actionCode=code,
-                executionMode="DISCRETE",
-                availability="AVAILABLE",
+        policies=[
+            PolicyArtifact(
                 policyRef="stand",
-                parameterSchema={"type": "object", "additionalProperties": False, "properties": {}},
-                completion={"terminalConditions": ["TASK_COMPLETE", "TIMEOUT"], "maxDurationMs": 1000},
-                preconditions={"allowedTerrains": ["flat"]},
+                path="policies/stand.onnx",
+                digest="sha256:" + "b" * 64,
+                taskId="Mjlab-SitStand-Flat-MicroDuck",
             )
-            for code in ("STAND", "KICK_LEFT")
+        ],
+        actions=[
+            code_owned_action_definition(
+                code,
+                availability="AVAILABLE" if code == "STAND" else "UNAVAILABLE",
+                policy_ref="stand" if code == "STAND" else None,
+                unavailable_reason=(
+                    None if code == "STAND" else "POLICY_ARTIFACT_MISSING"
+                ),
+            )
+            for code in CODE_OWNED_ACTION_CODES
         ],
         qualification={},
         license={},
@@ -374,7 +423,7 @@ def stand_request() -> TaskCreateRequest:
 
 @pytest.fixture
 def kick_request() -> TaskCreateRequest:
-    return request_for("1" * 32, "KICK_LEFT")
+    return request_for("1" * 32, "STAND")
 
 
 def request_for(task_id: str, action_code: str) -> TaskCreateRequest:
@@ -390,7 +439,9 @@ def request_for(task_id: str, action_code: str) -> TaskCreateRequest:
     )
 
 
-def wait_for_state(service: SimulatorTaskService, task_id: str, state: str, signal: Event | None = None):
+def wait_for_state(
+    service: SimulatorTaskService, task_id: str, state: str, signal: Event | None = None
+):
     """Wait on a runtime coordination signal, then observe the durable terminal snapshot."""
     if signal is not None:
         assert signal.wait(timeout=1.0)

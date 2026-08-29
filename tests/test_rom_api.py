@@ -15,13 +15,15 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from mjlab_microduck.rom.action_catalog import (
+    CODE_OWNED_ACTION_CODES,
+    code_owned_action_definition,
+)
 from mjlab_microduck.rom.api import create_app
 from mjlab_microduck.rom.contracts import (
     ACTION_CONTRACT,
     OBSERVATION_CONTRACT,
     ActionContract,
-    ActionDefinition,
-    CompletionContract,
     ModelArtifact,
     ObservationContract,
     PolicyArtifact,
@@ -51,17 +53,15 @@ def auth(bearer_token: str) -> dict[str, str]:
 
 @pytest.fixture
 def service(tmp_path: Path) -> SimulatorTaskService:
-    action = ActionDefinition(
-        actionCode="STAND",
-        executionMode="DISCRETE",
-        availability="AVAILABLE",
-        policyRef="stand-policy",
-        parameterSchema={"type": "object", "additionalProperties": False},
-        completion=CompletionContract(
-            terminalConditions=["COMPLETED"], maxDurationMs=1_000
-        ),
-        preconditions={"allowedTerrains": ["flat"]},
-    )
+    actions = [
+        code_owned_action_definition(
+            code,
+            availability="AVAILABLE" if code == "STAND" else "UNAVAILABLE",
+            policy_ref="stand-policy" if code == "STAND" else None,
+            unavailable_reason=(None if code == "STAND" else "POLICY_ARTIFACT_MISSING"),
+        )
+        for code in CODE_OWNED_ACTION_CODES
+    ]
     bundle = PolicyBundle(
         schema="MICRODUCK_POLICY_BUNDLE_V1",
         bundleId="org.microduck.test",
@@ -147,10 +147,11 @@ def service(tmp_path: Path) -> SimulatorTaskService:
                 policyRef="stand-policy",
                 path="policies/stand.onnx",
                 digest="sha256:" + "c" * 64,
+                taskId="Mjlab-SitStand-Flat-MicroDuck",
                 runtimeRequirements={},
             )
         ],
-        actions=[action],
+        actions=actions,
         qualification={},
         license={},
     )
@@ -285,7 +286,7 @@ def test_bad_wire_payload_uses_the_stable_parameter_error_envelope(
 
 
 def test_catalog_is_derived_from_the_installed_service_bundle(
-    client: TestClient, auth: dict[str, str]
+    client: TestClient, auth: dict[str, str], service: SimulatorTaskService
 ):
     """Returning a hard-coded catalog would let API metadata drift from the verified bundle."""
     response = client.get("/v1/catalog", headers=auth)
@@ -293,22 +294,8 @@ def test_catalog_is_derived_from_the_installed_service_bundle(
     assert response.status_code == 200
     assert response.json()["bundleId"] == "org.microduck.test"
     assert response.json()["actions"] == [
-        {
-            "actionCode": "STAND",
-            "executionMode": "DISCRETE",
-            "availability": "AVAILABLE",
-            "policyRef": "stand-policy",
-            "unavailableReason": None,
-            "parameterSchema": {"type": "object", "additionalProperties": False},
-            "completion": {"terminalConditions": ["COMPLETED"], "maxDurationMs": 1_000},
-            "lease": None,
-            "displayName": None,
-            "description": None,
-            "localizedLabels": None,
-            "preconditions": {"allowedTerrains": ["flat"]},
-            "safety": None,
-            "qualificationRefs": None,
-        }
+        action.model_dump(mode="json", by_alias=True)
+        for action in service._bundle.actions
     ]
 
 

@@ -35,13 +35,14 @@
     "LeaseContract": {
       "type": "object", "additionalProperties": false,
       "x-unergy-invariants": ["minLeaseMs <= defaultLeaseMs <= maxLeaseMs", "commandCadenceMs <= minLeaseMs"],
-      "required": ["minLeaseMs", "defaultLeaseMs", "maxLeaseMs", "commandCadenceMs"],
+      "required": ["minLeaseMs", "defaultLeaseMs", "maxLeaseMs", "commandCadenceMs", "zeroCommand", "safeStopBehavior"],
       "properties": {
         "minLeaseMs": {"type": "integer", "exclusiveMinimum": 0},
         "defaultLeaseMs": {"type": "integer", "exclusiveMinimum": 0},
         "maxLeaseMs": {"type": "integer", "exclusiveMinimum": 0},
         "commandCadenceMs": {"type": "integer", "exclusiveMinimum": 0},
-        "safeStopBehavior": {"type": "string"}
+        "zeroCommand": {"type": "object", "additionalProperties": {"type": "number"}},
+        "safeStopBehavior": {"const": "ZERO_TWIST", "type": "string"}
       }
     },
     "ObservationContract": {
