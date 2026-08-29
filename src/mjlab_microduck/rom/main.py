@@ -15,7 +15,13 @@ from typing import Any
 import uvicorn
 
 from .api import create_app
-from .contracts import ModelArtifact, PolicyBundle, RobotStatus, sha256_prefixed
+from .contracts import (
+    ModelArtifact,
+    PolicyBundle,
+    RobotStatus,
+    canonical_json,
+    sha256_prefixed,
+)
 from .runtime import RuntimeEvidence, RuntimeHandle, RuntimeSample, SimulationRuntime
 from .service import SimulatorTaskService
 from .store import SqliteTaskStore
@@ -158,6 +164,189 @@ def load_verified_bundle(bundle_dir: Path) -> PolicyBundle:
     return bundle
 
 
+def load_qualified_bundle(bundle_dir: Path) -> PolicyBundle:
+    """Load a promoted bundle only after its qualification chain is exact."""
+    root = Path(bundle_dir).resolve()
+    bundle = load_verified_bundle(root)
+    try:
+        from .action_specs import ACTION_RUNTIME_SPECS
+        from .qualification import (
+            QUALIFICATION_REPORT_PATH,
+            RELEASE_CONFIGURATION_PATH,
+            SUBJECT_MANIFEST_PATH,
+            QualificationReport,
+            ReleaseConfiguration,
+        )
+        from .runtime_identity import runtime_revision
+
+        qualification = bundle.qualification
+        if qualification.get("binding") != "VERIFIED_INPUT_BUNDLE_DIGEST_V1":
+            raise ValueError
+        declared = [
+            ModelArtifact.model_validate(item)
+            for item in qualification.get("artifacts", [])
+        ]
+
+        def read_bound_artifact(
+            path_key: str, digest_key: str, expected_path: str
+        ) -> tuple[bytes, str]:
+            declared_path = qualification.get(path_key)
+            declared_digest = qualification.get(digest_key)
+            matching = [item for item in declared if item.path == declared_path]
+            if declared_path != expected_path or len(matching) != 1:
+                raise ValueError
+            if declared_digest != matching[0].digest:
+                raise ValueError
+            content = _bundle_path(root, declared_path).read_bytes()
+            if not hmac_compare(_digest(_bundle_path(root, declared_path)), declared_digest):
+                raise ValueError
+            return content, declared_digest
+
+        report_bytes, report_digest = read_bound_artifact(
+            "reportPath", "reportDigest", QUALIFICATION_REPORT_PATH
+        )
+        configuration_bytes, configuration_digest = read_bound_artifact(
+            "releaseConfigurationPath",
+            "releaseConfigurationDigest",
+            RELEASE_CONFIGURATION_PATH,
+        )
+        subject_bytes, subject_digest = read_bound_artifact(
+            "subjectManifestPath", "subjectManifestDigest", SUBJECT_MANIFEST_PATH
+        )
+        report = QualificationReport.model_validate_json(report_bytes)
+        configuration = ReleaseConfiguration.model_validate_json(configuration_bytes)
+        subject = PolicyBundle.model_validate_json(subject_bytes)
+        if (
+            canonical_json(report) != report_bytes
+            or canonical_json(configuration) != configuration_bytes
+            or canonical_json(subject) != subject_bytes
+        ):
+            raise ValueError
+        if report_digest != sha256_prefixed(report):
+            raise ValueError
+        if configuration_digest != sha256_prefixed(configuration):
+            raise ValueError
+        if subject_digest != sha256_prefixed(subject):
+            raise ValueError
+
+        subject_artifacts = {
+            artifact.path: artifact.digest for artifact in _bundle_artifacts(subject)
+        }
+        if len(subject_artifacts) != len(_bundle_artifacts(subject)):
+            raise ValueError
+        expected_subject_digest = sha256_prefixed(
+            {
+                "manifest": subject.model_dump(
+                    mode="json", by_alias=True, exclude={"bundleDigest"}
+                ),
+                "artifacts": subject_artifacts,
+            }
+        )
+        if subject.bundleDigest != expected_subject_digest:
+            raise ValueError
+        for path, digest in subject_artifacts.items():
+            if _digest(_bundle_path(root, path)) != digest:
+                raise ValueError
+
+        if (
+            report.binding != "VERIFIED_INPUT_BUNDLE_DIGEST_V1"
+            or report.subjectBundleId != subject.bundleId
+            or report.subjectBundleVersion != subject.bundleVersion
+            or report.subjectBundleDigest != subject.bundleDigest
+            or qualification.get("subjectBundleId") != subject.bundleId
+            or qualification.get("subjectBundleVersion") != subject.bundleVersion
+            or qualification.get("subjectBundleDigest") != subject.bundleDigest
+            or report.releaseConfigurationDigest != configuration_digest
+            or qualification.get("releaseConfigurationDigest")
+            != configuration_digest
+            or report.sourceRepository != subject.sourceRepository
+            or report.sourceCommit != subject.sourceCommit
+            or report.modelDigest != subject.model.digest
+            or report.runtimeRevision != runtime_revision()
+            or bundle.bundleId != subject.bundleId
+            or bundle.sourceRepository != subject.sourceRepository
+            or bundle.sourceCommit != subject.sourceCommit
+            or bundle.model != subject.model
+            or bundle.policies != subject.policies
+            or configuration.release != bundle.bundleVersion
+            or configuration.createdAt != bundle.createdAt
+        ):
+            raise ValueError
+
+        results = {item.actionCode: item for item in report.actions}
+        declarations = {item.actionCode: item for item in configuration.actions}
+        installed_actions = {item.actionCode: item for item in bundle.actions}
+        subject_actions = {item.actionCode: item for item in subject.actions}
+        expected_codes = set(installed_actions)
+        if (
+            len(results) != len(report.actions)
+            or len(declarations) != len(configuration.actions)
+            or set(results) != expected_codes
+            or set(declarations) != expected_codes
+            or set(subject_actions) != expected_codes
+        ):
+            raise ValueError
+        policies = {item.policyRef: item for item in subject.policies}
+        for code in sorted(expected_codes):
+            action = installed_actions[code]
+            subject_action = subject_actions[code]
+            result = results[code]
+            declaration = declarations[code]
+            spec = ACTION_RUNTIME_SPECS.get(code)
+            policy = policies.get(subject_action.policyRef or "")
+            if (
+                action.qualificationRefs != [QUALIFICATION_REPORT_PATH]
+                or result.mandatory != declaration.mandatory
+                or result.terrain != declaration.terrain
+                or result.resetProfile != declaration.resetProfile
+                or result.seeds != declaration.seeds
+                or result.maxSteps != declaration.maxSteps
+                or result.parameters != declaration.parameters
+                or result.thresholds != declaration.thresholds
+                or spec is None
+                or result.scenarioProfile != spec.scenario_profile
+                or result.runtimeRevision != report.runtimeRevision
+                or result.modelDigest != subject.model.digest
+                or result.sourceCommit != subject.sourceCommit
+                or result.policyDigest
+                != (policy.digest if policy is not None else None)
+                or result.checkpoint
+                != (policy.checkpoint if policy is not None else None)
+                or result.runIdentity
+                != (policy.experimentRef if policy is not None else None)
+            ):
+                raise ValueError
+            if result.status == "PASSED":
+                if (
+                    subject_action.availability != "AVAILABLE"
+                    or action.availability != "AVAILABLE"
+                    or action.unavailableReason is not None
+                    or result.unavailableReason is not None
+                ):
+                    raise ValueError
+            elif result.status == "FAILED":
+                if (
+                    subject_action.availability != "AVAILABLE"
+                    or action.availability != "UNAVAILABLE"
+                    or action.unavailableReason != "QUALIFICATION_FAILED"
+                    or result.unavailableReason != "QUALIFICATION_FAILED"
+                    or declaration.mandatory
+                ):
+                    raise ValueError
+            elif (
+                result.status != "UNAVAILABLE"
+                or subject_action.availability != "UNAVAILABLE"
+                or action.availability != "UNAVAILABLE"
+                or action.unavailableReason != result.unavailableReason
+                or subject_action.unavailableReason != result.unavailableReason
+                or declaration.mandatory
+            ):
+                raise ValueError
+        return bundle
+    except Exception as exc:
+        raise ValueError("bundle qualification verification failed") from exc
+
+
 def hmac_compare(left: str, right: str) -> bool:
     """Keep digest equality exact without exposing a timing-sensitive comparison at the call site."""
     import hmac
@@ -234,9 +423,12 @@ def create_configured_app(
         reasons.append("BUNDLE_UNAVAILABLE")
     elif configuration.bearer_token:
         try:
-            bundle = load_verified_bundle(configuration.bundle_dir)
-        except Exception:  # noqa: BLE001 - do not leak filesystem or manifest contents.
-            reasons.append("BUNDLE_UNAVAILABLE")
+            bundle = load_qualified_bundle(configuration.bundle_dir)
+        except Exception as exc:  # noqa: BLE001 - stable, non-secret readiness boundary.
+            if "qualification" in str(exc):
+                reasons.append("QUALIFICATION_UNAVAILABLE")
+            else:
+                reasons.append("BUNDLE_UNAVAILABLE")
     state_db_usable = configuration.state_db is not None and _state_db_path_is_usable(
         configuration.state_db
     )

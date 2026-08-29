@@ -554,10 +554,10 @@ def test_placeholder_startup_does_not_reconcile_existing_running_task(
     ]
 
 
-def test_catalog_masks_manifest_availability_when_concrete_runtime_cannot_start(
+def test_candidate_bundle_cannot_expose_catalog_before_qualification(
     tmp_path: Path, service: SimulatorTaskService
 ):
-    """An installed manifest must not advertise executable motion while runtime readiness failed."""
+    """A hash-valid candidate must not expose a catalog before governed promotion."""
     bundle_dir = tmp_path / "bundle"
     _write_verified_bundle(bundle_dir, service._bundle)
     app = create_configured_app(
@@ -573,9 +573,8 @@ def test_catalog_masks_manifest_availability_when_concrete_runtime_cannot_start(
             "/v1/catalog", headers={"Authorization": "Bearer startup-token"}
         )
 
-    assert catalog.status_code == 200
-    assert catalog.json()["actions"][0]["availability"] == "UNAVAILABLE"
-    assert catalog.json()["actions"][0]["unavailableReason"] == "RUNTIME_UNAVAILABLE"
+    assert catalog.status_code == 503
+    assert catalog.json()["code"] == "NOT_READY"
 
 
 def test_database_startup_failure_has_its_own_readiness_reason(
@@ -600,6 +599,8 @@ def test_database_startup_failure_has_its_own_readiness_reason(
         )
 
     assert response.json()["reasonCodes"] == [
+        "BUNDLE_UNAVAILABLE",
+        "QUALIFICATION_UNAVAILABLE",
         "RUNTIME_UNAVAILABLE",
         "STATE_DB_UNAVAILABLE",
     ]

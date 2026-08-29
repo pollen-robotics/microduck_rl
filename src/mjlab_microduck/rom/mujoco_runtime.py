@@ -52,6 +52,23 @@ _CONTINUOUS_ACTIONS = {
     for code, spec in ACTION_RUNTIME_SPECS.items()
     if spec.execution_mode == "CONTINUOUS_LEASE" and spec.supported
 }
+_SITTING_JOINT_POSE = DEFAULT_JOINT_POSE.astype(np.float64).copy()
+for _index, _value in {
+    1: 0.0,
+    2: -0.4079,
+    3: 1.35,
+    4: 0.0,
+    10: 0.0,
+    11: 0.4079,
+    12: -1.35,
+    13: 0.0,
+}.items():
+    _SITTING_JOINT_POSE[_index] = _value
+_STAND_SETTLED_STEPS = 10
+_STAND_POSE_TOLERANCE_RAD = 0.08
+_STAND_MIN_HEIGHT_M = 0.09
+_STAND_MAX_TILT_RAD = math.radians(15.0)
+_STAND_MAX_JOINT_SPEED_RADPS = 0.5
 
 
 def _digest_bytes(content: bytes) -> str:
@@ -129,7 +146,12 @@ class MicroduckMujocoRuntime:
         self._max_tilt_rad = 0.0
         self._max_abs_action = 0.0
         self._energy_proxy = 0.0
-        self._limit_violations = 0
+        self._actuator_clamp_steps = 0
+        self._physical_joint_limit_violations = 0
+        self._tracking_error_sum = 0.0
+        self._tracking_error_max = 0.0
+        self._tracking_error_samples = 0
+        self._settled_steps = 0
         self._upright_steps = 0
         self._last_yaw_rad = 0.0
         self._yaw_rotation_rad = 0.0
@@ -524,14 +546,24 @@ class MicroduckMujocoRuntime:
         ):
             raise ValueError("imu_ang_vel site must be identity-aligned on trunk_base")
 
-    def _reset_model_locked(self, rng: np.random.Generator | None = None) -> None:
+    def _reset_model_locked(
+        self,
+        rng: np.random.Generator | None = None,
+        reset_profile: str = "DEFAULT_STANDING",
+    ) -> None:
         mujoco.mj_resetData(self._model, self._data)
         perturbation = (
             np.zeros(14, dtype=np.float64)
             if rng is None
             else rng.uniform(-0.005, 0.005, size=14)
         )
-        reset_pose = DEFAULT_JOINT_POSE.astype(np.float64) + perturbation
+        if reset_profile == "TRAINED_SITTING":
+            reset_pose = _SITTING_JOINT_POSE + perturbation
+            self._data.qpos[self._free_qpos_address + 2] = 0.07
+        elif reset_profile == "DEFAULT_STANDING":
+            reset_pose = DEFAULT_JOINT_POSE.astype(np.float64) + perturbation
+        else:
+            raise ValueError("runtime reset profile is not implemented")
         self._data.qpos[self._joint_qpos_indices] = reset_pose
         self._data.ctrl[self._actuator_indices] = reset_pose
         self._reset_perturbation_l2_rad = float(np.linalg.norm(perturbation))
@@ -542,6 +574,7 @@ class MicroduckMujocoRuntime:
         terrain = self._bundle.qualification.get("modelTerrain")
         if terrain == "flat" and has_flat_world_floor(self._model):
             capabilities.add("FLAT_TERRAIN")
+            capabilities.add("SITTING_RESET")
         if terrain in {"ramp", "slope"}:
             capabilities.add("RAMP_TERRAIN")
         if has_exact_passive_roller_topology(self._model):
@@ -569,6 +602,10 @@ class MicroduckMujocoRuntime:
                 raise ValueError("available action has no runtime semantics")
             if action.executionMode != spec.execution_mode:
                 raise ValueError("available action execution mode is incompatible")
+            if action.actionCode == "STAND" and action.parameterSchema.get(
+                "x-microduck-fixed-goal"
+            ) != "STAND":
+                raise ValueError("STAND requires the fixed SitStand posture goal")
             policy = policies.get(action.policyRef or "")
             if policy is None or policy.policyRef not in self._sessions:
                 raise ValueError("available action has no verified policy")
@@ -644,7 +681,8 @@ class MicroduckMujocoRuntime:
                 raise RuntimeError("runtime requires restart after a safety fault")
             self._applied_seed = int(request.scenario.get("seed", 0))
             self._rng = np.random.default_rng(self._applied_seed)
-            self._reset_model_locked(self._rng)
+            spec = ACTION_RUNTIME_SPECS[action.actionCode]
+            self._reset_model_locked(self._rng, spec.reset_profile)
             self._active_handle = RuntimeHandle(taskId=request.taskId)
             self._active_action = action
             self._active_request = request
@@ -672,7 +710,12 @@ class MicroduckMujocoRuntime:
             self._max_tilt_rad = 0.0
             self._max_abs_action = 0.0
             self._energy_proxy = 0.0
-            self._limit_violations = 0
+            self._actuator_clamp_steps = 0
+            self._physical_joint_limit_violations = 0
+            self._tracking_error_sum = 0.0
+            self._tracking_error_max = 0.0
+            self._tracking_error_samples = 0
+            self._settled_steps = 0
             self._upright_steps = 0
             self._last_yaw_rad = self._yaw_rad()
             self._yaw_rotation_rad = 0.0
@@ -878,7 +921,7 @@ class MicroduckMujocoRuntime:
                 target, actuator_limited = self._limit_targets(target)
                 if actuator_limited:
                     self._limiting_reason = "ACTUATOR_LIMIT"
-                    self._limit_violations += 1
+                    self._actuator_clamp_steps += 1
                 self._data.ctrl[self._actuator_indices] = target
                 self._policy_target = target.copy()
                 self._previous_action = policy_action.copy()
@@ -886,9 +929,34 @@ class MicroduckMujocoRuntime:
                     mujoco.mj_step(self._model, self._data)
                 self._step_count += 1
                 self._update_safety_metrics_locked(policy_action)
+                if self._active_action.actionCode in _CONTINUOUS_ACTIONS:
+                    tracking_error = self._velocity_tracking_error_locked()
+                    self._tracking_error_sum += tracking_error
+                    self._tracking_error_max = max(
+                        self._tracking_error_max, tracking_error
+                    )
+                    self._tracking_error_samples += 1
+                elif self._active_action.actionCode == "STAND":
+                    tracking_error = self._stand_pose_error_locked()
+                    self._tracking_error_sum += tracking_error
+                    self._tracking_error_max = max(
+                        self._tracking_error_max, tracking_error
+                    )
+                    self._tracking_error_samples += 1
+                    if self._stand_is_settled_locked(tracking_error):
+                        self._settled_steps += 1
+                    else:
+                        self._settled_steps = 0
                 self._require_finite_simulation_state()
                 self._check_joint_limits()
                 self._check_fall_locked()
+                if (
+                    self._active_action.actionCode == "STAND"
+                    and self._settled_steps >= _STAND_SETTLED_STEPS
+                ):
+                    self._terminal_state = "SUCCEEDED"
+                    self._terminal_reason = "STAND_POSE_SETTLED"
+                    self._stop_event.set()
             except FloatingPointError as exc:
                 self._fail_locked(str(exc))
             except Exception:  # noqa: BLE001 - any runtime failure must safe-stop.
@@ -961,6 +1029,13 @@ class MicroduckMujocoRuntime:
                 ),
                 "COMMAND_LIMIT" if applied != requested else None,
             )
+        if action_code == "STAND":
+            if parameters:
+                raise ValueError("STAND command does not accept parameters")
+            if action.parameterSchema.get("x-microduck-fixed-goal") != "STAND":
+                raise ValueError("STAND fixed posture goal is invalid")
+            command = DeploymentCommand.zero()
+            return command, command, None
         raise ValueError("runtime action has no implemented typed command profile")
 
     def _require_handle(self, handle: RuntimeHandle) -> None:
@@ -980,6 +1055,7 @@ class MicroduckMujocoRuntime:
                 low, high = self._model.jnt_range[joint_id]
                 value = self._data.qpos[qpos_index]
                 if value < low - 1e-4 or value > high + 1e-4:
+                    self._physical_joint_limit_violations += 1
                     raise FloatingPointError("JOINT_LIMIT")
 
     def _check_fall_locked(self) -> None:
@@ -1057,6 +1133,32 @@ class MicroduckMujocoRuntime:
     def _duration_locked(self) -> float:
         return max(0.0, float(self._data.time) - self._start_sim_time)
 
+    def _velocity_tracking_error_locked(self) -> float:
+        world_linear = self._data.qvel[
+            self._free_qvel_address : self._free_qvel_address + 3
+        ]
+        world_from_body = self._data.xmat[self._trunk_body_id].reshape(3, 3)
+        body_linear = world_from_body.T @ world_linear
+        measured = np.array(
+            [body_linear[0], body_linear[1], self._base_angular_velocity()[2]]
+        )
+        return float(np.linalg.norm(measured - np.asarray(self._command.twist)))
+
+    def _stand_pose_error_locked(self) -> float:
+        delta = self._encoder_positions() - DEFAULT_JOINT_POSE
+        return float(np.sqrt(np.mean(np.square(delta))))
+
+    def _stand_is_settled_locked(self, pose_error: float) -> bool:
+        gravity = project_gravity_wxyz(self._base_quaternion_wxyz())
+        tilt = math.acos(float(np.clip(-gravity[2], -1.0, 1.0)))
+        return (
+            pose_error <= _STAND_POSE_TOLERANCE_RAD
+            and float(self._base_position()[2]) >= _STAND_MIN_HEIGHT_M
+            and tilt <= _STAND_MAX_TILT_RAD
+            and float(np.max(np.abs(self._encoder_velocities()), initial=0.0))
+            <= _STAND_MAX_JOINT_SPEED_RADPS
+        )
+
     def _action_metrics_locked(self) -> dict[str, int | float | bool | str]:
         assert self._active_action is not None
         base_position = self._base_position()
@@ -1073,7 +1175,8 @@ class MicroduckMujocoRuntime:
             "finalTiltRad": round(final_tilt, 6),
             "maxAbsAction": round(self._max_abs_action, 6),
             "energyProxy": round(self._energy_proxy, 6),
-            "limitViolations": self._limit_violations,
+            "actuatorClampSteps": self._actuator_clamp_steps,
+            "physicalJointLimitViolations": self._physical_joint_limit_violations,
             "maxTiltRad": round(self._max_tilt_rad, 6),
             "minBaseHeightM": round(self._min_base_height_m, 6),
             "steps": self._step_count,
@@ -1085,23 +1188,26 @@ class MicroduckMujocoRuntime:
             "ROLLER_VELOCITY",
             "SWIZZLE",
         }:
-            world_linear = self._data.qvel[
-                self._free_qvel_address : self._free_qvel_address + 3
-            ]
-            world_from_body = self._data.xmat[self._trunk_body_id].reshape(3, 3)
-            body_linear = world_from_body.T @ world_linear
-            measured = np.array(
-                [body_linear[0], body_linear[1], self._base_angular_velocity()[2]]
-            )
             metrics["trackingError"] = round(
-                float(np.linalg.norm(measured - np.asarray(self._command.twist))), 6
+                self._tracking_error_sum / max(self._tracking_error_samples, 1),
+                6,
             )
+            metrics["trackingErrorMax"] = round(self._tracking_error_max, 6)
+            metrics["trackingErrorSamples"] = self._tracking_error_samples
         if self._active_action.actionCode == "VELSTAND_VELOCITY":
             metrics["standFraction"] = round(
                 self._upright_steps / max(self._step_count, 1), 6
             )
         if self._active_action.actionCode == "SWIZZLE":
             metrics["yawRotationRad"] = round(self._yaw_rotation_rad, 6)
+        if self._active_action.actionCode == "STAND":
+            metrics["standPoseError"] = round(self._stand_pose_error_locked(), 6)
+            metrics["trackingError"] = round(
+                self._tracking_error_sum / max(self._tracking_error_samples, 1), 6
+            )
+            metrics["trackingErrorMax"] = round(self._tracking_error_max, 6)
+            metrics["trackingErrorSamples"] = self._tracking_error_samples
+            metrics["standSettledSteps"] = self._settled_steps
         return metrics
 
     def _evidence_metrics_locked(self) -> dict[str, int | float | bool | str | None]:
@@ -1124,7 +1230,6 @@ class MicroduckMujocoRuntime:
             "resetProfile": ACTION_RUNTIME_SPECS[
                 self._active_action.actionCode
             ].reset_profile,
-            "modelIdentity": self._bundle.model.digest,
         }
 
     @staticmethod

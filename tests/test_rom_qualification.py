@@ -7,12 +7,21 @@ import subprocess
 import sys
 import zipfile
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
+from pydantic import ValidationError
 
+import mjlab_microduck.rom.qualification as qualification_module
 from mjlab_microduck.rom.action_catalog import ACTION_TEMPLATES
-from mjlab_microduck.rom.contracts import ActionDefinition, sha256_prefixed
+from mjlab_microduck.rom.contracts import (
+    ActionDefinition,
+    PolicyBundle,
+    canonical_json,
+    sha256_prefixed,
+)
+from mjlab_microduck.rom.main import load_qualified_bundle
+from mjlab_microduck.rom.mujoco_runtime import MicroduckMujocoRuntime
 from mjlab_microduck.rom.qualification import (
     ActionQualificationConfig,
     QualificationFailed,
@@ -21,7 +30,11 @@ from mjlab_microduck.rom.qualification import (
     ReleaseConfigurationError,
     qualify_and_promote,
 )
-from tests.test_rom_mujoco_runtime import _write_verified_bundle
+from mjlab_microduck.rom.runtime_identity import runtime_revision
+from tests.test_rom_mujoco_runtime import (
+    _rewrite_as_stand_bundle,
+    _write_verified_bundle,
+)
 
 NOW = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
 
@@ -38,19 +51,20 @@ def _config(
             mandatory=mandatory,
             terrain="flat",
             resetProfile="DEFAULT_STANDING",
-            seeds=(7, 11),
-            maxSteps=3,
-            parameters={"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0},
+            seeds=(7, 11, 29),
+            maxSteps=100,
+            parameters={"vxMps": 0.1, "vyMps": 0.0, "yawRateRadps": 0.0},
             thresholds=QualificationThresholds(
                 minSuccessRate=1.0,
                 maxFallRate=0.0,
-                maxMeanTrackingError=100.0,
+                maxMeanTrackingError=10.0,
                 minMeanDistanceM=min_distance_m,
-                maxMeanEnergyProxy=1_000_000.0,
-                maxLimitViolations=100,
+                maxMeanEnergyProxy=10_000.0,
+                maxActuatorClampSteps=100,
+                maxPhysicalJointLimitViolations=0,
                 actionMetric="trackingError",
                 actionMetricOperator="lte",
-                actionMetricThreshold=100.0,
+                actionMetricThreshold=10.0,
             ),
         )
     ]
@@ -61,16 +75,17 @@ def _config(
                 mandatory=False,
                 terrain="flat",
                 resetProfile="DEFAULT_STANDING",
-                seeds=(7,),
-                maxSteps=3,
+                seeds=(7, 11, 29),
+                maxSteps=100,
                 parameters={},
                 thresholds=QualificationThresholds(
                     minSuccessRate=1.0,
                     maxFallRate=0.0,
-                    maxMeanTrackingError=100.0,
+                    maxMeanTrackingError=10.0,
                     minMeanDistanceM=0.0,
-                    maxMeanEnergyProxy=1_000_000.0,
-                    maxLimitViolations=100,
+                    maxMeanEnergyProxy=10_000.0,
+                    maxActuatorClampSteps=100,
+                    maxPhysicalJointLimitViolations=0,
                     actionMetric="yawRotationRad",
                     actionMetricOperator="gte",
                     actionMetricThreshold=1.0,
@@ -80,14 +95,100 @@ def _config(
     return ReleaseConfiguration(
         release="1.0.1",
         createdAt=NOW,
-        runtimeSourceCommit="b" * 40,
         actions=tuple(actions),
+    )
+
+
+def _stand_config() -> ReleaseConfiguration:
+    return ReleaseConfiguration(
+        release="1.0.1",
+        createdAt=NOW,
+        actions=(
+            ActionQualificationConfig(
+                actionCode="STAND",
+                mandatory=True,
+                terrain="flat",
+                resetProfile="TRAINED_SITTING",
+                seeds=(7, 11, 29),
+                maxSteps=100,
+                parameters={},
+                thresholds=QualificationThresholds(
+                    minSuccessRate=1.0,
+                    maxFallRate=0.0,
+                    maxMeanTrackingError=10.0,
+                    minMeanDistanceM=0.0,
+                    maxMeanEnergyProxy=10_000.0,
+                    maxActuatorClampSteps=100,
+                    maxPhysicalJointLimitViolations=0,
+                    actionMetric="standPoseError",
+                    actionMetricOperator="lte",
+                    actionMetricThreshold=0.08,
+                ),
+            ),
+        ),
     )
 
 
 def _manifest(archive: Path) -> dict[str, object]:
     with zipfile.ZipFile(archive) as source:
         return json.loads(source.read("microduck-policy-bundle.json"))
+
+
+def _extract_promoted_bundle(tmp_path: Path) -> tuple[Path, PolicyBundle]:
+    candidate = tmp_path / "candidate"
+    _write_verified_bundle(candidate)
+    promoted = qualify_and_promote(
+        candidate,
+        tmp_path / "qualified.zip",
+        _config(mandatory=True),
+        timestamp=lambda: NOW,
+    )
+    installed = tmp_path / "installed"
+    with zipfile.ZipFile(promoted.output_zip) as archive:
+        archive.extractall(installed)
+    return installed, promoted.manifest
+
+
+def _resign_mutated_promoted_bundle(
+    root: Path,
+    *,
+    mutate_report=None,
+    mutate_manifest=None,
+) -> None:
+    manifest_path = root / "microduck-policy-bundle.json"
+    manifest = json.loads(manifest_path.read_text())
+    report_path = root / "qualification/qualification-v1.json"
+    report = json.loads(report_path.read_text())
+    if mutate_report is not None:
+        mutate_report(report)
+        report_path.write_bytes(canonical_json(report))
+        report_digest = "sha256:" + hashlib.sha256(report_path.read_bytes()).hexdigest()
+        manifest["qualification"]["reportDigest"] = report_digest
+        for artifact in manifest["qualification"]["artifacts"]:
+            if artifact["path"] == "qualification/qualification-v1.json":
+                artifact["digest"] = report_digest
+    if mutate_manifest is not None:
+        mutate_manifest(manifest)
+    manifest["bundleDigest"] = None
+    normalized = PolicyBundle.model_validate(manifest)
+    artifact_digests = {}
+    for artifact in [
+        manifest["model"],
+        *manifest["policies"],
+        *manifest["qualification"].get("artifacts", []),
+        *manifest["qualification"].get("modelClosure", []),
+        *manifest["license"].get("artifacts", []),
+    ]:
+        artifact_digests[artifact["path"]] = artifact["digest"]
+    manifest["bundleDigest"] = sha256_prefixed(
+        {
+            "manifest": normalized.model_dump(
+                mode="json", by_alias=True, exclude={"bundleDigest"}
+            ),
+            "artifacts": artifact_digests,
+        }
+    )
+    manifest_path.write_bytes(canonical_json(manifest))
 
 
 def _candidate_with_unavailable_spin(root: Path):
@@ -108,6 +209,10 @@ def _candidate_with_unavailable_spin(root: Path):
     artifact_digests = {
         unsigned.model.path: unsigned.model.digest,
         unsigned.policies[0].path: unsigned.policies[0].digest,
+        **{
+            item["path"]: item["digest"]
+            for item in unsigned.license.get("artifacts", [])
+        },
     }
     rewritten = unsigned.model_copy(
         update={
@@ -205,7 +310,6 @@ def test_mandatory_action_must_be_supported_by_candidate_capabilities(tmp_path: 
     config = ReleaseConfiguration(
         release="1.0.1",
         createdAt=NOW,
-        runtimeSourceCommit="b" * 40,
         actions=(_config(mandatory=False).actions[0], spin),
     )
 
@@ -239,7 +343,7 @@ def test_battery_uses_governed_runtime_and_records_bounded_exact_identity(
     assert result.runtimeIdentifier == (
         "mjlab_microduck.rom.mujoco_runtime.MicroduckMujocoRuntime"
     )
-    assert result.runtimeSourceCommit == "b" * 40
+    assert result.runtimeRevision == runtime_revision()
     assert result.policyDigest == candidate.policies[0].digest
     assert result.modelDigest == candidate.model.digest
     assert result.sourceCommit == candidate.sourceCommit
@@ -247,12 +351,73 @@ def test_battery_uses_governed_runtime_and_records_bounded_exact_identity(
     assert result.runIdentity == "entity/project/run-id"
     assert result.resetProfile == "DEFAULT_STANDING"
     assert result.scenarioProfile == "SEEDED_SERVO_RESET_V1"
-    assert [rollout.seed for rollout in result.rollouts] == [7, 11]
-    assert all(rollout.steps <= 3 for rollout in result.rollouts)
+    assert [rollout.seed for rollout in result.rollouts] == [7, 11, 29]
+    assert all(rollout.steps <= 100 for rollout in result.rollouts)
     assert all(rollout.startedAt == NOW == rollout.finishedAt for rollout in result.rollouts)
     assert all(rollout.energyProxy >= 0.0 for rollout in result.rollouts)
-    assert all(rollout.limitViolations >= 0 for rollout in result.rollouts)
+    assert all(rollout.actuatorClampSteps >= 0 for rollout in result.rollouts)
+    assert all(
+        rollout.physicalJointLimitViolations == 0 for rollout in result.rollouts
+    )
     assert all(rollout.maxAbsAction >= 0.0 for rollout in result.rollouts)
+
+
+def test_stand_qualification_promotes_exact_discrete_runtime_success(
+    tmp_path: Path,
+) -> None:
+    """A qualified STAND must complete the governed sitting-to-standing runtime path."""
+    source = tmp_path / "candidate"
+    candidate = _rewrite_as_stand_bundle(
+        source,
+        _write_verified_bundle(
+            source,
+            policy_output=[0.0] * 14,
+            action_code="STAND",
+            task_id="Mjlab-SitStand-Flat-MicroDuck",
+        ),
+    )
+
+    promoted = qualify_and_promote(
+        source,
+        tmp_path / "stand-qualified.zip",
+        _stand_config(),
+        timestamp=lambda: NOW,
+    )
+
+    result = promoted.report.actions[0]
+    assert result.status == "PASSED"
+    assert result.actionCode == "STAND"
+    assert all(rollout.success for rollout in result.rollouts)
+    assert all(
+        rollout.stopReason == "STAND_POSE_SETTLED" for rollout in result.rollouts
+    )
+    assert result.policyDigest == candidate.policies[0].digest
+    assert promoted.manifest.actions[0].availability == "AVAILABLE"
+
+
+def test_qualification_rejects_runtime_evidence_with_wrong_seed_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A runtime result from another seed must never be attributed to this battery."""
+    source = tmp_path / "candidate"
+    _write_verified_bundle(source)
+    original = MicroduckMujocoRuntime._evidence_metrics_locked
+
+    def mismatched_seed(runtime: MicroduckMujocoRuntime):
+        metrics = original(runtime)
+        return metrics | {"rngSeed": int(metrics["rngSeed"]) + 1}
+
+    monkeypatch.setattr(
+        MicroduckMujocoRuntime, "_evidence_metrics_locked", mismatched_seed
+    )
+
+    with pytest.raises(QualificationFailed, match="identity"):
+        qualify_and_promote(
+            source,
+            tmp_path / "qualified.zip",
+            _config(mandatory=True),
+            timestamp=lambda: NOW,
+        )
 
 
 def test_promotion_is_reproducible_refuses_overwrite_and_binds_report_artifact(
@@ -276,7 +441,11 @@ def test_promotion_is_reproducible_refuses_overwrite_and_binds_report_artifact(
     assert built_first.manifest.bundleDigest != candidate.bundleDigest
     assert built_first.manifest.bundleDigest == built_second.manifest.bundleDigest
     manifest = _manifest(first)
-    report_artifact = manifest["qualification"]["artifacts"][-1]
+    report_artifact = next(
+        artifact
+        for artifact in manifest["qualification"]["artifacts"]
+        if artifact["path"] == manifest["qualification"]["reportPath"]
+    )
     with zipfile.ZipFile(first) as archive:
         report_bytes = archive.read(report_artifact["path"])
     assert "bundleDigest" not in json.loads(report_bytes)
@@ -285,6 +454,147 @@ def test_promotion_is_reproducible_refuses_overwrite_and_binds_report_artifact(
     with pytest.raises(FileExistsError, match="already exists"):
         qualify_and_promote(
             source, first, _config(mandatory=True), timestamp=lambda: NOW
+        )
+
+
+def test_promoted_fixture_carries_declared_license_evidence(tmp_path: Path) -> None:
+    """A distributable fixture without its declared license bytes loses provenance."""
+    source = tmp_path / "candidate"
+    _write_verified_bundle(source)
+    promoted = qualify_and_promote(
+        source,
+        tmp_path / "qualified.zip",
+        _config(mandatory=True),
+        timestamp=lambda: NOW,
+    )
+
+    with zipfile.ZipFile(promoted.output_zip) as archive:
+        manifest = json.loads(archive.read("microduck-policy-bundle.json"))
+        license_artifact = manifest["license"]["artifacts"][0]
+        license_bytes = archive.read(license_artifact["path"])
+
+    assert license_artifact["digest"] == (
+        "sha256:" + hashlib.sha256(license_bytes).hexdigest()
+    )
+    assert b"Apache License" in license_bytes
+
+
+def test_runtime_loader_rejects_candidate_and_accepts_exact_promoted_report(
+    tmp_path: Path,
+) -> None:
+    """A digest-valid candidate must not become executable without a promoted report."""
+    candidate = tmp_path / "candidate-only"
+    _write_verified_bundle(candidate)
+
+    with pytest.raises(ValueError, match="qualification"):
+        load_qualified_bundle(candidate)
+
+    installed, promoted = _extract_promoted_bundle(tmp_path / "promoted-case")
+    assert load_qualified_bundle(installed) == promoted
+
+
+@pytest.mark.parametrize(
+    ("mutate_report", "mutate_manifest"),
+    [
+        (
+            lambda report: report["actions"].append(dict(report["actions"][0])),
+            None,
+        ),
+        (
+            lambda report: report.update({"subjectBundleId": "forged.bundle"}),
+            None,
+        ),
+        (
+            lambda report: report.update({"subjectBundleVersion": "forged"}),
+            None,
+        ),
+        (
+            lambda report: report.update(
+                {"releaseConfigurationDigest": "sha256:" + "f" * 64}
+            ),
+            None,
+        ),
+        (
+            lambda report: report.update(
+                {"runtimeRevision": "mjlab-microduck@0.1.0+sha256:" + "f" * 64}
+            ),
+            None,
+        ),
+        (
+            lambda report: report["actions"].clear(),
+            None,
+        ),
+        (
+            lambda report: report["actions"][0].update(
+                {"status": "FAILED", "unavailableReason": "QUALIFICATION_FAILED"}
+            ),
+            None,
+        ),
+        (
+            None,
+            lambda manifest: manifest["actions"][0].update(
+                {"qualificationRefs": []}
+            ),
+        ),
+        (
+            None,
+            lambda manifest: manifest["actions"][0].update(
+                {
+                    "qualificationRefs": [
+                        "qualification/qualification-v1.json",
+                        "qualification/qualification-v1.json",
+                    ]
+                }
+            ),
+        ),
+    ],
+)
+def test_runtime_loader_rejects_semantically_forged_or_partial_reports(
+    tmp_path: Path, mutate_report, mutate_manifest
+) -> None:
+    """Re-signing forged report bytes must not bypass qualification semantics."""
+    installed, _ = _extract_promoted_bundle(tmp_path)
+    _resign_mutated_promoted_bundle(
+        installed,
+        mutate_report=mutate_report,
+        mutate_manifest=mutate_manifest,
+    )
+
+    with pytest.raises(ValueError, match="qualification"):
+        load_qualified_bundle(installed)
+
+
+@pytest.mark.parametrize("mutation", ["duplicate", "mandatory-failed", "parameters"])
+def test_private_promotion_revalidates_qualification_correspondence(
+    tmp_path: Path, mutation: str
+) -> None:
+    """Calling the packaging primitive directly must not publish forged qualification."""
+    source = tmp_path / "candidate"
+    _write_verified_bundle(source)
+    configuration = _config(mandatory=True)
+    bundle, report = qualification_module.qualify_bundle(
+        source, configuration, timestamp=lambda: NOW
+    )
+    if mutation == "duplicate":
+        forged = report.model_copy(update={"actions": (*report.actions, report.actions[0])})
+    elif mutation == "mandatory-failed":
+        failed = report.actions[0].model_copy(
+            update={"status": "FAILED", "unavailableReason": "QUALIFICATION_FAILED"}
+        )
+        forged = report.model_copy(update={"actions": (failed,)})
+    else:
+        mismatched = report.actions[0].model_copy(
+            update={"parameters": {"vxMps": 9.0, "vyMps": 0.0, "yawRateRadps": 0.0}}
+        )
+        forged = report.model_copy(update={"actions": (mismatched,)})
+
+    with pytest.raises(ValueError, match="qualification"):
+        qualification_module._promote_qualified_bundle(
+            source,
+            tmp_path / f"{mutation}.zip",
+            configuration,
+            bundle,
+            forged,
         )
 
 
@@ -305,11 +615,62 @@ def test_release_config_must_match_code_owned_reset_and_cover_available_actions(
             ReleaseConfiguration(
                 release="1.0.1",
                 createdAt=NOW,
-                runtimeSourceCommit="b" * 40,
                 actions=(walk,),
             ),
             timestamp=lambda: NOW,
         )
+
+
+def test_release_policy_rejects_rubber_stamp_batteries_and_caller_revision() -> None:
+    """One-step, one-seed batteries and caller-selected code identities are not governed."""
+    base = _config(mandatory=True).actions[0]
+    with pytest.raises(ValidationError, match="seeds"):
+        ActionQualificationConfig.model_validate(
+            base.model_dump() | {"seeds": [7]}
+        )
+    with pytest.raises(ValidationError, match="maxSteps"):
+        ActionQualificationConfig.model_validate(
+            base.model_dump() | {"maxSteps": 1}
+        )
+    with pytest.raises(ValidationError, match="runtimeSourceCommit"):
+        ReleaseConfiguration.model_validate(
+            _config(mandatory=True).model_dump(by_alias=True)
+            | {"runtimeSourceCommit": "b" * 40}
+        )
+
+
+def test_release_policy_rejects_metric_and_command_outside_action_spec(
+    tmp_path: Path,
+) -> None:
+    """A release file must not invent an evaluator metric or qualification command."""
+    source = tmp_path / "candidate"
+    _write_verified_bundle(source)
+    action = _config(mandatory=True).actions[0]
+    invalid_metric = action.model_copy(
+        update={
+            "thresholds": action.thresholds.model_copy(
+                update={"actionMetric": "inventedMetric"}
+            )
+        }
+    )
+    invalid_command = action.model_copy(
+        update={
+            "parameters": {"vxMps": 9.0, "vyMps": 0.0, "yawRateRadps": 0.0}
+        }
+    )
+
+    for declaration in (invalid_metric, invalid_command):
+        with pytest.raises(ReleaseConfigurationError, match="code-owned"):
+            qualify_and_promote(
+                source,
+                tmp_path / f"{declaration.thresholds.actionMetric}.zip",
+                ReleaseConfiguration(
+                    release="1.0.1",
+                    createdAt=NOW,
+                    actions=(declaration,),
+                ),
+                timestamp=lambda: NOW,
+            )
 
     with pytest.raises(ReleaseConfigurationError, match="WALK_VELOCITY"):
         qualify_and_promote(
@@ -318,7 +679,6 @@ def test_release_config_must_match_code_owned_reset_and_cover_available_actions(
             ReleaseConfiguration(
                 release="1.0.1",
                 createdAt=NOW,
-                runtimeSourceCommit="b" * 40,
                 actions=(),
             ),
             timestamp=lambda: NOW,
@@ -336,6 +696,17 @@ def test_promotion_never_writes_output_into_source_asset_tree(tmp_path: Path):
             source / "qualified.zip",
             _config(mandatory=True),
             timestamp=lambda: NOW,
+        )
+
+    protected_root = tmp_path / "robot-source-assets"
+    protected_root.mkdir()
+    with pytest.raises(ValueError, match="protected source root"):
+        qualify_and_promote(
+            source,
+            protected_root / "qualified.zip",
+            _config(mandatory=True),
+            timestamp=lambda: NOW,
+            protected_source_roots=(protected_root,),
         )
 
 
@@ -429,3 +800,67 @@ def test_container_entrypoint_fails_before_server_when_mounts_are_invalid(tmp_pa
     assert completed.stdout == ""
     assert completed.stderr == "container startup failed: /bundle must contain a readable manifest\n"
     assert "test-token" not in completed.stderr
+
+
+def _docker_context_includes(policy: str, path: str) -> bool:
+    ignored = False
+    for raw in policy.splitlines():
+        rule = raw.strip()
+        if not rule or rule.startswith("#"):
+            continue
+        include = rule.startswith("!")
+        pattern = rule[1:] if include else rule
+        normalized = pattern.rstrip("/")
+        matches = (
+            path == normalized
+            if "/" not in normalized
+            else PurePosixPath(path).match(normalized)
+        )
+        if pattern == "**" or matches:
+            ignored = not include
+    return not ignored
+
+
+def test_docker_context_policies_allow_only_exact_rom_copy_inputs() -> None:
+    """A new training, robot, secret, checkpoint, or output file must stay outside build context."""
+    repository = Path(__file__).parents[1]
+    tracked = subprocess.run(
+        ["git", "ls-files"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    expected = {
+        "pyproject.toml",
+        "uv.lock",
+        "README.md",
+        "LICENSE",
+        "src/mjlab_microduck/__init__.py",
+        *(
+            path
+            for path in tracked
+            if path.startswith("src/mjlab_microduck/rom/")
+            and PurePosixPath(path).parent == PurePosixPath("src/mjlab_microduck/rom")
+            and path.endswith(".py")
+        ),
+        "docker/rom-simulator/entrypoint.sh",
+    }
+    policies = [
+        (repository / ".dockerignore").read_text(),
+        (repository / "docker/rom-simulator/Dockerfile.dockerignore").read_text(),
+    ]
+    representatives = [
+        *tracked,
+        ".env",
+        "output/checkpoint.pt",
+        "src/mjlab_microduck/robot/microduck/assets/body.stl",
+        "src/mjlab_microduck/robot/microduck/assets/source.part",
+        "src/mjlab_microduck/tasks/new_training.py",
+        "tests/secret_fixture.bin",
+    ]
+    for policy in policies:
+        included = {
+            path for path in representatives if _docker_context_includes(policy, path)
+        }
+        assert included == expected

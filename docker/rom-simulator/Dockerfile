@@ -29,6 +29,8 @@ RUN mkdir -p /bundle /state \
     && chown 10001:10001 /state
 
 COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/pyproject.toml /app/pyproject.toml
+COPY --from=builder /app/LICENSE /app/LICENSE
 COPY src/mjlab_microduck/__init__.py /app/src/mjlab_microduck/__init__.py
 COPY src/mjlab_microduck/rom /app/src/mjlab_microduck/rom
 COPY --chmod=0755 docker/rom-simulator/entrypoint.sh /usr/local/bin/rom-entrypoint

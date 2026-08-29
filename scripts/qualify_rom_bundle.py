@@ -32,6 +32,13 @@ def _parser() -> argparse.ArgumentParser:
         help="MICRODUCK_ROM_RELEASE_V1 JSON policy",
     )
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--protected-source-root",
+        action="append",
+        default=[],
+        type=Path,
+        help="additional source tree beneath which promotion output is forbidden",
+    )
     return parser
 
 
@@ -48,8 +55,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     try:
+        repository_root = Path(__file__).resolve().parents[1]
+        protected_roots = (
+            repository_root / "src/mjlab_microduck/robot/microduck",
+            *(path.resolve() for path in arguments.protected_source_root),
+        )
         promoted = qualify_and_promote(
-            arguments.bundle_dir, arguments.output, configuration
+            arguments.bundle_dir,
+            arguments.output,
+            configuration,
+            protected_source_roots=protected_roots,
         )
     except FileExistsError:
         print("qualification failed: output already exists", file=sys.stderr)

@@ -26,8 +26,11 @@ from .contracts import (
 )
 from .main import load_verified_bundle
 from .mujoco_runtime import MicroduckMujocoRuntime
+from .runtime_identity import runtime_revision
 
-_REPORT_PATH = "qualification/qualification-v1.json"
+QUALIFICATION_REPORT_PATH = "qualification/qualification-v1.json"
+RELEASE_CONFIGURATION_PATH = "qualification/release-v1.json"
+SUBJECT_MANIFEST_PATH = "qualification/subject-manifest-v1.json"
 _REPORT_BINDING = "VERIFIED_INPUT_BUNDLE_DIGEST_V1"
 _RUNTIME_IDENTIFIER = (
     "mjlab_microduck.rom.mujoco_runtime.MicroduckMujocoRuntime"
@@ -45,15 +48,16 @@ class ReleaseConfigurationError(ValueError):
 class QualificationThresholds(ContractModel):
     """Aggregate pass criteria for one deterministic action battery."""
 
-    minSuccessRate: float = Field(ge=0.0, le=1.0)
-    maxFallRate: float = Field(ge=0.0, le=1.0)
-    maxMeanTrackingError: float = Field(ge=0.0)
-    minMeanDistanceM: float = Field(ge=0.0)
-    maxMeanEnergyProxy: float = Field(ge=0.0)
-    maxLimitViolations: int = Field(ge=0)
+    minSuccessRate: float = Field(ge=0.8, le=1.0, allow_inf_nan=False)
+    maxFallRate: float = Field(ge=0.0, le=0.2, allow_inf_nan=False)
+    maxMeanTrackingError: float = Field(ge=0.0, le=10.0, allow_inf_nan=False)
+    minMeanDistanceM: float = Field(ge=0.0, le=100.0, allow_inf_nan=False)
+    maxMeanEnergyProxy: float = Field(ge=0.0, le=10_000.0, allow_inf_nan=False)
+    maxActuatorClampSteps: int = Field(ge=0, le=100)
+    maxPhysicalJointLimitViolations: int = Field(ge=0, le=0)
     actionMetric: str = Field(min_length=1)
     actionMetricOperator: Literal["gte", "lte"]
-    actionMetricThreshold: float
+    actionMetricThreshold: float = Field(ge=0.0, le=100.0, allow_inf_nan=False)
 
 
 class ActionQualificationConfig(ContractModel):
@@ -63,8 +67,8 @@ class ActionQualificationConfig(ContractModel):
     mandatory: bool
     terrain: str = Field(min_length=1)
     resetProfile: str = Field(min_length=1)
-    seeds: tuple[int, ...] = Field(min_length=1)
-    maxSteps: int = Field(gt=0, le=100_000)
+    seeds: tuple[int, ...] = Field(min_length=3, max_length=16)
+    maxSteps: int = Field(ge=100, le=2_000)
     parameters: dict[str, Any]
     thresholds: QualificationThresholds
 
@@ -89,7 +93,6 @@ class ReleaseConfiguration(ContractModel):
     )
     release: str = Field(min_length=1)
     createdAt: datetime
-    runtimeSourceCommit: str = Field(pattern=r"^[0-9a-f]{40,64}$")
     actions: tuple[ActionQualificationConfig, ...]
 
     @model_validator(mode="after")
@@ -112,7 +115,8 @@ class QualificationRollout(ContractModel):
     trackingError: float | None
     distanceM: float
     energyProxy: float
-    limitViolations: int
+    actuatorClampSteps: int
+    physicalJointLimitViolations: int
     maxAbsAction: float
     actionMetric: str
     actionMetricValue: float | None
@@ -129,19 +133,23 @@ class ActionQualificationResult(ContractModel):
     scenarioProfile: str
     seeds: tuple[int, ...]
     maxSteps: int
+    parameters: dict[str, Any]
     thresholds: QualificationThresholds
     successRate: float
     fallRate: float
     meanTrackingError: float | None
     meanDistanceM: float
     meanEnergyProxy: float
-    limitViolations: int
+    actuatorClampSteps: int
+    physicalJointLimitViolations: int
     actionMetricMean: float | None
     runtimeClass: Literal["MicroduckMujocoRuntime"]
     runtimeIdentifier: Literal[
         "mjlab_microduck.rom.mujoco_runtime.MicroduckMujocoRuntime"
     ]
-    runtimeSourceCommit: str = Field(pattern=r"^[0-9a-f]{40,64}$")
+    runtimeRevision: str = Field(
+        pattern=r"^mjlab-microduck@[^+]+\+sha256:[0-9a-f]{64}$"
+    )
     simulatorVersion: str
     policyDigest: str | None
     modelDigest: str
@@ -167,7 +175,9 @@ class QualificationReport(ContractModel):
     runtimeIdentifier: Literal[
         "mjlab_microduck.rom.mujoco_runtime.MicroduckMujocoRuntime"
     ]
-    runtimeSourceCommit: str = Field(pattern=r"^[0-9a-f]{40,64}$")
+    runtimeRevision: str = Field(
+        pattern=r"^mjlab-microduck@[^+]+\+sha256:[0-9a-f]{64}$"
+    )
     modelDigest: str
     releaseConfigurationDigest: str
     actions: tuple[ActionQualificationResult, ...]
@@ -223,14 +233,10 @@ def _validate_release_configuration(
     unknown = set(configured) - set(definitions)
     if unknown:
         raise ReleaseConfigurationError(f"unknown release actions: {sorted(unknown)}")
-    uncovered = {
-        code
-        for code, action in definitions.items()
-        if action.availability == "AVAILABLE" and code not in configured
-    }
+    uncovered = set(definitions) - set(configured)
     if uncovered:
         raise ReleaseConfigurationError(
-            f"available actions require explicit release policy: {sorted(uncovered)}"
+            f"bundle actions require explicit release policy: {sorted(uncovered)}"
         )
     for code, declaration in configured.items():
         definition = definitions[code]
@@ -246,6 +252,35 @@ def _validate_release_configuration(
         if declaration.resetProfile != spec.reset_profile:
             raise ReleaseConfigurationError(
                 f"action {code} reset profile does not match code-owned semantics"
+            )
+        if declaration.terrain != spec.qualification_terrain:
+            raise ReleaseConfigurationError(
+                f"action {code} terrain does not match code-owned qualification"
+            )
+        if declaration.parameters != dict(spec.qualification_parameters):
+            raise ReleaseConfigurationError(
+                f"action {code} command does not match code-owned qualification"
+            )
+        if not spec.qualification_min_seeds <= len(
+            declaration.seeds
+        ) <= spec.qualification_max_seeds:
+            raise ReleaseConfigurationError(
+                f"action {code} seed count does not match code-owned bounds"
+            )
+        if not spec.qualification_min_steps <= declaration.maxSteps <= (
+            spec.qualification_max_steps
+        ):
+            raise ReleaseConfigurationError(
+                f"action {code} step count does not match code-owned bounds"
+            )
+        metric_operators = dict(spec.qualification_metric_operators)
+        if (
+            declaration.thresholds.actionMetric not in spec.metric_keys
+            or metric_operators.get(declaration.thresholds.actionMetric)
+            != declaration.thresholds.actionMetricOperator
+        ):
+            raise ReleaseConfigurationError(
+                f"action {code} metric does not match code-owned qualification"
             )
         if declaration.terrain != bundle.qualification.get("modelTerrain"):
             raise ReleaseConfigurationError(
@@ -263,7 +298,7 @@ def _unavailable_result(
     bundle: PolicyBundle,
     declaration: ActionQualificationConfig,
     definition: ActionDefinition,
-    runtime_source_commit: str,
+    installed_runtime_revision: str,
 ) -> ActionQualificationResult:
     spec = ACTION_RUNTIME_SPECS[declaration.actionCode]
     return ActionQualificationResult(
@@ -276,17 +311,19 @@ def _unavailable_result(
         scenarioProfile=spec.scenario_profile,
         seeds=declaration.seeds,
         maxSteps=declaration.maxSteps,
+        parameters=declaration.parameters,
         thresholds=declaration.thresholds,
         successRate=0.0,
         fallRate=0.0,
         meanTrackingError=None,
         meanDistanceM=0.0,
         meanEnergyProxy=0.0,
-        limitViolations=0,
+        actuatorClampSteps=0,
+        physicalJointLimitViolations=0,
         actionMetricMean=None,
         runtimeClass="MicroduckMujocoRuntime",
         runtimeIdentifier=_RUNTIME_IDENTIFIER,
-        runtimeSourceCommit=runtime_source_commit,
+        runtimeRevision=installed_runtime_revision,
         simulatorVersion=mujoco.__version__,
         policyDigest=None,
         modelDigest=bundle.model.digest,
@@ -302,7 +339,7 @@ def _qualify_action(
     bundle: PolicyBundle,
     declaration: ActionQualificationConfig,
     definition: ActionDefinition,
-    runtime_source_commit: str,
+    installed_runtime_revision: str,
     timestamp: Callable[[], datetime],
 ) -> ActionQualificationResult:
     spec = ACTION_RUNTIME_SPECS[declaration.actionCode]
@@ -337,9 +374,35 @@ def _qualify_action(
             runtime.safe_stop(handle, "QUALIFICATION_RUNTIME_ERROR")
             raise
         metrics = dict(evidence.metrics)
+        expected_identities = {
+            "actionCode": declaration.actionCode,
+            "bundleDigest": bundle.bundleDigest,
+            "onnxDigest": policy.digest,
+            "mjcfDigest": bundle.model.digest,
+            "sourceCommit": bundle.sourceCommit,
+            "checkpoint": policy.checkpoint,
+            "runIdentity": policy.experimentRef,
+            "terrainIdentity": declaration.terrain,
+            "rngSeed": seed,
+            "scenarioProfile": spec.scenario_profile,
+            "resetProfile": declaration.resetProfile,
+        }
+        if any(metrics.get(key) != value for key, value in expected_identities.items()):
+            raise QualificationFailed(
+                f"runtime evidence identity mismatch for {declaration.actionCode}"
+            )
         steps = _integer(metrics, "steps")
         fallen = bool(metrics.get("fallen", False))
         terminal_failed = sample is not None and sample.terminalState == "FAILED"
+        terminal_succeeded = (
+            sample is not None and sample.terminalState == "SUCCEEDED"
+        )
+        succeeded = (
+            terminal_succeeded
+            if spec.execution_mode == "DISCRETE"
+            else steps == declaration.maxSteps
+            and not terminal_failed
+        )
         action_metric_value = _number(metrics, declaration.thresholds.actionMetric)
         rollouts.append(
             QualificationRollout(
@@ -347,14 +410,15 @@ def _qualify_action(
                 startedAt=started_at,
                 finishedAt=timestamp(),
                 steps=steps,
-                success=steps == declaration.maxSteps
-                and not fallen
-                and not terminal_failed,
+                success=succeeded and not fallen,
                 fallen=fallen,
                 trackingError=_number(metrics, "trackingError"),
                 distanceM=_number(metrics, "baseTravelM") or 0.0,
                 energyProxy=_number(metrics, "energyProxy") or 0.0,
-                limitViolations=_integer(metrics, "limitViolations"),
+                actuatorClampSteps=_integer(metrics, "actuatorClampSteps"),
+                physicalJointLimitViolations=_integer(
+                    metrics, "physicalJointLimitViolations"
+                ),
                 maxAbsAction=_number(metrics, "maxAbsAction") or 0.0,
                 actionMetric=declaration.thresholds.actionMetric,
                 actionMetricValue=action_metric_value,
@@ -378,7 +442,10 @@ def _qualify_action(
     action_mean = _mean(action_values) if len(action_values) == len(rollouts) else None
     mean_distance = _mean([item.distanceM for item in rollouts])
     mean_energy = _mean([item.energyProxy for item in rollouts])
-    limit_violations = sum(item.limitViolations for item in rollouts)
+    actuator_clamp_steps = sum(item.actuatorClampSteps for item in rollouts)
+    physical_joint_limit_violations = sum(
+        item.physicalJointLimitViolations for item in rollouts
+    )
     thresholds = declaration.thresholds
     action_metric_passed = action_mean is not None and (
         action_mean >= thresholds.actionMetricThreshold
@@ -392,7 +459,9 @@ def _qualify_action(
         and mean_tracking <= thresholds.maxMeanTrackingError
         and mean_distance >= thresholds.minMeanDistanceM
         and mean_energy <= thresholds.maxMeanEnergyProxy
-        and limit_violations <= thresholds.maxLimitViolations
+        and actuator_clamp_steps <= thresholds.maxActuatorClampSteps
+        and physical_joint_limit_violations
+        <= thresholds.maxPhysicalJointLimitViolations
         and action_metric_passed
     )
     return ActionQualificationResult(
@@ -405,17 +474,19 @@ def _qualify_action(
         scenarioProfile=spec.scenario_profile,
         seeds=declaration.seeds,
         maxSteps=declaration.maxSteps,
+        parameters=declaration.parameters,
         thresholds=thresholds,
         successRate=success_rate,
         fallRate=fall_rate,
         meanTrackingError=mean_tracking,
         meanDistanceM=mean_distance,
         meanEnergyProxy=mean_energy,
-        limitViolations=limit_violations,
+        actuatorClampSteps=actuator_clamp_steps,
+        physicalJointLimitViolations=physical_joint_limit_violations,
         actionMetricMean=action_mean,
         runtimeClass="MicroduckMujocoRuntime",
         runtimeIdentifier=_RUNTIME_IDENTIFIER,
-        runtimeSourceCommit=runtime_source_commit,
+        runtimeRevision=installed_runtime_revision,
         simulatorVersion=mujoco.__version__,
         policyDigest=policy.digest,
         modelDigest=bundle.model.digest,
@@ -436,6 +507,7 @@ def qualify_bundle(
     root = Path(bundle_root).resolve()
     bundle = load_verified_bundle(root)
     _validate_release_configuration(bundle, configuration)
+    installed_runtime_revision = runtime_revision()
     definitions = {action.actionCode: action for action in bundle.actions}
     results: list[ActionQualificationResult] = []
     for declaration in configuration.actions:
@@ -445,7 +517,7 @@ def qualify_bundle(
                 bundle,
                 declaration,
                 definition,
-                configuration.runtimeSourceCommit,
+                installed_runtime_revision,
             )
         else:
             result = _qualify_action(
@@ -453,7 +525,7 @@ def qualify_bundle(
                 bundle,
                 declaration,
                 definition,
-                configuration.runtimeSourceCommit,
+                installed_runtime_revision,
                 timestamp,
             )
         results.append(result)
@@ -469,7 +541,7 @@ def qualify_bundle(
         sourceRepository=bundle.sourceRepository,
         sourceCommit=bundle.sourceCommit,
         runtimeIdentifier=_RUNTIME_IDENTIFIER,
-        runtimeSourceCommit=configuration.runtimeSourceCommit,
+        runtimeRevision=installed_runtime_revision,
         modelDigest=bundle.model.digest,
         releaseConfigurationDigest=sha256_prefixed(configuration),
         actions=tuple(results),
@@ -494,7 +566,88 @@ def _declared_artifacts(bundle: PolicyBundle) -> list[ModelArtifact]:
     return artifacts
 
 
-def promote_qualified_bundle(
+def _validate_qualification_correspondence(
+    root: Path,
+    configuration: ReleaseConfiguration,
+    bundle: PolicyBundle,
+    report: QualificationReport,
+) -> None:
+    installed = load_verified_bundle(root)
+    if installed != bundle:
+        raise ValueError("qualification bundle does not match installed candidate")
+    _validate_release_configuration(bundle, configuration)
+    if (
+        report.subjectBundleId != bundle.bundleId
+        or report.subjectBundleVersion != bundle.bundleVersion
+        or report.subjectBundleDigest != bundle.bundleDigest
+        or report.sourceRepository != bundle.sourceRepository
+        or report.sourceCommit != bundle.sourceCommit
+        or report.modelDigest != bundle.model.digest
+        or report.releaseConfigurationDigest != sha256_prefixed(configuration)
+        or report.runtimeIdentifier != _RUNTIME_IDENTIFIER
+        or report.runtimeRevision != runtime_revision()
+    ):
+        raise ValueError("qualification report identity does not match candidate")
+    results = {item.actionCode: item for item in report.actions}
+    declarations = {item.actionCode: item for item in configuration.actions}
+    definitions = {item.actionCode: item for item in bundle.actions}
+    if (
+        len(results) != len(report.actions)
+        or len(declarations) != len(configuration.actions)
+        or set(results) != set(definitions)
+        or set(declarations) != set(definitions)
+    ):
+        raise ValueError("qualification report action coverage is not exact")
+    policies = {item.policyRef: item for item in bundle.policies}
+    for code, definition in definitions.items():
+        result = results[code]
+        declaration = declarations[code]
+        spec = ACTION_RUNTIME_SPECS[code]
+        policy = policies.get(definition.policyRef or "")
+        if (
+            result.mandatory != declaration.mandatory
+            or result.terrain != declaration.terrain
+            or result.resetProfile != declaration.resetProfile
+            or result.scenarioProfile != spec.scenario_profile
+            or result.seeds != declaration.seeds
+            or result.maxSteps != declaration.maxSteps
+            or result.parameters != declaration.parameters
+            or result.thresholds != declaration.thresholds
+            or result.runtimeIdentifier != _RUNTIME_IDENTIFIER
+            or result.runtimeRevision != report.runtimeRevision
+            or result.simulatorVersion != mujoco.__version__
+            or result.modelDigest != bundle.model.digest
+            or result.sourceCommit != bundle.sourceCommit
+            or result.policyDigest
+            != (policy.digest if policy is not None else None)
+            or result.checkpoint
+            != (policy.checkpoint if policy is not None else None)
+            or result.runIdentity
+            != (policy.experimentRef if policy is not None else None)
+        ):
+            raise ValueError("qualification result does not match release policy")
+        rollout_seeds = [item.seed for item in result.rollouts]
+        if definition.availability == "AVAILABLE":
+            if rollout_seeds != list(declaration.seeds):
+                raise ValueError("qualification rollouts do not cover declared seeds")
+            if declaration.mandatory and result.status != "PASSED":
+                raise ValueError("qualification mandatory action did not pass")
+            if result.status not in {"PASSED", "FAILED"}:
+                raise ValueError("qualification available action status is invalid")
+            if result.unavailableReason != (
+                None if result.status == "PASSED" else "QUALIFICATION_FAILED"
+            ):
+                raise ValueError("qualification failure reason is invalid")
+        elif (
+            result.status != "UNAVAILABLE"
+            or result.unavailableReason != definition.unavailableReason
+            or result.rollouts
+            or declaration.mandatory
+        ):
+            raise ValueError("qualification unavailable action result is invalid")
+
+
+def _promote_qualified_bundle(
     bundle_root: Path,
     output_zip: Path,
     configuration: ReleaseConfiguration,
@@ -508,23 +661,36 @@ def promote_qualified_bundle(
         raise FileExistsError(f"bundle output already exists: {output}")
     if output.is_relative_to(root):
         raise ValueError("promoted output must remain outside the source bundle")
-    if report.subjectBundleDigest != bundle.bundleDigest:
-        raise ValueError("qualification report is not bound to the source bundle")
+    _validate_qualification_correspondence(
+        root, configuration, bundle, report
+    )
 
     report_bytes = canonical_json(report)
+    configuration_bytes = canonical_json(configuration)
+    subject_manifest_bytes = canonical_json(bundle)
     report_artifact = ModelArtifact(
-        path=_REPORT_PATH,
+        path=QUALIFICATION_REPORT_PATH,
         digest=f"sha256:{hashlib.sha256(report_bytes).hexdigest()}",
+    )
+    configuration_artifact = ModelArtifact(
+        path=RELEASE_CONFIGURATION_PATH,
+        digest=f"sha256:{hashlib.sha256(configuration_bytes).hexdigest()}",
+    )
+    subject_manifest_artifact = ModelArtifact(
+        path=SUBJECT_MANIFEST_PATH,
+        digest=f"sha256:{hashlib.sha256(subject_manifest_bytes).hexdigest()}",
     )
     result_by_code = {item.actionCode: item for item in report.actions}
     promoted_actions: list[ActionDefinition] = []
     for action in bundle.actions:
         result = result_by_code.get(action.actionCode)
-        if result is None or result.status == "UNAVAILABLE":
-            promoted_actions.append(action)
-        elif result.status == "PASSED":
+        if result is None:
+            raise ValueError("qualification report does not cover every bundle action")
+        if result.status == "UNAVAILABLE" or result.status == "PASSED":
             promoted_actions.append(
-                action.model_copy(update={"qualificationRefs": [_REPORT_PATH]})
+                action.model_copy(
+                    update={"qualificationRefs": [QUALIFICATION_REPORT_PATH]}
+                )
             )
         else:
             promoted_actions.append(
@@ -532,7 +698,7 @@ def promote_qualified_bundle(
                     update={
                         "availability": "UNAVAILABLE",
                         "unavailableReason": "QUALIFICATION_FAILED",
-                        "qualificationRefs": [_REPORT_PATH],
+                        "qualificationRefs": [QUALIFICATION_REPORT_PATH],
                     }
                 )
             )
@@ -541,10 +707,22 @@ def promote_qualified_bundle(
     if not isinstance(existing_qualification_artifacts, list):
         raise TypeError("qualification artifacts must be a list")
     qualification = bundle.qualification | {
-        "artifacts": [*existing_qualification_artifacts, report_artifact.model_dump()],
+        "artifacts": [
+            *existing_qualification_artifacts,
+            report_artifact.model_dump(),
+            configuration_artifact.model_dump(),
+            subject_manifest_artifact.model_dump(),
+        ],
         "binding": _REPORT_BINDING,
+        "reportPath": QUALIFICATION_REPORT_PATH,
         "subjectBundleDigest": bundle.bundleDigest,
+        "subjectBundleId": bundle.bundleId,
+        "subjectBundleVersion": bundle.bundleVersion,
         "reportDigest": report_artifact.digest,
+        "releaseConfigurationPath": RELEASE_CONFIGURATION_PATH,
+        "releaseConfigurationDigest": configuration_artifact.digest,
+        "subjectManifestPath": SUBJECT_MANIFEST_PATH,
+        "subjectManifestDigest": subject_manifest_artifact.digest,
     }
     unsigned = bundle.model_copy(
         update={
@@ -569,10 +747,20 @@ def promote_qualified_bundle(
             raise ValueError("bundle artifact changed after qualification")
         contents[artifact.path] = content
         artifact_digests[artifact.path] = digest
-    if _REPORT_PATH in contents:
-        raise ValueError("qualification report path already exists")
-    contents[_REPORT_PATH] = report_bytes
-    artifact_digests[_REPORT_PATH] = report_artifact.digest
+    new_artifacts = (
+        (QUALIFICATION_REPORT_PATH, report_bytes, report_artifact.digest),
+        (
+            RELEASE_CONFIGURATION_PATH,
+            configuration_bytes,
+            configuration_artifact.digest,
+        ),
+        (SUBJECT_MANIFEST_PATH, subject_manifest_bytes, subject_manifest_artifact.digest),
+    )
+    for artifact_path, artifact_bytes, artifact_digest in new_artifacts:
+        if artifact_path in contents:
+            raise ValueError("qualification artifact path already exists")
+        contents[artifact_path] = artifact_bytes
+        artifact_digests[artifact_path] = artifact_digest
     digest = sha256_prefixed(
         {
             "manifest": unsigned.model_dump(
@@ -601,6 +789,7 @@ def qualify_and_promote(
     configuration: ReleaseConfiguration,
     *,
     timestamp: Callable[[], datetime] = lambda: datetime.now(UTC),
+    protected_source_roots: tuple[Path, ...] = (),
 ) -> PromotedBundle:
     """Qualify a verified installed candidate and promote it to a new release."""
     output = Path(output_zip).resolve()
@@ -609,5 +798,8 @@ def qualify_and_promote(
     root = Path(bundle_root).resolve()
     if output.is_relative_to(root):
         raise ValueError("promoted output must remain outside the source bundle")
+    for protected_root in protected_source_roots:
+        if output.is_relative_to(Path(protected_root).resolve()):
+            raise ValueError("promoted output must remain outside protected source roots")
     bundle, report = qualify_bundle(root, configuration, timestamp=timestamp)
-    return promote_qualified_bundle(root, output, configuration, bundle, report)
+    return _promote_qualified_bundle(root, output, configuration, bundle, report)

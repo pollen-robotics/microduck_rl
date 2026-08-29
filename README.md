@@ -187,9 +187,10 @@ joint-index mappings, reward sign conventions, and NaN guards.
 
 Policy bundles can be built, qualified through the exact governed MuJoCo/ONNX
 runtime, promoted immutably, and served through the authenticated simulator API.
-The current runtime supports qualified continuous actions; discrete catalog
-entries remain explicitly unavailable until their code-owned reset and
-completion semantics exist. See [docs/rom-simulator.md](docs/rom-simulator.md)
+The runtime supports qualified continuous actions and governed `STAND` through
+the SitStand policy family; every other discrete catalog entry remains
+explicitly unavailable until its own reset and completion semantics exist. See
+[docs/rom-simulator.md](docs/rom-simulator.md)
 for the export, release-policy, Docker, curl, backup, timeout, and license
 workflow.
 

@@ -1,13 +1,14 @@
+# Deny by default. Only exact ROM container COPY inputs are admitted.
 **
 !pyproject.toml
 !uv.lock
 !README.md
 !LICENSE
 !src/
-!src/**
+!src/mjlab_microduck/
+!src/mjlab_microduck/__init__.py
+!src/mjlab_microduck/rom/
+!src/mjlab_microduck/rom/*.py
 !docker/
 !docker/rom-simulator/
 !docker/rom-simulator/entrypoint.sh
-src/mjlab_microduck/robot/microduck/assets/**/*.stl
-src/mjlab_microduck/robot/microduck/assets/**/*.part
-**/*.part

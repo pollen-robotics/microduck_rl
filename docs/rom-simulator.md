@@ -30,8 +30,10 @@ uv run scripts/build_rom_bundle.py \
 ```
 
 Never hand-convert a checkpoint. Candidate and promoted outputs must live
-outside `src/mjlab_microduck/robot/microduck`; the qualification CLI refuses to
-write beneath its source bundle directory.
+outside `src/mjlab_microduck/robot/microduck`; the qualification CLI resolves
+and protects that repository robot-source root in addition to the candidate
+bundle root. Additional protected roots can be repeated with
+`--protected-source-root`.
 
 Extract the candidate into a new staging directory:
 
@@ -55,7 +57,6 @@ Example `release.json` for the currently supported flat walking runtime:
   "schema": "MICRODUCK_ROM_RELEASE_V1",
   "release": "1.0.0",
   "createdAt": "2026-08-29T12:00:00Z",
-  "runtimeSourceCommit": "0123456789abcdef0123456789abcdef01234567",
   "actions": [
     {
       "actionCode": "WALK_VELOCITY",
@@ -71,7 +72,8 @@ Example `release.json` for the currently supported flat walking runtime:
         "maxMeanTrackingError": 0.25,
         "minMeanDistanceM": 0.5,
         "maxMeanEnergyProxy": 200.0,
-        "maxLimitViolations": 0,
+        "maxActuatorClampSteps": 0,
+        "maxPhysicalJointLimitViolations": 0,
         "actionMetric": "trackingError",
         "actionMetricOperator": "lte",
         "actionMetricThreshold": 0.25
@@ -95,8 +97,15 @@ or ZIP. An optional threshold failure remains in the catalog as
 `UNAVAILABLE / QUALIFICATION_FAILED`; a mandatory failure produces no promoted
 ZIP.
 
-The qualification report contains bounded per-seed success, fall, tracking,
-distance, normalized-action energy proxy, limit-violation, max-action, and
+Release files cannot select a runtime revision. Qualification derives it from
+the installed `mjlab-microduck` package version and a digest of the exact
+governed runtime modules. Batteries require 3–16 unique seeds and 100–2,000
+steps, and action commands, terrain, reset, action metric, and metric direction
+must match the code-owned action specification.
+
+The qualification report contains bounded per-seed success, fall, stepwise
+tracking statistics, distance, normalized-action energy proxy, separately
+counted actuator-clamp steps and physical joint-limit violations, max-action, and
 action-specific metrics, with timestamps and exact simulator, runtime, model,
 policy, source, checkpoint, and run identities. Its
 `subjectBundleDigest` is the digest of the verified candidate bytes actually
@@ -140,10 +149,14 @@ executes the verified deployment bundle with Task 7's position-actuator
 semantics. This keeps Git and training-only integration code out of the runtime
 image without floating any installed dependency version.
 
-The Dockerfile-specific ignore file and root-context `.dockerignore` exclude
-all `*.part` files and MicroDuck STL assets. The image contains no production
-or distribution-restricted model bytes; runtime model resolution is exclusively
-from the verified `/bundle` mount.
+The Dockerfile-specific ignore file and root-context `.dockerignore` are
+deny-by-default allowlists. They admit only lock/package/readme/license metadata,
+the direct ROM Python package, and the entrypoint; robot, training, tests,
+checkpoints, outputs, env files, STL, and `.part` paths remain excluded. The
+final image carries `/app/LICENSE` and the package metadata used for runtime
+revision binding. It contains no production or distribution-restricted model
+bytes; runtime model resolution is exclusively from the verified `/bundle`
+mount.
 
 ## 4. Authenticated API checks
 
@@ -189,24 +202,33 @@ curl --fail --silent -H "$AUTH" -X POST \
   "http://127.0.0.1:8000/v1/tasks/$TASK/cancel"
 ```
 
-To smoke the deadman, create another continuous task with `"leaseMs":200`, do
-not send a renewal, wait more than 200 ms, and query it:
+To smoke the deadman, create a distinct continuous task with `"leaseMs":200`,
+send no renewal, wait more than 200 ms, and query it:
 
 ```bash
+DEADMAN_TASK=22222222222222222222222222222222
+curl --fail --silent -H "$AUTH" -H 'Content-Type: application/json' \
+  -X POST http://127.0.0.1:8000/v1/tasks \
+  -d "{\"schema\":\"MICRODUCK_SIM_TASK_V1\",\"taskId\":\"$DEADMAN_TASK\",\"actionCode\":\"WALK_VELOCITY\",\"bundleVersion\":\"$BUNDLE_VERSION\",\"bundleDigest\":\"$BUNDLE_DIGEST\",\"parameters\":{\"vxMps\":0.0,\"vyMps\":0.0,\"yawRateRadps\":0.0},\"scenario\":{\"terrain\":\"flat\",\"seed\":11},\"leaseMs\":200,\"requestedBy\":\"operator-deadman-smoke\"}"
+
 sleep 0.4
 curl --fail --silent -H "$AUTH" \
-  "http://127.0.0.1:8000/v1/tasks/22222222222222222222222222222222"
+  "http://127.0.0.1:8000/v1/tasks/$DEADMAN_TASK"
 ```
 
 The durable terminal state must be `TIMED_OUT`; continuous renewal cessation
 never means success.
 
-Discrete smoke is catalog-driven. Submit a discrete action only when its catalog
-entry says `AVAILABLE`. The current conservative runtime intentionally exposes
-all discrete actions as unavailable because their reset/completion scenario
-semantics are not implemented. A request such as `SPIN` therefore returns the
-stable `ACTION_UNAVAILABLE` error; do not reinterpret that as a successful
-discrete smoke or claim discrete production support.
+Discrete smoke is catalog-driven. `STAND` has exact SitStand-family runtime
+semantics: `TRAINED_SITTING` reset, fixed `SIT_FLAG_ZERO` posture goal, fall
+handling, and sustained `STAND_POSE_SETTLED` completion. It is `AVAILABLE` only
+when the mounted bundle includes the matching SitStand ONNX/model and a passing
+governed STAND result. The deterministic nonrestricted handoff fixture
+demonstrates an authenticated `STAND` request progressing
+`ACCEPTED` → `RUNNING` → `SUCCEEDED`; it does not claim a production robot
+checkpoint. Other discrete actions such as `SPIN` remain unavailable until
+their own exact artifacts and semantics pass qualification, and return the
+stable `ACTION_UNAVAILABLE` error.
 
 ## 5. Persistence, restart, and backup
 
@@ -225,12 +247,13 @@ across process death. Clients must inspect the task and create a new intent.
 
 ## 6. License boundary and troubleshooting
 
-The Python code and container packaging are Apache-2.0. Repository 3D model
+The Python code and container packaging are Apache-2.0; the image includes the
+repository `LICENSE`. Repository 3D model
 files are CC BY-SA-NC and are deliberately excluded from the image. A bundle
 mount is a separately reviewed distribution unit: include only assets and
 attributions whose redistribution is authorized for the target use. The
-deterministic handoff fixture uses a minimal test MJCF and contains no production
-STL or `.part` file.
+deterministic handoff fixture uses a minimal test MJCF, embeds a declared
+Apache-2.0 license artifact, and contains no production STL or `.part` file.
 
 Stable operator signals:
 
@@ -238,6 +261,7 @@ Stable operator signals:
 |---|---|
 | `BEARER_TOKEN_MISSING` | Configure a nonempty secret through an env file or secret manager. |
 | `BUNDLE_UNAVAILABLE` | Mount an extracted promoted bundle at `/bundle`; verify manifest and artifact bytes. |
+| `QUALIFICATION_UNAVAILABLE` | Candidate, missing, forged, duplicate, mismatched, or partial qualification data was rejected; mount the exact promoted output. |
 | `STATE_DB_UNAVAILABLE` | Make `/state` writable by UID/GID 10001 and verify free space. |
 | `RUNTIME_UNAVAILABLE` | Bundle verification passed but model/policy/runtime preflight failed; rebuild from exact governed artifacts. |
 | `WATCHDOG_UNHEALTHY` | Restart and investigate host scheduling/resource pressure before accepting motion. |

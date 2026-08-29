@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import time
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -31,6 +33,12 @@ from mjlab_microduck.rom.main import create_configured_app, load_verified_bundle
 from mjlab_microduck.rom.mujoco_runtime import MicroduckMujocoRuntime
 from mjlab_microduck.rom.observation import DEFAULT_JOINT_POSE
 from mjlab_microduck.rom.onnx_policy import inspect_normalized_actor
+from mjlab_microduck.rom.qualification import (
+    ActionQualificationConfig,
+    QualificationThresholds,
+    ReleaseConfiguration,
+    qualify_and_promote,
+)
 from mjlab_microduck.rom.service import SimulatorTaskService
 from mjlab_microduck.rom.store import SqliteTaskStore
 
@@ -456,8 +464,11 @@ def _write_verified_bundle(
 ) -> PolicyBundle:
     model_path = root / "models" / "robot.xml"
     policy_path = root / "policies" / "walk.onnx"
+    license_path = root / "licenses" / "Apache-2.0.txt"
     model_path.parent.mkdir(parents=True)
     policy_path.parent.mkdir(parents=True)
+    license_path.parent.mkdir(parents=True)
+    license_path.write_bytes((Path(__file__).parents[1] / "LICENSE").read_bytes())
     dependency_path = root / "models" / "extra.xml"
     if include_dependency:
         dependency_path.write_text("<mujoco><default/></mujoco>")
@@ -611,11 +622,20 @@ def _write_verified_bundle(
                 else []
             ),
         },
-        license={"artifacts": []},
+        license={
+            "spdx": "Apache-2.0",
+            "artifacts": [
+                {
+                    "path": "licenses/Apache-2.0.txt",
+                    "digest": _digest(license_path),
+                }
+            ],
+        },
     )
     artifact_digests = {
         unsigned.model.path: unsigned.model.digest,
         policy.path: policy.digest,
+        "licenses/Apache-2.0.txt": _digest(license_path),
     }
     if include_dependency and declare_dependency:
         artifact_digests["models/extra.xml"] = _digest(dependency_path)
@@ -667,12 +687,16 @@ def _rewrite_as_stand_bundle(root: Path, source: PolicyBundle) -> PolicyBundle:
             "type": "object",
             "additionalProperties": False,
             "properties": {},
+            "x-microduck-fixed-goal": "STAND",
         },
         completion=CompletionContract(
             terminalConditions=["TASK_COMPLETE", "FALLEN", "TIMEOUT"],
             maxDurationMs=15_000,
         ),
-        preconditions={"allowedTerrains": ["flat"]},
+        preconditions={
+            "allowedTerrains": ["flat"],
+            "scenarioProfile": "SEEDED_SERVO_RESET_V1",
+        },
     )
     unsigned = source.model_copy(
         update={"bundleDigest": None, "policies": [policy], "actions": [action]}
@@ -680,6 +704,10 @@ def _rewrite_as_stand_bundle(root: Path, source: PolicyBundle) -> PolicyBundle:
     digests = {
         source.model.path: source.model.digest,
         policy.path: policy.digest,
+        **{
+            item["path"]: item["digest"]
+            for item in source.license.get("artifacts", [])
+        },
     }
     rewritten = unsigned.model_copy(
         update={
@@ -720,6 +748,10 @@ def test_runtime_readiness_rejects_available_action_with_wrong_policy_task_ident
     artifact_digests = {
         source.model.path: source.model.digest,
         source.policies[0].path: source.policies[0].digest,
+        **{
+            item["path"]: item["digest"]
+            for item in source.license.get("artifacts", [])
+        },
     }
     rewritten = unsigned.model_copy(
         update={
@@ -825,6 +857,10 @@ def test_runtime_readiness_rejects_action_preconditions_outside_qualification(
     artifacts = {
         source.model.path: source.model.digest,
         source.policies[0].path: source.policies[0].digest,
+        **{
+            item["path"]: item["digest"]
+            for item in source.license.get("artifacts", [])
+        },
     }
     rewritten = unsigned.model_copy(
         update={
@@ -1026,7 +1062,8 @@ def test_runtime_executes_real_onnx_at_50hz_and_maps_actions_by_joint_name(
         "finalTiltRad": pytest.approx(0.0),
         "maxAbsAction": pytest.approx(0.13),
         "energyProxy": pytest.approx(0.00182),
-        "limitViolations": 0,
+        "actuatorClampSteps": 0,
+        "physicalJointLimitViolations": 0,
         "maxTiltRad": pytest.approx(0.0),
         "minBaseHeightM": pytest.approx(0.12),
         "mjcfDigest": bundle.model.digest,
@@ -1037,14 +1074,61 @@ def test_runtime_executes_real_onnx_at_50hz_and_maps_actions_by_joint_name(
         "scenarioProfile": "SEEDED_SERVO_RESET_V1",
         "resetPerturbationL2Rad": pytest.approx(0.01045295),
         "resetProfile": "DEFAULT_STANDING",
-        "modelIdentity": bundle.model.digest,
         "sourceCommit": SOURCE_COMMIT,
         "steps": 1,
         "loopOverruns": 0,
         "trackingError": pytest.approx(0.355429, abs=1e-6),
+        "trackingErrorMax": pytest.approx(0.355429, abs=1e-6),
+        "trackingErrorSamples": 1,
     }
     assert runtime.status().limp is False
     assert runtime.status().activeTaskId is None
+
+
+def test_runtime_accumulates_tracking_and_distinguishes_clamp_from_joint_limit(
+    tmp_path: Path,
+) -> None:
+    """A final-sample error or combined limit counter would misstate rollout quality."""
+    clamped_root = tmp_path / "clamped"
+    clamped_bundle = _write_verified_bundle(
+        clamped_root, policy_output=np.full(14, 100.0, dtype=np.float32)
+    )
+    clamped_runtime = MicroduckMujocoRuntime(
+        clamped_root, clamped_bundle, realtime=False
+    )
+    request = _request().model_copy(update={"bundleDigest": clamped_bundle.bundleDigest})
+    handle = clamped_runtime.start(clamped_bundle.actions[0], request)
+    clamped_runtime.sample(handle)
+    clamped_runtime.sample(handle)
+    clamped = clamped_runtime.safe_stop(handle, "TEST_COMPLETE").metrics
+
+    assert clamped["trackingErrorSamples"] == 2
+    assert clamped["trackingError"] <= clamped["trackingErrorMax"]
+    assert clamped["actuatorClampSteps"] == 2
+    assert clamped["physicalJointLimitViolations"] == 0
+
+    violated_root = tmp_path / "violated"
+    violated_bundle = _write_verified_bundle(violated_root)
+    violated_runtime = MicroduckMujocoRuntime(
+        violated_root, violated_bundle, realtime=False
+    )
+    violated_request = _request().model_copy(
+        update={"bundleDigest": violated_bundle.bundleDigest}
+    )
+    violated_handle = violated_runtime.start(
+        violated_bundle.actions[0], violated_request
+    )
+    joint_id = violated_runtime._joint_ids[0]
+    qpos_index = violated_runtime._joint_qpos_indices[0]
+    violated_runtime._data.qpos[qpos_index] = (
+        violated_runtime._model.jnt_range[joint_id][1] + 1.0
+    )
+    violated_runtime.sample(violated_handle)
+    violated = violated_runtime.safe_stop(
+        violated_handle, "TEST_COMPLETE"
+    ).metrics
+
+    assert violated["physicalJointLimitViolations"] == 1
 
 
 def test_runtime_policy_output_depends_on_exact_command_observation_slot(
@@ -1448,44 +1532,122 @@ def test_runtime_reports_requested_and_safety_limited_command_separately(
     assert status.limitingReason == "COMMAND_LIMIT"
 
 
-def test_discrete_action_without_exact_runtime_semantics_is_refused(
+def test_stand_uses_trained_sitting_reset_fixed_goal_and_settled_completion(
     tmp_path: Path,
 ) -> None:
-    """A manifest Python name must never turn an unsupported maneuver into success."""
+    """STAND must run the SitStand family from its real sitting reset to settled success."""
     root = tmp_path / "bundle"
-    bundle = _rewrite_as_stand_bundle(root, _write_verified_bundle(root))
-    with pytest.raises(ValueError, match="no runtime semantics"):
-        MicroduckMujocoRuntime(root, bundle, realtime=False)
+    source = _write_verified_bundle(
+        root,
+        policy_output=np.zeros(14, dtype=np.float32),
+        action_code="STAND",
+        task_id="Mjlab-SitStand-Flat-MicroDuck",
+    )
+    bundle = _rewrite_as_stand_bundle(root, source)
+    runtime = MicroduckMujocoRuntime(root, bundle, realtime=False)
+    request = TaskCreateRequest(
+        schema="MICRODUCK_SIM_TASK_V1",
+        taskId="3" * 32,
+        actionCode="STAND",
+        bundleVersion=bundle.bundleVersion,
+        bundleDigest=bundle.bundleDigest,
+        parameters={},
+        scenario={"terrain": "flat", "seed": 7},
+        requestedBy="stand-runtime-test",
+    )
+
+    runtime.validate(bundle.actions[0], request)
+    handle = runtime.start(bundle.actions[0], request)
+    assert runtime._data.qpos[runtime._joint_qpos_indices[3]] == pytest.approx(
+        1.35, abs=0.01
+    )
+    sample = runtime.sample(handle)
+    for _ in range(299):
+        if not sample.running:
+            break
+        sample = runtime.sample(handle)
+
+    evidence = runtime.safe_stop(handle, "TASK_COMPLETE")
+    assert sample.terminalState == "SUCCEEDED"
+    assert sample.stopReason == "STAND_POSE_SETTLED"
+    assert evidence.metrics["resetProfile"] == "TRAINED_SITTING"
+    assert evidence.metrics["standPoseError"] <= 0.08
+    assert evidence.metrics["trackingErrorSamples"] > 0
 
 
-def test_configured_app_composes_verified_ready_concrete_runtime(
+def test_configured_app_rejects_candidate_and_composes_promoted_runtime(
     tmp_path: Path,
 ) -> None:
-    """Leaving the Task-6 placeholder selected would keep valid installations unready."""
-    root = tmp_path / "bundle"
-    bundle = _write_verified_bundle(root)
-    app = create_configured_app(
+    """Hash-valid candidate bytes must never become executable before qualification."""
+    candidate_root = tmp_path / "candidate"
+    candidate = _write_verified_bundle(candidate_root)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    candidate_app = create_configured_app(
         {
-            "MICRODUCK_ROM_BUNDLE_DIR": str(root),
-            "MICRODUCK_ROM_STATE_DB": str(tmp_path / "state" / "tasks.sqlite"),
+            "MICRODUCK_ROM_BUNDLE_DIR": str(candidate_root),
+            "MICRODUCK_ROM_STATE_DB": str(state_dir / "tasks.sqlite"),
             "MICRODUCK_ROM_BEARER_TOKEN": "secret-token",
             "MICRODUCK_ROM_HOST": "127.0.0.1",
             "MICRODUCK_ROM_PORT": "8000",
         }
     )
-    (tmp_path / "state").mkdir(exist_ok=True)
+    assert candidate_app.state.readiness_reason_codes == [
+        "QUALIFICATION_UNAVAILABLE"
+    ]
 
-    # Recompose after the state directory exists; the first pass must remain fail-closed.
-    assert app.state.readiness_reason_codes == ["STATE_DB_UNAVAILABLE"]
-    state_db = tmp_path / "state" / "tasks.sqlite"
-    interrupted = _request().model_copy(update={"bundleDigest": bundle.bundleDigest})
+    configuration = ReleaseConfiguration(
+        release="1.0.1",
+        createdAt=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+        actions=(
+            ActionQualificationConfig(
+                actionCode="WALK_VELOCITY",
+                mandatory=True,
+                terrain="flat",
+                resetProfile="DEFAULT_STANDING",
+                seeds=(7, 11, 29),
+                maxSteps=100,
+                parameters={"vxMps": 0.1, "vyMps": 0.0, "yawRateRadps": 0.0},
+                thresholds=QualificationThresholds(
+                    minSuccessRate=1.0,
+                    maxFallRate=0.0,
+                    maxMeanTrackingError=10.0,
+                    minMeanDistanceM=0.0,
+                    maxMeanEnergyProxy=10_000.0,
+                    maxActuatorClampSteps=100,
+                    maxPhysicalJointLimitViolations=0,
+                    actionMetric="trackingError",
+                    actionMetricOperator="lte",
+                    actionMetricThreshold=10.0,
+                ),
+            ),
+        ),
+    )
+    promoted_zip = tmp_path / "qualified.zip"
+    promoted = qualify_and_promote(
+        candidate_root,
+        promoted_zip,
+        configuration,
+        timestamp=lambda: datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+    )
+    qualified_root = tmp_path / "qualified"
+    with zipfile.ZipFile(promoted_zip) as archive:
+        archive.extractall(qualified_root)
+
+    state_db = state_dir / "tasks.sqlite"
+    interrupted = _request().model_copy(
+        update={
+            "bundleVersion": promoted.manifest.bundleVersion,
+            "bundleDigest": promoted.manifest.bundleDigest,
+        }
+    )
     store = SqliteTaskStore(state_db)
     store.create(interrupted, sha256_prefixed(interrupted))
     store.transition(interrupted.taskId, "VALIDATING", event_type="TASK_VALIDATING")
     store.transition(interrupted.taskId, "RUNNING", event_type="TASK_STARTED")
     ready_app = create_configured_app(
         {
-            "MICRODUCK_ROM_BUNDLE_DIR": str(root),
+            "MICRODUCK_ROM_BUNDLE_DIR": str(qualified_root),
             "MICRODUCK_ROM_STATE_DB": str(state_db),
             "MICRODUCK_ROM_BEARER_TOKEN": "secret-token",
             "MICRODUCK_ROM_HOST": "127.0.0.1",
@@ -1501,8 +1663,102 @@ def test_configured_app_composes_verified_ready_concrete_runtime(
         "ready": True,
         "reasonCodes": [],
         "robotModel": "MICRODUCK",
-        "bundleId": bundle.bundleId,
-        "bundleVersion": bundle.bundleVersion,
-        "bundleDigest": bundle.bundleDigest,
+        "bundleId": candidate.bundleId,
+        "bundleVersion": promoted.manifest.bundleVersion,
+        "bundleDigest": promoted.manifest.bundleDigest,
     }
     assert SqliteTaskStore(state_db).get(interrupted.taskId).state == "UNKNOWN"
+
+
+def test_qualified_stand_api_runs_from_accepted_to_succeeded(
+    tmp_path: Path,
+) -> None:
+    """The concrete API must expose genuine governed discrete completion, not a fake runtime."""
+    candidate_root = tmp_path / "candidate"
+    candidate = _rewrite_as_stand_bundle(
+        candidate_root,
+        _write_verified_bundle(
+            candidate_root,
+            policy_output=np.zeros(14, dtype=np.float32),
+            action_code="STAND",
+            task_id="Mjlab-SitStand-Flat-MicroDuck",
+        ),
+    )
+    configuration = ReleaseConfiguration(
+        release="1.0.1",
+        createdAt=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+        actions=(
+            ActionQualificationConfig(
+                actionCode="STAND",
+                mandatory=True,
+                terrain="flat",
+                resetProfile="TRAINED_SITTING",
+                seeds=(7, 11, 29),
+                maxSteps=100,
+                parameters={},
+                thresholds=QualificationThresholds(
+                    minSuccessRate=1.0,
+                    maxFallRate=0.0,
+                    maxMeanTrackingError=10.0,
+                    minMeanDistanceM=0.0,
+                    maxMeanEnergyProxy=10_000.0,
+                    maxActuatorClampSteps=100,
+                    maxPhysicalJointLimitViolations=0,
+                    actionMetric="standPoseError",
+                    actionMetricOperator="lte",
+                    actionMetricThreshold=0.08,
+                ),
+            ),
+        ),
+    )
+    promoted_zip = tmp_path / "stand-qualified.zip"
+    promoted = qualify_and_promote(
+        candidate_root,
+        promoted_zip,
+        configuration,
+        timestamp=lambda: datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+    )
+    installed = tmp_path / "installed"
+    with zipfile.ZipFile(promoted_zip) as archive:
+        archive.extractall(installed)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    app = create_configured_app(
+        {
+            "MICRODUCK_ROM_BUNDLE_DIR": str(installed),
+            "MICRODUCK_ROM_STATE_DB": str(state_dir / "tasks.sqlite"),
+            "MICRODUCK_ROM_BEARER_TOKEN": "secret-token",
+        }
+    )
+    headers = {"Authorization": "Bearer secret-token"}
+    with TestClient(app) as client:
+        created = client.post(
+            "/v1/tasks",
+            headers=headers,
+            json={
+                "schema": "MICRODUCK_SIM_TASK_V1",
+                "taskId": "4" * 32,
+                "actionCode": "STAND",
+                "bundleVersion": promoted.manifest.bundleVersion,
+                "bundleDigest": promoted.manifest.bundleDigest,
+                "parameters": {},
+                "scenario": {"terrain": "flat", "seed": 7},
+                "requestedBy": "stand-api-test",
+            },
+        )
+        assert created.status_code == 202
+        assert created.json()["state"] == "ACCEPTED"
+        deadline = time.monotonic() + 5.0
+        observed = []
+        while time.monotonic() < deadline:
+            snapshot = client.get("/v1/tasks/" + "4" * 32, headers=headers).json()
+            observed.append(snapshot["state"])
+            if snapshot["state"] == "SUCCEEDED":
+                break
+            time.sleep(0.02)
+
+    assert "RUNNING" in observed
+    assert snapshot["state"] == "SUCCEEDED"
+    assert snapshot["stopReason"] == "TASK_COMPLETE"
+    assert snapshot["evidence"]["metrics"]["standSettledSteps"] >= 10
+    assert candidate.bundleId == promoted.manifest.bundleId

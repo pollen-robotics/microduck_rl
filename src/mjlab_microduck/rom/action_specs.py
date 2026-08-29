@@ -7,7 +7,7 @@ command, safety, completion, and evidence implementation for its task family.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 
@@ -28,6 +28,15 @@ class RuntimeActionSpec:
     unavailable_reason: str | None = None
     scenario_fields: tuple[str, ...] = ("terrain", "seed")
     scenario_profile: str = "SEEDED_SERVO_RESET_V1"
+    qualification_terrain: str = "flat"
+    qualification_parameters: tuple[tuple[str, float], ...] = ()
+    qualification_min_seeds: int = 3
+    qualification_max_seeds: int = 16
+    qualification_min_steps: int = 100
+    qualification_max_steps: int = 2_000
+    qualification_metric_operators: tuple[
+        tuple[str, Literal["gte", "lte"]], ...
+    ] = ()
 
 
 def _unsupported(
@@ -146,16 +155,19 @@ ACTION_RUNTIME_SPECS.update(
                 completion="SIT_POSE_SETTLED",
                 metrics=("sitPoseError",),
             ),
-            _unsupported(
-                "STAND",
-                "Mjlab-SitStand-Flat-MicroDuck",
-                capabilities=("SITTING_RESET",),
-                reset="TRAINED_SITTING",
-                command="SIT_FLAG_ZERO",
-                period=None,
-                fall="FAIL_ON_FALL",
-                completion="STAND_POSE_SETTLED",
-                metrics=("standPoseError",),
+            RuntimeActionSpec(
+                action_code="STAND",
+                execution_mode="DISCRETE",
+                task_ids=("Mjlab-SitStand-Flat-MicroDuck",),
+                required_capabilities=("FLAT_TERRAIN", "SITTING_RESET"),
+                reset_profile="TRAINED_SITTING",
+                command_profile="SIT_FLAG_ZERO",
+                phase_period_s=None,
+                kick_mirror="NONE",
+                fall_policy="FAIL_ON_FALL",
+                completion_profile="STAND_POSE_SETTLED",
+                metric_keys=("standPoseError",),
+                supported=True,
             ),
             _unsupported(
                 "GROUND_PICK",
@@ -247,3 +259,32 @@ ACTION_RUNTIME_SPECS.update(
         )
     }
 )
+
+_QUALIFICATION_PARAMETERS = {
+    "WALK_VELOCITY": (("vxMps", 0.1), ("vyMps", 0.0), ("yawRateRadps", 0.0)),
+    "VELSTAND_VELOCITY": (("vxMps", 0.1), ("vyMps", 0.0), ("yawRateRadps", 0.0)),
+    "ROLLER_VELOCITY": (("vxMps", 0.1), ("vyMps", 0.0), ("yawRateRadps", 0.0)),
+    "SWIZZLE": (("vxMps", 0.0), ("vyMps", 0.0), ("yawRateRadps", 0.5)),
+    "ROLLER_SLOPE": (("vxMps", 0.0), ("vyMps", 0.0), ("yawRateRadps", 0.0)),
+}
+_LESS_IS_BETTER_METRICS = {
+    "trackingError",
+    "standPoseError",
+    "sitPoseError",
+    "settlingError",
+    "returnPoseError",
+    "yawRateError",
+}
+for _code, _spec in tuple(ACTION_RUNTIME_SPECS.items()):
+    ACTION_RUNTIME_SPECS[_code] = replace(
+        _spec,
+        qualification_terrain="ramp" if _code == "ROLLER_SLOPE" else "flat",
+        qualification_parameters=_QUALIFICATION_PARAMETERS.get(_code, ()),
+        qualification_metric_operators=tuple(
+            (
+                metric,
+                "lte" if metric in _LESS_IS_BETTER_METRICS else "gte",
+            )
+            for metric in _spec.metric_keys
+        ),
+    )
