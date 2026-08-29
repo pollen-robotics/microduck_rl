@@ -422,9 +422,22 @@ class MicroduckMujocoRuntime:
                 != mujoco.mjtBias.mjBIAS_AFFINE
                 or self._model.actuator_gainprm[actuator_id, 0] <= 0.0
                 or not math.isclose(
+                    self._model.actuator_biasprm[actuator_id, 0],
+                    0.0,
+                    abs_tol=1e-12,
+                    rel_tol=0.0,
+                )
+                or not math.isclose(
                     self._model.actuator_biasprm[actuator_id, 1],
                     -self._model.actuator_gainprm[actuator_id, 0],
                     abs_tol=1e-12,
+                    rel_tol=0.0,
+                )
+                or not math.isclose(
+                    self._model.actuator_biasprm[actuator_id, 2],
+                    0.0,
+                    abs_tol=1e-12,
+                    rel_tol=0.0,
                 )
             ):
                 raise ValueError(
@@ -1000,8 +1013,8 @@ class MicroduckMujocoRuntime:
     def _disable_actuators_locked(self) -> None:
         """Make fatal limp truthful by removing position-servo gain and bias."""
         self._data.ctrl[self._actuator_indices] = 0.0
-        self._model.actuator_gainprm[self._actuator_indices, 0] = 0.0
-        self._model.actuator_biasprm[self._actuator_indices, 1:3] = 0.0
+        self._model.actuator_gainprm[self._actuator_indices] = 0.0
+        self._model.actuator_biasprm[self._actuator_indices] = 0.0
 
     def _encoder_positions(self) -> NDArray[np.float64]:
         return (

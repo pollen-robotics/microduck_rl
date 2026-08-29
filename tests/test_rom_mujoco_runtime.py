@@ -55,6 +55,8 @@ def _write_policy(
     normalizer_std_values: np.ndarray | None = None,
     identity_before_normalizer: bool = False,
     bypass_normalizer: bool = False,
+    second_normalizer: bool = False,
+    actor_post_normalization: bool = False,
     task_id: str = TASK_ID,
 ) -> None:
     output_values = (
@@ -96,7 +98,15 @@ def _write_policy(
         weight_values.ravel(),
     )
     bias = helper.make_tensor("bias", TensorProto.FLOAT, [14], output_values.ravel())
+    second_mean = helper.make_tensor(
+        "second_mean", TensorProto.FLOAT, [61], [0.25] * 61
+    )
+    second_std = helper.make_tensor("second_std", TensorProto.FLOAT, [61], [2.0] * 61)
+    actor_mean = helper.make_tensor("actor_mean", TensorProto.FLOAT, [14], [0.25] * 14)
+    actor_std = helper.make_tensor("actor_std", TensorProto.FLOAT, [14], [2.0] * 14)
     normalizer_input = "prefixed" if identity_before_normalizer else "observations"
+    actor_input = "normalized_twice" if second_normalizer else "normalized"
+    linear_output = "linear_raw" if actor_post_normalization else "linear"
     nodes = [
         *(
             [helper.make_node("Identity", ["observations"], ["prefixed"])]
@@ -105,19 +115,48 @@ def _write_policy(
         ),
         helper.make_node("Sub", [normalizer_input, "normalizer_mean"], ["centered"]),
         helper.make_node("Div", ["centered", "normalizer_std"], ["normalized"]),
+        *(
+            [
+                helper.make_node(
+                    "Sub", ["normalized", "second_mean"], ["centered_twice"]
+                ),
+                helper.make_node(
+                    "Div",
+                    ["centered_twice", "second_std"],
+                    ["normalized_twice"],
+                ),
+            ]
+            if second_normalizer
+            else []
+        ),
         helper.make_node(
             "MatMul",
-            ["observations" if bypass_normalizer else "normalized", "weights"],
-            ["linear"],
+            ["observations" if bypass_normalizer else actor_input, "weights"],
+            [linear_output],
+        ),
+        *(
+            [
+                helper.make_node(
+                    "Sub", ["linear_raw", "actor_mean"], ["actor_centered"]
+                ),
+                helper.make_node("Div", ["actor_centered", "actor_std"], ["linear"]),
+            ]
+            if actor_post_normalization
+            else []
         ),
         helper.make_node("Add", ["linear", "bias"], ["actions"]),
     ]
+    initializers = [normalizer_mean, normalizer_std, weights, bias]
+    if second_normalizer:
+        initializers.extend([second_mean, second_std])
+    if actor_post_normalization:
+        initializers.extend([actor_mean, actor_std])
     graph = helper.make_graph(
         nodes,
         "fixture-policy",
         [observations],
         [actions],
-        [normalizer_mean, normalizer_std, weights, bias],
+        initializers,
     )
     model = helper.make_model(
         graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=10
@@ -154,6 +193,14 @@ def _write_model(
     gyro_kind: str = "gyro",
     imu_site_quat: str = "1 0 0 0",
     roller_topology: bool = False,
+    floor_pos: str = "0 0 0",
+    floor_quat: str = "1 0 0 0",
+    floor_contype: int = 1,
+    floor_conaffinity: int = 1,
+    wheel_contype: int = 1,
+    wheel_conaffinity: int = 1,
+    trunk_contype: int = 1,
+    trunk_conaffinity: int = 1,
 ) -> None:
     bodies: list[str] = []
     closing: list[str] = []
@@ -173,7 +220,7 @@ def _write_model(
                 *(
                     [
                         f'<body name="wheel_{wheel}"><joint name="passive_{wheel}_wheel" type="hinge" axis="0 1 0"/>'
-                        '<geom type="cylinder" size="0.003 0.002" mass="0.001"/></body>'
+                        f'<geom type="cylinder" size="0.003 0.002" mass="0.001" contype="{wheel_contype}" conaffinity="{wheel_conaffinity}"/></body>'
                         for wheel in (
                             ("LF", "LR") if joint == "left_ankle" else ("RF", "RR")
                         )
@@ -203,6 +250,16 @@ def _write_model(
                 'gaintype="fixed" biastype="affine" '
                 'gainprm="1" biasprm="0 -1 0"/>'
             )
+        if actuator_kind == "general_affine_offset":
+            return (
+                f'<general {common} gaintype="fixed" biastype="affine" '
+                'gainprm="1" biasprm="0.25 -1 0"/>'
+            )
+        if actuator_kind == "general_velocity_bias":
+            return (
+                f'<general {common} gaintype="fixed" biastype="affine" '
+                'gainprm="1" biasprm="0 -1 0.25"/>'
+            )
         return f"<{actuator_kind} {common}/>"
 
     actuators = "\n".join(
@@ -219,10 +276,14 @@ def _write_model(
   {f'<include file="{include_file}"/>' if include_file else ""}
   <option timestep="0.005" gravity="0 0 0"/>
   <worldbody>
-    <geom name="floor" type="plane" size="0 0 0.05"/>
+    <geom name="floor" type="plane" size="0 0 0.05" pos="{floor_pos}" quat="{
+            floor_quat
+        }" contype="{floor_contype}" conaffinity="{floor_conaffinity}"/>
     <body name="trunk_base" pos="0 0 0.12">
       {"" if freejoint_on_child else '<freejoint name="trunk_base_freejoint"/>'}
-      <geom type="sphere" size="0.01" mass="0.1"/>
+      <geom type="sphere" size="0.01" mass="0.1" contype="{
+            trunk_contype
+        }" conaffinity="{trunk_conaffinity}"/>
       <site name="imu" quat="{imu_site_quat}"/>
       <body name="roller"><joint name="passive_wheel" type="hinge"/><geom type="sphere" size="0.002" mass="0.001"/></body>
       {"".join(bodies)}
@@ -270,6 +331,14 @@ def _write_verified_bundle(
     action_code: str = "WALK_VELOCITY",
     task_id: str = TASK_ID,
     roller_topology: bool = False,
+    floor_pos: str = "0 0 0",
+    floor_quat: str = "1 0 0 0",
+    floor_contype: int = 1,
+    floor_conaffinity: int = 1,
+    wheel_contype: int = 1,
+    wheel_conaffinity: int = 1,
+    trunk_contype: int = 1,
+    trunk_conaffinity: int = 1,
 ) -> PolicyBundle:
     model_path = root / "models" / "robot.xml"
     policy_path = root / "policies" / "walk.onnx"
@@ -288,6 +357,14 @@ def _write_verified_bundle(
         gyro_kind=gyro_kind,
         imu_site_quat=imu_site_quat,
         roller_topology=roller_topology,
+        floor_pos=floor_pos,
+        floor_quat=floor_quat,
+        floor_contype=floor_contype,
+        floor_conaffinity=floor_conaffinity,
+        wheel_contype=wheel_contype,
+        wheel_conaffinity=wheel_conaffinity,
+        trunk_contype=trunk_contype,
+        trunk_conaffinity=trunk_conaffinity,
         include_file="extra.xml" if include_dependency else None,
     )
     _write_policy(
@@ -549,6 +626,47 @@ def test_runtime_readiness_rejects_available_action_with_wrong_policy_task_ident
         MicroduckMujocoRuntime(root, verified, realtime=False)
 
 
+@pytest.mark.parametrize(
+    "fixture",
+    [
+        {"floor_quat": "0.70710678 0.70710678 0 0"},
+        {"floor_pos": "0 0 2"},
+        {
+            "floor_contype": 4,
+            "floor_conaffinity": 4,
+            "trunk_contype": 4,
+            "trunk_conaffinity": 4,
+        },
+    ],
+)
+def test_runtime_rejects_unusable_or_collision_incompatible_flat_floor(
+    tmp_path: Path, fixture: dict[str, object]
+) -> None:
+    """A flat label is insufficient unless the loaded floor can contact the robot."""
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root, **fixture)
+
+    with pytest.raises(ValueError, match="qualified model capabilities"):
+        MicroduckMujocoRuntime(root, bundle, realtime=False)
+
+
+def test_runtime_rejects_rollers_whose_masks_cannot_collide_with_floor(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(
+        root,
+        action_code="ROLLER_VELOCITY",
+        task_id="Mjlab-Velocity-Flat-MicroDuck-Rollers",
+        roller_topology=True,
+        wheel_contype=4,
+        wheel_conaffinity=4,
+    )
+
+    with pytest.raises(ValueError, match="qualified model capabilities"):
+        MicroduckMujocoRuntime(root, bundle, realtime=False)
+
+
 def test_runtime_readiness_rejects_action_preconditions_outside_qualification(
     tmp_path: Path,
 ) -> None:
@@ -626,6 +744,8 @@ def test_runtime_rejects_non_position_actuator_semantics(tmp_path: Path) -> None
         ({"actuator_gear": 2.0}, "unit positive joint gear"),
         ({"actuator_kind": "general_user_gain"}, "fixed gain"),
         ({"actuator_kind": "general_dynamic"}, "actuator dynamics"),
+        ({"actuator_kind": "general_affine_offset"}, "position actuator semantics"),
+        ({"actuator_kind": "general_velocity_bias"}, "position actuator semantics"),
         ({"extra_passive_actuator": True}, "exactly 14 total actuators"),
     ],
 )
@@ -845,6 +965,29 @@ def test_runtime_rejects_bypassed_invalid_or_unbound_normalizer(
         MicroduckMujocoRuntime(root, bundle, realtime=False)
 
 
+def test_normalizer_validator_rejects_second_empirical_stats_stage(
+    tmp_path: Path,
+) -> None:
+    """A second 61D Sub/Div changes the deployment observation a second time."""
+    policy = tmp_path / "twice-normalized.onnx"
+    _write_policy(policy, second_normalizer=True)
+
+    with pytest.raises(ValueError, match="exactly one.*normalization"):
+        inspect_normalized_actor(onnx.load(policy, load_external_data=False))
+
+
+def test_normalizer_validator_allows_actor_arithmetic_after_empirical_prefix(
+    tmp_path: Path,
+) -> None:
+    """Actor-local 14D arithmetic is not a second observation normalizer."""
+    policy = tmp_path / "actor-arithmetic.onnx"
+    _write_policy(policy, actor_post_normalization=True)
+
+    inspected = inspect_normalized_actor(onnx.load(policy, load_external_data=False))
+
+    assert inspected.fingerprint.startswith("sha256:")
+
+
 def test_runtime_rejects_requested_terrain_not_bound_to_loaded_model(
     tmp_path: Path,
 ) -> None:
@@ -1040,6 +1183,27 @@ def test_runtime_fail_safe_stops_when_state_becomes_non_finite(tmp_path: Path) -
     assert runtime.status().limp is True
     assert runtime.status().health["ready"] is False
     assert np.all(runtime._model.actuator_gainprm[runtime._actuator_indices, 0] == 0.0)
+
+
+def test_fatal_limp_clears_every_affine_force_term(tmp_path: Path) -> None:
+    """Fatal limp must remain force-free even if an affine constant was introduced."""
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root)
+    runtime = MicroduckMujocoRuntime(root, bundle, realtime=False)
+    runtime._model.actuator_biasprm[runtime._actuator_indices, 0] = 0.25
+    runtime._data.ctrl[runtime._actuator_indices] = 1.0
+    mujoco.mj_forward(runtime._model, runtime._data)
+    assert np.any(np.abs(runtime._data.actuator_force) > 0.0)
+
+    with runtime._lock:
+        runtime._fail_locked("TEST_FATAL")
+    mujoco.mj_forward(runtime._model, runtime._data)
+
+    assert np.all(runtime._data.ctrl[runtime._actuator_indices] == 0.0)
+    assert np.all(runtime._model.actuator_gainprm[runtime._actuator_indices] == 0.0)
+    assert np.all(runtime._model.actuator_biasprm[runtime._actuator_indices] == 0.0)
+    assert np.all(runtime._data.actuator_force[runtime._actuator_indices] == 0.0)
+    assert np.all(runtime._data.qfrc_actuator == 0.0)
 
 
 def test_invalid_handle_has_no_sampling_or_stop_side_effect_and_valid_stop_is_idempotent(

@@ -22,6 +22,18 @@ class _Trace:
     stage: int
     mean_name: str | None = None
     std_name: str | None = None
+    extra_stats_transform: bool = False
+
+
+def _is_empirical_stats_initializer(
+    initializers: dict[str, onnx.TensorProto], name: str
+) -> bool:
+    tensor = initializers.get(name)
+    return bool(
+        tensor is not None
+        and tensor.data_type == onnx.TensorProto.FLOAT
+        and tuple(tensor.dims) == (61,)
+    )
 
 
 def _float32_vector(
@@ -59,7 +71,12 @@ def inspect_normalized_actor(model: onnx.ModelProto) -> NormalizedActorGraph:
             statistics[node.input[1]] = _float32_vector(
                 initializers, node.input[1], positive=False
             )
-            trace = _Trace(1, mean_name=node.input[1])
+            source = traces[node.input[0]]
+            trace = _Trace(
+                1,
+                mean_name=node.input[1],
+                extra_stats_transform=source.extra_stats_transform,
+            )
         elif (
             node.op_type == "Div"
             and len(node.input) == 2
@@ -71,13 +88,36 @@ def inspect_normalized_actor(model: onnx.ModelProto) -> NormalizedActorGraph:
             statistics[node.input[1]] = _float32_vector(
                 initializers, node.input[1], positive=True
             )
-            trace = _Trace(2, mean_name=source.mean_name, std_name=node.input[1])
+            trace = _Trace(
+                2,
+                mean_name=source.mean_name,
+                std_name=node.input[1],
+                extra_stats_transform=source.extra_stats_transform,
+            )
         elif dynamic:
-            least = min(dynamic, key=lambda item: item.stage)
-            if all(item == least for item in dynamic):
-                trace = least
-            else:
-                trace = _Trace(least.stage)
+            first = dynamic[0]
+            same_normalizer = all(
+                (item.stage, item.mean_name, item.std_name)
+                == (first.stage, first.mean_name, first.std_name)
+                for item in dynamic
+            )
+            has_stats_initializer = any(
+                _is_empirical_stats_initializer(initializers, name)
+                for name in node.input
+                if name not in traces
+            )
+            trace = _Trace(
+                min(item.stage for item in dynamic),
+                mean_name=first.mean_name if same_normalizer else None,
+                std_name=first.std_name if same_normalizer else None,
+                extra_stats_transform=(
+                    any(item.extra_stats_transform for item in dynamic)
+                    or (
+                        node.op_type in {"Add", "Sub", "Mul", "Div"}
+                        and has_stats_initializer
+                    )
+                ),
+            )
         if trace is not None:
             for output in node.output:
                 traces[output] = trace
@@ -87,9 +127,11 @@ def inspect_normalized_actor(model: onnx.ModelProto) -> NormalizedActorGraph:
         or output_trace.stage != 2
         or output_trace.mean_name is None
         or output_trace.std_name is None
+        or output_trace.extra_stats_transform
     ):
         raise ValueError(
-            "ONNX normalization Sub/Div does not dominate the sole actor output"
+            "ONNX actor must apply exactly one empirical normalization stage "
+            "on every input-output path"
         )
     mean = statistics[output_trace.mean_name]
     std = statistics[output_trace.std_name]
