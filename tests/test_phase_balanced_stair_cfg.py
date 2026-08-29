@@ -1,10 +1,12 @@
 from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     MicroduckStairCurriculumRsiRlCfg,
+    MicroduckStairContactMantleRsiRlCfg,
     MicroduckStairPhaseBalancedRsiRlCfg,
     STAIR_MECHANISM_CURRICULUM_LEVELS,
     STAIR_MECHANISM_MIN_RISER_HEIGHT,
     STANDARD_RISER_HEIGHT,
     make_microduck_stair_curriculum_rsi_env_cfg,
+    make_microduck_stair_contact_mantle_rsi_env_cfg,
     make_microduck_stair_phase_balanced_rsi_env_cfg,
 )
 
@@ -70,3 +72,23 @@ def test_curriculum_rsi_preserves_actor_contract_and_real_stair_challenge():
     assert clearance.params["num_terrain_levels"] == STAIR_MECHANISM_CURRICULUM_LEVELS
     assert MicroduckStairCurriculumRsiRlCfg.max_iterations == 600
     assert MicroduckStairCurriculumRsiRlCfg.save_interval == 25
+
+
+def test_contact_mantle_rsi_focuses_only_the_armed_last_mile():
+    baseline = make_microduck_stair_curriculum_rsi_env_cfg()
+    cfg = make_microduck_stair_contact_mantle_rsi_env_cfg()
+    reward = cfg.rewards["stair_curriculum_contact_mantle_frontier"]
+
+    assert tuple(cfg.observations["actor"].terms) == tuple(
+        baseline.observations["actor"].terms
+    )
+    assert cfg.rewards["stair_curriculum_mantle_frontier"].weight == 0.0
+    assert reward.weight == 12.0
+    assert reward.params["x_start_margin"] == 0.005
+    assert reward.params["x_target_margin"] == 0.040
+    assert reward.params["z_start_margin"] == 0.005
+    assert reward.params["z_target_margin"] == 0.025
+    assert reward.params["support_sensor_name"] == "robot_ground_contact"
+    assert cfg.rewards["stair_first_tread_secured"].weight == 600.0
+    assert MicroduckStairContactMantleRsiRlCfg.max_iterations == 300
+    assert MicroduckStairContactMantleRsiRlCfg.save_interval == 25

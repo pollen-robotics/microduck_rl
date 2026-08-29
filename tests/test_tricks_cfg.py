@@ -3,7 +3,10 @@ from types import SimpleNamespace
 
 import torch
 
-from mjlab_microduck.tasks.mdp import classify_standard_stair_contacts
+from mjlab_microduck.tasks.mdp import (
+    classify_curriculum_stair_contacts,
+    classify_standard_stair_contacts,
+)
 
 from mjlab_microduck.tasks.microduck_backflip_env_cfg import (
     MicroduckBackflipRlCfg,
@@ -484,6 +487,37 @@ def test_standard_stair_contacts_distinguish_face_tread_and_flat_floor():
 
     assert torch.equal(face, torch.tensor([[True, False, False]]))
     assert torch.equal(tread, torch.tensor([[False, True, False]]))
+
+
+def test_curriculum_stair_contacts_use_each_environment_riser_height():
+    found = torch.ones(2, 2)
+    positions = torch.tensor(
+        [
+            [[0.660, 0.0, 0.080], [0.720, 0.0, 0.100]],
+            [[0.660, 0.0, 0.150], [0.720, 0.0, 0.170]],
+        ]
+    )
+    normals = torch.tensor(
+        [
+            [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        ]
+    )
+
+    face, tread = classify_curriculum_stair_contacts(
+        found,
+        positions,
+        normals,
+        torch.zeros(2, 3),
+        stair_face_x=0.660,
+        riser_height=torch.tensor([0.100, 0.170]),
+        tread_depth=0.280,
+        corridor_half_width=0.360,
+    )
+
+    expected = torch.tensor([[True, False], [True, False]])
+    assert torch.equal(face, expected)
+    assert torch.equal(tread, torch.tensor([[False, True], [False, True]]))
 
 
 def test_tread_contact_bank_stage_pays_only_new_pullup_progress():

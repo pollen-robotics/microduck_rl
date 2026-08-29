@@ -1112,6 +1112,34 @@ def make_microduck_stair_curriculum_rsi_env_cfg(
     return cfg
 
 
+def make_microduck_stair_contact_mantle_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A21: convert real stair contact into last-mile mantle progress."""
+
+    cfg = make_microduck_stair_curriculum_rsi_env_cfg(play=play)
+    cfg.rewards["stair_curriculum_mantle_frontier"].weight = 0.0
+    cfg.rewards["stair_curriculum_contact_mantle_frontier"] = RewardTermCfg(
+        func=microduck_mdp.stair_curriculum_contact_mantle_frontier,
+        weight=12.0,
+        params={
+            "stair_start_distance": STANDARD_STAIR_START_DISTANCE,
+            "min_riser_height": STAIR_MECHANISM_MIN_RISER_HEIGHT,
+            "max_riser_height": STANDARD_RISER_HEIGHT,
+            "num_terrain_levels": STAIR_MECHANISM_CURRICULUM_LEVELS,
+            "tread_depth": STANDARD_TREAD_DEPTH,
+            "corridor_half_width": STANDARD_STAIR_WIDTH * 0.40,
+            "x_start_margin": 0.005,
+            "x_target_margin": 0.040,
+            "z_start_margin": 0.005,
+            "z_target_margin": 0.025,
+            "support_sensor_name": "robot_ground_contact",
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    return cfg
+
+
 def make_microduck_stair_tread_contact_bank_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -1377,6 +1405,16 @@ MicroduckStairCurriculumRsiRlCfg.max_iterations = 600
 MicroduckStairCurriculumRsiRlCfg.save_interval = 25
 MicroduckStairCurriculumRsiRlCfg.actor.distribution_cfg["init_std"] = 0.30
 MicroduckStairCurriculumRsiRlCfg.algorithm.learning_rate = 2.0e-5
+
+MicroduckStairContactMantleRsiRlCfg = deepcopy(MicroduckStairCurriculumRsiRlCfg)
+MicroduckStairContactMantleRsiRlCfg.experiment_name = (
+    "microduck_stair_contact_mantle_rsi_specialist"
+)
+MicroduckStairContactMantleRsiRlCfg.run_name = (
+    "microduck_stair_contact_mantle_rsi_specialist"
+)
+MicroduckStairContactMantleRsiRlCfg.max_iterations = 300
+MicroduckStairContactMantleRsiRlCfg.save_interval = 25
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)
 MicroduckStairTreadContactBankRlCfg.experiment_name = (

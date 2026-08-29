@@ -68,6 +68,11 @@ STAIR_TARGETS = {
         "experiment": "microduck_stair_curriculum_rsi_specialist",
         "iterations": 600,
     },
+    "specialist-contact-mantle-rsi": {
+        "task": "Mjlab-Stairs-Contact-Mantle-RSI-Specialist-MicroDuck",
+        "experiment": "microduck_stair_contact_mantle_rsi_specialist",
+        "iterations": 300,
+    },
     "specialist-tread-contact-bank": {
         "task": "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
         "experiment": "microduck_stair_tread_contact_bank_specialist",

@@ -141,6 +141,7 @@ from .microduck_standard_stairs_env_cfg import (
     make_microduck_stair_roulade_bank_env_cfg,
     make_microduck_stair_phase_balanced_rsi_env_cfg,
     make_microduck_stair_curriculum_rsi_env_cfg,
+    make_microduck_stair_contact_mantle_rsi_env_cfg,
     make_microduck_stair_foot_anchor_vault_env_cfg,
     make_microduck_stair_ordered_vault_env_cfg,
     make_microduck_stair_tread_contact_bank_env_cfg,
@@ -155,6 +156,7 @@ from .microduck_standard_stairs_env_cfg import (
     MicroduckStairRouladeBankRlCfg,
     MicroduckStairPhaseBalancedRsiRlCfg,
     MicroduckStairCurriculumRsiRlCfg,
+    MicroduckStairContactMantleRsiRlCfg,
     MicroduckStairFootAnchorVaultRlCfg,
     MicroduckStairOrderedVaultRlCfg,
     MicroduckStairTreadContactBankRlCfg,
@@ -427,6 +429,14 @@ register_mjlab_task(
     env_cfg=make_microduck_stair_curriculum_rsi_env_cfg(),
     play_env_cfg=make_microduck_stair_curriculum_rsi_env_cfg(play=True),
     rl_cfg=MicroduckStairCurriculumRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Contact-Mantle-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_contact_mantle_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_contact_mantle_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairContactMantleRsiRlCfg,
     runner_cls=MicroduckStairSpecialistRunner,
 )
 

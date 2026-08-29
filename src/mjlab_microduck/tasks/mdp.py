@@ -1000,6 +1000,104 @@ def stair_curriculum_mantle_frontier(
     return _new_frontier_delta(env, frontier, "_stair_curriculum_mantle_frontier")
 
 
+def stair_curriculum_contact_mantle_frontier(
+    env: ManagerBasedRlEnv,
+    stair_start_distance: float,
+    min_riser_height: float,
+    max_riser_height: float,
+    num_terrain_levels: int,
+    tread_depth: float,
+    corridor_half_width: float,
+    x_start_margin: float = 0.005,
+    x_target_margin: float = 0.040,
+    z_start_margin: float = 0.005,
+    z_target_margin: float = 0.025,
+    support_sensor_name: str = "robot_ground_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay only new last-mile center progress after real stair contact.
+
+    A first-riser face or tread contact arms the potential for the remainder of
+    the episode. The potential then concentrates all of its gradient in the
+    final centimeters needed to put the root over the lip. Repeated bumps and
+    holding an already reached pose pay zero because only a new episode-best
+    potential is rewarded.
+    """
+
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    levels = env.scene.terrain.terrain_levels.to(dtype=x.dtype)
+    level_fraction = torch.clamp(
+        levels / max(num_terrain_levels - 1, 1), min=0.0, max=1.0
+    )
+    riser_height = min_riser_height + level_fraction * (
+        max_riser_height - min_riser_height
+    )
+
+    if support_sensor_name not in env.scene.sensors:
+        raise RuntimeError(f"Missing required contact sensor: {support_sensor_name}")
+    contact_data = env.scene.sensors[support_sensor_name].data
+    if (
+        contact_data.found is None
+        or contact_data.pos is None
+        or contact_data.normal is None
+    ):
+        raise RuntimeError(
+            f"{support_sensor_name} must provide found, pos, and normal"
+        )
+    face, tread = classify_curriculum_stair_contacts(
+        contact_data.found,
+        contact_data.pos,
+        contact_data.normal,
+        env.scene.terrain.env_origins,
+        stair_face_x=stair_start_distance,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    contact = (face | tread).any(dim=-1)
+
+    armed = getattr(env, "_stair_curriculum_contact_mantle_armed", None)
+    if armed is None:
+        armed = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._stair_curriculum_contact_mantle_armed = armed
+    fresh = env.episode_length_buf <= 1
+    armed[fresh] = False
+    cleared = getattr(env, "_stair_first_riser_latched", None)
+    if cleared is None:
+        cleared = torch.zeros_like(armed)
+    newly_eligible = (
+        (env.episode_length_buf >= 3)
+        & (y <= corridor_half_width)
+        & contact
+        & ~cleared
+    )
+    armed |= newly_eligible
+
+    x_progress = torch.clamp(
+        (x - (stair_start_distance + x_start_margin))
+        / max(x_target_margin - x_start_margin, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    z_progress = torch.clamp(
+        (z - (riser_height + z_start_margin))
+        / max(z_target_margin - z_start_margin, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    potential = 0.55 * x_progress + 0.45 * z_progress
+    potential = torch.where(
+        armed & (y <= corridor_half_width), potential, torch.zeros_like(potential)
+    )
+    return _new_frontier_delta(
+        env, potential, "_stair_curriculum_contact_mantle_frontier"
+    )
+
+
 def stair_critic_privileged_state(
     env: ManagerBasedRlEnv,
     stair_start_distance: float,
@@ -1602,6 +1700,51 @@ def classify_standard_stair_contacts(
             <= stair_face_x + tread_depth + position_tolerance
         )
         & (torch.abs(local_pos[..., 2] - riser_height) <= position_tolerance)
+        & (normal[..., 2] >= normal_alignment)
+    )
+    return face, tread
+
+
+def classify_curriculum_stair_contacts(
+    found: torch.Tensor,
+    positions_w: torch.Tensor,
+    normals_w: torch.Tensor,
+    terrain_origins_w: torch.Tensor,
+    *,
+    stair_face_x: float,
+    riser_height: torch.Tensor,
+    tread_depth: float,
+    corridor_half_width: float,
+    position_tolerance: float = 0.018,
+    normal_alignment: float = 0.70,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Classify first-riser contacts with a per-environment riser height."""
+
+    if found.ndim != 2 or positions_w.shape != normals_w.shape:
+        raise ValueError("Stair contact tensors have incompatible shapes")
+    if positions_w.shape[:2] != found.shape or positions_w.shape[-1] != 3:
+        raise ValueError("Stair contact positions must have shape [B, N, 3]")
+    if riser_height.shape != (found.shape[0],):
+        raise ValueError("riser_height must have shape [B]")
+    local_pos = positions_w - terrain_origins_w[:, None, :]
+    active = found > 0
+    in_corridor = torch.abs(local_pos[..., 1]) <= corridor_half_width
+    normal = torch.abs(torch.nan_to_num(normals_w, nan=0.0))
+    riser = riser_height[:, None]
+    face = (
+        active
+        & in_corridor
+        & (torch.abs(local_pos[..., 0] - stair_face_x) <= position_tolerance)
+        & (local_pos[..., 2] >= -position_tolerance)
+        & (local_pos[..., 2] <= riser + position_tolerance)
+        & (normal[..., 0] >= normal_alignment)
+    )
+    tread = (
+        active
+        & in_corridor
+        & (local_pos[..., 0] >= stair_face_x - position_tolerance)
+        & (local_pos[..., 0] <= stair_face_x + tread_depth + position_tolerance)
+        & (torch.abs(local_pos[..., 2] - riser) <= position_tolerance)
         & (normal[..., 2] >= normal_alignment)
     )
     return face, tread
