@@ -148,6 +148,35 @@ def _evaluate(
     return _load_json(output)
 
 
+def _record_video(
+    checkpoint: Path,
+    video_dir: Path,
+    *,
+    steps: int,
+    device: str,
+) -> Path:
+    iteration = int(checkpoint.stem.rsplit("_", 1)[-1])
+    output = video_dir / f"standard-home-stairs-iter-{iteration:05d}.mp4"
+    if output.is_file() and output.stat().st_size > 0:
+        return output.resolve()
+    command = [
+        sys.executable,
+        str(REPO_ROOT / "scripts" / "record_stair_policy.py"),
+        str(checkpoint),
+        str(output),
+        "--steps",
+        str(steps),
+        "--device",
+        device,
+    ]
+    completed = subprocess.run(command, cwd=REPO_ROOT, check=False)
+    if completed.returncode != 0 or not output.is_file():
+        raise RuntimeError(
+            f"Video recording failed for {checkpoint.name} (exit {completed.returncode})"
+        )
+    return output.resolve()
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
@@ -156,6 +185,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-num-envs", type=int, default=8)
     parser.add_argument("--eval-steps", type=int, default=1_500)
     parser.add_argument("--eval-device", default="cuda:0")
+    parser.add_argument("--video-steps", type=int, default=700)
+    parser.add_argument("--video-device", default="cpu")
+    parser.add_argument(
+        "--video-dir",
+        type=Path,
+        default=(
+            REPO_ROOT
+            / "artifacts"
+            / "verified"
+            / "stair-policy-evolution"
+        ),
+    )
     parser.add_argument(
         "--state",
         type=Path,
@@ -175,6 +216,7 @@ def main() -> int:
 
     manifest_path = args.state.resolve().with_name("best-stair-preview.json")
     evaluation_dir = run_dir / "stair-evaluations"
+    current_video: Path | None = None
     viewer = NativeViewer(REPO_ROOT / ".tmp" / "codex" / "best-preview-viewer.log")
     evaluated: dict[str, dict[str, object]] = {str(current_checkpoint.resolve()): baseline_report}
     rejections: dict[str, str] = {}
@@ -206,12 +248,19 @@ def main() -> int:
             "viewer_checkpoint": str(current_checkpoint.resolve()),
             "viewer_evaluation": current_report,
             "viewer_running": viewer.running(),
+            "viewer_video": str(current_video) if current_video else None,
             "reason": reason,
             "rejections": rejections,
         }
         write_json_atomic(args.state.resolve(), state)
 
     viewer.start(current_checkpoint)
+    current_video = _record_video(
+        current_checkpoint,
+        args.video_dir.resolve(),
+        steps=args.video_steps,
+        device=args.video_device,
+    )
     publish(
         "Showing the best existing physics-gated checkpoint; new candidates are checked automatically."
     )
@@ -227,8 +276,6 @@ def main() -> int:
                     for item in ranking.candidates
                     if item.iteration > 0
                     and item.iteration % 200 == 0
-                    and item.hard_score > ranking.baseline.hard_score
-                    and any(value > 0.0 for value in item.hard_score)
                     and str(item.path.resolve()) not in evaluated
                     and str(item.path.resolve()) not in rejections
                 ]
@@ -263,8 +310,15 @@ def main() -> int:
                         )
                         evaluated[key] = report
                         if physics_improves(report, current_report):
+                            promoted_video = _record_video(
+                                candidate,
+                                args.video_dir.resolve(),
+                                steps=args.video_steps,
+                                device=args.video_device,
+                            )
                             current_checkpoint = candidate
                             current_report = report
+                            current_video = promoted_video
                             viewer.start(current_checkpoint)
                             publish(
                                 f"Promoted {candidate.name} after full-height physics evaluation."

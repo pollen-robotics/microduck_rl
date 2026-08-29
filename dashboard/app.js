@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const state = { data: null, selectedRun: null, mediaFilter: "all" };
+  const state = { data: null, selectedRun: null };
   const $ = (selector) => document.querySelector(selector);
 
   function text(value) {
@@ -138,25 +138,17 @@
   function renderMedia(data) {
     const grid = $("#media-grid");
     grid.replaceChildren();
-    const media = (data.media || []).filter((item) => state.mediaFilter === "all" || item.kind === state.mediaFilter);
+    const media = (data.media || []).filter((item) => item.kind === "video");
     $("#media-empty").hidden = media.length !== 0;
     for (const item of media) {
       const card = el("article", "media-card");
       const preview = el("div", "media-preview");
-      if (item.kind === "video") {
-        const video = document.createElement("video");
-        video.controls = true;
-        video.preload = "metadata";
-        video.src = item.url;
-        video.setAttribute("aria-label", item.name);
-        preview.append(video);
-      } else {
-        const image = document.createElement("img");
-        image.loading = "lazy";
-        image.src = item.url;
-        image.alt = `Captured rollout: ${item.name}`;
-        preview.append(image);
-      }
+      const video = document.createElement("video");
+      video.controls = true;
+      video.preload = "metadata";
+      video.src = item.url;
+      video.setAttribute("aria-label", item.name);
+      preview.append(video);
       const meta = el("div", "media-meta");
       const location = item.source === "runs" ? item.path : `${item.source}/${item.path || item.name}`;
       meta.append(el("span", "media-name", text(item.name)), el("span", "media-source", text(location)));
@@ -190,11 +182,6 @@
 
   $("#refresh-button").addEventListener("click", refresh);
   $("#run-select").addEventListener("change", (event) => selectRun(event.target.value));
-  document.querySelectorAll("[data-filter]").forEach((button) => button.addEventListener("click", () => {
-    state.mediaFilter = button.dataset.filter;
-    document.querySelectorAll("[data-filter]").forEach((item) => item.classList.toggle("is-selected", item === button));
-    if (state.data) renderMedia(state.data);
-  }));
   refresh();
   window.setInterval(refresh, 10000);
 })();

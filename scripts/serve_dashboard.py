@@ -9,7 +9,7 @@ Usage::
 The server is intentionally standard-library-only. It binds to ``0.0.0.0``
 so a Tailscale device can reach it at ``http://<tailscale-ip>:9999``. The
 dashboard reads, but never modifies, ``logs/rsl_rl``, ``output/playwright``,
-``artifacts``, and ``dashboard/media``. Video cards are curated by
+``artifacts``, and ``dashboard/media``. Media visibility is curated by
 ``dashboard/featured_media.json`` when that file is present.
 """
 
@@ -289,24 +289,37 @@ def _metric_payload(series: dict[str, list[list[float | int]]]) -> dict[str, Any
     return payload
 
 
-def _featured_video_keys() -> set[str] | None:
-    """Return the configured video allowlist, or None when curation is off."""
+def _featured_media_config() -> tuple[set[str] | None, tuple[str, ...], bool]:
+    """Return exact videos, video prefixes, and whether images are visible."""
 
     if not FEATURED_MEDIA_FILE.is_file():
-        return None
+        return None, (), True
     try:
         payload = json.loads(FEATURED_MEDIA_FILE.read_text(encoding="utf-8"))
         values = payload.get("featuredVideos", [])
         if not isinstance(values, list):
-            return set()
-        return {str(value).strip().replace("\\", "/") for value in values if str(value).strip()}
+            values = []
+        prefixes = payload.get("featuredVideoPrefixes", [])
+        if not isinstance(prefixes, list):
+            prefixes = []
+        exact = {
+            str(value).strip().replace("\\", "/")
+            for value in values
+            if str(value).strip()
+        }
+        normalized_prefixes = tuple(
+            str(value).strip().replace("\\", "/")
+            for value in prefixes
+            if str(value).strip()
+        )
+        return exact, normalized_prefixes, bool(payload.get("showImages", True))
     except (OSError, ValueError, AttributeError):
-        return set()
+        return set(), (), False
 
 
 def _discover_media() -> list[dict[str, Any]]:
     media: list[dict[str, Any]] = []
-    featured_videos = _featured_video_keys()
+    featured_videos, featured_prefixes, show_images = _featured_media_config()
     for source, root in MEDIA_ROOTS.items():
         if not root.is_dir():
             continue
@@ -318,9 +331,18 @@ def _discover_media() -> list[dict[str, Any]]:
                 stat = path.stat()
                 relative_path = path.relative_to(root).as_posix()
                 kind = "video" if path.suffix.lower() in {".mp4", ".webm", ".mov", ".m4v", ".avi", ".mkv"} else "image"
-                if kind == "video" and featured_videos is not None:
-                    if f"{source}/{relative_path}" not in featured_videos:
-                        continue
+                media_key = f"{source}/{relative_path}"
+                if (
+                    kind == "video"
+                    and featured_videos is not None
+                    and media_key not in featured_videos
+                    and not any(
+                        media_key.startswith(prefix) for prefix in featured_prefixes
+                    )
+                ):
+                    continue
+                if kind == "image" and not show_images:
+                    continue
                 media.append({
                     "name": path.name,
                     "source": source,
