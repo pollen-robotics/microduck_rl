@@ -2,6 +2,7 @@
 
 import os
 import re
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -9,8 +10,6 @@ from typing import Literal
 
 import torch
 import tyro
-from rsl_rl.runners import OnPolicyRunner
-
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
@@ -18,7 +17,38 @@ from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.utils.os import get_checkpoint_path, get_wandb_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
-from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
+from rsl_rl.runners import OnPolicyRunner
+
+
+def attach_microduck_metadata(
+    onnx_path: str | Path,
+    *,
+    task_id: str,
+    source_commit: str,
+    checkpoint: str | None,
+    run_identity: str | None,
+) -> None:
+    """Append ROM provenance without replacing the exported, normalized actor graph."""
+    import onnx
+
+    model = onnx.load(str(onnx_path))
+    metadata = {entry.key: entry.value for entry in model.metadata_props}
+    metadata.update(
+        {
+            "microduck.task_id": task_id,
+            "microduck.source_commit": source_commit,
+            "microduck.observation_contract": "MICRODUCK_OBS_61_V1",
+            "microduck.action_contract": "MICRODUCK_ACTION_14_V1",
+            "microduck.checkpoint": checkpoint or "",
+            "microduck.run_identity": run_identity or "",
+        }
+    )
+    del model.metadata_props[:]
+    for key, value in sorted(metadata.items()):
+        item = model.metadata_props.add()
+        item.key = key
+        item.value = value
+    onnx.save(model, str(onnx_path))
 
 
 @dataclass(frozen=True)
@@ -221,7 +251,7 @@ def run_export(task_id: str, cfg: ExportConfig):
         runner_cls = load_runner_cls(task_id) or OnPolicyRunner
         runner = runner_cls(env, asdict(agent_cfg), device=device)
         runner.load(str(resume_path), map_location=device)
-        policy = runner.get_inference_policy(device=device)
+        runner.get_inference_policy(device=device)
 
     # mjlab 1.3.0: ONNX export + metadata moved to mjlab.rl.exporter_utils and
     # the runner's built-in export_policy_to_onnx. Observation normalization is
@@ -229,7 +259,7 @@ def run_export(task_id: str, cfg: ExportConfig):
     # submodule of the policy's MLPModel (obs_normalization=True in RslRlModelCfg),
     # so export_policy_to_onnx emits actor(normalizer(obs)). No manual normalizer
     # handling needed (the old export_velocity_policy_as_onnx path is gone).
-    from mjlab.rl.exporter_utils import get_base_metadata, attach_metadata_to_onnx
+    from mjlab.rl.exporter_utils import attach_metadata_to_onnx, get_base_metadata
 
     onnx_path = os.path.abspath(cfg.onnx_file)
     path = os.path.dirname(onnx_path)
@@ -239,6 +269,16 @@ def run_export(task_id: str, cfg: ExportConfig):
 
     metadata = get_base_metadata(runner.env.unwrapped, run_path=cfg.checkpoint_file)
     attach_metadata_to_onnx(onnx_path, metadata)
+    source_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], text=True, cwd=Path(__file__).parents[1]
+    ).strip()
+    attach_microduck_metadata(
+        onnx_path,
+        task_id=task_id,
+        source_commit=source_commit,
+        checkpoint=resume_path.name if resume_path is not None else None,
+        run_identity=cfg.wandb_run_path or str(resume_path) if resume_path is not None else None,
+    )
 
     print(f"Written {onnx_path}")
 
