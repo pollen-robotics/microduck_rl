@@ -1,0 +1,254 @@
+{
+  "head": {
+    "source_object": "head",
+    "file": "head.obj",
+    "body": "jaw_soft",
+    "reference_pos": [
+      -0.003618807066231966,
+      -0.0012709442526102066,
+      0.09609134495258331
+    ],
+    "rgba": [
+      0.94,
+      0.94,
+      0.94,
+      1.0
+    ],
+    "vertices": 1106,
+    "triangles": 2216
+  },
+  "eyes": {
+    "source_object": "eyes",
+    "file": "eyes.obj",
+    "body": "jaw_soft",
+    "reference_pos": [
+      0.034463800489902496,
+      -0.000348520465195179,
+      0.0868675708770752
+    ],
+    "rgba": [
+      0.02,
+      0.03,
+      0.04,
+      1.0
+    ],
+    "vertices": 3153,
+    "triangles": 5989
+  },
+  "cylinder_002": {
+    "source_object": "Cylinder.002",
+    "file": "cylinder_002.obj",
+    "body": "jaw_soft",
+    "reference_pos": [
+      -0.004261570051312447,
+      -0.050247304141521454,
+      0.09558252990245819
+    ],
+    "rgba": [
+      0.05,
+      0.05,
+      0.06,
+      1.0
+    ],
+    "vertices": 64,
+    "triangles": 124
+  },
+  "cylinder_003": {
+    "source_object": "Cylinder.003",
+    "file": "cylinder_003.obj",
+    "body": "jaw_soft",
+    "reference_pos": [
+      -0.004261570051312447,
+      -0.050943706184625626,
+      0.09558252990245819
+    ],
+    "rgba": [
+      0.05,
+      0.05,
+      0.06,
+      1.0
+    ],
+    "vertices": 64,
+    "triangles": 124
+  },
+  "cylinder_004": {
+    "source_object": "Cylinder.004",
+    "file": "cylinder_004.obj",
+    "body": "jaw_soft",
+    "reference_pos": [
+      -0.004261570051312447,
+      -0.050247304141521454,
+      0.09558252990245819
+    ],
+    "rgba": [
+      0.05,
+      0.05,
+      0.06,
+      1.0
+    ],
+    "vertices": 64,
+    "triangles": 124
+  },
+  "cylinder_007": {
+    "source_object": "Cylinder.007",
+    "file": "cylinder_007.obj",
+    "body": "jaw_soft",
+    "reference_pos": [
+      -0.004261570051312447,
+      0.047233376652002335,
+      0.09558252990245819
+    ],
+    "rgba": [
+      0.05,
+      0.05,
+      0.06,
+      1.0
+    ],
+    "vertices": 64,
+    "triangles": 124
+  },
+  "cylinder_008": {
+    "source_object": "Cylinder.008",
+    "file": "cylinder_008.obj",
+    "body": "jaw_soft",
+    "reference_pos": [
+      -0.004261570051312447,
+      0.04653697833418846,
+      0.09558252990245819
+    ],
+    "rgba": [
+      0.05,
+      0.05,
+      0.06,
+      1.0
+    ],
+    "vertices": 64,
+    "triangles": 124
+  },
+  "cylinder_009": {
+    "source_object": "Cylinder.009",
+    "file": "cylinder_009.obj",
+    "body": "jaw_soft",
+    "reference_pos": [
+      -0.004261570051312447,
+      0.047233376652002335,
+      0.09558252990245819
+    ],
+    "rgba": [
+      0.05,
+      0.05,
+      0.06,
+      1.0
+    ],
+    "vertices": 64,
+    "triangles": 124
+  },
+  "mesh_0_001": {
+    "source_object": "Mesh_0.001",
+    "file": "mesh_0_001.obj",
+    "body": "left_upper_arm",
+    "reference_pos": [
+      -0.00357250077649951,
+      0.0480835884809494,
+      0.02959463559091091
+    ],
+    "rgba": [
+      0.94,
+      0.94,
+      0.94,
+      1.0
+    ],
+    "vertices": 15471,
+    "triangles": 33700
+  },
+  "arm_lower_001": {
+    "source_object": "arm_lower.001",
+    "file": "arm_lower_001.obj",
+    "body": "left_forearm",
+    "reference_pos": [
+      -0.0007413532584905624,
+      0.04696441441774368,
+      0.017246980220079422
+    ],
+    "rgba": [
+      0.94,
+      0.94,
+      0.94,
+      1.0
+    ],
+    "vertices": 27734,
+    "triangles": 68654
+  },
+  "hand_r_001": {
+    "source_object": "hand_r.001",
+    "file": "hand_r_001.obj",
+    "body": "left_forearm",
+    "reference_pos": [
+      0.005567607935518026,
+      0.04280054196715355,
+      -0.0084847928956151
+    ],
+    "rgba": [
+      0.8,
+      0.84,
+      0.88,
+      1.0
+    ],
+    "vertices": 4556,
+    "triangles": 9108
+  },
+  "mesh_0_004": {
+    "source_object": "Mesh_0.004",
+    "file": "mesh_0_004.obj",
+    "body": "right_upper_arm",
+    "reference_pos": [
+      -0.009968678466975689,
+      -0.055051542818546295,
+      0.02970709279179573
+    ],
+    "rgba": [
+      0.94,
+      0.94,
+      0.94,
+      1.0
+    ],
+    "vertices": 15471,
+    "triangles": 33700
+  },
+  "arm_lower": {
+    "source_object": "arm_lower",
+    "file": "arm_lower.obj",
+    "body": "right_forearm",
+    "reference_pos": [
+      -0.0020155911333858967,
+      -0.05460492894053459,
+      0.01738106645643711
+    ],
+    "rgba": [
+      0.94,
+      0.94,
+      0.94,
+      1.0
+    ],
+    "vertices": 27734,
+    "triangles": 68654
+  },
+  "hand_r": {
+    "source_object": "hand_r",
+    "file": "hand_r.obj",
+    "body": "right_forearm",
+    "reference_pos": [
+      0.014354124665260315,
+      -0.05496711656451225,
+      -0.0047739711590111256
+    ],
+    "rgba": [
+      0.8,
+      0.84,
+      0.88,
+      1.0
+    ],
+    "vertices": 4556,
+    "triangles": 9108
+  }
+}

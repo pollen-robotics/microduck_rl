@@ -63,6 +63,44 @@ def test_growbot_is_footed_and_has_arm_collisions():
         assert model.geom(name).id >= 0
 
 
+def test_growbot_uses_exported_custom_head_and_arm_visuals():
+    model = get_growbot_spec().compile()
+
+    for name in (
+        "growbot_head_visual",
+        "growbot_eyes_visual",
+        "growbot_mesh_0_001_visual",
+        "growbot_arm_lower_001_visual",
+        "growbot_hand_r_001_visual",
+        "growbot_mesh_0_004_visual",
+        "growbot_arm_lower_visual",
+        "growbot_hand_r_visual",
+    ):
+        geom = model.geom(name)
+        assert geom.id >= 0
+        assert model.geom_contype[geom.id] == 0
+        assert model.geom_conaffinity[geom.id] == 0
+
+    # Training still uses simple collision hulls, but they are not rendered on
+    # top of the approved Blender meshes.
+    collision = model.geom("left_forearm_collision")
+    assert model.geom_rgba[collision.id, 3] == 0.0
+    assert model.geom_contype[collision.id] != 0
+
+    replaced_head_body_ids = {
+        model.body(name).id
+        for name in ("neck", "neck_pitch", "yaw_roll_motion", "jaw_soft")
+    }
+    stock_head_mesh_names = {
+        model.mesh(model.geom_dataid[index]).name
+        for index in range(model.ngeom)
+        if model.geom_bodyid[index] in replaced_head_body_ids
+        and model.geom_type[index] == mujoco.mjtGeom.mjGEOM_MESH
+        and not model.mesh(model.geom_dataid[index]).name.startswith("growbot_")
+    }
+    assert stock_head_mesh_names <= {"top_head_shell", "jaw", "bottom_head_shell"}
+
+
 def test_growbot_mass_stays_inside_initial_design_range():
     model = get_growbot_spec().compile()
     assert 0.50 <= float(model.body_mass.sum()) <= 0.80
