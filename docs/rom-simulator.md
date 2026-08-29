@@ -113,6 +113,15 @@ executed. The promoted manifest and promoted digest then cover that report as an
 artifact. This `VERIFIED_INPUT_BUNDLE_DIGEST_V1` rule avoids an impossible
 self-referential digest: the report never claims to contain the final ZIP digest.
 
+Raw rollout domains are code-owned. `rollRotationRad`, `slopeProgressM`, and
+`yawRotationRad` are signed. `payloadLifted`, `standFraction`,
+`supportFootContact`, `terrainExitReached`, and `uprightReached` are fractions
+in `[0, 1]`. Every other declared action metric is nonnegative. Tracking error,
+its sum and maximum, distance, energy, and maximum absolute action are also
+nonnegative and finite. Each rollout carries one tracking sample per completed
+control step plus the accumulated sum, so startup can reproduce the reported
+mean instead of trusting a terminal snapshot.
+
 ## 3. Build and run the container
 
 ```bash

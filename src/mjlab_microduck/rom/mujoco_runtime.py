@@ -1192,6 +1192,7 @@ class MicroduckMujocoRuntime:
                 self._tracking_error_sum / max(self._tracking_error_samples, 1),
                 6,
             )
+            metrics["trackingErrorSum"] = round(self._tracking_error_sum, 6)
             metrics["trackingErrorMax"] = round(self._tracking_error_max, 6)
             metrics["trackingErrorSamples"] = self._tracking_error_samples
         if self._active_action.actionCode == "VELSTAND_VELOCITY":
@@ -1205,6 +1206,7 @@ class MicroduckMujocoRuntime:
             metrics["trackingError"] = round(
                 self._tracking_error_sum / max(self._tracking_error_samples, 1), 6
             )
+            metrics["trackingErrorSum"] = round(self._tracking_error_sum, 6)
             metrics["trackingErrorMax"] = round(self._tracking_error_max, 6)
             metrics["trackingErrorSamples"] = self._tracking_error_samples
             metrics["standSettledSteps"] = self._settled_steps

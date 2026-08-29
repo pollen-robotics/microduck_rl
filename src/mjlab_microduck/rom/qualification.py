@@ -106,17 +106,42 @@ class ReleaseConfiguration(ContractModel):
 
 
 class QualificationRollout(ContractModel):
+    actionCode: str
+    bundleDigest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    policyDigest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    modelDigest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    sourceCommit: str
+    checkpoint: str | None = None
+    runIdentity: str | None = None
+    runtimeIdentifier: Literal[
+        "mjlab_microduck.rom.mujoco_runtime.MicroduckMujocoRuntime"
+    ]
+    runtimeRevision: str = Field(
+        pattern=r"^mjlab-microduck@[^+]+\+sha256:[0-9a-f]{64}$"
+    )
+    simulatorVersion: str
+    terrain: str
+    resetProfile: str
+    scenarioProfile: str
     seed: int
+    requestedParameters: dict[str, Any]
+    requestedMotion: dict[str, tuple[float, ...]]
+    appliedMotion: dict[str, tuple[float, ...]]
     startedAt: datetime
     finishedAt: datetime
     steps: int
+    terminalState: Literal["RUNNING", "SUCCEEDED", "FAILED"]
     success: bool
     fallen: bool
     trackingError: float | None
+    trackingErrorSum: float | None
+    trackingErrorMax: float | None
+    trackingSampleCount: int
     distanceM: float
     energyProxy: float
     actuatorClampSteps: int
     physicalJointLimitViolations: int
+    settledSteps: int
     maxAbsAction: float
     actionMetric: str
     actionMetricValue: float | None
@@ -334,6 +359,206 @@ def _unavailable_result(
     )
 
 
+_QUALIFICATION_FAILURE_REASONS = {
+    "CONTROL_LOOP_OVERRUN",
+    "FALLEN",
+    "JOINT_LIMIT",
+    "NON_FINITE_POLICY_OUTPUT",
+    "NON_FINITE_STATE",
+    "RUNTIME_EXCEPTION",
+}
+
+
+def _expected_qualification_motion(
+    action_code: str, parameters: Mapping[str, Any]
+) -> dict[str, tuple[float, ...]]:
+    spec = ACTION_RUNTIME_SPECS[action_code]
+    zero = {
+        "twist": (0.0, 0.0, 0.0),
+        "headPose": (0.0, 0.0, 0.0, 0.0),
+        "bodyPose": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+    }
+    if spec.command_profile == "TWIST_VELOCITY":
+        return zero | {
+            "twist": (
+                float(parameters["vxMps"]),
+                float(parameters["vyMps"]),
+                float(parameters["yawRateRadps"]),
+            )
+        }
+    if spec.command_profile in {"SIT_FLAG_ZERO", "ZERO_TWIST_LEASE"}:
+        return zero
+    raise ValueError(f"action {action_code} has no governed qualification motion")
+
+
+def _validate_rollout_semantics(
+    bundle: PolicyBundle,
+    declaration: ActionQualificationConfig,
+    definition: ActionDefinition,
+    rollout: QualificationRollout,
+    installed_runtime_revision: str,
+) -> None:
+    spec = ACTION_RUNTIME_SPECS[declaration.actionCode]
+    policy = next(
+        item for item in bundle.policies if item.policyRef == definition.policyRef
+    )
+    expected_identity = {
+        "actionCode": declaration.actionCode,
+        "bundleDigest": bundle.bundleDigest,
+        "policyDigest": policy.digest,
+        "modelDigest": bundle.model.digest,
+        "sourceCommit": bundle.sourceCommit,
+        "checkpoint": policy.checkpoint,
+        "runIdentity": policy.experimentRef,
+        "runtimeIdentifier": _RUNTIME_IDENTIFIER,
+        "runtimeRevision": installed_runtime_revision,
+        "simulatorVersion": mujoco.__version__,
+        "terrain": declaration.terrain,
+        "resetProfile": declaration.resetProfile,
+        "scenarioProfile": spec.scenario_profile,
+        "requestedParameters": declaration.parameters,
+    }
+    if any(getattr(rollout, key) != value for key, value in expected_identity.items()):
+        raise ValueError("qualification rollout identity is invalid")
+    expected_motion = _expected_qualification_motion(
+        declaration.actionCode, declaration.parameters
+    )
+    if (
+        rollout.requestedMotion != expected_motion
+        or rollout.appliedMotion != expected_motion
+    ):
+        raise ValueError("qualification rollout command identity is invalid")
+
+    integer_counts = (
+        rollout.steps,
+        rollout.trackingSampleCount,
+        rollout.actuatorClampSteps,
+        rollout.physicalJointLimitViolations,
+        rollout.settledSteps,
+    )
+    numeric_values = (
+        rollout.trackingError,
+        rollout.trackingErrorSum,
+        rollout.trackingErrorMax,
+        rollout.distanceM,
+        rollout.energyProxy,
+        rollout.maxAbsAction,
+        rollout.actionMetricValue,
+    )
+    if any(
+        value is not None and not math.isfinite(float(value))
+        for value in numeric_values
+    ):
+        raise ValueError("qualification rollout numeric evidence must be finite")
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value < 0
+        for value in integer_counts
+    ):
+        raise ValueError("qualification rollout counts are invalid")
+    if (
+        not 1 <= rollout.steps <= declaration.maxSteps
+        or rollout.actuatorClampSteps > rollout.steps
+        or rollout.physicalJointLimitViolations
+        > rollout.steps * bundle.actionContract.dimension
+        or rollout.settledSteps > rollout.steps
+    ):
+        raise ValueError("qualification rollout counts exceed step bounds")
+    nonnegative_values = (
+        rollout.trackingError,
+        rollout.trackingErrorSum,
+        rollout.trackingErrorMax,
+        rollout.distanceM,
+        rollout.energyProxy,
+        rollout.maxAbsAction,
+    )
+    if any(value is None or value < 0.0 for value in nonnegative_values):
+        raise ValueError("qualification rollout norm evidence must be nonnegative")
+    if (
+        rollout.trackingSampleCount != rollout.steps
+        or not math.isclose(
+            rollout.trackingError,
+            rollout.trackingErrorSum / rollout.trackingSampleCount,
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        )
+        or rollout.trackingErrorMax + 1e-6 < rollout.trackingError
+    ):
+        raise ValueError("qualification rollout tracking evidence is incomplete")
+
+    if rollout.actionMetric != declaration.thresholds.actionMetric:
+        raise ValueError("qualification rollout action metric identity is invalid")
+    if rollout.actionMetricValue is None:
+        raise ValueError("qualification rollout action metric is missing")
+    metric_domain = dict(spec.qualification_metric_domains).get(
+        rollout.actionMetric
+    )
+    if metric_domain == "NONNEGATIVE" and rollout.actionMetricValue < 0.0:
+        raise ValueError("qualification rollout action metric must be nonnegative")
+    if metric_domain == "UNIT_INTERVAL" and not (
+        0.0 <= rollout.actionMetricValue <= 1.0
+    ):
+        raise ValueError("qualification rollout action metric must be a fraction")
+    if metric_domain not in {"NONNEGATIVE", "SIGNED", "UNIT_INTERVAL"}:
+        raise ValueError("qualification rollout action metric domain is undefined")
+
+    if (
+        rollout.startedAt.tzinfo is None
+        or rollout.finishedAt.tzinfo is None
+        or rollout.finishedAt < rollout.startedAt
+    ):
+        raise ValueError("qualification rollout timestamps are invalid")
+    if rollout.fallen and (
+        rollout.success
+        or rollout.terminalState != "FAILED"
+        or rollout.stopReason != "FALLEN"
+    ):
+        raise ValueError("qualification rollout fall evidence is inconsistent")
+
+    if spec.execution_mode == "CONTINUOUS_LEASE":
+        successful = (
+            rollout.steps == declaration.maxSteps
+            and rollout.terminalState == "RUNNING"
+            and rollout.stopReason == spec.qualification_success_stop_reason
+            and not rollout.fallen
+        )
+        if rollout.success != successful:
+            raise ValueError("qualification continuous success evidence is invalid")
+        if not successful and (
+            rollout.terminalState != "FAILED"
+            or rollout.stopReason not in _QUALIFICATION_FAILURE_REASONS
+            or (rollout.stopReason == "FALLEN") != rollout.fallen
+        ):
+            raise ValueError("qualification continuous terminal evidence is invalid")
+        return
+
+    if rollout.terminalState == "SUCCEEDED":
+        completion_valid = (
+            spec.completion_profile == "STAND_POSE_SETTLED"
+            and rollout.stopReason == spec.qualification_success_stop_reason
+            and rollout.settledSteps == spec.qualification_min_settled_steps
+            and spec.qualification_completion_metric_max is not None
+            and rollout.actionMetricValue
+            <= spec.qualification_completion_metric_max
+            and not rollout.fallen
+        )
+        if not rollout.success or not completion_valid:
+            raise ValueError("qualification discrete completion evidence is invalid")
+    elif rollout.terminalState == "RUNNING":
+        if (
+            rollout.success
+            or rollout.fallen
+            or rollout.steps != declaration.maxSteps
+            or rollout.stopReason != "MAX_STEPS_REACHED"
+        ):
+            raise ValueError("qualification discrete timeout evidence is invalid")
+    elif (
+        rollout.success
+        or rollout.stopReason not in _QUALIFICATION_FAILURE_REASONS
+        or (rollout.stopReason == "FALLEN") != rollout.fallen
+    ):
+        raise ValueError("qualification discrete failure evidence is invalid")
+
+
 def recompute_action_qualification(
     bundle: PolicyBundle,
     declaration: ActionQualificationConfig,
@@ -359,16 +584,13 @@ def recompute_action_qualification(
     ):
         raise ValueError("qualification rollouts do not cover exact unique seeds")
     for rollout in rollouts:
-        if (
-            rollout.actionMetric != declaration.thresholds.actionMetric
-            or rollout.steps < 1
-            or rollout.steps > declaration.maxSteps
-            or rollout.startedAt.tzinfo is None
-            or rollout.finishedAt.tzinfo is None
-            or rollout.finishedAt < rollout.startedAt
-            or (rollout.success and rollout.fallen)
-        ):
-            raise ValueError("qualification rollout evidence is invalid")
+        _validate_rollout_semantics(
+            bundle,
+            declaration,
+            definition,
+            rollout,
+            installed_runtime_revision,
+        )
 
     success_rate = _mean([1.0 if item.success else 0.0 for item in rollouts])
     fall_rate = _mean([1.0 if item.fallen else 0.0 for item in rollouts])
@@ -474,6 +696,7 @@ def _qualify_action(
                 sample = runtime.sample(handle)
                 if not sample.running:
                     break
+            status = runtime.status()
             evidence = runtime.safe_stop(handle, "QUALIFICATION_BATTERY_COMPLETE")
         except Exception:
             runtime.safe_stop(handle, "QUALIFICATION_RUNTIME_ERROR")
@@ -511,19 +734,44 @@ def _qualify_action(
         action_metric_value = _number(metrics, declaration.thresholds.actionMetric)
         rollouts.append(
             QualificationRollout(
+                actionCode=declaration.actionCode,
+                bundleDigest=bundle.bundleDigest,
+                policyDigest=policy.digest,
+                modelDigest=bundle.model.digest,
+                sourceCommit=bundle.sourceCommit,
+                checkpoint=policy.checkpoint,
+                runIdentity=policy.experimentRef,
+                runtimeIdentifier=_RUNTIME_IDENTIFIER,
+                runtimeRevision=installed_runtime_revision,
+                simulatorVersion=mujoco.__version__,
+                terrain=declaration.terrain,
+                resetProfile=declaration.resetProfile,
+                scenarioProfile=spec.scenario_profile,
                 seed=seed,
+                requestedParameters=declaration.parameters,
+                requestedMotion=status.requestedMotion,
+                appliedMotion=status.appliedMotion,
                 startedAt=started_at,
                 finishedAt=timestamp(),
                 steps=steps,
+                terminalState=(
+                    sample.terminalState
+                    if sample is not None and sample.terminalState is not None
+                    else "RUNNING"
+                ),
                 success=succeeded and not fallen,
                 fallen=fallen,
                 trackingError=_number(metrics, "trackingError"),
+                trackingErrorSum=_number(metrics, "trackingErrorSum"),
+                trackingErrorMax=_number(metrics, "trackingErrorMax"),
+                trackingSampleCount=_integer(metrics, "trackingErrorSamples"),
                 distanceM=_number(metrics, "baseTravelM") or 0.0,
                 energyProxy=_number(metrics, "energyProxy") or 0.0,
                 actuatorClampSteps=_integer(metrics, "actuatorClampSteps"),
                 physicalJointLimitViolations=_integer(
                     metrics, "physicalJointLimitViolations"
                 ),
+                settledSteps=_integer(metrics, "standSettledSteps"),
                 maxAbsAction=_number(metrics, "maxAbsAction") or 0.0,
                 actionMetric=declaration.thresholds.actionMetric,
                 actionMetricValue=action_metric_value,

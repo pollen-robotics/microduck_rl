@@ -1078,6 +1078,7 @@ def test_runtime_executes_real_onnx_at_50hz_and_maps_actions_by_joint_name(
         "steps": 1,
         "loopOverruns": 0,
         "trackingError": pytest.approx(0.355429, abs=1e-6),
+        "trackingErrorSum": pytest.approx(0.355429, abs=1e-6),
         "trackingErrorMax": pytest.approx(0.355429, abs=1e-6),
         "trackingErrorSamples": 1,
     }

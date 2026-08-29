@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -25,10 +26,12 @@ from mjlab_microduck.rom.mujoco_runtime import MicroduckMujocoRuntime
 from mjlab_microduck.rom.qualification import (
     ActionQualificationConfig,
     QualificationFailed,
+    QualificationReport,
     QualificationThresholds,
     ReleaseConfiguration,
     ReleaseConfigurationError,
     qualify_and_promote,
+    recompute_action_qualification,
 )
 from mjlab_microduck.rom.runtime_identity import runtime_revision
 from tests.test_rom_mujoco_runtime import (
@@ -147,6 +150,42 @@ def _extract_promoted_bundle(tmp_path: Path) -> tuple[Path, PolicyBundle]:
     with zipfile.ZipFile(promoted.output_zip) as archive:
         archive.extractall(installed)
     return installed, promoted.manifest
+
+
+def _extract_promoted_stand_bundle(tmp_path: Path) -> tuple[Path, PolicyBundle]:
+    candidate = tmp_path / "candidate"
+    _rewrite_as_stand_bundle(
+        candidate,
+        _write_verified_bundle(
+            candidate,
+            policy_output=[0.0] * 14,
+            action_code="STAND",
+            task_id="Mjlab-SitStand-Flat-MicroDuck",
+        ),
+    )
+    promoted = qualify_and_promote(
+        candidate,
+        tmp_path / "qualified.zip",
+        _stand_config(),
+        timestamp=lambda: NOW,
+    )
+    installed = tmp_path / "installed"
+    with zipfile.ZipFile(promoted.output_zip) as archive:
+        archive.extractall(installed)
+    return installed, promoted.manifest
+
+
+def _qualified_components(installed: Path):
+    subject = PolicyBundle.model_validate_json(
+        (installed / "qualification/subject-manifest-v1.json").read_bytes()
+    )
+    configuration = ReleaseConfiguration.model_validate_json(
+        (installed / "qualification/release-v1.json").read_bytes()
+    )
+    report = QualificationReport.model_validate_json(
+        (installed / "qualification/qualification-v1.json").read_bytes()
+    )
+    return subject, configuration.actions[0], subject.actions[0], report.actions[0]
 
 
 def _resign_mutated_promoted_bundle(
@@ -720,6 +759,125 @@ def test_runtime_loader_revalidates_resigned_governed_release_configuration(
         mutate_report=lambda report: report["actions"][0].update(
             {"parameters": {"vxMps": 0.2, "vyMps": 0.0, "yawRateRadps": 0.0}}
         ),
+    )
+
+    with pytest.raises(ValueError, match="qualification"):
+        load_qualified_bundle(installed)
+
+
+def test_rollout_semantics_reject_invalid_numeric_domains_before_aggregation(
+    tmp_path: Path,
+) -> None:
+    """Negative, non-finite, or impossible raw counters must never become a result."""
+    installed, _ = _extract_promoted_bundle(tmp_path)
+    subject, declaration, definition, result = _qualified_components(installed)
+    rollout = result.rollouts[0]
+    mutations = (
+        {"trackingError": -0.1},
+        {"distanceM": -0.1},
+        {"energyProxy": -0.1},
+        {"actuatorClampSteps": -1},
+        {"physicalJointLimitViolations": -1},
+        {"maxAbsAction": -0.1},
+        {"actionMetricValue": -0.1},
+        {"trackingError": math.nan},
+        {"energyProxy": math.inf},
+        {"actuatorClampSteps": rollout.steps + 1},
+        {"physicalJointLimitViolations": rollout.steps * 14 + 1},
+    )
+
+    for mutation in mutations:
+        forged_rollouts = (
+            rollout.model_copy(update=mutation),
+            *result.rollouts[1:],
+        )
+        with pytest.raises(ValueError, match="rollout"):
+            recompute_action_qualification(
+                subject,
+                declaration,
+                definition,
+                forged_rollouts,
+                result.runtimeRevision,
+            )
+
+
+def test_rollout_semantics_reject_fallen_reason_without_fallen_state(
+    tmp_path: Path,
+) -> None:
+    """A safety stop reason must agree with terminal and fallen state evidence."""
+    installed, _ = _extract_promoted_bundle(tmp_path)
+    subject, declaration, definition, result = _qualified_components(installed)
+    forged = result.rollouts[0].model_copy(
+        update={
+            "success": False,
+            "fallen": False,
+            "terminalState": "FAILED",
+            "stopReason": "FALLEN",
+        }
+    )
+
+    with pytest.raises(ValueError, match="qualification"):
+        recompute_action_qualification(
+            subject,
+            declaration,
+            definition,
+            (forged, *result.rollouts[1:]),
+            result.runtimeRevision,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutate_rollout",
+    [
+        pytest.param(
+            lambda rollout: rollout.update({"steps": 1}),
+            id="one-step-walk-success",
+        ),
+        pytest.param(
+            lambda rollout: rollout.update({"stopReason": "FALLEN"}),
+            id="success-with-fallen-stop",
+        ),
+        pytest.param(
+            lambda rollout: rollout.pop("trackingSampleCount", None),
+            id="incomplete-tracking-evidence",
+        ),
+        pytest.param(
+            lambda rollout: rollout.pop("requestedMotion", None),
+            id="missing-requested-command-identity",
+        ),
+        pytest.param(
+            lambda rollout: rollout.pop("modelDigest", None),
+            id="missing-model-identity",
+        ),
+    ],
+)
+def test_runtime_loader_rejects_resigned_semantically_invalid_walk_rollouts(
+    tmp_path: Path, mutate_rollout
+) -> None:
+    """A fully re-hashed WALK report still requires complete governed raw evidence."""
+    installed, _ = _extract_promoted_bundle(tmp_path)
+    _resign_mutated_promoted_bundle(
+        installed,
+        mutate_report=lambda report: [
+            mutate_rollout(rollout) for rollout in report["actions"][0]["rollouts"]
+        ],
+    )
+
+    with pytest.raises(ValueError, match="qualification"):
+        load_qualified_bundle(installed)
+
+
+def test_runtime_loader_rejects_resigned_forged_stand_completion(
+    tmp_path: Path,
+) -> None:
+    """A STAND success boolean cannot replace sustained settlement evidence."""
+    installed, _ = _extract_promoted_stand_bundle(tmp_path)
+    _resign_mutated_promoted_bundle(
+        installed,
+        mutate_report=lambda report: [
+            rollout.pop("settledSteps", None)
+            for rollout in report["actions"][0]["rollouts"]
+        ],
     )
 
     with pytest.raises(ValueError, match="qualification"):

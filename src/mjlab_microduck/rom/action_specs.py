@@ -10,6 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Literal
 
+type QualificationMetricDomain = Literal[
+    "NONNEGATIVE", "SIGNED", "UNIT_INTERVAL"
+]
+
 
 @dataclass(frozen=True)
 class RuntimeActionSpec:
@@ -37,6 +41,12 @@ class RuntimeActionSpec:
     qualification_metric_operators: tuple[
         tuple[str, Literal["gte", "lte"]], ...
     ] = ()
+    qualification_metric_domains: tuple[
+        tuple[str, QualificationMetricDomain], ...
+    ] = ()
+    qualification_success_stop_reason: str | None = None
+    qualification_min_settled_steps: int = 0
+    qualification_completion_metric_max: float | None = None
 
 
 def _unsupported(
@@ -275,6 +285,14 @@ _LESS_IS_BETTER_METRICS = {
     "returnPoseError",
     "yawRateError",
 }
+_SIGNED_METRICS = {"rollRotationRad", "slopeProgressM", "yawRotationRad"}
+_UNIT_INTERVAL_METRICS = {
+    "payloadLifted",
+    "standFraction",
+    "supportFootContact",
+    "terrainExitReached",
+    "uprightReached",
+}
 for _code, _spec in tuple(ACTION_RUNTIME_SPECS.items()):
     ACTION_RUNTIME_SPECS[_code] = replace(
         _spec,
@@ -287,4 +305,22 @@ for _code, _spec in tuple(ACTION_RUNTIME_SPECS.items()):
             )
             for metric in _spec.metric_keys
         ),
+        qualification_metric_domains=tuple(
+            (
+                metric,
+                "SIGNED"
+                if metric in _SIGNED_METRICS
+                else (
+                    "UNIT_INTERVAL"
+                    if metric in _UNIT_INTERVAL_METRICS
+                    else "NONNEGATIVE"
+                ),
+            )
+            for metric in _spec.metric_keys
+        ),
+        qualification_success_stop_reason=(
+            "STAND_POSE_SETTLED" if _code == "STAND" else "MAX_STEPS_REACHED"
+        ),
+        qualification_min_settled_steps=10 if _code == "STAND" else 0,
+        qualification_completion_metric_max=0.08 if _code == "STAND" else None,
     )
