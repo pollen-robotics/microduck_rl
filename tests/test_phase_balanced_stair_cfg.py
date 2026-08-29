@@ -1,13 +1,19 @@
 from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     MicroduckStairCurriculumRsiRlCfg,
     MicroduckStairContactMantleRsiRlCfg,
+    MicroduckStairMediumDynamicsRsiRlCfg,
     MicroduckStairPhaseBalancedRsiRlCfg,
+    MicroduckStairSoftDynamicsRsiRlCfg,
+    STAIR_BRIDGE_SOLREF_TIME_CONSTANT,
+    STAIR_DISCOVERY_SOLREF_TIME_CONSTANT,
     STAIR_MECHANISM_CURRICULUM_LEVELS,
     STAIR_MECHANISM_MIN_RISER_HEIGHT,
     STANDARD_RISER_HEIGHT,
     make_microduck_stair_curriculum_rsi_env_cfg,
     make_microduck_stair_contact_mantle_rsi_env_cfg,
+    make_microduck_stair_medium_dynamics_rsi_env_cfg,
     make_microduck_stair_phase_balanced_rsi_env_cfg,
+    make_microduck_stair_soft_dynamics_rsi_env_cfg,
 )
 
 
@@ -92,3 +98,27 @@ def test_contact_mantle_rsi_focuses_only_the_armed_last_mile():
     assert cfg.rewards["stair_first_tread_secured"].weight == 600.0
     assert MicroduckStairContactMantleRsiRlCfg.max_iterations == 300
     assert MicroduckStairContactMantleRsiRlCfg.save_interval == 25
+
+
+def test_contact_continuation_uses_only_full_height_challenge_rows():
+    baseline = make_microduck_stair_contact_mantle_rsi_env_cfg()
+    soft = make_microduck_stair_soft_dynamics_rsi_env_cfg()
+    medium = make_microduck_stair_medium_dynamics_rsi_env_cfg()
+
+    for cfg in (soft, medium):
+        assert tuple(cfg.observations["actor"].terms) == tuple(
+            baseline.observations["actor"].terms
+        )
+        assert cfg.scene.terrain.max_init_terrain_level == (
+            STAIR_MECHANISM_CURRICULUM_LEVELS - 1
+        )
+        assert cfg.events["route_challenge_levels"].params["standard_fraction"] == 1.0
+        assert "terrain_levels" not in cfg.curriculum
+        assert cfg.rewards["stair_first_tread_secured"].weight == 600.0
+
+    assert STAIR_DISCOVERY_SOLREF_TIME_CONSTANT == 0.10
+    assert STAIR_BRIDGE_SOLREF_TIME_CONSTANT == 0.065
+    assert soft.scene.spec_fn.__name__ == "_soft_stair_discovery_contacts"
+    assert medium.scene.spec_fn.__name__ == "_medium_stair_bridge_contacts"
+    assert MicroduckStairSoftDynamicsRsiRlCfg.max_iterations == 200
+    assert MicroduckStairMediumDynamicsRsiRlCfg.max_iterations == 200

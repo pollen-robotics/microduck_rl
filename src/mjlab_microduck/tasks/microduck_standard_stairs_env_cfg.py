@@ -62,6 +62,52 @@ ROUTE_MIN_RISER_HEIGHT = 0.010
 ROUTE_CURRICULUM_LEVELS = 16
 STAIR_MECHANISM_MIN_RISER_HEIGHT = 0.10
 STAIR_MECHANISM_CURRICULUM_LEVELS = 8
+STAIR_DISCOVERY_SOLREF_TIME_CONSTANT = 0.10
+STAIR_BRIDGE_SOLREF_TIME_CONSTANT = 0.065
+
+
+def _set_stair_contact_continuation(
+    spec: mujoco.MjSpec,
+    *,
+    time_constant: float,
+    impedance_start: float,
+) -> None:
+    """Soften raised stair boxes while preserving the hard approach floor."""
+
+    body = spec.body("terrain")
+    changed = 0
+    for geom in body.geoms:
+        # Generated approach floors have their center below z=0. Keeping them
+        # at the normal contact setting preserves the manufacturer walk-up.
+        if float(geom.pos[2]) <= 0.0:
+            continue
+        geom.solref = [time_constant, 1.0]
+        geom.solimp = [impedance_start, 0.95, 0.005, 0.5, 2.0]
+        changed += 1
+    print(
+        "[stair continuation] softened "
+        f"{changed} raised geoms (solref={time_constant:.3f})"
+    )
+
+
+def _soft_stair_discovery_contacts(spec: mujoco.MjSpec) -> None:
+    """A22 soft constraint used only to discover a full-height crossing."""
+
+    _set_stair_contact_continuation(
+        spec,
+        time_constant=STAIR_DISCOVERY_SOLREF_TIME_CONSTANT,
+        impedance_start=0.65,
+    )
+
+
+def _medium_stair_bridge_contacts(spec: mujoco.MjSpec) -> None:
+    """A23 halfway constraint used before returning to hard contacts."""
+
+    _set_stair_contact_continuation(
+        spec,
+        time_constant=STAIR_BRIDGE_SOLREF_TIME_CONSTANT,
+        impedance_start=0.76,
+    )
 
 
 @dataclass(kw_only=True)
@@ -1140,6 +1186,43 @@ def make_microduck_stair_contact_mantle_rsi_env_cfg(
     return cfg
 
 
+def _make_microduck_stair_contact_continuation_env_cfg(
+    *,
+    play: bool,
+    spec_fn: object,
+) -> ManagerBasedRlEnvCfg:
+    """Keep every rollout on the 170 mm row while varying contact hardness."""
+
+    cfg = make_microduck_stair_contact_mantle_rsi_env_cfg(play=play)
+    cfg.scene.spec_fn = spec_fn
+    cfg.scene.terrain.max_init_terrain_level = STAIR_MECHANISM_CURRICULUM_LEVELS - 1
+    cfg.events["route_challenge_levels"].params["standard_fraction"] = 1.0
+    cfg.curriculum.pop("terrain_levels", None)
+    return cfg
+
+
+def make_microduck_stair_soft_dynamics_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A22: discover a 170 mm crossing with soft stair constraints."""
+
+    return _make_microduck_stair_contact_continuation_env_cfg(
+        play=play,
+        spec_fn=_soft_stair_discovery_contacts,
+    )
+
+
+def make_microduck_stair_medium_dynamics_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A23: retain the crossing while hardening stair contacts."""
+
+    return _make_microduck_stair_contact_continuation_env_cfg(
+        play=play,
+        spec_fn=_medium_stair_bridge_contacts,
+    )
+
+
 def make_microduck_stair_tread_contact_bank_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -1415,6 +1498,29 @@ MicroduckStairContactMantleRsiRlCfg.run_name = (
 )
 MicroduckStairContactMantleRsiRlCfg.max_iterations = 300
 MicroduckStairContactMantleRsiRlCfg.save_interval = 25
+
+MicroduckStairSoftDynamicsRsiRlCfg = deepcopy(MicroduckStairContactMantleRsiRlCfg)
+MicroduckStairSoftDynamicsRsiRlCfg.experiment_name = (
+    "microduck_stair_soft_dynamics_rsi_specialist"
+)
+MicroduckStairSoftDynamicsRsiRlCfg.run_name = (
+    "microduck_stair_soft_dynamics_rsi_specialist"
+)
+MicroduckStairSoftDynamicsRsiRlCfg.max_iterations = 200
+MicroduckStairSoftDynamicsRsiRlCfg.save_interval = 25
+MicroduckStairSoftDynamicsRsiRlCfg.actor.distribution_cfg["init_std"] = 0.26
+MicroduckStairSoftDynamicsRsiRlCfg.algorithm.learning_rate = 1.5e-5
+
+MicroduckStairMediumDynamicsRsiRlCfg = deepcopy(MicroduckStairSoftDynamicsRsiRlCfg)
+MicroduckStairMediumDynamicsRsiRlCfg.experiment_name = (
+    "microduck_stair_medium_dynamics_rsi_specialist"
+)
+MicroduckStairMediumDynamicsRsiRlCfg.run_name = (
+    "microduck_stair_medium_dynamics_rsi_specialist"
+)
+MicroduckStairMediumDynamicsRsiRlCfg.max_iterations = 200
+MicroduckStairMediumDynamicsRsiRlCfg.actor.distribution_cfg["init_std"] = 0.22
+MicroduckStairMediumDynamicsRsiRlCfg.algorithm.learning_rate = 1.0e-5
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)
 MicroduckStairTreadContactBankRlCfg.experiment_name = (
