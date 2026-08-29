@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Bounded A13 CEM search for a full-height first-stair action sequence.
+"""Bounded A15 CEM search for a full-height first-stair action sequence.
 
 The manufacturer-derived A9 actor remains frozen. CEM searches only a short,
-piecewise-constant residual action sequence from one exact A12 loaded-foot bank
-state. Candidate fitness is the best single state on its own trajectory. It is
-never assembled from independent maxima, and a lateral bypass invalidates the
-candidate.
+piecewise-constant residual action sequence from one exact manufacturer-roll
+bank state. Candidate fitness is the best single state on its own trajectory,
+with an auxiliary contact-sequence score that rewards real anchor contact,
+positive pitch work, release, and later tread support. It is never assembled
+from independent maxima, and a lateral bypass invalidates the candidate.
 """
 
 from __future__ import annotations
@@ -37,6 +38,10 @@ TRUNK_SHELL_LOCAL_CENTER_M = np.array((-0.006, 0.0, -0.006), dtype=np.float64)
 SIDE_BYPASS_PENALTY = 1_000_000.0
 SAGITTAL_ACTION_DIM = 7
 DEFAULT_ACTION_LIMIT = 10.0
+CONTACT_SEQUENCE_MIN_WORK_J = 0.001
+CONTACT_SEQUENCE_TARGET_WORK_J = 0.004
+CONTACT_SEQUENCE_WEIGHT = 8.0
+CONTROL_STEP_S = 0.02
 
 
 @dataclass(frozen=True)
@@ -79,6 +84,25 @@ class CandidateScore:
     best_root_z_m: float
     best_shell_min_x_m: float
     best_shell_min_z_m: float
+    geometry_score: float = 0.0
+    contact_sequence_score: float = 0.0
+    contact_sequence: bool = False
+    anchor_contact_step: int = -1
+    contact_release_step: int = -1
+    support_contact_step: int = -1
+    positive_pitch_work_j: float = 0.0
+
+
+@dataclass(frozen=True)
+class ContactSequenceScore:
+    """Auxiliary temporal score for a physically meaningful contact handoff."""
+
+    quality: float
+    sequence: bool
+    anchor_contact_step: int
+    release_step: int
+    support_contact_step: int
+    positive_pitch_work_j: float
 
 
 def expand_action_knots(knots: np.ndarray, horizon_steps: int) -> np.ndarray:
@@ -184,6 +208,82 @@ def box_corners_world(
     )
 
 
+def score_contact_sequence(
+    anchor_contact: np.ndarray | None,
+    anchor_positive_pitch_power: np.ndarray | None,
+    support_contact: np.ndarray | None,
+    valid_steps: np.ndarray,
+    *,
+    step_dt: float = CONTROL_STEP_S,
+    min_positive_work_j: float = CONTACT_SEQUENCE_MIN_WORK_J,
+    target_positive_work_j: float = CONTACT_SEQUENCE_TARGET_WORK_J,
+) -> ContactSequenceScore:
+    """Score anchor contact -> positive work -> release -> tread support.
+
+    This is only an auxiliary search shaping signal. The strict geometry and
+    secured-tread checks remain the promotion gate. Contact arrays are kept
+    per time step so the search cannot combine contact from one state with
+    clearance from another.
+    """
+
+    valid = np.asarray(valid_steps, dtype=bool)
+    if valid.ndim != 1:
+        raise ValueError("valid_steps must have shape (steps,)")
+    steps = valid.shape[0]
+    if anchor_contact is None or anchor_positive_pitch_power is None or support_contact is None:
+        return ContactSequenceScore(0.0, False, -1, -1, -1, 0.0)
+    anchor = np.asarray(anchor_contact, dtype=bool)
+    power = np.asarray(anchor_positive_pitch_power, dtype=np.float64)
+    support = np.asarray(support_contact, dtype=bool)
+    if anchor.shape != (steps,) or power.shape != (steps,) or support.shape != (steps,):
+        raise ValueError("contact traces must all have shape (steps,)")
+    finite_power = np.nan_to_num(power, nan=0.0, posinf=0.0, neginf=0.0)
+    work_by_step = np.where(
+        valid & anchor,
+        np.maximum(finite_power, 0.0) * max(step_dt, 0.0),
+        0.0,
+    )
+    cumulative_work = np.cumsum(work_by_step)
+    anchor_indices = np.flatnonzero(valid & anchor)
+    if anchor_indices.size == 0:
+        return ContactSequenceScore(0.0, False, -1, -1, -1, 0.0)
+
+    anchor_step = int(anchor_indices[0])
+    positive_work = float(cumulative_work[-1])
+    work_quality = float(
+        np.clip(positive_work / max(target_positive_work_j, 1e-9), 0.0, 1.0)
+    )
+    release_candidates = np.flatnonzero(
+        valid
+        & (np.arange(steps) > anchor_step)
+        & ~anchor
+        & (cumulative_work >= min_positive_work_j)
+    )
+    release_step = int(release_candidates[0]) if release_candidates.size else -1
+    support_candidates = (
+        np.flatnonzero(valid & support & (np.arange(steps) > release_step))
+        if release_step >= 0
+        else np.empty(0, dtype=np.int64)
+    )
+    support_step = int(support_candidates[0]) if support_candidates.size else -1
+    has_work = positive_work >= min_positive_work_j
+    sequence = bool(anchor_step >= 0 and has_work and release_step >= 0 and support_step >= 0)
+    quality = (
+        0.20
+        + 0.35 * work_quality
+        + 0.15 * float(release_step >= 0)
+        + 0.30 * float(support_step >= 0)
+    )
+    return ContactSequenceScore(
+        quality=float(np.clip(quality, 0.0, 1.0)),
+        sequence=sequence,
+        anchor_contact_step=anchor_step,
+        release_step=release_step,
+        support_contact_step=support_step,
+        positive_pitch_work_j=positive_work,
+    )
+
+
 def _unit_progress(values: np.ndarray, start: float, target: float) -> np.ndarray:
     if target <= start:
         raise ValueError("progress target must exceed start")
@@ -196,6 +296,9 @@ def score_strict_trajectory(
     secured_tread: np.ndarray,
     valid_steps: np.ndarray | None = None,
     config: StrictScoreConfig | None = None,
+    anchor_contact: np.ndarray | None = None,
+    anchor_positive_pitch_power: np.ndarray | None = None,
+    support_contact: np.ndarray | None = None,
 ) -> CandidateScore:
     """Score one trajectory without combining evidence from different states.
 
@@ -239,6 +342,7 @@ def score_strict_trajectory(
             best_root_z_m=float("nan"),
             best_shell_min_x_m=float("nan"),
             best_shell_min_z_m=float("nan"),
+            geometry_score=float(-config.side_bypass_penalty),
         )
 
     x = roots[:, 0]
@@ -290,7 +394,14 @@ def score_strict_trajectory(
     )
     step_scores = np.where(valid & in_corridor, step_scores, -np.inf)
     best_step = int(np.argmax(step_scores))
-    best_score = float(step_scores[best_step])
+    geometry_score = float(step_scores[best_step])
+    contact = score_contact_sequence(
+        anchor_contact,
+        anchor_positive_pitch_power,
+        support_contact,
+        valid,
+    )
+    best_score = geometry_score + CONTACT_SEQUENCE_WEIGHT * contact.quality
     if not np.isfinite(best_score):
         best_step = int(np.flatnonzero(valid)[0])
         best_score = 0.0
@@ -310,6 +421,13 @@ def score_strict_trajectory(
         best_root_z_m=float(z[best_step]),
         best_shell_min_x_m=float(shell_min_x[best_step]),
         best_shell_min_z_m=float(shell_min_z[best_step]),
+        geometry_score=geometry_score,
+        contact_sequence_score=contact.quality,
+        contact_sequence=contact.sequence,
+        anchor_contact_step=contact.anchor_contact_step,
+        contact_release_step=contact.release_step,
+        support_contact_step=contact.support_contact_step,
+        positive_pitch_work_j=contact.positive_pitch_work_j,
     )
 
 
@@ -592,6 +710,74 @@ def _locate_and_validate_shell(base_env: Any) -> int:
     return int(geom.id)
 
 
+def _stair_contact_masks(
+    base_env: Any,
+    sensor_name: str,
+    *,
+    torch: Any,
+    microduck_mdp: Any,
+) -> tuple[Any, Any]:
+    """Return per-slot first-face and first-tread contact masks."""
+
+    empty = torch.zeros(
+        (base_env.num_envs, 1), dtype=torch.bool, device=base_env.device
+    )
+    if sensor_name not in base_env.scene.sensors:
+        return empty, empty
+    data = base_env.scene.sensors[sensor_name].data
+    if data.found is None or data.pos is None or data.normal is None:
+        return empty, empty
+    found = data.found.reshape(base_env.num_envs, -1)
+    positions = data.pos.reshape(base_env.num_envs, -1, 3)
+    normals = data.normal.reshape(base_env.num_envs, -1, 3)
+    face, tread = microduck_mdp.classify_standard_stair_contacts(
+        found,
+        positions,
+        normals,
+        base_env.scene.terrain.env_origins,
+        stair_face_x=STAIR_FACE_X_M,
+        riser_height=STANDARD_RISER_HEIGHT_M,
+        tread_depth=STANDARD_TREAD_DEPTH_M,
+        corridor_half_width=0.20,
+    )
+    return face, tread
+
+
+def _contact_pitch_power(
+    base_env: Any,
+    sensor_name: str,
+    contact_mask: Any,
+    *,
+    torch: Any,
+) -> Any:
+    """Return strongest signed positive pitch power for selected contacts."""
+
+    zero = torch.zeros(base_env.num_envs, device=base_env.device)
+    if sensor_name not in base_env.scene.sensors:
+        return zero
+    data = base_env.scene.sensors[sensor_name].data
+    if data.force is None or data.normal is None or data.pos is None:
+        return zero
+    force = data.force.reshape(base_env.num_envs, -1, 3)
+    normal = data.normal.reshape(base_env.num_envs, -1, 3)
+    positions = data.pos.reshape(base_env.num_envs, -1, 3)
+    if contact_mask.shape != force.shape[:2]:
+        return zero
+    normal_force = torch.abs(torch.sum(force * normal, dim=-1))
+    normal_force = torch.where(contact_mask, normal_force, torch.zeros_like(normal_force))
+    slot = normal_force.argmax(dim=-1, keepdim=True)
+    slot_xyz = slot.unsqueeze(-1).expand(-1, -1, 3)
+    contact_pos = positions.gather(1, slot_xyz).squeeze(1)
+    contact_force = force.gather(1, slot_xyz).squeeze(1)
+    asset = base_env.scene["robot"]
+    lever = contact_pos - asset.data.root_link_pos_w
+    pitch_torque = torch.cross(lever, contact_force, dim=-1)[:, 1]
+    pitch_power = torch.clamp(
+        pitch_torque * asset.data.root_link_ang_vel_w[:, 1], min=0.0
+    )
+    return torch.where(normal_force.max(dim=-1).values > 0.0, pitch_power, zero)
+
+
 def _evaluate_candidates(
     candidates: np.ndarray,
     *,
@@ -609,6 +795,8 @@ def _evaluate_candidates(
     gpu_headroom_gb: float,
     torch: Any,
 ) -> list[CandidateScore]:
+    from mjlab_microduck.tasks import mdp as microduck_mdp
+
     expanded = expand_action_knots(candidates, horizon_steps)
     if sagittal_symmetry:
         expanded = expand_sagittal_actions(expanded)
@@ -652,6 +840,9 @@ def _evaluate_candidates(
         corners_by_step: list[Any] = []
         secured_by_step: list[Any] = []
         valid_by_step: list[Any] = []
+        anchor_contact_by_step: list[Any] = []
+        anchor_power_by_step: list[Any] = []
+        support_contact_by_step: list[Any] = []
 
         for step in range(horizon_steps):
             robot = base_env.scene["robot"]
@@ -673,6 +864,41 @@ def _evaluate_candidates(
             secured_by_step.append((secured_latched & ~previous_secured).clone())
             previous_secured = secured_latched.clone()
             valid_by_step.append(alive.clone())
+            head_face_slots, _ = _stair_contact_masks(
+                base_env,
+                "head_ground_contact",
+                torch=torch,
+                microduck_mdp=microduck_mdp,
+            )
+            _, foot_tread_slots = _stair_contact_masks(
+                base_env,
+                "feet_stair_contact",
+                torch=torch,
+                microduck_mdp=microduck_mdp,
+            )
+            _, robot_tread_slots = _stair_contact_masks(
+                base_env,
+                "robot_ground_contact",
+                torch=torch,
+                microduck_mdp=microduck_mdp,
+            )
+            head_face_contact = head_face_slots.any(dim=-1)
+            foot_tread_contact = foot_tread_slots.any(dim=-1)
+            anchor_contact_by_step.append((head_face_contact | foot_tread_contact).clone())
+            head_power = _contact_pitch_power(
+                base_env,
+                "head_ground_contact",
+                head_face_slots,
+                torch=torch,
+            )
+            foot_power = _contact_pitch_power(
+                base_env,
+                "feet_stair_contact",
+                foot_tread_slots,
+                torch=torch,
+            )
+            anchor_power_by_step.append(torch.maximum(head_power, foot_power).clone())
+            support_contact_by_step.append(robot_tread_slots.any(dim=-1).clone())
 
             with torch.inference_mode():
                 actions = baseline_actor(observations) + residual_actions[:, step]
@@ -684,6 +910,9 @@ def _evaluate_candidates(
         shell_trajectories = torch.stack(corners_by_step, dim=1).cpu().numpy()
         secured_trajectories = torch.stack(secured_by_step, dim=1).cpu().numpy()
         valid_trajectories = torch.stack(valid_by_step, dim=1).cpu().numpy()
+        anchor_trajectories = torch.stack(anchor_contact_by_step, dim=1).cpu().numpy()
+        anchor_power_trajectories = torch.stack(anchor_power_by_step, dim=1).cpu().numpy()
+        support_trajectories = torch.stack(support_contact_by_step, dim=1).cpu().numpy()
         if score_start_step:
             valid_trajectories[:, :score_start_step] = False
         for index in range(count):
@@ -694,6 +923,9 @@ def _evaluate_candidates(
                     secured_trajectories[index],
                     valid_trajectories[index],
                     score_config,
+                    anchor_contact=anchor_trajectories[index],
+                    anchor_positive_pitch_power=anchor_power_trajectories[index],
+                    support_contact=support_trajectories[index],
                 )
             )
     return results

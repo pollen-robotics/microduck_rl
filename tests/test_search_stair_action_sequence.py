@@ -129,6 +129,42 @@ def test_box_corners_world_uses_exact_oriented_box_geometry() -> None:
     np.testing.assert_allclose(corners[0].max(axis=0), [1.2, 2.1, 3.3])
 
 
+def test_contact_sequence_requires_work_release_and_later_tread_support() -> None:
+    contact = np.array([False, True, True, False, False, True])
+    power = np.array([0.0, 0.04, 0.03, 0.0, 0.0, 0.0])
+    support = np.array([False, False, False, False, False, True])
+
+    result = SEARCH.score_contact_sequence(
+        contact,
+        power,
+        support,
+        np.ones(6, dtype=bool),
+    )
+
+    assert result.sequence
+    assert result.anchor_contact_step == 1
+    assert result.release_step == 3
+    assert result.support_contact_step == 5
+    np.testing.assert_allclose(result.positive_pitch_work_j, 0.0014)
+
+
+def test_contact_sequence_does_not_credit_support_before_release() -> None:
+    contact = np.array([True, True, False, False])
+    power = np.array([0.05, 0.05, 0.0, 0.0])
+    support = np.array([True, False, False, False])
+
+    result = SEARCH.score_contact_sequence(
+        contact,
+        power,
+        support,
+        np.ones(4, dtype=bool),
+    )
+
+    assert not result.sequence
+    assert result.release_step == 2
+    assert result.support_contact_step == -1
+
+
 def test_strict_score_never_combines_independent_trajectory_maxima() -> None:
     roots = np.array(
         [
