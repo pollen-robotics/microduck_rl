@@ -1795,6 +1795,10 @@ def stair_tread_pullup_frontier(
     start_height: float = 0.10,
     target_height: float = 0.205,
     corridor_half_width: float = 0.36,
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    support_sensor_name: str = "robot_ground_contact",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Reward new root lift and advance after a real first-tread contact.
@@ -1809,9 +1813,22 @@ def stair_tread_pullup_frontier(
     y = torch.abs(
         asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
     )
-    contacted = getattr(env, "_stair_first_tread_contact_latched", None)
+    _, tread_contact, _ = _standard_stair_contact_masks(
+        env,
+        support_sensor_name,
+        stair_face_x=stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    current_contact = tread_contact.any(dim=-1)
+    contacted = getattr(env, "_stair_tread_pullup_contact_latched", None)
     if contacted is None:
         contacted = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._stair_tread_pullup_contact_latched = contacted
+    fresh = env.episode_length_buf <= 1
+    contacted[fresh] = False
+    contacted |= current_contact
     x_progress = torch.clamp(
         (x - start_x) / max(target_x - start_x, 1e-6), 0.0, 1.0
     )

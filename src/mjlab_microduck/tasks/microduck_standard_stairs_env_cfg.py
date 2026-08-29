@@ -931,7 +931,7 @@ def make_microduck_stair_tread_contact_bank_env_cfg(
     # for replaying that initial state. Pay only newly achieved root lift and
     # advance, then the unchanged physical clearance and secured-tread gates.
     cfg.rewards["stair_riser_face_contact"].weight = 0.0
-    cfg.rewards["stair_first_tread_contact"].weight = 0.0
+    cfg.rewards["stair_first_tread_contact"].weight = 1.0e-6
     cfg.rewards["stair_tread_support_frontier"].weight = 0.0
     cfg.rewards["stair_apex_or_mantle_frontier"].weight = 1.0
     cfg.rewards["stair_assisted_lift"].weight = 2.0
@@ -945,6 +945,9 @@ def make_microduck_stair_tread_contact_bank_env_cfg(
             "start_height": 0.10,
             "target_height": 0.205,
             "corridor_half_width": STANDARD_STAIR_WIDTH * 0.40,
+            "stair_face_x": STANDARD_STAIR_START_DISTANCE,
+            "riser_height": STANDARD_RISER_HEIGHT,
+            "tread_depth": STANDARD_TREAD_DEPTH,
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )

@@ -474,7 +474,7 @@ def test_tread_contact_bank_stage_pays_only_new_pullup_progress():
 
     assert bank == {"bank_path": ".tmp/codex/full170-tread-contact-state-bank.pt"}
     assert cfg.rewards["stair_riser_face_contact"].weight == 0.0
-    assert cfg.rewards["stair_first_tread_contact"].weight == 0.0
+    assert cfg.rewards["stair_first_tread_contact"].weight == 1.0e-6
     assert cfg.rewards["stair_tread_support_frontier"].weight == 0.0
     pullup = cfg.rewards["stair_tread_pullup_frontier"]
     assert pullup.weight == 20.0
