@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from mjlab.tasks.registry import register_mjlab_task
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
@@ -30,6 +32,27 @@ class MicroduckFrozenActorNormRunner(MicroduckOnPolicyRunner):
         normalizer = getattr(self.alg.actor, "obs_normalizer", None)
         if hasattr(normalizer, "until"):
             normalizer.until = 0
+
+
+class MicroduckStairSpecialistRunner(MicroduckOnPolicyRunner):
+    """Seed the specialist actor without importing walking PPO state."""
+
+    def load(
+        self,
+        path: str,
+        load_cfg: dict | None = None,
+        strict: bool = True,
+        map_location: str | None = None,
+    ) -> dict:
+        if load_cfg is None and Path(path).parent.name == ".bootstrap-walking":
+            load_cfg = {
+                "actor": True,
+                "critic": False,
+                "optimizer": False,
+                "iteration": False,
+                "rnd": False,
+            }
+        return super().load(path, load_cfg, strict, map_location)
 
 
 from .microduck_velocity_env_cfg import (
@@ -90,8 +113,10 @@ from .microduck_stairs_env_cfg import (
 )
 from .microduck_standard_stairs_env_cfg import (
     make_microduck_route_stairs_env_cfg,
+    make_microduck_stair_specialist_env_cfg,
     make_microduck_standard_stairs_env_cfg,
     MicroduckRouteStairsRlCfg,
+    MicroduckStairSpecialistRlCfg,
     MicroduckStandardStairsRlCfg,
 )
 from .microduck_headstand_env_cfg import (
@@ -285,6 +310,14 @@ register_mjlab_task(
     play_env_cfg=make_microduck_route_stairs_env_cfg(play=True),
     rl_cfg=MicroduckRouteStairsRlCfg,
     runner_cls=MicroduckFrozenActorNormRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_specialist_env_cfg(),
+    play_env_cfg=make_microduck_stair_specialist_env_cfg(play=True),
+    rl_cfg=MicroduckStairSpecialistRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
 )
 
 register_mjlab_task(

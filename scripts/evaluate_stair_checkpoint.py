@@ -9,6 +9,7 @@ writes an atomic JSON report that can gate the single-robot live preview.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from dataclasses import asdict
@@ -21,6 +22,8 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
+
+from mjlab_microduck.policies import HardStairHandoffPolicy, load_actor_pair
 
 TASK_ID = "Mjlab-Stairs-Route-MicroDuck"
 STANDARD_RISER_HEIGHT_M = 0.170
@@ -37,9 +40,25 @@ def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
     os.replace(temporary, path)
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("checkpoint", type=Path)
+    parser.add_argument("checkpoint", type=Path, help="Stair specialist checkpoint.")
+    parser.add_argument(
+        "--walker-checkpoint",
+        type=Path,
+        help=(
+            "Immutable manufacturer walking checkpoint. When provided, walk to "
+            "the stair and hard-switch to the specialist 100 mm before its face."
+        ),
+    )
     parser.add_argument("--num-envs", type=int, default=8)
     parser.add_argument(
         "--steps",
@@ -60,6 +79,13 @@ def main() -> int:
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_file():
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
+    walker_checkpoint = (
+        args.walker_checkpoint.expanduser().resolve()
+        if args.walker_checkpoint is not None
+        else None
+    )
+    if walker_checkpoint is not None and not walker_checkpoint.is_file():
+        raise SystemExit(f"Walker checkpoint not found: {walker_checkpoint}")
     if args.num_envs < 1 or args.steps < 1:
         raise SystemExit("--num-envs and --steps must be positive")
 
@@ -73,13 +99,24 @@ def main() -> int:
     env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
     runner_cls = load_runner_cls(TASK_ID) or MjlabOnPolicyRunner
     runner = runner_cls(env, asdict(agent_cfg), device=args.device)
-    runner.load(
-        str(checkpoint),
-        load_cfg={"actor": True},
-        strict=True,
-        map_location=args.device,
-    )
-    policy = runner.get_inference_policy(device=args.device)
+    if walker_checkpoint is not None:
+        walker, specialist = load_actor_pair(
+            runner,
+            walker_checkpoint,
+            checkpoint,
+            device=args.device,
+        )
+        policy = HardStairHandoffPolicy(walker, specialist, base_env)
+        policy_mode = "hard_walker_to_specialist_handoff"
+    else:
+        runner.load(
+            str(checkpoint),
+            load_cfg={"actor": True},
+            strict=True,
+            map_location=args.device,
+        )
+        policy = runner.get_inference_policy(device=args.device)
+        policy_mode = "single_actor"
 
     device = torch.device(args.device)
     max_x = torch.full((args.num_envs,), -torch.inf, device=device)
@@ -120,10 +157,26 @@ def main() -> int:
 
     successes = int(success_count.sum().item())
     report: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "task": TASK_ID,
         "checkpoint": str(checkpoint),
+        "checkpoint_sha256": _sha256(checkpoint),
         "checkpoint_iteration": int(checkpoint.stem.rsplit("_", 1)[-1]),
+        "walker_checkpoint": str(walker_checkpoint) if walker_checkpoint else None,
+        "walker_checkpoint_sha256": (
+            _sha256(walker_checkpoint) if walker_checkpoint else None
+        ),
+        "policy_mode": policy_mode,
+        "handoff_local_x_m": (
+            policy.switch_local_x_m
+            if isinstance(policy, HardStairHandoffPolicy)
+            else None
+        ),
+        "handoff_count": (
+            policy.handoff_count
+            if isinstance(policy, HardStairHandoffPolicy)
+            else 0
+        ),
         "standard_riser_height_m": STANDARD_RISER_HEIGHT_M,
         "num_envs": args.num_envs,
         "steps": args.steps,

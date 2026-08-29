@@ -20,7 +20,6 @@ import shutil
 import subprocess
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BOOTSTRAP_DIR_NAME = ".bootstrap-walking"
 STAIR_TARGETS = {
@@ -28,6 +27,11 @@ STAIR_TARGETS = {
         "task": "Mjlab-Stairs-Route-MicroDuck",
         "experiment": "microduck_stair_route",
         "iterations": 10_000,
+    },
+    "specialist": {
+        "task": "Mjlab-Stairs-Specialist-MicroDuck",
+        "experiment": "microduck_stair_specialist",
+        "iterations": 800,
     },
     "low": {
         "task": "Mjlab-Stairs-MicroDuck",
@@ -84,7 +88,10 @@ def _parse_args() -> argparse.Namespace:
         "--stage",
         choices=tuple(STAIR_TARGETS),
         default="route",
-        help="Use route for a flat runway followed by progressively taller stairs.",
+        help=(
+            "Use specialist for the fixed 170 mm post-handoff policy; "
+            "route is the older shared runway policy."
+        ),
     )
     parser.add_argument(
         "--num-envs",

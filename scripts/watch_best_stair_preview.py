@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -27,6 +28,14 @@ except ModuleNotFoundError:  # Direct execution puts scripts/ on sys.path.
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TASK_ID = "Mjlab-Stairs-Route-MicroDuck"
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def physics_improves(candidate: dict[str, object], current: dict[str, object]) -> bool:
@@ -53,9 +62,19 @@ def _load_json(path: Path) -> dict[str, object]:
     return payload
 
 
+def _report_matches(
+    report: dict[str, object], checkpoint: Path, walker_checkpoint: Path
+) -> bool:
+    return (
+        report.get("checkpoint_sha256") == _sha256(checkpoint)
+        and report.get("walker_checkpoint_sha256") == _sha256(walker_checkpoint)
+    )
+
+
 class NativeViewer:
-    def __init__(self, log_path: Path):
+    def __init__(self, log_path: Path, walker_checkpoint: Path):
         self.log_path = log_path
+        self.walker_checkpoint = walker_checkpoint
         self.process: subprocess.Popen[bytes] | None = None
         self._log_handle = None
 
@@ -66,18 +85,13 @@ class NativeViewer:
         environment = os.environ.copy()
         environment.setdefault("PYTHONUTF8", "1")
         command = [
-            str(REPO_ROOT / ".venv" / "Scripts" / "play.exe"),
-            TASK_ID,
-            "--checkpoint-file",
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "view_stair_handoff.py"),
             str(checkpoint),
-            "--num-envs",
-            "1",
+            "--walker-checkpoint",
+            str(self.walker_checkpoint),
             "--device",
             "cpu",
-            "--viewer",
-            "native",
-            "--video",
-            "False",
         ]
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         self.process = subprocess.Popen(
@@ -115,6 +129,7 @@ class NativeViewer:
 
 def _evaluate(
     checkpoint: Path,
+    walker_checkpoint: Path,
     output: Path,
     *,
     num_envs: int,
@@ -125,6 +140,8 @@ def _evaluate(
         sys.executable,
         str(REPO_ROOT / "scripts" / "evaluate_stair_checkpoint.py"),
         str(checkpoint),
+        "--walker-checkpoint",
+        str(walker_checkpoint),
         "--num-envs",
         str(num_envs),
         "--steps",
@@ -150,13 +167,18 @@ def _evaluate(
 
 def _record_video(
     checkpoint: Path,
+    walker_checkpoint: Path,
     video_dir: Path,
     *,
     steps: int,
     device: str,
 ) -> Path:
     iteration = int(checkpoint.stem.rsplit("_", 1)[-1])
-    output = video_dir / f"standard-home-stairs-iter-{iteration:05d}.mp4"
+    checkpoint_id = _sha256(checkpoint)[:10]
+    output = (
+        video_dir
+        / f"standard-home-stairs-{checkpoint_id}-iter-{iteration:05d}.mp4"
+    )
     if output.is_file() and output.stat().st_size > 0:
         return output.resolve()
     command = [
@@ -164,6 +186,8 @@ def _record_video(
         str(REPO_ROOT / "scripts" / "record_stair_policy.py"),
         str(checkpoint),
         str(output),
+        "--walker-checkpoint",
+        str(walker_checkpoint),
         "--steps",
         str(steps),
         "--device",
@@ -180,6 +204,7 @@ def _record_video(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
+    parser.add_argument("--walker-checkpoint", type=Path, required=True)
     parser.add_argument("--baseline-report", type=Path, required=True)
     parser.add_argument("--poll-seconds", type=float, default=30.0)
     parser.add_argument("--eval-num-envs", type=int, default=8)
@@ -208,16 +233,28 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     run_dir = args.run_dir.resolve()
+    walker_checkpoint = args.walker_checkpoint.expanduser().resolve()
+    if not walker_checkpoint.is_file():
+        raise SystemExit(f"Missing walker checkpoint: {walker_checkpoint}")
     baseline_report = _load_json(args.baseline_report.resolve())
     current_report = baseline_report
     current_checkpoint = run_dir / "model_0.pt"
     if not current_checkpoint.is_file():
         raise SystemExit(f"Missing baseline checkpoint: {current_checkpoint}")
+    expected_specialist_hash = _sha256(current_checkpoint)
+    expected_walker_hash = _sha256(walker_checkpoint)
+    if baseline_report.get("checkpoint_sha256") != expected_specialist_hash:
+        raise SystemExit("Baseline report does not match model_0.pt")
+    if baseline_report.get("walker_checkpoint_sha256") != expected_walker_hash:
+        raise SystemExit("Baseline report does not match the immutable walker checkpoint")
 
     manifest_path = args.state.resolve().with_name("best-stair-preview.json")
     evaluation_dir = run_dir / "stair-evaluations"
     current_video: Path | None = None
-    viewer = NativeViewer(REPO_ROOT / ".tmp" / "codex" / "best-preview-viewer.log")
+    viewer = NativeViewer(
+        REPO_ROOT / ".tmp" / "codex" / "best-preview-viewer.log",
+        walker_checkpoint,
+    )
     evaluated: dict[str, dict[str, object]] = {str(current_checkpoint.resolve()): baseline_report}
     rejections: dict[str, str] = {}
     if evaluation_dir.is_dir():
@@ -230,6 +267,8 @@ def main() -> int:
             if not checkpoint.is_file():
                 continue
             report = _load_json(report_path)
+            if not _report_matches(report, checkpoint, walker_checkpoint):
+                continue
             key = str(checkpoint.resolve())
             evaluated[key] = report
             if physics_improves(report, current_report):
@@ -257,6 +296,7 @@ def main() -> int:
     viewer.start(current_checkpoint)
     current_video = _record_video(
         current_checkpoint,
+        walker_checkpoint,
         args.video_dir.resolve(),
         steps=args.video_steps,
         device=args.video_device,
@@ -303,6 +343,7 @@ def main() -> int:
                         evaluation_path = evaluation_dir / f"{candidate.stem}.json"
                         report = _evaluate(
                             candidate,
+                            walker_checkpoint,
                             evaluation_path,
                             num_envs=args.eval_num_envs,
                             steps=args.eval_steps,
@@ -312,6 +353,7 @@ def main() -> int:
                         if physics_improves(report, current_report):
                             promoted_video = _record_video(
                                 candidate,
+                                walker_checkpoint,
                                 args.video_dir.resolve(),
                                 steps=args.video_steps,
                                 device=args.video_device,

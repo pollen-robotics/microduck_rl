@@ -898,6 +898,56 @@ def stair_first_riser_clearance(
     return newly_cleared.float()
 
 
+def stair_first_riser_frontier(
+    env: ManagerBasedRlEnv,
+    stair_start_distance: float,
+    standing_root_height: float,
+    riser_height: float,
+    approach_distance: float = 0.18,
+    preload_distance: float = 0.08,
+    x_margin: float = 0.04,
+    z_margin: float = 0.025,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward only new episode-best progress through the first 170 mm riser.
+
+    The three equal phases are reaching the face, lifting above the lip, and
+    crossing the face while elevated. Holding or repeating an already reached
+    state pays zero, so the dense discovery signal cannot be farmed.
+    """
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    approach = torch.clamp(
+        (x - (stair_start_distance - approach_distance))
+        / max(approach_distance - 0.02, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    preload_gate = torch.sigmoid(
+        (x - (stair_start_distance - preload_distance)) / 0.02
+    )
+    lip_height = riser_height + z_margin
+    lift = torch.clamp(
+        (z - standing_root_height)
+        / max(lip_height - standing_root_height, 1e-6),
+        min=0.0,
+        max=1.0,
+    ) * preload_gate
+    crossing = torch.clamp(
+        (x - (stair_start_distance - 0.02)) / max(x_margin + 0.02, 1e-6),
+        min=0.0,
+        max=1.0,
+    ) * lift
+    frontier = (approach + lift + crossing) / 3.0
+    if not hasattr(env, "_stair_first_riser_frontier"):
+        env._stair_first_riser_frontier = frontier.clone()
+    fresh = env.episode_length_buf <= 1
+    env._stair_first_riser_frontier[fresh] = frontier[fresh]
+    new_best = torch.maximum(env._stair_first_riser_frontier, frontier)
+    delta = new_best - env._stair_first_riser_frontier
+    env._stair_first_riser_frontier = new_best
+    return delta / env.step_dt
+
+
 def reset_route_learning_states(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
@@ -911,6 +961,8 @@ def reset_route_learning_states(
     near_face_fraction: float = 0.25,
     partial_mantle_fraction: float = 0.25,
     on_tread_fraction: float = 0.15,
+    min_tread_step: int = 1,
+    max_tread_step: int | None = None,
 ) -> None:
     """Reverse curriculum for discovering contact and recovery subskills.
 
@@ -1002,8 +1054,14 @@ def reset_route_learning_states(
         # must never claim the clearance latch merely because reset placed the
         # robot beyond the first face.
         env._stair_skip_first_clearance[tread_ids] = True
+        upper_tread_step = num_steps if max_tread_step is None else max_tread_step
+        if not 1 <= min_tread_step <= upper_tread_step <= num_steps:
+            raise ValueError("Tread reset range must stay within the staircase.")
         step_index = torch.randint(
-            1, num_steps + 1, (len(tread_ids),), device=env.device
+            min_tread_step,
+            upper_tread_step + 1,
+            (len(tread_ids),),
+            device=env.device,
         )
         tread_center = stair_start_distance + (step_index.float() - 0.5) * tread_depth
         env.sim.data.qpos[tread_ids, 0] = (

@@ -475,6 +475,71 @@ def make_microduck_route_stairs_env_cfg(
     return cfg
 
 
+def make_microduck_stair_specialist_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Train only the post-handoff specialist on the full home staircase."""
+    cfg = make_microduck_route_stairs_env_cfg(play=False)
+    cfg.episode_length_s = 8.0
+
+    # Keep the procedural row layout used by route cues, but make every row
+    # the same physical five-step, 170 mm staircase. There is no miniature
+    # terrain and no height curriculum in this specialist experiment.
+    terrain_generator = cfg.scene.terrain.terrain_generator
+    for terrain_cfg in terrain_generator.sub_terrains.values():
+        terrain_cfg.riser_height = STANDARD_RISER_HEIGHT
+        terrain_cfg.riser_height_range = None
+        terrain_cfg.difficulty_levels = None
+    cfg.events["route_challenge_levels"].params["standard_fraction"] = 1.0
+    cfg.curriculum.pop("terrain_levels", None)
+
+    # Every episode starts in the specialist's domain: a real handoff window,
+    # a partial shell/head mantle, or recovery on the first full-height tread.
+    # Distant runway starts belong exclusively to the immutable walker.
+    reset_params = cfg.events["route_state_curriculum"].params
+    reset_params.update(
+        {
+            "near_face_fraction": 0.50,
+            "partial_mantle_fraction": 0.30,
+            "on_tread_fraction": 0.20,
+            "min_tread_step": 1,
+            "max_tread_step": 1,
+        }
+    )
+
+    # Discovery is driven by an unfarmable first-riser frontier and a durable
+    # one-shot clearance. The distant five-step height potential is silent
+    # until the first 170 mm transition is actually learned.
+    cfg.rewards["track_linear_velocity"].weight = 0.0
+    cfg.rewards["track_angular_velocity"].weight = 0.0
+    cfg.rewards["upright"].weight = 0.0
+    cfg.rewards["action_rate_l2"].weight = 0.0
+    cfg.rewards["stair_goal_progress"].weight = 0.5
+    cfg.rewards["stair_top_approach"].weight = 0.0
+    cfg.rewards["stair_first_riser_clearance"].weight = 200.0
+    cfg.rewards["stair_first_riser_frontier"] = RewardTermCfg(
+        func=microduck_mdp.stair_first_riser_frontier,
+        weight=4.0,
+        params={
+            "stair_start_distance": STANDARD_STAIR_START_DISTANCE,
+            "standing_root_height": STANDARD_STANDING_ROOT_HEIGHT,
+            "riser_height": STANDARD_RISER_HEIGHT,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    if play:
+        # Specialist-only play begins at the real handoff window. Full-route
+        # evaluation uses the separate hard walker-to-specialist dispatcher.
+        reset_params.update(
+            {
+                "near_face_fraction": 1.0,
+                "partial_mantle_fraction": 0.0,
+                "on_tread_fraction": 0.0,
+            }
+        )
+    return cfg
+
+
 MicroduckStandardStairsRlCfg = deepcopy(MicroduckRlCfg)
 MicroduckStandardStairsRlCfg.experiment_name = "microduck_standard_stairs"
 MicroduckStandardStairsRlCfg.run_name = "microduck_standard_stairs"
@@ -485,3 +550,15 @@ MicroduckRouteStairsRlCfg.experiment_name = "microduck_stair_route"
 MicroduckRouteStairsRlCfg.run_name = "microduck_stair_route"
 MicroduckRouteStairsRlCfg.max_iterations = 10_000
 MicroduckRouteStairsRlCfg.save_interval = 50
+
+MicroduckStairSpecialistRlCfg = deepcopy(MicroduckRouteStairsRlCfg)
+MicroduckStairSpecialistRlCfg.experiment_name = "microduck_stair_specialist"
+MicroduckStairSpecialistRlCfg.run_name = "microduck_stair_specialist"
+MicroduckStairSpecialistRlCfg.max_iterations = 800
+MicroduckStairSpecialistRlCfg.save_interval = 50
+MicroduckStairSpecialistRlCfg.algorithm.learning_rate = 1.0e-4
+MicroduckStairSpecialistRlCfg.algorithm.schedule = "fixed"
+MicroduckStairSpecialistRlCfg.algorithm.clip_param = 0.1
+MicroduckStairSpecialistRlCfg.algorithm.entropy_coef = 0.003
+MicroduckStairSpecialistRlCfg.algorithm.num_learning_epochs = 3
+MicroduckStairSpecialistRlCfg.algorithm.num_mini_batches = 4

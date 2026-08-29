@@ -17,13 +17,20 @@ from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 
+from mjlab_microduck.policies import HardStairHandoffPolicy, load_actor_pair
+
 TASK_ID = "Mjlab-Stairs-Route-MicroDuck"
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("checkpoint", type=Path)
+    parser.add_argument("checkpoint", type=Path, help="Stair specialist checkpoint.")
     parser.add_argument("output", type=Path)
+    parser.add_argument(
+        "--walker-checkpoint",
+        type=Path,
+        help="Immutable manufacturer walker used before the hard stair handoff.",
+    )
     parser.add_argument("--steps", type=int, default=700)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--width", type=int, default=960)
@@ -86,6 +93,13 @@ def main() -> int:
     output = args.output.expanduser().resolve()
     if not checkpoint.is_file():
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
+    walker_checkpoint = (
+        args.walker_checkpoint.expanduser().resolve()
+        if args.walker_checkpoint is not None
+        else None
+    )
+    if walker_checkpoint is not None and not walker_checkpoint.is_file():
+        raise SystemExit(f"Walker checkpoint not found: {walker_checkpoint}")
     if args.steps < 1 or args.width < 2 or args.height < 2:
         raise SystemExit("--steps, --width, and --height must be positive")
 
@@ -107,13 +121,22 @@ def main() -> int:
     env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
     runner_cls = load_runner_cls(TASK_ID) or MjlabOnPolicyRunner
     runner = runner_cls(env, asdict(agent_cfg), device=args.device)
-    runner.load(
-        str(checkpoint),
-        load_cfg={"actor": True},
-        strict=True,
-        map_location=args.device,
-    )
-    policy = runner.get_inference_policy(device=args.device)
+    if walker_checkpoint is not None:
+        walker, specialist = load_actor_pair(
+            runner,
+            walker_checkpoint,
+            checkpoint,
+            device=args.device,
+        )
+        policy = HardStairHandoffPolicy(walker, specialist, base_env)
+    else:
+        runner.load(
+            str(checkpoint),
+            load_cfg={"actor": True},
+            strict=True,
+            map_location=args.device,
+        )
+        policy = runner.get_inference_policy(device=args.device)
 
     writer: subprocess.Popen[bytes] | None = None
     try:
