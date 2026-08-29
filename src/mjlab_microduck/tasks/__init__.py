@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import torch
 from mjlab.tasks.registry import register_mjlab_task
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
@@ -37,6 +38,11 @@ class MicroduckFrozenActorNormRunner(MicroduckOnPolicyRunner):
 class MicroduckStairSpecialistRunner(MicroduckOnPolicyRunner):
     """Seed the specialist actor without importing walking PPO state."""
 
+    def __init__(self, env, train_cfg: dict, log_dir=None, device="cpu", **kwargs):
+        distribution_cfg = train_cfg.get("actor", {}).get("distribution_cfg") or {}
+        self._bootstrap_actor_std = float(distribution_cfg.get("init_std", 1.0))
+        super().__init__(env, train_cfg, log_dir, device, **kwargs)
+
     def load(
         self,
         path: str,
@@ -44,7 +50,10 @@ class MicroduckStairSpecialistRunner(MicroduckOnPolicyRunner):
         strict: bool = True,
         map_location: str | None = None,
     ) -> dict:
-        if load_cfg is None and Path(path).parent.name == ".bootstrap-walking":
+        bootstrap_actor = (
+            load_cfg is None and Path(path).parent.name == ".bootstrap-walking"
+        )
+        if bootstrap_actor:
             load_cfg = {
                 "actor": True,
                 "critic": False,
@@ -52,7 +61,22 @@ class MicroduckStairSpecialistRunner(MicroduckOnPolicyRunner):
                 "iteration": False,
                 "rnd": False,
             }
-        return super().load(path, load_cfg, strict, map_location)
+        infos = super().load(path, load_cfg, strict, map_location)
+        if bootstrap_actor:
+            distribution = self.alg.actor.distribution
+            with torch.no_grad():
+                if hasattr(distribution, "std_param"):
+                    distribution.std_param.fill_(self._bootstrap_actor_std)
+                elif hasattr(distribution, "log_std_param"):
+                    distribution.log_std_param.fill_(
+                        torch.log(
+                            torch.tensor(
+                                self._bootstrap_actor_std,
+                                device=distribution.log_std_param.device,
+                            )
+                        )
+                    )
+        return infos
 
 
 from .microduck_velocity_env_cfg import (
@@ -112,9 +136,11 @@ from .microduck_stairs_env_cfg import (
     MicroduckStairsRlCfg,
 )
 from .microduck_standard_stairs_env_cfg import (
+    make_microduck_assisted_stair_specialist_env_cfg,
     make_microduck_route_stairs_env_cfg,
     make_microduck_stair_specialist_env_cfg,
     make_microduck_standard_stairs_env_cfg,
+    MicroduckAssistedStairSpecialistRlCfg,
     MicroduckRouteStairsRlCfg,
     MicroduckStairSpecialistRlCfg,
     MicroduckStandardStairsRlCfg,
@@ -317,6 +343,14 @@ register_mjlab_task(
     env_cfg=make_microduck_stair_specialist_env_cfg(),
     play_env_cfg=make_microduck_stair_specialist_env_cfg(play=True),
     rl_cfg=MicroduckStairSpecialistRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Assisted-Specialist-MicroDuck",
+    env_cfg=make_microduck_assisted_stair_specialist_env_cfg(),
+    play_env_cfg=make_microduck_assisted_stair_specialist_env_cfg(play=True),
+    rl_cfg=MicroduckAssistedStairSpecialistRlCfg,
     runner_cls=MicroduckStairSpecialistRunner,
 )
 

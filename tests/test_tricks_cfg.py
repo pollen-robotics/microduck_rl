@@ -25,8 +25,10 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     STANDARD_STANDING_ROOT_HEIGHT,
     STANDARD_TOP_ROOT_HEIGHT,
     STANDARD_TREAD_DEPTH,
+    MicroduckAssistedStairSpecialistRlCfg,
     MicroduckRouteStairsRlCfg,
     MicroduckStairSpecialistRlCfg,
+    make_microduck_assisted_stair_specialist_env_cfg,
     make_microduck_route_stairs_env_cfg,
     make_microduck_stair_specialist_env_cfg,
     make_microduck_standard_stairs_env_cfg,
@@ -178,6 +180,45 @@ def test_stair_specialist_uses_only_full_height_handoff_states():
     assert MicroduckStairSpecialistRlCfg.max_iterations == 800
     assert MicroduckStairSpecialistRlCfg.algorithm.learning_rate == 1.0e-4
     assert MicroduckStairSpecialistRlCfg.algorithm.schedule == "fixed"
+
+
+def test_assisted_stair_specialist_keeps_full_geometry_and_stage_a_gates():
+    cfg = make_microduck_assisted_stair_specialist_env_cfg()
+    generator = cfg.scene.terrain.terrain_generator
+    reset = cfg.events["route_state_curriculum"]
+    clearance = cfg.rewards["stair_first_riser_clearance"]
+
+    assert "route_challenge_levels" not in cfg.events
+    for terrain in generator.sub_terrains.values():
+        assert terrain.riser_height == 0.17
+        assert terrain.riser_height_range is None
+        assert terrain.tread_depth == 0.28
+        assert terrain.num_steps == 5
+    assert reset.func.__name__ == "reset_assisted_stair_states"
+    assert reset.params["lip_release_fraction"] == 0.50
+    assert reset.params["shell_brace_fraction"] == 0.25
+    assert reset.params["tread_recovery_fraction"] == 0.15
+    assert reset.params["real_handoff_fraction"] == 0.10
+    assert cfg.episode_length_s == 4.0
+    assert clearance.weight == 400.0
+    assert clearance.params["riser_height"] == 0.17
+    assert clearance.params["hold_time_s"] == 0.08
+    assert cfg.rewards["stair_assisted_approach"].weight == 0.5
+    assert cfg.rewards["stair_assisted_lift"].weight == 3.0
+    assert cfg.rewards["stair_assisted_crossing"].weight == 5.0
+    assert cfg.rewards["stair_first_tread_stable"].weight == 200.0
+    assert cfg.rewards["stair_goal_progress"].weight == 0.0
+    assert cfg.rewards["stair_top_goal"].weight == 0.0
+    assert MicroduckAssistedStairSpecialistRlCfg.max_iterations == 100
+    assert MicroduckAssistedStairSpecialistRlCfg.save_interval == 25
+    assert (
+        MicroduckAssistedStairSpecialistRlCfg.actor.distribution_cfg["init_std"]
+        == 0.45
+    )
+    assert (
+        MicroduckAssistedStairSpecialistRlCfg.algorithm.learning_rate == 5.0e-5
+    )
+    assert MicroduckAssistedStairSpecialistRlCfg.algorithm.max_grad_norm == 0.5
 
 
 def test_headstand_has_exclusive_contact_gate_and_shared_actor_layout():

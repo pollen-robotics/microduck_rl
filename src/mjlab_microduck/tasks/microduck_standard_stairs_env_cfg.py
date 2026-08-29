@@ -540,6 +540,73 @@ def make_microduck_stair_specialist_env_cfg(
     return cfg
 
 
+def make_microduck_assisted_stair_specialist_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A: discover a real 170 mm mantle from full-height contact states."""
+    cfg = make_microduck_stair_specialist_env_cfg(play=False)
+    cfg.episode_length_s = 4.0
+    cfg.events.pop("route_challenge_levels", None)
+    cfg.events["route_state_curriculum"] = EventTermCfg(
+        func=microduck_mdp.reset_assisted_stair_states,
+        mode="reset",
+        params={
+            "stair_start_distance": STANDARD_STAIR_START_DISTANCE,
+            "standing_root_height": STANDARD_STANDING_ROOT_HEIGHT,
+            "lip_release_fraction": 0.50,
+            "shell_brace_fraction": 0.25,
+            "tread_recovery_fraction": 0.15,
+            "real_handoff_fraction": 0.10,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+
+    # The terrain and all reward thresholds are literal full-size dimensions.
+    # No terrain-level state can silently turn this into a low-stair task.
+    for observation_group in ("actor", "critic"):
+        route_cues = (
+            cfg.observations[observation_group].terms["body_command"].params
+        )
+        route_cues["min_riser_height"] = STANDARD_RISER_HEIGHT
+        route_cues["max_riser_height"] = STANDARD_RISER_HEIGHT
+
+    for reward in cfg.rewards.values():
+        reward.weight = 0.0
+    cfg.rewards["stair_assisted_approach"] = RewardTermCfg(
+        func=microduck_mdp.stair_assisted_approach_frontier,
+        weight=0.5,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )
+    cfg.rewards["stair_assisted_lift"] = RewardTermCfg(
+        func=microduck_mdp.stair_assisted_lift_frontier,
+        weight=3.0,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )
+    cfg.rewards["stair_assisted_crossing"] = RewardTermCfg(
+        func=microduck_mdp.stair_assisted_crossing_frontier,
+        weight=5.0,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )
+    clearance = cfg.rewards["stair_first_riser_clearance"]
+    clearance.weight = 400.0
+    clearance.params.update(
+        {
+            "riser_height": STANDARD_RISER_HEIGHT,
+            "x_margin": 0.04,
+            "z_margin": 0.020,
+            "max_vertical_speed": 0.60,
+            "hold_time_s": 0.08,
+        }
+    )
+    cfg.rewards["stair_first_tread_stable"] = RewardTermCfg(
+        func=microduck_mdp.stair_first_tread_stable,
+        weight=200.0,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )
+    del play
+    return cfg
+
+
 MicroduckStandardStairsRlCfg = deepcopy(MicroduckRlCfg)
 MicroduckStandardStairsRlCfg.experiment_name = "microduck_standard_stairs"
 MicroduckStandardStairsRlCfg.run_name = "microduck_standard_stairs"
@@ -562,3 +629,23 @@ MicroduckStairSpecialistRlCfg.algorithm.clip_param = 0.1
 MicroduckStairSpecialistRlCfg.algorithm.entropy_coef = 0.003
 MicroduckStairSpecialistRlCfg.algorithm.num_learning_epochs = 3
 MicroduckStairSpecialistRlCfg.algorithm.num_mini_batches = 4
+
+MicroduckAssistedStairSpecialistRlCfg = deepcopy(MicroduckStairSpecialistRlCfg)
+MicroduckAssistedStairSpecialistRlCfg.experiment_name = (
+    "microduck_stair_assisted_specialist"
+)
+MicroduckAssistedStairSpecialistRlCfg.run_name = (
+    "microduck_stair_assisted_specialist"
+)
+MicroduckAssistedStairSpecialistRlCfg.max_iterations = 100
+MicroduckAssistedStairSpecialistRlCfg.save_interval = 25
+MicroduckAssistedStairSpecialistRlCfg.actor.distribution_cfg["init_std"] = 0.45
+MicroduckAssistedStairSpecialistRlCfg.algorithm.learning_rate = 5.0e-5
+MicroduckAssistedStairSpecialistRlCfg.algorithm.schedule = "fixed"
+MicroduckAssistedStairSpecialistRlCfg.algorithm.clip_param = 0.10
+MicroduckAssistedStairSpecialistRlCfg.algorithm.entropy_coef = 0.0005
+MicroduckAssistedStairSpecialistRlCfg.algorithm.num_learning_epochs = 5
+MicroduckAssistedStairSpecialistRlCfg.algorithm.num_mini_batches = 4
+MicroduckAssistedStairSpecialistRlCfg.algorithm.gamma = 0.99
+MicroduckAssistedStairSpecialistRlCfg.algorithm.lam = 0.95
+MicroduckAssistedStairSpecialistRlCfg.algorithm.max_grad_norm = 0.5

@@ -33,6 +33,11 @@ STAIR_TARGETS = {
         "experiment": "microduck_stair_specialist",
         "iterations": 800,
     },
+    "specialist-assisted": {
+        "task": "Mjlab-Stairs-Assisted-Specialist-MicroDuck",
+        "experiment": "microduck_stair_assisted_specialist",
+        "iterations": 100,
+    },
     "low": {
         "task": "Mjlab-Stairs-MicroDuck",
         "experiment": "microduck_stairs",

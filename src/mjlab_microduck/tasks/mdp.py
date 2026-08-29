@@ -838,6 +838,7 @@ def stair_first_riser_clearance(
     max_riser_height: float,
     num_terrain_levels: int,
     corridor_half_width: float,
+    riser_height: float | None = None,
     x_margin: float = 0.04,
     z_margin: float = 0.025,
     max_vertical_speed: float = 0.35,
@@ -852,13 +853,16 @@ def stair_first_riser_clearance(
     """
     asset: Entity = env.scene[asset_cfg.name]
     x, z, _ = _stair_local_state(env, asset_cfg)
-    levels = env.scene.terrain.terrain_levels.to(dtype=x.dtype)
-    level_fraction = torch.clamp(
-        levels / max(num_terrain_levels - 1, 1), min=0.0, max=1.0
-    )
-    riser = min_riser_height + level_fraction * (
-        max_riser_height - min_riser_height
-    )
+    if riser_height is None:
+        levels = env.scene.terrain.terrain_levels.to(dtype=x.dtype)
+        level_fraction = torch.clamp(
+            levels / max(num_terrain_levels - 1, 1), min=0.0, max=1.0
+        )
+        riser = min_riser_height + level_fraction * (
+            max_riser_height - min_riser_height
+        )
+    else:
+        riser = torch.full_like(x, riser_height)
     y = torch.abs(
         asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
     )
@@ -1074,6 +1078,250 @@ def reset_route_learning_states(
             + step_index.float() * riser[tread_mask]
         )
         env.sim.data.qvel[tread_ids, :6] = 0.0
+
+
+def _seed_action_history_from_joint_pose(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Keep the 61D previous-action observation consistent with a reset pose."""
+    if len(env_ids) == 0:
+        return
+    asset: Entity = env.scene[asset_cfg.name]
+    action_term = env.action_manager.get_term("joint_pos")
+    joint_pos = asset.data.joint_pos[env_ids][:, action_term.target_ids]
+    offset = action_term.offset
+    scale = action_term.scale
+    offset_value = offset[env_ids] if isinstance(offset, torch.Tensor) else offset
+    scale_value = scale[env_ids] if isinstance(scale, torch.Tensor) else scale
+    raw_action = (joint_pos - offset_value) / scale_value
+    manager = env.action_manager
+    manager._action[env_ids] = raw_action
+    manager._prev_action[env_ids] = raw_action
+    manager._prev_prev_action[env_ids] = raw_action
+    action_term._raw_actions[env_ids] = raw_action
+    action_term._processed_actions[env_ids] = joint_pos
+
+
+def reset_assisted_stair_states(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    stair_start_distance: float,
+    standing_root_height: float,
+    lip_release_fraction: float = 0.50,
+    shell_brace_fraction: float = 0.25,
+    tread_recovery_fraction: float = 0.15,
+    real_handoff_fraction: float = 0.10,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Stage-A reverse curriculum on one fixed 170 mm home stair.
+
+    These are physically demanding full-height contact states, not shorter
+    geometry. Action history is reconstructed from the reset joint pose so the
+    actor does not receive the all-zero history mismatch from the stalled run.
+    """
+    if env_ids is None or len(env_ids) == 0:
+        return
+    fractions = (
+        lip_release_fraction,
+        shell_brace_fraction,
+        tread_recovery_fraction,
+        real_handoff_fraction,
+    )
+    if any(fraction < 0.0 for fraction in fractions) or not math.isclose(
+        sum(fractions), 1.0, abs_tol=1e-6
+    ):
+        raise ValueError(
+            "Assisted stair reset fractions must be nonnegative and sum to 1."
+        )
+
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    terrain = env.scene.terrain
+    origins = terrain.env_origins
+    draw = torch.rand(len(env_ids), device=env.device)
+    lip_end = lip_release_fraction
+    shell_end = lip_end + shell_brace_fraction
+    tread_end = shell_end + tread_recovery_fraction
+    lip_ids = env_ids[draw < lip_end]
+    shell_ids = env_ids[(draw >= lip_end) & (draw < shell_end)]
+    tread_ids = env_ids[(draw >= shell_end) & (draw < tread_end)]
+    handoff_ids = env_ids[draw >= tread_end]
+
+    if not hasattr(env, "_stair_skip_first_clearance"):
+        env._stair_skip_first_clearance = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    env._stair_skip_first_clearance[env_ids] = False
+    env._stair_skip_first_clearance[tread_ids] = True
+
+    def sample(count: int, low: float, high: float) -> torch.Tensor:
+        return low + (high - low) * torch.rand(count, device=env.device)
+
+    def set_pitch(ids: torch.Tensor, low_deg: float, high_deg: float) -> None:
+        pitch = torch.deg2rad(sample(len(ids), low_deg, high_deg))
+        env.sim.data.qpos[ids, 3] = torch.cos(0.5 * pitch)
+        env.sim.data.qpos[ids, 4] = 0.0
+        env.sim.data.qpos[ids, 5] = torch.sin(0.5 * pitch)
+        env.sim.data.qpos[ids, 6] = 0.0
+
+    if len(lip_ids) > 0:
+        env.sim.data.qpos[lip_ids, 0] = origins[lip_ids, 0] + sample(
+            len(lip_ids), stair_start_distance + 0.020, stair_start_distance + 0.037
+        )
+        env.sim.data.qpos[lip_ids, 1] = origins[lip_ids, 1]
+        env.sim.data.qpos[lip_ids, 2] = origins[lip_ids, 2] + sample(
+            len(lip_ids), 0.198, 0.225
+        )
+        set_pitch(lip_ids, 30.0, 55.0)
+        env.sim.data.qvel[lip_ids, :6] = 0.0
+        env.sim.data.qvel[lip_ids, 0] = sample(len(lip_ids), 0.18, 0.30)
+        env.sim.data.qvel[lip_ids, 2] = sample(len(lip_ids), -0.03, 0.08)
+        env.sim.data.qvel[lip_ids, 4] = sample(len(lip_ids), -1.5, -0.3)
+
+    if len(shell_ids) > 0:
+        env.sim.data.qpos[shell_ids, 0] = origins[shell_ids, 0] + sample(
+            len(shell_ids), stair_start_distance - 0.020, stair_start_distance + 0.015
+        )
+        env.sim.data.qpos[shell_ids, 1] = origins[shell_ids, 1]
+        env.sim.data.qpos[shell_ids, 2] = origins[shell_ids, 2] + sample(
+            len(shell_ids), 0.165, 0.205
+        )
+        set_pitch(shell_ids, 45.0, 70.0)
+        env.sim.data.qvel[shell_ids, :6] = 0.0
+        env.sim.data.qvel[shell_ids, 0] = sample(len(shell_ids), 0.10, 0.22)
+        env.sim.data.qvel[shell_ids, 2] = sample(len(shell_ids), 0.08, 0.20)
+        env.sim.data.qvel[shell_ids, 4] = sample(len(shell_ids), 0.5, 2.0)
+
+    if len(tread_ids) > 0:
+        env.sim.data.qpos[tread_ids, 0] = origins[tread_ids, 0] + sample(
+            len(tread_ids), stair_start_distance + 0.080, stair_start_distance + 0.200
+        )
+        env.sim.data.qpos[tread_ids, 1] = origins[tread_ids, 1]
+        env.sim.data.qpos[tread_ids, 2] = origins[tread_ids, 2] + sample(
+            len(tread_ids), 0.260, 0.310
+        )
+        set_pitch(tread_ids, 35.0, 55.0)
+        env.sim.data.qvel[tread_ids, :6] = 0.0
+        env.sim.data.qvel[tread_ids, 0] = sample(len(tread_ids), 0.03, 0.12)
+        env.sim.data.qvel[tread_ids, 2] = sample(len(tread_ids), -0.08, 0.02)
+        env.sim.data.qvel[tread_ids, 4] = sample(len(tread_ids), -1.2, -0.2)
+
+    if len(handoff_ids) > 0:
+        env.sim.data.qpos[handoff_ids, 0] = origins[handoff_ids, 0] + sample(
+            len(handoff_ids), stair_start_distance - 0.120, stair_start_distance - 0.080
+        )
+        env.sim.data.qpos[handoff_ids, 1] = origins[handoff_ids, 1]
+        env.sim.data.qpos[handoff_ids, 2] = (
+            origins[handoff_ids, 2] + standing_root_height
+        )
+        set_pitch(handoff_ids, -12.0, 12.0)
+        env.sim.data.qvel[handoff_ids, :6] = 0.0
+        env.sim.data.qvel[handoff_ids, 0] = sample(len(handoff_ids), 0.14, 0.30)
+        env.sim.data.qvel[handoff_ids, 2] = sample(len(handoff_ids), -0.10, 0.10)
+        env.sim.data.qvel[handoff_ids, 4] = sample(len(handoff_ids), -2.0, 2.0)
+
+    _seed_action_history_from_joint_pose(env, env_ids, asset_cfg)
+
+
+def _new_frontier_delta(
+    env: ManagerBasedRlEnv, value: torch.Tensor, state_name: str
+) -> torch.Tensor:
+    state = getattr(env, state_name, None)
+    if state is None:
+        state = value.clone()
+        setattr(env, state_name, state)
+    fresh = env.episode_length_buf <= 1
+    state[fresh] = value[fresh]
+    new_best = torch.maximum(state, value)
+    delta = new_best - state
+    setattr(env, state_name, new_best)
+    return delta / env.step_dt
+
+
+def stair_assisted_approach_frontier(
+    env: ManagerBasedRlEnv,
+    start_x: float = 0.54,
+    end_x: float = 0.64,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    x, _, _ = _stair_local_state(env, asset_cfg)
+    value = torch.clamp((x - start_x) / max(end_x - start_x, 1e-6), 0.0, 1.0)
+    return _new_frontier_delta(env, value, "_stair_assisted_approach")
+
+
+def stair_assisted_lift_frontier(
+    env: ManagerBasedRlEnv,
+    start_height: float = 0.115,
+    clearance_height: float = 0.195,
+    x_gate: float = 0.60,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    value = torch.clamp(
+        (z - start_height) / max(clearance_height - start_height, 1e-6), 0.0, 1.0
+    ) * torch.sigmoid((x - x_gate) / 0.015)
+    return _new_frontier_delta(env, value, "_stair_assisted_lift")
+
+
+def stair_assisted_crossing_frontier(
+    env: ManagerBasedRlEnv,
+    start_x: float = 0.64,
+    end_x: float = 0.72,
+    clearance_height: float = 0.190,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    height_gate = torch.sigmoid((z - clearance_height) / 0.008)
+    value = torch.clamp((x - start_x) / max(end_x - start_x, 1e-6), 0.0, 1.0)
+    value *= height_gate
+    return _new_frontier_delta(env, value, "_stair_assisted_crossing")
+
+
+def stair_first_tread_stable(
+    env: ManagerBasedRlEnv,
+    min_x: float = 0.72,
+    max_x: float = 0.94,
+    min_height: float = 0.235,
+    upright_threshold: float = 0.82,
+    max_vertical_speed: float = 0.15,
+    max_angular_speed: float = 1.0,
+    hold_time_s: float = 0.20,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, upright = _stair_local_state(env, asset_cfg)
+    vertical_speed = torch.abs(asset.data.root_link_lin_vel_w[:, 2])
+    angular_speed = torch.linalg.vector_norm(asset.data.root_link_ang_vel_w, dim=-1)
+    candidate = (
+        (x >= min_x)
+        & (x <= max_x)
+        & (z >= min_height)
+        & (upright >= upright_threshold)
+        & (vertical_speed <= max_vertical_speed)
+        & (angular_speed <= max_angular_speed)
+    )
+    if not hasattr(env, "_stair_first_tread_hold_steps"):
+        env._stair_first_tread_hold_steps = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+        env._stair_first_tread_latched = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    fresh = env.episode_length_buf <= 1
+    env._stair_first_tread_hold_steps[fresh] = 0
+    env._stair_first_tread_latched[fresh] = False
+    env._stair_first_tread_hold_steps = torch.where(
+        candidate,
+        env._stair_first_tread_hold_steps + 1,
+        torch.zeros_like(env._stair_first_tread_hold_steps),
+    )
+    required_steps = max(1, int(round(hold_time_s / env.step_dt)))
+    newly_stable = (
+        env._stair_first_tread_hold_steps >= required_steps
+    ) & ~env._stair_first_tread_latched
+    env._stair_first_tread_latched |= newly_stable
+    return newly_stable.float()
 
 
 def stair_goal_progress(
