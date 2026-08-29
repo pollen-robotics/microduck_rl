@@ -178,13 +178,13 @@ def test_bundle_resolves_compiler_mesh_and_texture_directories_through_includes(
     (model_root / "root_meshes").mkdir(parents=True)
     (model_root / "root_textures").mkdir()
     (model_root / "nested").mkdir()
-    (model_root / "child_meshes").mkdir()
-    (model_root / "child_textures").mkdir()
+    (model_root / "included_meshes").mkdir()
+    (model_root / "included_textures").mkdir()
     for relative in (
         "root_meshes/root.stl",
         "root_textures/root.png",
-        "child_meshes/child.stl",
-        "child_textures/child.png",
+        "included_meshes/child.stl",
+        "included_textures/child.png",
     ):
         (model_root / relative).write_bytes(relative.encode())
     (model_root / "robot.xml").write_text(
@@ -193,7 +193,7 @@ def test_bundle_resolves_compiler_mesh_and_texture_directories_through_includes(
         '<texture file="root.png"/></asset></mujoco>'
     )
     (model_root / "nested" / "child.xml").write_text(
-        '<mujoco><compiler meshdir="../child_meshes" texturedir="../child_textures"/>'
+        '<mujoco><compiler meshdir="included_meshes" texturedir="included_textures"/>'
         '<asset><mesh file="child.stl"/><texture file="child.png"/></asset></mujoco>'
     )
     built = build_bundle(
@@ -212,8 +212,8 @@ def test_bundle_resolves_compiler_mesh_and_texture_directories_through_includes(
         assert {
             "models/root_meshes/root.stl",
             "models/root_textures/root.png",
-            "models/child_meshes/child.stl",
-            "models/child_textures/child.png",
+            "models/included_meshes/child.stl",
+            "models/included_textures/child.png",
         } <= set(archive.namelist())
 
 

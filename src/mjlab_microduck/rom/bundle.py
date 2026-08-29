@@ -73,7 +73,7 @@ def _archive_path(prefix: str, source: Path, root: Path) -> str:
 
 
 def _compiler_asset_directories(
-    source: Path, tree: ET.ElementTree, inherited: _AssetDirectories
+    model_root: Path, tree: ET.ElementTree, inherited: _AssetDirectories
 ) -> _AssetDirectories:
     compiler = tree.getroot().find("compiler")
     if compiler is None:
@@ -81,10 +81,10 @@ def _compiler_asset_directories(
     mesh_dir = compiler.get("meshdir")
     texture_dir = compiler.get("texturedir")
     return _AssetDirectories(
-        mesh_dir=(source.parent / mesh_dir).resolve()
+        mesh_dir=(model_root / mesh_dir).resolve()
         if mesh_dir is not None
         else inherited.mesh_dir,
-        texture_dir=(source.parent / texture_dir).resolve()
+        texture_dir=(model_root / texture_dir).resolve()
         if texture_dir is not None
         else inherited.texture_dir,
     )
@@ -116,7 +116,7 @@ def _model_closure(model_path: Path) -> list[Path]:
         if source.suffix.lower() != ".xml":
             continue
         tree = ET.parse(source)
-        directories = _compiler_asset_directories(source, tree, inherited_directories)
+        directories = _compiler_asset_directories(root, tree, inherited_directories)
         for element in tree.iter():
             referenced = element.get("file")
             if not referenced:
