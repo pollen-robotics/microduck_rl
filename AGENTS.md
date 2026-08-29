@@ -259,9 +259,9 @@ Never launch a long run without one.
   low-rise checkpoint and the full-size challenge visually distinct in the
   dashboard and describe short runs as diagnostics, not learned success.
 - For the local native viewer, use four environments to match the current GPU
-  budget and record the result with `--video True`. The dashboard is served by
-  `scripts/serve_dashboard.py` on port 9999 and reads the local `logs/` and
-  capture folders only.
+  budget. Keep mass evaluation headless and record only a physics-gated
+  promotion. The dashboard is served by `scripts/serve_dashboard.py` on port
+  9999 and reads the local `logs/` and capture folders only.
 - The official MuJoCo samples are low-level single-model reference programs:
   `basic.cc` advances and renders one interactive model, while `record.cc`
   renders offscreen frames and reads pixels. Keep the four-robot tile in the

@@ -177,14 +177,10 @@ def _record_video(
     steps: int,
     device: str,
 ) -> Path:
-    iteration = int(checkpoint.stem.rsplit("_", 1)[-1])
-    checkpoint_id = _sha256(checkpoint)[:10]
-    output = (
-        video_dir
-        / f"standard-home-stairs-{checkpoint_id}-iter-{iteration:05d}.mp4"
-    )
+    output = _video_path(checkpoint, video_dir)
     if output.is_file() and output.stat().st_size > 0:
         return output.resolve()
+
     command = [
         sys.executable,
         str(REPO_ROOT / "scripts" / "record_stair_policy.py"),
@@ -205,6 +201,15 @@ def _record_video(
     return output.resolve()
 
 
+def _video_path(checkpoint: Path, video_dir: Path) -> Path:
+    iteration = int(checkpoint.stem.rsplit("_", 1)[-1])
+    checkpoint_id = _sha256(checkpoint)[:10]
+    return (
+        video_dir
+        / f"standard-home-stairs-{checkpoint_id}-iter-{iteration:05d}.mp4"
+    )
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
@@ -217,13 +222,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--video-steps", type=int, default=700)
     parser.add_argument("--video-device", default="cpu")
     parser.add_argument(
+        "--record-initial-video",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Record the starting checkpoint too; disabled so mass evaluation stays headless.",
+    )
+    parser.add_argument(
         "--video-dir",
         type=Path,
         default=(
             REPO_ROOT
             / "artifacts"
             / "verified"
-            / "stair-policy-evolution"
+            / "stair-policy-promotions"
         ),
     )
     parser.add_argument(
@@ -300,13 +311,17 @@ def main() -> int:
         write_json_atomic(args.state.resolve(), state)
 
     viewer.start(current_checkpoint)
-    current_video = _record_video(
-        current_checkpoint,
-        walker_checkpoint,
-        args.video_dir.resolve(),
-        steps=args.video_steps,
-        device=args.video_device,
-    )
+    video_dir = args.video_dir.resolve()
+    existing_video = _video_path(current_checkpoint, video_dir)
+    current_video = existing_video.resolve() if existing_video.is_file() else None
+    if args.record_initial_video and current_video is None:
+        current_video = _record_video(
+            current_checkpoint,
+            walker_checkpoint,
+            video_dir,
+            steps=args.video_steps,
+            device=args.video_device,
+        )
     publish(
         "Showing the best existing physics-gated checkpoint; new candidates are checked automatically."
     )
@@ -360,7 +375,7 @@ def main() -> int:
                             promoted_video = _record_video(
                                 candidate,
                                 walker_checkpoint,
-                                args.video_dir.resolve(),
+                                video_dir,
                                 steps=args.video_steps,
                                 device=args.video_device,
                             )

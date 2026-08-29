@@ -1,3 +1,6 @@
+import sys
+
+from scripts import train_stair_from_walking, watch_best_stair_preview
 from scripts.watch_best_stair_preview import physics_improves
 
 
@@ -24,3 +27,31 @@ def test_physics_gate_rejects_lateral_progress_outside_stair_corridor():
     candidate["best_corridor_route_x_m"] = 0.59
     candidate["best_any_route_x_m"] = 0.90
     assert not physics_improves(candidate, baseline)
+
+
+def test_video_recording_is_opt_in_for_headless_mass_evaluation(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "watch_best_stair_preview.py",
+            str(tmp_path / "run"),
+            "--walker-checkpoint",
+            str(tmp_path / "walker.pt"),
+            "--baseline-report",
+            str(tmp_path / "baseline.json"),
+        ],
+    )
+
+    args = watch_best_stair_preview._parse_args()
+
+    assert args.record_initial_video is False
+    assert args.video_dir.name == "stair-policy-promotions"
+
+
+def test_stair_finetune_video_recording_is_disabled_by_default(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["train_stair_from_walking.py"])
+
+    args = train_stair_from_walking._parse_args()
+
+    assert args.video is False

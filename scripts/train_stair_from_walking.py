@@ -152,7 +152,12 @@ def _parse_args() -> argparse.Namespace:
         help="Override the selected stage default (3000 low, 10000 standard).",
     )
     parser.add_argument("--run-name", help="Run label. Defaults to from_walking_<stage>.")
-    parser.add_argument("--video", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--video",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Record simulator videos during training; disabled by default for headless mass evaluation.",
+    )
     return parser.parse_args()
 
 

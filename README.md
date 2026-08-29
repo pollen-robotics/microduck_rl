@@ -68,8 +68,10 @@ Open `http://localhost:9999` locally, or replace `localhost` with this
 machine's Tailscale address. The dashboard reads `logs/` and
 `output/playwright/` without uploading anything.
 
-Only videos listed in `dashboard/featured_media.json` are shown. Generate a
-verified manufacturer-policy clip with:
+Only videos listed in `dashboard/featured_media.json` are shown. Training and
+evaluation stay headless by default. The live preview watcher writes a 20-second
+clip only when a candidate passes the physics promotion gate. Generate a
+verified manufacturer-policy clip explicitly with:
 
 ```powershell
 uv run python scripts/record_policy.py --walking .tmp/codex/BEST_alpha_walking.onnx
