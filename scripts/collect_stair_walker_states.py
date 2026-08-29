@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect exact manufacturer-walker states before the fixed 170 mm home stair."""
+"""Collect exact manufacturer motion states for the fixed 170 mm home stair."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from mjlab_microduck.tasks.stair_walk_state_bank import (
     walk_state_count,
 )
 
-TASK_ID = "Mjlab-Stairs-Route-MicroDuck"
+DEFAULT_TASK_ID = "Mjlab-Stairs-Route-MicroDuck"
 
 
 def _sha256(path: Path) -> str:
@@ -45,6 +45,11 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--walker-checkpoint", type=Path, required=True)
     parser.add_argument(
+        "--source-task",
+        default=DEFAULT_TASK_ID,
+        help="Registered task used to generate the source motion.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=Path(".tmp/codex/full170-walker-state-bank.pt"),
@@ -54,6 +59,25 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--min-local-x", type=float, default=0.56)
     parser.add_argument("--max-local-x", type=float, default=0.64)
     parser.add_argument("--max-steps", type=int, default=8_000)
+    parser.add_argument(
+        "--capture-every-n-steps",
+        type=int,
+        default=0,
+        help=(
+            "Capture every N eligible control steps. Zero preserves the original "
+            "one-state-per-episode walking-bank behavior."
+        ),
+    )
+    parser.add_argument(
+        "--zero-all-command-observations",
+        action="store_true",
+        help="Zero actor observation slots 52:61 for manufacturer episodic policies.",
+    )
+    parser.add_argument(
+        "--standing-only-reset",
+        action="store_true",
+        help="Force standing starts when the source task has a set_roulade_state event.",
+    )
     parser.add_argument(
         "--device", default="cuda:0" if torch.cuda.is_available() else "cpu"
     )
@@ -81,18 +105,27 @@ def main() -> int:
         args.target_states < 1
         or args.num_envs < 1
         or args.max_steps < 1
+        or args.capture_every_n_steps < 0
         or args.min_local_x >= args.max_local_x
     ):
         raise SystemExit("State count, environment count, steps, and capture band are invalid")
 
     configure_torch_backends()
-    env_cfg = load_env_cfg(TASK_ID, play=True)
-    agent_cfg = load_rl_cfg(TASK_ID)
+    env_cfg = load_env_cfg(args.source_task, play=True)
+    agent_cfg = load_rl_cfg(args.source_task)
+    if args.standing_only_reset:
+        event = env_cfg.events.get("set_roulade_state")
+        if event is None:
+            raise SystemExit(
+                "--standing-only-reset requires a source task with set_roulade_state"
+            )
+        event.params["standing_prob"] = 1.0
+        event.params["midroll_prob"] = 0.0
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.seed = 0
     base_env = ManagerBasedRlEnv(cfg=env_cfg, device=args.device, render_mode=None)
     env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
-    runner_cls = load_runner_cls(TASK_ID) or MjlabOnPolicyRunner
+    runner_cls = load_runner_cls(args.source_task) or MjlabOnPolicyRunner
     runner = runner_cls(env, asdict(agent_cfg), device=args.device)
     walker = load_frozen_actor(runner, checkpoint, device=args.device)
 
@@ -109,7 +142,8 @@ def main() -> int:
             with torch.inference_mode():
                 walker_observations = observations.clone()
                 actor_observations = walker_observations["actor"].clone()
-                actor_observations[:, 55:61] = 0.0
+                command_start = 52 if args.zero_all_command_observations else 55
+                actor_observations[:, command_start:61] = 0.0
                 walker_observations["actor"] = actor_observations
                 actions = walker(walker_observations)
                 observations, _, dones, _ = env.step(actions)
@@ -124,8 +158,19 @@ def main() -> int:
                     best_corridor_x,
                     float(local[in_corridor, 0].max().item()),
                 )
+            unique_episode_gate = (
+                ~captured_this_episode
+                if args.capture_every_n_steps == 0
+                else torch.ones_like(captured_this_episode)
+            )
+            cadence_gate = (
+                torch.ones_like(captured_this_episode)
+                if args.capture_every_n_steps == 0
+                else (base_env.episode_length_buf % args.capture_every_n_steps == 0)
+            )
             eligible = (
-                (~captured_this_episode)
+                unique_episode_gate
+                & cadence_gate
                 & (dones == 0)
                 & (base_env.episode_length_buf > 2)
                 & (local[:, 0] >= args.min_local_x)
@@ -139,7 +184,11 @@ def main() -> int:
             if len(ids) > remaining:
                 ids = ids[:remaining]
             if len(ids) > 0:
-                chunks.append(capture_walk_state_rows(base_env, ids))
+                chunk = capture_walk_state_rows(base_env, ids)
+                chunk["source_episode_step"] = (
+                    base_env.episode_length_buf[ids].detach().cpu().clone()
+                )
+                chunks.append(chunk)
                 captured_this_episode[ids] = True
             captured_this_episode[dones.to(torch.bool)] = False
 
@@ -172,7 +221,7 @@ def main() -> int:
         "schema_version": BANK_SCHEMA_VERSION,
         "metadata": {
             "created_at": datetime.now(UTC).isoformat(),
-            "task": TASK_ID,
+            "task": args.source_task,
             "walker_checkpoint": str(checkpoint),
             "walker_checkpoint_sha256": _sha256(checkpoint),
             "capture_local_x_m": [args.min_local_x, args.max_local_x],
@@ -187,7 +236,12 @@ def main() -> int:
             "step_dt": base_env.step_dt,
             "decimation": base_env.cfg.decimation,
             "mjlab_version": version("mjlab"),
-            "route_cue_slice_zeroed": [55, 61],
+            "actor_command_slice_zeroed": [
+                52 if args.zero_all_command_observations else 55,
+                61,
+            ],
+            "capture_every_n_steps": args.capture_every_n_steps,
+            "standing_only_reset": args.standing_only_reset,
         },
         "states": states,
     }

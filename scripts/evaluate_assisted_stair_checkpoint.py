@@ -29,6 +29,7 @@ TASK_IDS = (
     "Mjlab-Stairs-Walker-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Launch-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Apex-Mantle-Specialist-MicroDuck",
+    "Mjlab-Stairs-Roulade-Bank-Specialist-MicroDuck",
 )
 RESET_MODES = {
     0: "lip_release",
@@ -41,6 +42,12 @@ APEX_MANTLE_RESET_MODES = {
     1: "head_lever",
     2: "unused_tread",
     3: "real_handoff",
+}
+ROULADE_BANK_RESET_MODES = {
+    0: "launch_release",
+    1: "head_lever",
+    2: "unused_tread",
+    3: "manufacturer_roll_phase",
 }
 
 
@@ -83,11 +90,12 @@ def main() -> int:
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
     if args.num_envs < 1 or args.episodes < 1:
         raise SystemExit("--num-envs and --episodes must be positive")
-    reset_modes = (
-        APEX_MANTLE_RESET_MODES
-        if args.task == "Mjlab-Stairs-Apex-Mantle-Specialist-MicroDuck"
-        else RESET_MODES
-    )
+    if args.task == "Mjlab-Stairs-Roulade-Bank-Specialist-MicroDuck":
+        reset_modes = ROULADE_BANK_RESET_MODES
+    elif args.task == "Mjlab-Stairs-Apex-Mantle-Specialist-MicroDuck":
+        reset_modes = APEX_MANTLE_RESET_MODES
+    else:
+        reset_modes = RESET_MODES
 
     configure_torch_backends()
     env_cfg = load_env_cfg(args.task, play=True)

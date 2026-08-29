@@ -138,6 +138,7 @@ from .microduck_stairs_env_cfg import (
 from .microduck_standard_stairs_env_cfg import (
     make_microduck_assisted_stair_specialist_env_cfg,
     make_microduck_stair_apex_mantle_env_cfg,
+    make_microduck_stair_roulade_bank_env_cfg,
     make_microduck_stair_bridge_specialist_env_cfg,
     make_microduck_stair_launch_bank_env_cfg,
     make_microduck_stair_walker_bank_env_cfg,
@@ -146,6 +147,7 @@ from .microduck_standard_stairs_env_cfg import (
     make_microduck_standard_stairs_env_cfg,
     MicroduckAssistedStairSpecialistRlCfg,
     MicroduckStairApexMantleRlCfg,
+    MicroduckStairRouladeBankRlCfg,
     MicroduckStairBridgeSpecialistRlCfg,
     MicroduckStairLaunchBankRlCfg,
     MicroduckStairWalkerBankRlCfg,
@@ -391,6 +393,14 @@ register_mjlab_task(
     env_cfg=make_microduck_stair_apex_mantle_env_cfg(),
     play_env_cfg=make_microduck_stair_apex_mantle_env_cfg(play=True),
     rl_cfg=MicroduckStairApexMantleRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Roulade-Bank-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_roulade_bank_env_cfg(),
+    play_env_cfg=make_microduck_stair_roulade_bank_env_cfg(play=True),
+    rl_cfg=MicroduckStairRouladeBankRlCfg,
     runner_cls=MicroduckStairSpecialistRunner,
 )
 

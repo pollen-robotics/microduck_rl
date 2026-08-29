@@ -30,6 +30,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     STANDARD_TREAD_DEPTH,
     MicroduckAssistedStairSpecialistRlCfg,
     MicroduckStairApexMantleRlCfg,
+    MicroduckStairRouladeBankRlCfg,
     MicroduckStairBridgeSpecialistRlCfg,
     MicroduckStairLaunchBankRlCfg,
     MicroduckStairWalkerBankRlCfg,
@@ -37,6 +38,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     MicroduckStairSpecialistRlCfg,
     make_microduck_assisted_stair_specialist_env_cfg,
     make_microduck_stair_apex_mantle_env_cfg,
+    make_microduck_stair_roulade_bank_env_cfg,
     make_microduck_stair_bridge_specialist_env_cfg,
     make_microduck_stair_launch_bank_env_cfg,
     make_microduck_stair_walker_bank_env_cfg,
@@ -397,6 +399,34 @@ def test_apex_mantle_stage_rewards_capability_from_real_handoff():
         MicroduckStairApexMantleRlCfg.actor.distribution_cfg["init_std"] == 0.35
     )
     assert MicroduckStairApexMantleRlCfg.algorithm.learning_rate == 3.0e-5
+
+
+def test_roulade_bank_stage_requires_contact_supported_tread_progress():
+    cfg = make_microduck_stair_roulade_bank_env_cfg()
+    reset = cfg.events["route_state_curriculum"].params
+
+    assert reset["lip_release_fraction"] == 0.10
+    assert reset["shell_brace_fraction"] == 0.20
+    assert reset["tread_recovery_fraction"] == 0.0
+    assert reset["real_handoff_fraction"] == 0.70
+    assert cfg.events["walker_state_bank"].params["bank_path"].endswith(
+        "full170-roulade-state-bank.pt"
+    )
+    crossing = cfg.rewards["stair_assisted_crossing"]
+    assert crossing.params["hard_height_gate"] is True
+    assert crossing.params["clearance_height"] == 0.17
+    assert math.isclose(crossing.params["corridor_half_width"], 0.36)
+    support = cfg.rewards["stair_tread_support_frontier"]
+    assert support.weight == 15.0
+    assert support.params["riser_height"] == 0.17
+    assert cfg.rewards["stair_first_riser_clearance"].weight == 400.0
+    assert cfg.rewards["stair_first_tread_secured"].weight == 300.0
+    assert MicroduckStairRouladeBankRlCfg.max_iterations == 150
+    assert MicroduckStairRouladeBankRlCfg.save_interval == 25
+    assert (
+        MicroduckStairRouladeBankRlCfg.actor.distribution_cfg["init_std"] == 0.28
+    )
+    assert MicroduckStairRouladeBankRlCfg.algorithm.learning_rate == 2.0e-5
 
 
 def test_headstand_has_exclusive_contact_gate_and_shared_actor_layout():

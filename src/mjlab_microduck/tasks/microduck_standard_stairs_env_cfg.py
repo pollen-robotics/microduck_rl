@@ -828,6 +828,63 @@ def make_microduck_stair_apex_mantle_env_cfg(
     return cfg
 
 
+def make_microduck_stair_roulade_bank_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A7: adapt exact manufacturer roll phases into a tread mantle."""
+
+    cfg = make_microduck_stair_apex_mantle_env_cfg(play=False)
+    reset = cfg.events["route_state_curriculum"].params
+    reset.update(
+        {
+            "lip_release_fraction": 0.10,
+            "shell_brace_fraction": 0.20,
+            "tread_recovery_fraction": 0.0,
+            "real_handoff_fraction": 0.70,
+        }
+    )
+    cfg.events["walker_state_bank"] = EventTermCfg(
+        func=WalkerStateBankReset,
+        mode="reset",
+        params={"bank_path": ".tmp/codex/full170-roulade-state-bank.pt"},
+    )
+
+    # A transplanted phase is useful only if the real collision converts the
+    # manufacturer's roll into support on top of the tread. Hard-gate crossing
+    # by height and corridor, then reward contact-supported x/z progress. The
+    # strict clearance and secured-tread latches remain the curriculum gates.
+    cfg.rewards["stair_apex_or_mantle_frontier"].weight = 4.0
+    cfg.rewards["stair_assisted_approach"].weight = 0.5
+    cfg.rewards["stair_assisted_lift"].weight = 3.0
+    cfg.rewards["stair_assisted_crossing"].weight = 8.0
+    cfg.rewards["stair_assisted_crossing"].params.update(
+        {
+            "start_x": STANDARD_STAIR_START_DISTANCE,
+            "end_x": STANDARD_STAIR_START_DISTANCE + 0.08,
+            "clearance_height": STANDARD_RISER_HEIGHT,
+            "corridor_half_width": STANDARD_STAIR_WIDTH * 0.40,
+            "hard_height_gate": True,
+        }
+    )
+    cfg.rewards["stair_tread_support_frontier"] = RewardTermCfg(
+        func=microduck_mdp.stair_tread_support_frontier,
+        weight=15.0,
+        params={
+            "stair_face_x": STANDARD_STAIR_START_DISTANCE,
+            "target_x": STANDARD_STAIR_START_DISTANCE + 0.08,
+            "riser_height": STANDARD_RISER_HEIGHT,
+            "target_root_height": 0.205,
+            "corridor_half_width": STANDARD_STAIR_WIDTH * 0.40,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["stair_first_riser_clearance"].weight = 400.0
+    cfg.rewards["stair_first_tread_secured"].weight = 300.0
+    cfg.rewards["stair_first_tread_settle_quality"].weight = 1.0
+    del play
+    return cfg
+
+
 MicroduckStandardStairsRlCfg = deepcopy(MicroduckRlCfg)
 MicroduckStandardStairsRlCfg.experiment_name = "microduck_standard_stairs"
 MicroduckStandardStairsRlCfg.run_name = "microduck_standard_stairs"
@@ -913,3 +970,14 @@ MicroduckStairApexMantleRlCfg.save_interval = 25
 MicroduckStairApexMantleRlCfg.actor.distribution_cfg["init_std"] = 0.35
 MicroduckStairApexMantleRlCfg.algorithm.learning_rate = 3.0e-5
 MicroduckStairApexMantleRlCfg.algorithm.entropy_coef = 0.0005
+
+MicroduckStairRouladeBankRlCfg = deepcopy(MicroduckStairApexMantleRlCfg)
+MicroduckStairRouladeBankRlCfg.experiment_name = (
+    "microduck_stair_roulade_bank_specialist"
+)
+MicroduckStairRouladeBankRlCfg.run_name = "microduck_stair_roulade_bank_specialist"
+MicroduckStairRouladeBankRlCfg.max_iterations = 150
+MicroduckStairRouladeBankRlCfg.save_interval = 25
+MicroduckStairRouladeBankRlCfg.actor.distribution_cfg["init_std"] = 0.28
+MicroduckStairRouladeBankRlCfg.algorithm.learning_rate = 2.0e-5
+MicroduckStairRouladeBankRlCfg.algorithm.entropy_coef = 0.0002

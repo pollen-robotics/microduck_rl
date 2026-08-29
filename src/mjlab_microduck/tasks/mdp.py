@@ -1546,13 +1546,75 @@ def stair_assisted_crossing_frontier(
     start_x: float = 0.64,
     end_x: float = 0.72,
     clearance_height: float = 0.190,
+    corridor_half_width: float | None = None,
+    hard_height_gate: bool = False,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     x, z, _ = _stair_local_state(env, asset_cfg)
-    height_gate = torch.sigmoid((z - clearance_height) / 0.008)
+    height_gate = (
+        (z >= clearance_height).to(z.dtype)
+        if hard_height_gate
+        else torch.sigmoid((z - clearance_height) / 0.008)
+    )
     value = torch.clamp((x - start_x) / max(end_x - start_x, 1e-6), 0.0, 1.0)
     value *= height_gate
+    if corridor_half_width is not None:
+        asset: Entity = env.scene[asset_cfg.name]
+        y = torch.abs(
+            asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+        )
+        value = torch.where(
+            y <= corridor_half_width, value, torch.zeros_like(value)
+        )
     return _new_frontier_delta(env, value, "_stair_assisted_crossing")
+
+
+def stair_tread_support_frontier(
+    env: ManagerBasedRlEnv,
+    stair_face_x: float = 0.66,
+    target_x: float = 0.74,
+    riser_height: float = 0.17,
+    target_root_height: float = 0.205,
+    corridor_half_width: float = 0.36,
+    support_sensor_name: str = "robot_ground_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward new contact-supported progress onto the first real tread.
+
+    Forward translation alone is insufficient. The robot must remain inside
+    the stair corridor, place its root beyond the vertical face and above the
+    170 mm lip, and have actual robot-terrain contact. This makes a foot plant,
+    shell mantle, or head-assisted lever valid while rejecting a sideways fall
+    that merely produces a large global x coordinate.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    support = torch.zeros_like(x, dtype=torch.bool)
+    if support_sensor_name in env.scene.sensors:
+        found = env.scene.sensors[support_sensor_name].data.found
+        support = (found.view(found.shape[0], -1) > 0).any(dim=-1)
+
+    x_progress = torch.clamp(
+        (x - stair_face_x) / max(target_x - stair_face_x, 1e-6), 0.0, 1.0
+    )
+    z_progress = torch.clamp(
+        (z - riser_height)
+        / max(target_root_height - riser_height, 1e-6),
+        0.0,
+        1.0,
+    )
+    value = torch.sqrt(x_progress * z_progress)
+    eligible = (
+        support
+        & (y <= corridor_half_width)
+        & (x >= stair_face_x)
+        & (z >= riser_height)
+    )
+    value = torch.where(eligible, value, torch.zeros_like(value))
+    return _new_frontier_delta(env, value, "_stair_tread_support_frontier")
 
 
 def stair_first_tread_stable(

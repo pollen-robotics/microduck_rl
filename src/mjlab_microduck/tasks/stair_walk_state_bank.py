@@ -66,7 +66,13 @@ def _capture_commands(env: Any, env_ids: torch.Tensor) -> dict[str, dict[str, to
         ("head_pose", _POSE_FIELDS),
         ("body_pose", _POSE_FIELDS),
     ):
-        term = env.command_manager.get_term(name)
+        try:
+            term = env.command_manager.get_term(name)
+        except KeyError:
+            # Episodic manufacturer tasks zero-pad the shared observation tail
+            # instead of registering head/body commands. Keep those target
+            # stair cues untouched when this state is later transplanted.
+            continue
         result[name] = {
             field: _cpu_rows(getattr(term, field), env_ids) for field in fields
         }
@@ -353,14 +359,15 @@ class WalkerStateBankReset:
         action_term._raw_actions[ids] = saved["raw_action"]
         action_term._processed_actions[ids] = saved["processed_action"]
 
-        for name, fields in (
-            ("twist", _TWIST_FIELDS),
-            ("head_pose", _POSE_FIELDS),
-            ("body_pose", _POSE_FIELDS),
-        ):
+        command_fields = {
+            "twist": _TWIST_FIELDS,
+            "head_pose": _POSE_FIELDS,
+            "body_pose": _POSE_FIELDS,
+        }
+        for name, saved_fields in saved["commands"].items():
             term = self._env.command_manager.get_term(name)
-            for field in fields:
-                value = saved["commands"][name][field]
+            for field in command_fields[name]:
+                value = saved_fields[field]
                 if field == "time_left":
                     value = value + self._env.step_dt
                 getattr(term, field)[ids] = value
