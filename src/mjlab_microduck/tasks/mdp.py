@@ -1265,6 +1265,150 @@ def _new_frontier_delta(
     return delta / env.step_dt
 
 
+def stair_preload_frontier(
+    env: ManagerBasedRlEnv,
+    start_x: float = 0.42,
+    end_x: float = 0.62,
+    standing_root_height: float = 0.115,
+    target_root_height: float = 0.095,
+    upright_floor: float = 0.55,
+    corridor_half_width: float = 0.36,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward one episode-best crouch while approaching the first riser.
+
+    The preload is deliberately a frontier instead of a per-step pose reward:
+    reaching a deeper crouch can pay once, but camping there cannot. The route,
+    corridor, and upright gates prevent lying down away from the stair from
+    becoming a substitute for loading the legs.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, upright = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    approach_gate = torch.clamp(
+        (x - start_x) / max(end_x - start_x, 1e-6), min=0.0, max=1.0
+    )
+    crouch = torch.clamp(
+        (standing_root_height - z)
+        / max(standing_root_height - target_root_height, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    upright_gate = torch.clamp(
+        (upright - upright_floor) / max(1.0 - upright_floor, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    value = approach_gate * crouch * upright_gate
+    value = torch.where(y <= corridor_half_width, value, torch.zeros_like(value))
+    return _new_frontier_delta(env, value, "_stair_preload_frontier")
+
+
+def stair_launch_sequence(
+    env: ManagerBasedRlEnv,
+    min_x: float = 0.46,
+    max_x: float = 0.68,
+    preload_root_height: float = 0.098,
+    min_upward_speed: float = 0.30,
+    min_forward_speed: float = 0.05,
+    preload_max_vertical_speed: float = 0.30,
+    upright_threshold: float = 0.55,
+    corridor_half_width: float = 0.36,
+    preload_hold_time_s: float = 0.04,
+    launch_bonus: float = 4.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay once for a grounded preload followed by a forward/upward launch.
+
+    This is a minimal phase variable, not a prescribed jump trajectory. After
+    the compression gate is reached, the actor remains free to jump, roll,
+    shell-mantle, or plant its head. The later physical clearance and support
+    latches still decide whether the attempt actually climbed the stair.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, upright = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    velocity = torch.nan_to_num(asset.data.root_link_lin_vel_w, nan=0.0)
+    if not hasattr(env, "_stair_launch_phase"):
+        env._stair_launch_phase = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+        env._stair_preload_hold_steps = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+    fresh = env.episode_length_buf <= 1
+    env._stair_launch_phase[fresh] = 0
+    env._stair_preload_hold_steps[fresh] = 0
+
+    in_launch_zone = (
+        (x >= min_x) & (x <= max_x) & (y <= corridor_half_width)
+    )
+    preload_candidate = (
+        (env._stair_launch_phase == 0)
+        & in_launch_zone
+        & (z <= preload_root_height)
+        & (upright >= upright_threshold)
+        & (torch.abs(velocity[:, 2]) <= preload_max_vertical_speed)
+    )
+    env._stair_preload_hold_steps = torch.where(
+        preload_candidate,
+        env._stair_preload_hold_steps + 1,
+        torch.zeros_like(env._stair_preload_hold_steps),
+    )
+    required_steps = max(1, int(round(preload_hold_time_s / env.step_dt)))
+    newly_preloaded = (
+        (env._stair_launch_phase == 0)
+        & (env._stair_preload_hold_steps >= required_steps)
+    )
+    env._stair_launch_phase[newly_preloaded] = 1
+
+    newly_launched = (
+        (env._stair_launch_phase == 1)
+        & in_launch_zone
+        & (velocity[:, 0] >= min_forward_speed)
+        & (velocity[:, 2] >= min_upward_speed)
+    )
+    env._stair_launch_phase[newly_launched] = 2
+    return newly_preloaded.float() + launch_bonus * newly_launched.float()
+
+
+def stair_takeoff_frontier(
+    env: ManagerBasedRlEnv,
+    min_x: float = 0.46,
+    max_x: float = 0.68,
+    target_vertical_speed: float = 1.20,
+    corridor_half_width: float = 0.36,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward new upward-speed records only after the preload gate."""
+    asset: Entity = env.scene[asset_cfg.name]
+    x, _, _ = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    phase = getattr(env, "_stair_launch_phase", None)
+    if phase is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    upward_speed = torch.clamp(
+        torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0)
+        / max(target_vertical_speed, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    eligible = (
+        (phase >= 1)
+        & (x >= min_x)
+        & (x <= max_x)
+        & (y <= corridor_half_width)
+    )
+    value = torch.where(eligible, upward_speed, torch.zeros_like(upward_speed))
+    return _new_frontier_delta(env, value, "_stair_takeoff_frontier")
+
+
 def stair_assisted_approach_frontier(
     env: ManagerBasedRlEnv,
     start_x: float = 0.54,

@@ -414,6 +414,10 @@ def make_microduck_route_stairs_env_cfg(
         "num_terrain_levels": ROUTE_CURRICULUM_LEVELS,
         "tread_depth": STANDARD_TREAD_DEPTH,
         "num_steps": STANDARD_NUM_STEPS,
+        # Give the post-walk specialist roughly 260 mm of physical runway to
+        # preload and launch. The immutable walker still receives zeroes in
+        # this command slice, so its manufacturer gait is unchanged.
+        "cue_distance": 0.30,
     }
     for observation_group in ("actor", "critic"):
         cfg.observations[observation_group].terms["body_command"].func = (
@@ -677,6 +681,81 @@ def make_microduck_stair_walker_bank_env_cfg(
     return cfg
 
 
+def make_microduck_stair_launch_bank_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A4: learn preload and takeoff from an earlier real walker state."""
+
+    cfg = make_microduck_stair_walker_bank_env_cfg(play=False)
+    cfg.episode_length_s = 6.0
+    reset = cfg.events["route_state_curriculum"].params
+    reset.update(
+        {
+            "lip_release_fraction": 0.15,
+            "shell_brace_fraction": 0.15,
+            "tread_recovery_fraction": 0.10,
+            "real_handoff_fraction": 0.60,
+        }
+    )
+    cfg.events["walker_state_bank"] = EventTermCfg(
+        func=WalkerStateBankReset,
+        mode="reset",
+        params={"bank_path": ".tmp/codex/full170-walker-launch-state-bank.pt"},
+    )
+
+    # Direct-collocation-inspired milestones: first load the legs, then create
+    # upward impulse, then let the existing unconstrained lift/cross/support
+    # gates judge any jump, roll, shell mantle, or head-lever solution.
+    cfg.rewards["stair_assisted_approach"].params.update(
+        {"start_x": 0.40, "end_x": 0.58}
+    )
+    cfg.rewards["stair_preload_frontier"] = RewardTermCfg(
+        func=microduck_mdp.stair_preload_frontier,
+        weight=2.0,
+        params={
+            "start_x": 0.40,
+            "end_x": 0.60,
+            "standing_root_height": STANDARD_STANDING_ROOT_HEIGHT,
+            "target_root_height": 0.092,
+            "corridor_half_width": STANDARD_STAIR_WIDTH * 0.40,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["stair_launch_sequence"] = RewardTermCfg(
+        func=microduck_mdp.stair_launch_sequence,
+        weight=50.0,
+        params={
+            "min_x": 0.46,
+            "max_x": STANDARD_STAIR_START_DISTANCE + 0.02,
+            "preload_root_height": 0.098,
+            "min_upward_speed": 0.30,
+            "corridor_half_width": STANDARD_STAIR_WIDTH * 0.40,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["stair_takeoff_frontier"] = RewardTermCfg(
+        func=microduck_mdp.stair_takeoff_frontier,
+        weight=3.0,
+        params={
+            "min_x": 0.46,
+            "max_x": STANDARD_STAIR_START_DISTANCE + 0.02,
+            "target_vertical_speed": 1.20,
+            "corridor_half_width": STANDARD_STAIR_WIDTH * 0.40,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["stair_assisted_lift"].params.update(
+        {"start_height": 0.095, "clearance_height": 0.205, "x_gate": 0.52}
+    )
+    cfg.rewards["stair_assisted_crossing"].params.update(
+        {"start_x": 0.60, "end_x": 0.72, "clearance_height": 0.190}
+    )
+    cfg.rewards["stair_first_tread_stable"].weight = 100.0
+    cfg.rewards["stair_first_tread_secured"].weight = 250.0
+    del play
+    return cfg
+
+
 MicroduckStandardStairsRlCfg = deepcopy(MicroduckRlCfg)
 MicroduckStandardStairsRlCfg.experiment_name = "microduck_standard_stairs"
 MicroduckStandardStairsRlCfg.run_name = "microduck_standard_stairs"
@@ -740,3 +819,14 @@ MicroduckStairWalkerBankRlCfg.save_interval = 25
 MicroduckStairWalkerBankRlCfg.actor.distribution_cfg["init_std"] = 0.30
 MicroduckStairWalkerBankRlCfg.algorithm.learning_rate = 2.0e-5
 MicroduckStairWalkerBankRlCfg.algorithm.entropy_coef = 0.0001
+
+MicroduckStairLaunchBankRlCfg = deepcopy(MicroduckStairWalkerBankRlCfg)
+MicroduckStairLaunchBankRlCfg.experiment_name = (
+    "microduck_stair_launch_bank_specialist"
+)
+MicroduckStairLaunchBankRlCfg.run_name = "microduck_stair_launch_bank_specialist"
+MicroduckStairLaunchBankRlCfg.max_iterations = 200
+MicroduckStairLaunchBankRlCfg.save_interval = 25
+MicroduckStairLaunchBankRlCfg.actor.distribution_cfg["init_std"] = 0.34
+MicroduckStairLaunchBankRlCfg.algorithm.learning_rate = 2.5e-5
+MicroduckStairLaunchBankRlCfg.algorithm.entropy_coef = 0.0002

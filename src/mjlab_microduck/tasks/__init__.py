@@ -138,12 +138,14 @@ from .microduck_stairs_env_cfg import (
 from .microduck_standard_stairs_env_cfg import (
     make_microduck_assisted_stair_specialist_env_cfg,
     make_microduck_stair_bridge_specialist_env_cfg,
+    make_microduck_stair_launch_bank_env_cfg,
     make_microduck_stair_walker_bank_env_cfg,
     make_microduck_route_stairs_env_cfg,
     make_microduck_stair_specialist_env_cfg,
     make_microduck_standard_stairs_env_cfg,
     MicroduckAssistedStairSpecialistRlCfg,
     MicroduckStairBridgeSpecialistRlCfg,
+    MicroduckStairLaunchBankRlCfg,
     MicroduckStairWalkerBankRlCfg,
     MicroduckRouteStairsRlCfg,
     MicroduckStairSpecialistRlCfg,
@@ -371,6 +373,14 @@ register_mjlab_task(
     env_cfg=make_microduck_stair_walker_bank_env_cfg(),
     play_env_cfg=make_microduck_stair_walker_bank_env_cfg(play=True),
     rl_cfg=MicroduckStairWalkerBankRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Launch-Bank-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_launch_bank_env_cfg(),
+    play_env_cfg=make_microduck_stair_launch_bank_env_cfg(play=True),
+    rl_cfg=MicroduckStairLaunchBankRlCfg,
     runner_cls=MicroduckStairSpecialistRunner,
 )
 

@@ -30,11 +30,13 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     STANDARD_TREAD_DEPTH,
     MicroduckAssistedStairSpecialistRlCfg,
     MicroduckStairBridgeSpecialistRlCfg,
+    MicroduckStairLaunchBankRlCfg,
     MicroduckStairWalkerBankRlCfg,
     MicroduckRouteStairsRlCfg,
     MicroduckStairSpecialistRlCfg,
     make_microduck_assisted_stair_specialist_env_cfg,
     make_microduck_stair_bridge_specialist_env_cfg,
+    make_microduck_stair_launch_bank_env_cfg,
     make_microduck_stair_walker_bank_env_cfg,
     make_microduck_route_stairs_env_cfg,
     make_microduck_stair_specialist_env_cfg,
@@ -139,6 +141,7 @@ def test_route_stairs_walk_first_and_progress_to_standard_height():
     assert cfg.events["route_state_curriculum"].params["on_tread_fraction"] == 0.10
     assert cfg.observations["actor"].terms["body_command"].func.__name__ == "stair_route_cues"
     assert cfg.observations["critic"].terms["body_command"].func.__name__ == "stair_route_cues"
+    assert cfg.observations["actor"].terms["body_command"].params["cue_distance"] == 0.30
     assert MicroduckRouteStairsRlCfg.save_interval == 50
 
     play_cfg = make_microduck_route_stairs_env_cfg(play=True)
@@ -312,6 +315,47 @@ def test_walker_bank_stage_uses_real_handoff_states_on_full_home_stairs():
         MicroduckStairWalkerBankRlCfg.actor.distribution_cfg["init_std"] == 0.30
     )
     assert MicroduckStairWalkerBankRlCfg.algorithm.learning_rate == 2.0e-5
+
+
+def test_launch_bank_stage_uses_early_walker_states_and_impulse_milestones():
+    cfg = make_microduck_stair_launch_bank_env_cfg()
+    reset = cfg.events["route_state_curriculum"].params
+
+    for terrain in cfg.scene.terrain.terrain_generator.sub_terrains.values():
+        assert terrain.riser_height == 0.17
+        assert terrain.riser_height_range is None
+        assert terrain.tread_depth == 0.28
+        assert terrain.num_steps == 5
+    assert cfg.episode_length_s == 6.0
+    assert reset["lip_release_fraction"] == 0.15
+    assert reset["shell_brace_fraction"] == 0.15
+    assert reset["tread_recovery_fraction"] == 0.10
+    assert reset["real_handoff_fraction"] == 0.60
+    assert sum(
+        reset[name]
+        for name in (
+            "lip_release_fraction",
+            "shell_brace_fraction",
+            "tread_recovery_fraction",
+            "real_handoff_fraction",
+        )
+    ) == 1.0
+    bank_event = cfg.events["walker_state_bank"]
+    assert bank_event.params["bank_path"].endswith(
+        "full170-walker-launch-state-bank.pt"
+    )
+    assert cfg.rewards["stair_preload_frontier"].weight == 2.0
+    assert cfg.rewards["stair_launch_sequence"].weight == 50.0
+    assert cfg.rewards["stair_launch_sequence"].params["min_upward_speed"] == 0.30
+    assert cfg.rewards["stair_takeoff_frontier"].weight == 3.0
+    assert cfg.rewards["stair_assisted_lift"].params["x_gate"] == 0.52
+    assert cfg.rewards["stair_first_tread_stable"].weight == 100.0
+    assert MicroduckStairLaunchBankRlCfg.max_iterations == 200
+    assert MicroduckStairLaunchBankRlCfg.save_interval == 25
+    assert (
+        MicroduckStairLaunchBankRlCfg.actor.distribution_cfg["init_std"] == 0.34
+    )
+    assert MicroduckStairLaunchBankRlCfg.algorithm.learning_rate == 2.5e-5
 
 
 def test_headstand_has_exclusive_contact_gate_and_shared_actor_layout():

@@ -26,6 +26,7 @@ TASK_IDS = (
     "Mjlab-Stairs-Assisted-Specialist-MicroDuck",
     "Mjlab-Stairs-Bridge-Specialist-MicroDuck",
     "Mjlab-Stairs-Walker-Bank-Specialist-MicroDuck",
+    "Mjlab-Stairs-Launch-Bank-Specialist-MicroDuck",
 )
 RESET_MODES = {
     0: "lip_release",
