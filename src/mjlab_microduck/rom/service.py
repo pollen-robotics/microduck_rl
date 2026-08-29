@@ -92,6 +92,7 @@ class SimulatorTaskService:
         self._bundle = bundle
         self._store = store
         self._runtime = runtime
+        self._store.mark_interrupted_unknown()
         self._poll_interval_s = pollIntervalS
         self._lock = Lock()
         self._active: _ActiveTask | None = None
@@ -169,6 +170,8 @@ class SimulatorTaskService:
         action = next((item for item in self._bundle.actions if item.actionCode == request.actionCode), None)
         if action is None or action.availability != "AVAILABLE" or action.executionMode != "DISCRETE":
             raise ActionUnavailable(f"action is unavailable: {request.actionCode}")
+        if request.leaseMs is not None:
+            raise InvalidParameters("discrete actions do not accept leaseMs")
         _validate_json_schema(request.parameters, action.parameterSchema)
         self._require_preconditions(action, request)
         return action
@@ -195,7 +198,6 @@ class SimulatorTaskService:
         request = active.request
         outcome = _Outcome(state="FAILED", reason="RUNTIME_EXCEPTION")
         sample_metrics: dict[str, RuntimeMetric] = {}
-        runtime_owned = False
         handle: RuntimeHandle | None = None
         started = False
         try:
@@ -207,7 +209,6 @@ class SimulatorTaskService:
             if active.stop_event.is_set():
                 outcome = _Outcome(state="CANCELLED", reason="CANCELLED")
             else:
-                runtime_owned = True
                 handle = self._runtime.start(action, request)
                 outcome = self._sample_until_terminal(active, action, handle)
                 sample_metrics = outcome.metrics
@@ -224,11 +225,10 @@ class SimulatorTaskService:
                     # The store remains the source of truth if an external recovery won a race.
                     pass
             stop_evidence = RuntimeEvidence()
-            if runtime_owned:
-                try:
-                    stop_evidence = self._runtime.safe_stop(handle, outcome.reason)
-                except Exception:  # noqa: BLE001 - a failed safe stop is itself a runtime failure.
-                    outcome = _Outcome(state="FAILED", reason="RUNTIME_EXCEPTION", metrics=sample_metrics)
+            try:
+                stop_evidence = self._runtime.safe_stop(handle, outcome.reason)
+            except Exception:  # noqa: BLE001 - a failed safe stop is itself a runtime failure.
+                outcome = _Outcome(state="FAILED", reason="RUNTIME_EXCEPTION", metrics=sample_metrics)
             evidence = self._evidence_for(action, outcome, sample_metrics, stop_evidence)
             if started:
                 try:
@@ -256,12 +256,9 @@ class SimulatorTaskService:
                 return _Outcome(state="CANCELLED", reason="CANCELLED")
             sample = self._runtime.sample(handle)
             if sample.terminalState is not None:
-                reason = sample.stopReason or (
-                    "TASK_COMPLETE" if sample.terminalState == "SUCCEEDED" else "RUNTIME_FAILED"
-                )
                 return _Outcome(
                     state=sample.terminalState,
-                    reason=reason,
+                    reason=_terminal_result_code(sample.terminalState, sample.stopReason),
                     metrics=dict(sample.metrics),
                 )
             if time.monotonic() >= deadline:
@@ -308,6 +305,15 @@ def _merge_metrics(
     if len(merged) > 32:
         return dict(list(merged.items())[:32])
     return merged
+
+
+def _terminal_result_code(state: str, runtime_reason: str | None) -> str:
+    """Map runtime-local detail onto the fixed public discrete-task result vocabulary."""
+    if state == "SUCCEEDED":
+        return "TASK_COMPLETE"
+    if runtime_reason == "FALLEN":
+        return "FALLEN"
+    return "RUNTIME_FAILED"
 
 
 def _validate_json_schema(value: Any, schema: Mapping[str, Any], path: str = "parameters") -> None:

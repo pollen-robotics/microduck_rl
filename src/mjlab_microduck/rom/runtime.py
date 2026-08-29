@@ -7,10 +7,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
-from .contracts import ActionDefinition, RobotStatus, TaskCreateRequest
+from .contracts import ActionDefinition, RobotStatus, TaskCreateRequest, canonical_json
 
 type RuntimeMetric = str | int | float | bool | None
 _MAX_METRICS = 32
+_MAX_METRIC_KEY_LENGTH = 64
+_MAX_METRIC_STRING_LENGTH = 128
+_MAX_METRICS_ENCODED_BYTES = 1_024
 
 
 def _bounded_metrics(metrics: Mapping[str, RuntimeMetric]) -> dict[str, RuntimeMetric]:
@@ -19,13 +22,17 @@ def _bounded_metrics(metrics: Mapping[str, RuntimeMetric]) -> dict[str, RuntimeM
         raise ValueError(f"runtime metrics must contain at most {_MAX_METRICS} entries")
     bounded: dict[str, RuntimeMetric] = {}
     for key, value in metrics.items():
-        if not isinstance(key, str) or not key:
-            raise ValueError("runtime metric names must be non-empty strings")
+        if not isinstance(key, str) or not key or len(key) > _MAX_METRIC_KEY_LENGTH:
+            raise ValueError("runtime metric names must be non-empty strings of bounded length")
         if not isinstance(value, str | int | float | bool | type(None)):
             raise TypeError("runtime metrics must be scalar values")
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError("runtime metrics must be finite")
+        if isinstance(value, str) and len(value) > _MAX_METRIC_STRING_LENGTH:
+            raise ValueError("runtime metric string values must have bounded length")
         bounded[key] = value
+    if len(canonical_json(bounded)) > _MAX_METRICS_ENCODED_BYTES:
+        raise ValueError("runtime metrics encoded size exceeds the bounded evidence limit")
     return bounded
 
 

@@ -16,7 +16,9 @@ from mjlab_microduck.rom.contracts import (
     PolicyArtifact,
     PolicyBundle,
     TaskCreateRequest,
+    sha256_prefixed,
 )
+from mjlab_microduck.rom.runtime import RuntimeEvidence, RuntimeSample
 from mjlab_microduck.rom.service import (
     ActionUnavailable,
     BundleMismatch,
@@ -98,6 +100,17 @@ def test_rejects_parameters_outside_action_schema(service, stand_request, store)
     assert store.get(invalid.taskId) is None
 
 
+def test_rejects_a_lease_for_a_discrete_action(service, stand_request, store):
+    """Accepting a lease on a discrete action would blur its bounded completion contract."""
+    leased = stand_request.model_copy(update={"leaseMs": 100})
+
+    with pytest.raises(InvalidParameters) as error:
+        service.create_task(leased)
+
+    assert error.value.code == "PARAMETER_INVALID"
+    assert store.get(leased.taskId) is None
+
+
 def test_rejects_nonflat_or_unhealthy_runtime_before_creating_task(
     service, stand_request, runtime, store
 ):
@@ -171,6 +184,52 @@ def test_discrete_max_duration_times_out_and_safely_stops(bundle, store, runtime
     assert len(runtime.safe_stop_calls) == 1
 
 
+def test_runtime_terminal_reason_is_mapped_to_a_stable_public_result_code(
+    service, stand_request, runtime
+):
+    """Passing through runtime text would make public task results unbounded and unparseable."""
+    runtime.complete_next(
+        state="SUCCEEDED",
+        metrics={"upright": True},
+        stop_reason="untrusted-runtime-detail/../../../",
+    )
+    created = service.create_task(stand_request)
+
+    terminal = wait_for_state(service, created.taskId, "SUCCEEDED", runtime.safe_stopped)
+    events = service.events_after(created.taskId, -1)
+
+    assert terminal.stopReason == "TASK_COMPLETE"
+    assert terminal.evidence is not None
+    assert terminal.evidence.stopReason == "TASK_COMPLETE"
+    assert events[-1].payload == {"code": "TASK_COMPLETE"}
+
+
+@pytest.mark.parametrize(
+    ("factory", "message"),
+    [
+        (lambda: RuntimeSample(running=True, metrics={"x" * 65: 1}), "metric names"),
+        (lambda: RuntimeEvidence(metrics={"note": "x" * 129}), "string values"),
+        (
+            lambda: RuntimeEvidence(
+                metrics={f"metric-{index}": "x" * 64 for index in range(16)}
+            ),
+            "encoded size",
+        ),
+    ],
+)
+def test_runtime_metrics_reject_oversize_trajectory_shaped_payloads(factory, message):
+    """Removing metric byte bounds would let a trajectory hide in one evidence record."""
+    with pytest.raises(ValueError, match=message):
+        factory()
+
+
+def test_runtime_metrics_allow_bounded_scalar_summary():
+    """Overly broad metric rejection would discard normal task-summary evidence."""
+    sample = RuntimeSample(running=False, terminalState="SUCCEEDED", metrics={"upright": True, "score": 0.25})
+
+    assert sample.metrics == {"upright": True, "score": 0.25}
+
+
 def test_cancel_during_validation_is_idempotent_and_does_not_skip_store_states(
     service, stand_request, runtime
 ):
@@ -186,13 +245,27 @@ def test_cancel_during_validation_is_idempotent_and_does_not_skip_store_states(
 
     terminal = wait_for_state(service, created.taskId, "CANCELLED")
     assert terminal.stopReason == "CANCELLED"
-    assert len(runtime.safe_stop_calls) == 0
+    assert runtime.safe_stopped.wait(timeout=1.0)
+    assert runtime.safe_stop_calls == [(None, "CANCELLED")]
     assert [event.eventType for event in service.events_after(created.taskId, -1)] == [
         "TASK_VALIDATING",
         "TASK_CANCEL_REQUESTED",
         "TASK_STARTED",
         "TASK_CANCELLED",
     ]
+
+
+def test_service_startup_marks_preexisting_inflight_tasks_unknown_without_redispatch(
+    bundle, store, runtime, stand_request
+):
+    """Re-dispatching persisted in-flight work after restart could issue a duplicate robot motion."""
+    store.create(stand_request, sha256_prefixed(stand_request))
+    store.transition(stand_request.taskId, "VALIDATING", event_type="TASK_VALIDATING")
+
+    restarted = SimulatorTaskService(bundle, store, runtime, pollIntervalS=0.001)
+
+    assert restarted.get_task(stand_request.taskId).state == "UNKNOWN"
+    assert not runtime.validation_started.is_set()
 
 
 def test_cancelled_running_task_safely_stops_once_and_releases_slot(

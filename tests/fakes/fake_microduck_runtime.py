@@ -28,8 +28,17 @@ class FakeMicroduckRuntime:
         self.status_error: BaseException | None = None
         self.status_value = robot_status()
 
-    def complete_next(self, *, state: str, metrics: dict[str, Any]) -> None:
-        self._samples.append(RuntimeSample(running=False, terminalState=state, metrics=metrics))
+    def complete_next(
+        self, *, state: str, metrics: dict[str, Any], stop_reason: str | None = None
+    ) -> None:
+        self._samples.append(
+            RuntimeSample(
+                running=False,
+                terminalState=state,
+                metrics=metrics,
+                stopReason=stop_reason,
+            )
+        )
 
     def fail_next_sample(self, error: BaseException) -> None:
         self._samples.append(error)
