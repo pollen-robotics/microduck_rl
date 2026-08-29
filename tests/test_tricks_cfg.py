@@ -30,10 +30,12 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     STANDARD_TREAD_DEPTH,
     MicroduckAssistedStairSpecialistRlCfg,
     MicroduckStairBridgeSpecialistRlCfg,
+    MicroduckStairWalkerBankRlCfg,
     MicroduckRouteStairsRlCfg,
     MicroduckStairSpecialistRlCfg,
     make_microduck_assisted_stair_specialist_env_cfg,
     make_microduck_stair_bridge_specialist_env_cfg,
+    make_microduck_stair_walker_bank_env_cfg,
     make_microduck_route_stairs_env_cfg,
     make_microduck_stair_specialist_env_cfg,
     make_microduck_standard_stairs_env_cfg,
@@ -286,6 +288,30 @@ def test_stair_bridge_keeps_full_height_and_prioritizes_shell_and_tread():
         == 0.35
     )
     assert MicroduckStairBridgeSpecialistRlCfg.algorithm.learning_rate == 3.0e-5
+
+
+def test_walker_bank_stage_uses_real_handoff_states_on_full_home_stairs():
+    cfg = make_microduck_stair_walker_bank_env_cfg()
+    reset = cfg.events["route_state_curriculum"].params
+
+    for terrain in cfg.scene.terrain.terrain_generator.sub_terrains.values():
+        assert terrain.riser_height == 0.17
+        assert terrain.riser_height_range is None
+        assert terrain.tread_depth == 0.28
+        assert terrain.num_steps == 5
+    assert reset["lip_release_fraction"] == 0.20
+    assert reset["shell_brace_fraction"] == 0.25
+    assert reset["tread_recovery_fraction"] == 0.25
+    assert reset["real_handoff_fraction"] == 0.30
+    bank_event = cfg.events["walker_state_bank"]
+    assert bank_event.func.__name__ == "WalkerStateBankReset"
+    assert bank_event.params["bank_path"].endswith("full170-walker-state-bank.pt")
+    assert MicroduckStairWalkerBankRlCfg.max_iterations == 100
+    assert MicroduckStairWalkerBankRlCfg.save_interval == 25
+    assert (
+        MicroduckStairWalkerBankRlCfg.actor.distribution_cfg["init_std"] == 0.30
+    )
+    assert MicroduckStairWalkerBankRlCfg.algorithm.learning_rate == 2.0e-5
 
 
 def test_headstand_has_exclusive_contact_gate_and_shared_actor_layout():

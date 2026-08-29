@@ -43,6 +43,11 @@ STAIR_TARGETS = {
         "experiment": "microduck_stair_bridge_specialist",
         "iterations": 200,
     },
+    "specialist-walker-bank": {
+        "task": "Mjlab-Stairs-Walker-Bank-Specialist-MicroDuck",
+        "experiment": "microduck_stair_walker_bank_specialist",
+        "iterations": 100,
+    },
     "low": {
         "task": "Mjlab-Stairs-MicroDuck",
         "experiment": "microduck_stairs",

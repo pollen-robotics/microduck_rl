@@ -32,6 +32,7 @@ from mjlab_microduck.tasks.microduck_velocity_env_cfg import (
 )
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.stair_action import with_stair_history_seed
+from mjlab_microduck.tasks.stair_walk_state_bank import WalkerStateBankReset
 
 
 STANDARD_RISER_HEIGHT = 0.17
@@ -649,6 +650,33 @@ def make_microduck_stair_bridge_specialist_env_cfg(
     return cfg
 
 
+def make_microduck_stair_walker_bank_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A3: train from exact immutable-walker states at the real stair face."""
+
+    cfg = make_microduck_stair_bridge_specialist_env_cfg(play=False)
+    reset = cfg.events["route_state_curriculum"].params
+    reset.update(
+        {
+            "lip_release_fraction": 0.20,
+            "shell_brace_fraction": 0.25,
+            "tread_recovery_fraction": 0.25,
+            "real_handoff_fraction": 0.30,
+        }
+    )
+    # Appending this class event is order-sensitive. It replaces only mode 3
+    # after the assisted reset selects a family, then its reset() hook restores
+    # action, command, and observation history after mjlab clears the managers.
+    cfg.events["walker_state_bank"] = EventTermCfg(
+        func=WalkerStateBankReset,
+        mode="reset",
+        params={"bank_path": ".tmp/codex/full170-walker-state-bank.pt"},
+    )
+    del play
+    return cfg
+
+
 MicroduckStandardStairsRlCfg = deepcopy(MicroduckRlCfg)
 MicroduckStandardStairsRlCfg.experiment_name = "microduck_standard_stairs"
 MicroduckStandardStairsRlCfg.run_name = "microduck_standard_stairs"
@@ -701,3 +729,14 @@ MicroduckStairBridgeSpecialistRlCfg.max_iterations = 200
 MicroduckStairBridgeSpecialistRlCfg.actor.distribution_cfg["init_std"] = 0.35
 MicroduckStairBridgeSpecialistRlCfg.algorithm.learning_rate = 3.0e-5
 MicroduckStairBridgeSpecialistRlCfg.algorithm.entropy_coef = 0.0002
+
+MicroduckStairWalkerBankRlCfg = deepcopy(MicroduckStairBridgeSpecialistRlCfg)
+MicroduckStairWalkerBankRlCfg.experiment_name = (
+    "microduck_stair_walker_bank_specialist"
+)
+MicroduckStairWalkerBankRlCfg.run_name = "microduck_stair_walker_bank_specialist"
+MicroduckStairWalkerBankRlCfg.max_iterations = 100
+MicroduckStairWalkerBankRlCfg.save_interval = 25
+MicroduckStairWalkerBankRlCfg.actor.distribution_cfg["init_std"] = 0.30
+MicroduckStairWalkerBankRlCfg.algorithm.learning_rate = 2.0e-5
+MicroduckStairWalkerBankRlCfg.algorithm.entropy_coef = 0.0001

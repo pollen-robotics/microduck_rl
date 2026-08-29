@@ -10,7 +10,14 @@ import torch
 from tensordict import TensorDict
 
 
-def _load_frozen_actor(runner: Any, checkpoint: Path, device: str) -> torch.nn.Module:
+def load_frozen_actor(
+    runner: Any, checkpoint: str | Path, *, device: str
+) -> torch.nn.Module:
+    """Load one deterministic actor without retaining optimizer or critic state."""
+
+    checkpoint = Path(checkpoint).expanduser().resolve()
+    if not checkpoint.is_file():
+        raise FileNotFoundError(f"Actor checkpoint not found: {checkpoint}")
     runner.load(
         str(checkpoint),
         load_cfg={"actor": True},
@@ -41,8 +48,8 @@ def load_actor_pair(
         if not checkpoint.is_file():
             raise FileNotFoundError(f"{label.title()} checkpoint not found: {checkpoint}")
 
-    walker = _load_frozen_actor(runner, walker_path, device)
-    specialist = _load_frozen_actor(runner, specialist_path, device)
+    walker = load_frozen_actor(runner, walker_path, device=device)
+    specialist = load_frozen_actor(runner, specialist_path, device=device)
     return walker, specialist
 
 
