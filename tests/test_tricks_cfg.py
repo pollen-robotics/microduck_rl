@@ -121,7 +121,9 @@ def test_route_stairs_walk_first_and_progress_to_standard_height():
     assert cfg.scene.entities["robot"].spec_fn.__name__ == "get_standup_spec"
     assert cfg.scene.entities["robot"].spec_fn().geom("trunk_shell_collision") is not None
     assert {sensor.name for sensor in cfg.scene.sensors} >= {
+        "feet_stair_contact",
         "head_ground_contact",
+        "legs_ground_contact",
         "robot_ground_contact",
         "trunk_ground_contact",
     }
@@ -428,9 +430,22 @@ def test_roulade_bank_stage_requires_contact_supported_tread_progress():
     robot_contact = next(
         sensor for sensor in cfg.scene.sensors if sensor.name == "robot_ground_contact"
     )
-    assert robot_contact.fields == ("found", "pos", "normal")
+    assert robot_contact.fields == ("found", "force", "pos", "normal", "tangent")
     assert robot_contact.reduce == "maxforce"
     assert robot_contact.num_slots == 4
+    assert robot_contact.global_frame is True
+    for sensor_name in (
+        "feet_stair_contact",
+        "head_ground_contact",
+        "legs_ground_contact",
+        "trunk_ground_contact",
+    ):
+        sensor = next(
+            item for item in cfg.scene.sensors if item.name == sensor_name
+        )
+        assert sensor.fields == ("found", "force", "pos", "normal", "tangent")
+        assert sensor.reduce == "maxforce"
+        assert sensor.global_frame is True
     crossing = cfg.rewards["stair_assisted_crossing"]
     assert crossing.params["hard_height_gate"] is True
     assert crossing.params["clearance_height"] == 0.17

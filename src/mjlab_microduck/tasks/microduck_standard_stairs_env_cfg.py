@@ -305,30 +305,61 @@ def make_microduck_route_stairs_env_cfg(
         name="head_ground_contact",
         primary=ContactMatch(mode="body", pattern="jaw_soft", entity="robot"),
         secondary=ContactMatch(mode="body", pattern="terrain"),
-        fields=("found",),
-        reduce="none",
-        num_slots=1,
+        fields=("found", "force", "pos", "normal", "tangent"),
+        reduce="maxforce",
+        num_slots=4,
+        global_frame=True,
     )
     robot_contact = ContactSensorCfg(
         name="robot_ground_contact",
         primary=ContactMatch(mode="subtree", pattern="trunk_base", entity="robot"),
         secondary=ContactMatch(mode="body", pattern="terrain"),
-        fields=("found", "pos", "normal"),
+        fields=("found", "force", "pos", "normal", "tangent"),
         reduce="maxforce",
         num_slots=4,
+        global_frame=True,
     )
     trunk_contact = ContactSensorCfg(
         name="trunk_ground_contact",
         primary=ContactMatch(mode="body", pattern="trunk_base", entity="robot"),
         secondary=ContactMatch(mode="body", pattern="terrain"),
-        fields=("found",),
-        reduce="none",
-        num_slots=1,
+        fields=("found", "force", "pos", "normal", "tangent"),
+        reduce="maxforce",
+        num_slots=4,
+        global_frame=True,
+    )
+    leg_contact = ContactSensorCfg(
+        name="legs_ground_contact",
+        primary=ContactMatch(
+            mode="body",
+            pattern=r"^(hip_l|hip_l_2|leg|leg_2)$",
+            entity="robot",
+        ),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found", "force", "pos", "normal", "tangent"),
+        reduce="maxforce",
+        num_slots=2,
+        global_frame=True,
+    )
+    feet_stair_contact = ContactSensorCfg(
+        name="feet_stair_contact",
+        primary=ContactMatch(
+            mode="geom",
+            pattern=r"^(left_foot_collision|right_foot_collision)$",
+            entity="robot",
+        ),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found", "force", "pos", "normal", "tangent"),
+        reduce="maxforce",
+        num_slots=2,
+        global_frame=True,
     )
     cfg.scene.sensors = tuple(cfg.scene.sensors) + (
         head_contact,
         robot_contact,
         trunk_contact,
+        leg_contact,
+        feet_stair_contact,
     )
     cfg.scene.terrain.terrain_generator = deepcopy(ROUTE_STAIR_TERRAINS_CFG)
     cfg.scene.terrain.max_init_terrain_level = 0

@@ -99,3 +99,25 @@ def test_dynamic_phase_filter_rejects_backward_low_and_crash_rows():
     )
 
     assert torch.equal(rows, torch.tensor([0]))
+
+
+def test_vault_momentum_accepts_forward_upward_or_pivot_motion():
+    states = {
+        "root_qpos_local": torch.zeros(4, 7),
+        "root_qvel": torch.tensor(
+            [
+                [0.13, 0.0, 0.00, 0.0, 0.0, 0.0],
+                [0.00, 0.0, 0.00, 0.0, 2.0, 0.0],
+                [0.00, 0.0, 0.13, 0.0, 0.0, 0.0],
+                [-0.20, 0.0, -0.20, 0.0, -2.0, 0.0],
+            ]
+        ),
+    }
+
+    rows = eligible_walk_state_rows(
+        states,
+        min_vault_momentum=0.12,
+        vault_lever_arm=0.06,
+    )
+
+    assert torch.equal(rows, torch.tensor([0, 1, 2]))

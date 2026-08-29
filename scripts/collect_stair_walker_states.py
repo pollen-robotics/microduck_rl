@@ -88,6 +88,20 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--tread-contact-sensor",
+        default="robot_ground_contact",
+        help=(
+            "Position/normal contact sensor used by --capture-first-tread-contact. "
+            "Use feet_stair_contact to build a foot-anchored vault bank."
+        ),
+    )
+    parser.add_argument(
+        "--min-tread-normal-force",
+        type=float,
+        default=0.0,
+        help="Minimum normal load in newtons for a captured tread-contact slot.",
+    )
+    parser.add_argument(
         "--device", default="cuda:0" if torch.cuda.is_available() else "cpu"
     )
     return parser.parse_args()
@@ -115,6 +129,7 @@ def main() -> int:
         or args.num_envs < 1
         or args.max_steps < 1
         or args.capture_every_n_steps < 0
+        or args.min_tread_normal_force < 0.0
         or args.min_local_x >= args.max_local_x
     ):
         raise SystemExit("State count, environment count, steps, and capture band are invalid")
@@ -182,11 +197,17 @@ def main() -> int:
                 else (base_env.episode_length_buf % args.capture_every_n_steps == 0)
             )
             contact_gate = torch.ones_like(captured_this_episode)
+            contact_sensor_data = None
+            tread_contact = None
             if args.capture_first_tread_contact:
-                sensor = base_env.scene.sensors["robot_ground_contact"].data
+                if args.tread_contact_sensor not in base_env.scene.sensors:
+                    raise RuntimeError(
+                        f"Unknown tread contact sensor: {args.tread_contact_sensor}"
+                    )
+                sensor = base_env.scene.sensors[args.tread_contact_sensor].data
                 if sensor.found is None or sensor.pos is None or sensor.normal is None:
                     raise RuntimeError(
-                        "robot_ground_contact must expose found, pos, and normal"
+                        f"{args.tread_contact_sensor} must expose found, pos, and normal"
                     )
                 _, tread_contact = classify_standard_stair_contacts(
                     sensor.found,
@@ -194,7 +215,18 @@ def main() -> int:
                     sensor.normal,
                     origins,
                 )
+                if args.min_tread_normal_force > 0.0:
+                    if sensor.force is None:
+                        raise RuntimeError(
+                            f"{args.tread_contact_sensor} must expose force for "
+                            "--min-tread-normal-force"
+                        )
+                    normal_force = torch.abs(
+                        torch.sum(sensor.force * sensor.normal, dim=-1)
+                    )
+                    tread_contact &= normal_force >= args.min_tread_normal_force
                 contact_gate = tread_contact.any(dim=-1)
+                contact_sensor_data = sensor
             eligible = (
                 unique_episode_gate
                 & cadence_gate
@@ -216,6 +248,26 @@ def main() -> int:
                 chunk["source_episode_step"] = (
                     base_env.episode_length_buf[ids].detach().cpu().clone()
                 )
+                if contact_sensor_data is not None and tread_contact is not None:
+                    contact_pos_local = contact_sensor_data.pos[ids] - origins[
+                        ids, None, :
+                    ]
+                    chunk["captured_tread_contact"] = {
+                        "found": contact_sensor_data.found[ids]
+                        .detach()
+                        .cpu()
+                        .clone(),
+                        "mask": tread_contact[ids].detach().cpu().clone(),
+                        "pos_local": contact_pos_local.detach().cpu().clone(),
+                        "normal": contact_sensor_data.normal[ids]
+                        .detach()
+                        .cpu()
+                        .clone(),
+                    }
+                    if contact_sensor_data.force is not None:
+                        chunk["captured_tread_contact"]["force"] = (
+                            contact_sensor_data.force[ids].detach().cpu().clone()
+                        )
                 chunks.append(chunk)
                 captured_this_episode[ids] = True
             captured_this_episode[dones.to(torch.bool)] = False
@@ -271,6 +323,8 @@ def main() -> int:
             "capture_every_n_steps": args.capture_every_n_steps,
             "standing_only_reset": args.standing_only_reset,
             "capture_first_tread_contact": args.capture_first_tread_contact,
+            "tread_contact_sensor": args.tread_contact_sensor,
+            "min_tread_normal_force_n": args.min_tread_normal_force,
             "canonical_source_xy_yaw": args.standing_only_reset,
         },
         "states": states,

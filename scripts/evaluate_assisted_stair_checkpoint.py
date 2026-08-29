@@ -23,6 +23,7 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
+from mjlab_microduck.tasks.mdp import classify_standard_stair_contacts
 
 TASK_IDS = (
     "Mjlab-Stairs-Assisted-Specialist-MicroDuck",
@@ -56,6 +57,12 @@ TREAD_CONTACT_BANK_RESET_MODES = {
     1: "unused_head_lever",
     2: "unused_tread",
     3: "real_tread_contact",
+}
+BODY_PART_CONTACT_SENSORS = {
+    "head": "head_ground_contact",
+    "trunk": "trunk_ground_contact",
+    "legs": "legs_ground_contact",
+    "feet": "feet_stair_contact",
 }
 
 
@@ -144,6 +151,22 @@ def main() -> int:
     face_contact_events = 0
     tread_contact_events = 0
     tread_contact_source_steps: list[int] = []
+    body_part_tread_latched = {
+        name: torch.zeros_like(previous_clearance)
+        for name, sensor_name in BODY_PART_CONTACT_SENSORS.items()
+        if sensor_name in base_env.scene.sensors
+    }
+    body_part_tread_events = {name: 0 for name in body_part_tread_latched}
+    body_part_force_max = {
+        name: torch.zeros(args.num_envs, dtype=torch.float32, device=args.device)
+        for name in body_part_tread_latched
+    }
+    body_part_power_max = {
+        name: torch.zeros_like(previous_clearance, dtype=torch.float32)
+        for name in body_part_tread_latched
+    }
+    body_part_trial_forces = {name: [] for name in body_part_tread_latched}
+    body_part_trial_powers = {name: [] for name in body_part_tread_latched}
     max_x = torch.full((args.num_envs,), -torch.inf, device=args.device)
     max_z = torch.full_like(max_x, -torch.inf)
     steps = base_env.max_episode_length * args.episodes
@@ -195,6 +218,77 @@ def main() -> int:
                 )
             completed_trials += int(dones.sum().item())
             done_mask = dones.bool()
+            origins = base_env.scene.terrain.env_origins
+            for body_part, sensor_name in BODY_PART_CONTACT_SENSORS.items():
+                if body_part not in body_part_tread_latched:
+                    continue
+                sensor_data = base_env.scene.sensors[sensor_name].data
+                if (
+                    sensor_data.found is None
+                    or sensor_data.force is None
+                    or sensor_data.pos is None
+                    or sensor_data.normal is None
+                ):
+                    raise RuntimeError(
+                        f"{sensor_name} must provide found, force, pos, and normal"
+                    )
+                _, body_tread = classify_standard_stair_contacts(
+                    sensor_data.found,
+                    sensor_data.pos,
+                    sensor_data.normal,
+                    origins,
+                )
+                current_body_tread = body_tread.any(dim=-1)
+                new_body_tread = (
+                    current_body_tread & ~body_part_tread_latched[body_part]
+                )
+                body_part_tread_events[body_part] += int(
+                    new_body_tread.sum().item()
+                )
+                body_part_tread_latched[body_part] |= current_body_tread
+                normal_force = torch.abs(
+                    torch.sum(sensor_data.force * sensor_data.normal, dim=-1)
+                )
+                normal_force = torch.where(
+                    body_tread, normal_force, torch.zeros_like(normal_force)
+                )
+                strongest_slot = normal_force.argmax(dim=-1, keepdim=True)
+                strongest_force = normal_force.gather(1, strongest_slot).squeeze(1)
+                slot_index = strongest_slot.unsqueeze(-1).expand(-1, -1, 3)
+                contact_pos = sensor_data.pos.gather(1, slot_index).squeeze(1)
+                contact_force = sensor_data.force.gather(1, slot_index).squeeze(1)
+                robot = base_env.scene["robot"]
+                lever = contact_pos - robot.data.root_link_pos_w
+                pitch_torque = torch.cross(lever, contact_force, dim=-1)[:, 1]
+                pitch_power = torch.clamp(
+                    pitch_torque * robot.data.root_link_ang_vel_w[:, 1], min=0.0
+                )
+                pitch_power = torch.where(
+                    current_body_tread,
+                    pitch_power,
+                    torch.zeros_like(pitch_power),
+                )
+                body_part_force_max[body_part] = torch.maximum(
+                    body_part_force_max[body_part], strongest_force
+                )
+                body_part_power_max[body_part] = torch.maximum(
+                    body_part_power_max[body_part], pitch_power
+                )
+                if torch.any(done_mask):
+                    body_part_trial_forces[body_part].extend(
+                        body_part_force_max[body_part][done_mask]
+                        .detach()
+                        .cpu()
+                        .tolist()
+                    )
+                    body_part_trial_powers[body_part].extend(
+                        body_part_power_max[body_part][done_mask]
+                        .detach()
+                        .cpu()
+                        .tolist()
+                    )
+                    body_part_force_max[body_part][done_mask] = 0.0
+                    body_part_power_max[body_part][done_mask] = 0.0
             for code, name in reset_modes.items():
                 mode_mask = episode_mode == code
                 mode_trials[name] += int((done_mask & mode_mask).sum().item())
@@ -217,9 +311,10 @@ def main() -> int:
             previous_secured[done_mask] = False
             previous_face_contact[done_mask] = False
             previous_tread_contact[done_mask] = False
+            for latch in body_part_tread_latched.values():
+                latch[done_mask] = False
 
             robot = base_env.scene["robot"]
-            origins = base_env.scene.terrain.env_origins
             local = robot.data.root_link_pos_w - origins
             max_x = torch.maximum(max_x, torch.nan_to_num(local[:, 0], nan=-torch.inf))
             max_z = torch.maximum(max_z, torch.nan_to_num(local[:, 2], nan=-torch.inf))
@@ -227,6 +322,21 @@ def main() -> int:
         env.close()
 
     denominator = max(completed_trials, 1)
+
+    def quantiles(values: list[float]) -> dict[str, float]:
+        if not values:
+            return {}
+        samples = torch.tensor(values, dtype=torch.float32)
+        return {
+            name: float(torch.quantile(samples, probability).item())
+            for name, probability in (
+                ("p50", 0.50),
+                ("p75", 0.75),
+                ("p90", 0.90),
+                ("p95", 0.95),
+                ("max", 1.00),
+            )
+        }
     eligible_names = tuple(
         name
         for name in reset_modes.values()
@@ -276,6 +386,19 @@ def main() -> int:
         "riser_face_contact_rate": face_contact_events / denominator,
         "first_tread_contact_events": tread_contact_events,
         "first_tread_contact_rate": tread_contact_events / denominator,
+        "body_part_tread_contact_events": body_part_tread_events,
+        "body_part_tread_contact_rates": {
+            name: events / denominator
+            for name, events in body_part_tread_events.items()
+        },
+        "body_part_tread_normal_force_n": {
+            name: quantiles(values)
+            for name, values in body_part_trial_forces.items()
+        },
+        "body_part_positive_pitch_power_w": {
+            name: quantiles(values)
+            for name, values in body_part_trial_powers.items()
+        },
         "manufacturer_source_steps_with_tread_contact": dict(
             sorted(Counter(tread_contact_source_steps).items())
         ),

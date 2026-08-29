@@ -306,6 +306,8 @@ def eligible_walk_state_rows(
     min_forward_speed: float | None = None,
     min_vertical_speed: float | None = None,
     min_root_height: float | None = None,
+    min_vault_momentum: float | None = None,
+    vault_lever_arm: float = 0.06,
 ) -> torch.Tensor:
     """Return source rows that contain useful dynamic handoff phases."""
 
@@ -325,6 +327,17 @@ def eligible_walk_state_rows(
         eligible &= states["root_qvel"][:, 2] >= min_vertical_speed
     if min_root_height is not None:
         eligible &= states["root_qpos_local"][:, 2] >= min_root_height
+    if min_vault_momentum is not None:
+        velocity = states["root_qvel"]
+        # A useful tread-contact handoff can carry translational momentum or
+        # convert forward somersault rate into linear speed about a head/shell
+        # pivot. Negative components do not help the robot vault the lip.
+        vault_momentum = (
+            torch.clamp(velocity[:, 0], min=0.0)
+            + torch.clamp(velocity[:, 2], min=0.0)
+            + vault_lever_arm * torch.clamp(velocity[:, 4], min=0.0)
+        )
+        eligible &= vault_momentum >= min_vault_momentum
     rows = torch.nonzero(eligible, as_tuple=False).squeeze(-1)
     if len(rows) == 0:
         raise ValueError("Walker-state phase filters rejected every bank row")
@@ -354,6 +367,8 @@ class WalkerStateBankReset:
             min_forward_speed=cfg.params.get("min_forward_speed"),
             min_vertical_speed=cfg.params.get("min_vertical_speed"),
             min_root_height=cfg.params.get("min_root_height"),
+            min_vault_momentum=cfg.params.get("min_vault_momentum"),
+            vault_lever_arm=cfg.params.get("vault_lever_arm", 0.06),
         )
 
         robot = env.scene["robot"]
@@ -374,6 +389,8 @@ class WalkerStateBankReset:
         min_forward_speed: float | None = None,
         min_vertical_speed: float | None = None,
         min_root_height: float | None = None,
+        min_vault_momentum: float | None = None,
+        vault_lever_arm: float = 0.06,
     ) -> None:
         del (
             bank_path,
@@ -385,6 +402,8 @@ class WalkerStateBankReset:
             min_forward_speed,
             min_vertical_speed,
             min_root_height,
+            min_vault_momentum,
+            vault_lever_arm,
         )
         mode = getattr(env, "_stair_assisted_reset_mode", None)
         if mode is None:
