@@ -126,7 +126,7 @@ components:
       type: object
       additionalProperties: false
       required: [code, message, details]
-      properties: {code: {type: string, enum: [AUTH_REQUIRED, NOT_READY, BUNDLE_MISMATCH, ACTION_UNAVAILABLE, PARAMETER_INVALID, PRECONDITION_FAILED, ROBOT_BUSY, TASK_ID_CONFLICT, STALE_COMMAND, INTERNAL_ERROR]}, message: {type: string}, details: {type: object}}
+      properties: {code: {type: string, enum: [AUTH_REQUIRED, NOT_READY, BUNDLE_MISMATCH, ACTION_UNAVAILABLE, PARAMETER_INVALID, PRECONDITION_FAILED, ROBOT_BUSY, TASK_ID_CONFLICT, STALE_COMMAND, TASK_NOT_FOUND, INTERNAL_ERROR]}, message: {type: string}, details: {type: object}}
     HealthResponse:
       type: object
       additionalProperties: false
@@ -150,6 +150,7 @@ components:
     LeaseContract:
       type: object
       additionalProperties: false
+      x-unergy-invariants: [minLeaseMs <= defaultLeaseMs <= maxLeaseMs, commandCadenceMs <= minLeaseMs]
       required: [minLeaseMs, defaultLeaseMs, maxLeaseMs, commandCadenceMs]
       properties: {minLeaseMs: {type: integer, exclusiveMinimum: 0}, defaultLeaseMs: {type: integer, exclusiveMinimum: 0}, maxLeaseMs: {type: integer, exclusiveMinimum: 0}, commandCadenceMs: {type: integer, exclusiveMinimum: 0}, safeStopBehavior: {type: [string, 'null']}}
     ActionDefinition:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Mapping
 from datetime import datetime
@@ -16,6 +17,47 @@ SIM_TASK_SCHEMA = "MICRODUCK_SIM_TASK_V1"
 BIPED_POSE_SCHEMA = "BIPED_POSE_V1"
 OBSERVATION_CONTRACT = "MICRODUCK_OBS_61_V1"
 ACTION_CONTRACT = "MICRODUCK_ACTION_14_V1"
+
+CONTROLLED_SERVO_JOINTS = (
+    "left_hip_yaw",
+    "left_hip_roll",
+    "left_hip_pitch",
+    "left_knee",
+    "left_ankle",
+    "neck_pitch",
+    "head_pitch",
+    "head_yaw",
+    "head_roll",
+    "right_hip_yaw",
+    "right_hip_roll",
+    "right_hip_pitch",
+    "right_knee",
+    "right_ankle",
+)
+OBSERVATION_FIELDS = (
+    "base_ang_vel.roll",
+    "base_ang_vel.pitch",
+    "base_ang_vel.yaw",
+    "projected_gravity.x",
+    "projected_gravity.y",
+    "projected_gravity.z",
+    *(f"joint_pos_rel.{joint}" for joint in CONTROLLED_SERVO_JOINTS),
+    *(f"joint_vel_rel.{joint}" for joint in CONTROLLED_SERVO_JOINTS),
+    *(f"last_action.{joint}" for joint in CONTROLLED_SERVO_JOINTS),
+    "twist.lin_vel_x",
+    "twist.lin_vel_y",
+    "twist.ang_vel_z",
+    "head_pose.neck_pitch",
+    "head_pose.head_pitch",
+    "head_pose.head_yaw",
+    "head_pose.head_roll",
+    "body_pose.x",
+    "body_pose.y",
+    "body_pose.z",
+    "body_pose.roll",
+    "body_pose.pitch",
+    "body_pose.yaw",
+)
 
 _TASK_ID_PATTERN = r"^[0-9a-f]{32}$"
 _DIGEST_PATTERN = r"^sha256:[0-9a-f]{64}$"
@@ -58,6 +100,12 @@ class ObservationContract(ContractModel):
     units: dict[str, str]
     normalization: Literal["BAKED_IN_ONNX", "DECLARED"]
 
+    @model_validator(mode="after")
+    def validate_shared_layout(self) -> ObservationContract:
+        if self.fields != list(OBSERVATION_FIELDS):
+            raise ValueError("observation fields must use the exact shared 61D layout")
+        return self
+
 
 class ActionContract(ContractModel):
     identifier: Literal["MICRODUCK_ACTION_14_V1"]
@@ -66,6 +114,12 @@ class ActionContract(ContractModel):
     units: str
     scaling: dict[str, Any]
     clipping: dict[str, Any]
+
+    @model_validator(mode="after")
+    def validate_controlled_servo_order(self) -> ActionContract:
+        if self.joints != list(CONTROLLED_SERVO_JOINTS):
+            raise ValueError("action joints must use the exact controlled-servo order")
+        return self
 
 
 class PolicyArtifact(ContractModel):
@@ -110,7 +164,7 @@ class ActionDefinition(ContractModel):
 
 class PolicyBundle(ContractModel):
     schema_: Literal["MICRODUCK_POLICY_BUNDLE_V1"] = Field(
-        default=POLICY_BUNDLE_SCHEMA, alias="schema", serialization_alias="schema"
+        ..., alias="schema", serialization_alias="schema"
     )
     bundleId: str = Field(min_length=1)
     bundleVersion: str = Field(min_length=1)
@@ -159,7 +213,7 @@ def _reject_raw_control_keys(value: Any) -> None:
 
 class TaskCreateRequest(ContractModel):
     schema_: Literal["MICRODUCK_SIM_TASK_V1"] = Field(
-        default=SIM_TASK_SCHEMA, alias="schema", serialization_alias="schema"
+        ..., alias="schema", serialization_alias="schema"
     )
     taskId: str = Field(pattern=_TASK_ID_PATTERN)
     actionCode: str = Field(min_length=1)
@@ -229,7 +283,7 @@ class TaskSnapshot(ContractModel):
 
 class RobotStatus(ContractModel):
     schema_: Literal["BIPED_POSE_V1"] = Field(
-        default=BIPED_POSE_SCHEMA, alias="schema", serialization_alias="schema"
+        ..., alias="schema", serialization_alias="schema"
     )
     timestamp: datetime
     basePositionM: tuple[float, float, float]
@@ -257,6 +311,8 @@ class RobotStatus(ContractModel):
 
 
 def _canonical_value(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("non-finite floats are not valid canonical JSON")
     if isinstance(value, BaseModel):
         return _canonical_value(value.model_dump(mode="json", by_alias=True, exclude_none=True))
     if isinstance(value, Mapping):

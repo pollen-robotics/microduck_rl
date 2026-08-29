@@ -34,6 +34,7 @@
     },
     "LeaseContract": {
       "type": "object", "additionalProperties": false,
+      "x-unergy-invariants": ["minLeaseMs <= defaultLeaseMs <= maxLeaseMs", "commandCadenceMs <= minLeaseMs"],
       "required": ["minLeaseMs", "defaultLeaseMs", "maxLeaseMs", "commandCadenceMs"],
       "properties": {
         "minLeaseMs": {"type": "integer", "exclusiveMinimum": 0},
@@ -49,7 +50,16 @@
       "properties": {
         "identifier": {"const": "MICRODUCK_OBS_61_V1"},
         "dimension": {"const": 61},
-        "fields": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "fields": {"type": "array", "minItems": 61, "maxItems": 61, "prefixItems": [
+          {"const": "base_ang_vel.roll"}, {"const": "base_ang_vel.pitch"}, {"const": "base_ang_vel.yaw"},
+          {"const": "projected_gravity.x"}, {"const": "projected_gravity.y"}, {"const": "projected_gravity.z"},
+          {"const": "joint_pos_rel.left_hip_yaw"}, {"const": "joint_pos_rel.left_hip_roll"}, {"const": "joint_pos_rel.left_hip_pitch"}, {"const": "joint_pos_rel.left_knee"}, {"const": "joint_pos_rel.left_ankle"}, {"const": "joint_pos_rel.neck_pitch"}, {"const": "joint_pos_rel.head_pitch"}, {"const": "joint_pos_rel.head_yaw"}, {"const": "joint_pos_rel.head_roll"}, {"const": "joint_pos_rel.right_hip_yaw"}, {"const": "joint_pos_rel.right_hip_roll"}, {"const": "joint_pos_rel.right_hip_pitch"}, {"const": "joint_pos_rel.right_knee"}, {"const": "joint_pos_rel.right_ankle"},
+          {"const": "joint_vel_rel.left_hip_yaw"}, {"const": "joint_vel_rel.left_hip_roll"}, {"const": "joint_vel_rel.left_hip_pitch"}, {"const": "joint_vel_rel.left_knee"}, {"const": "joint_vel_rel.left_ankle"}, {"const": "joint_vel_rel.neck_pitch"}, {"const": "joint_vel_rel.head_pitch"}, {"const": "joint_vel_rel.head_yaw"}, {"const": "joint_vel_rel.head_roll"}, {"const": "joint_vel_rel.right_hip_yaw"}, {"const": "joint_vel_rel.right_hip_roll"}, {"const": "joint_vel_rel.right_hip_pitch"}, {"const": "joint_vel_rel.right_knee"}, {"const": "joint_vel_rel.right_ankle"},
+          {"const": "last_action.left_hip_yaw"}, {"const": "last_action.left_hip_roll"}, {"const": "last_action.left_hip_pitch"}, {"const": "last_action.left_knee"}, {"const": "last_action.left_ankle"}, {"const": "last_action.neck_pitch"}, {"const": "last_action.head_pitch"}, {"const": "last_action.head_yaw"}, {"const": "last_action.head_roll"}, {"const": "last_action.right_hip_yaw"}, {"const": "last_action.right_hip_roll"}, {"const": "last_action.right_hip_pitch"}, {"const": "last_action.right_knee"}, {"const": "last_action.right_ankle"},
+          {"const": "twist.lin_vel_x"}, {"const": "twist.lin_vel_y"}, {"const": "twist.ang_vel_z"},
+          {"const": "head_pose.neck_pitch"}, {"const": "head_pose.head_pitch"}, {"const": "head_pose.head_yaw"}, {"const": "head_pose.head_roll"},
+          {"const": "body_pose.x"}, {"const": "body_pose.y"}, {"const": "body_pose.z"}, {"const": "body_pose.roll"}, {"const": "body_pose.pitch"}, {"const": "body_pose.yaw"}
+        ]},
         "units": {"type": "object", "additionalProperties": {"type": "string"}},
         "normalization": {"enum": ["BAKED_IN_ONNX", "DECLARED"]}
       }
@@ -60,7 +70,9 @@
       "properties": {
         "identifier": {"const": "MICRODUCK_ACTION_14_V1"},
         "dimension": {"const": 14},
-        "joints": {"type": "array", "minItems": 14, "maxItems": 14, "items": {"type": "string"}},
+        "joints": {"type": "array", "minItems": 14, "maxItems": 14, "prefixItems": [
+          {"const": "left_hip_yaw"}, {"const": "left_hip_roll"}, {"const": "left_hip_pitch"}, {"const": "left_knee"}, {"const": "left_ankle"}, {"const": "neck_pitch"}, {"const": "head_pitch"}, {"const": "head_yaw"}, {"const": "head_roll"}, {"const": "right_hip_yaw"}, {"const": "right_hip_roll"}, {"const": "right_hip_pitch"}, {"const": "right_knee"}, {"const": "right_ankle"}
+        ]},
         "units": {"type": "string"}, "scaling": {"type": "object"}, "clipping": {"type": "object"}
       }
     },
