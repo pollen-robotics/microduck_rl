@@ -463,6 +463,7 @@ def _write_verified_bundle(
     trunk_conaffinity: int = 1,
     exact_foot_topology: bool = True,
     extra_passive_wheel_joint: bool = False,
+    weld_trunk: bool | None = None,
 ) -> PolicyBundle:
     model_path = root / "models" / "robot.xml"
     policy_path = root / "policies" / "walk.onnx"
@@ -494,7 +495,7 @@ def _write_verified_bundle(
         trunk_conaffinity=trunk_conaffinity,
         exact_foot_topology=exact_foot_topology,
         extra_passive_wheel_joint=extra_passive_wheel_joint,
-        weld_trunk=action_code == "STAND",
+        weld_trunk=action_code == "STAND" if weld_trunk is None else weld_trunk,
         include_file="extra.xml" if include_dependency else None,
     )
     _write_policy(
