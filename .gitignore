@@ -38,3 +38,4 @@ backup_onnx/
 logdir/.claude/
 logdir/
 logdir/.claude/worktrees/
+.worktrees/
