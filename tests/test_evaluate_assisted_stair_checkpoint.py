@@ -17,6 +17,7 @@ assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 A12TrajectoryMetrics = MODULE.A12TrajectoryMetrics
+ContactTrajectoryMetrics = MODULE.ContactTrajectoryMetrics
 
 
 def _observe(
@@ -78,3 +79,14 @@ def test_a12_side_bypass_is_once_per_trajectory_and_only_before_clear() -> None:
         events = _observe(metrics, (0.700, 0.0, 0.198), episode_step)
     assert events["full_shell_clear"]
     assert not _observe(metrics, (0.800, 0.50, 0.30), 7)["side_bypass"]
+
+
+def test_contact_metrics_ignore_reset_contact_but_count_policy_recontact() -> None:
+    metrics = ContactTrajectoryMetrics(1, "cpu")
+
+    assert not metrics.observe(torch.tensor([True]), torch.tensor([1])).item()
+    assert not metrics.observe(torch.tensor([True]), torch.tensor([3])).item()
+    assert not metrics.observe(torch.tensor([False]), torch.tensor([4])).item()
+    assert metrics.observe(torch.tensor([True]), torch.tensor([5])).item()
+    assert not metrics.observe(torch.tensor([False]), torch.tensor([6])).item()
+    assert not metrics.observe(torch.tensor([True]), torch.tensor([7])).item()

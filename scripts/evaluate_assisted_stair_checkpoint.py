@@ -33,6 +33,7 @@ TASK_IDS = (
     "Mjlab-Stairs-Launch-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Apex-Mantle-Specialist-MicroDuck",
     "Mjlab-Stairs-Roulade-Bank-Specialist-MicroDuck",
+    "Mjlab-Stairs-Curriculum-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
     "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
@@ -177,6 +178,34 @@ class A12TrajectoryMetrics:
         self.side_bypass_latched[done_mask] = False
 
 
+class ContactTrajectoryMetrics:
+    """Count one policy-created contact transition per assisted trajectory."""
+
+    def __init__(self, num_envs: int, device: torch.device | str):
+        self._previous = torch.zeros(num_envs, dtype=torch.bool, device=device)
+        self._latched = torch.zeros_like(self._previous)
+
+    def observe(
+        self,
+        current: torch.Tensor,
+        episode_steps: torch.Tensor,
+    ) -> torch.Tensor:
+        if current.shape != self._previous.shape:
+            raise ValueError("current must have shape (num_envs,)")
+        if episode_steps.shape != self._previous.shape:
+            raise ValueError("episode_steps must have shape (num_envs,)")
+        eligible = episode_steps >= A12_IGNORE_INITIAL_CONTROL_STEPS
+        newly_contacted = current & ~self._previous & eligible & ~self._latched
+        self._latched |= newly_contacted
+        self._previous = current.clone()
+        return newly_contacted
+
+    def reset(self, dones: torch.Tensor) -> None:
+        done_mask = dones.bool()
+        self._previous[done_mask] = False
+        self._latched[done_mask] = False
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", type=Path)
@@ -222,7 +251,10 @@ def main() -> int:
         "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
     }:
         reset_modes = TREAD_CONTACT_BANK_RESET_MODES
-    elif args.task == "Mjlab-Stairs-Roulade-Bank-Specialist-MicroDuck":
+    elif args.task in {
+        "Mjlab-Stairs-Roulade-Bank-Specialist-MicroDuck",
+        "Mjlab-Stairs-Curriculum-RSI-Specialist-MicroDuck",
+    }:
         reset_modes = ROULADE_BANK_RESET_MODES
     elif args.task == "Mjlab-Stairs-Apex-Mantle-Specialist-MicroDuck":
         reset_modes = APEX_MANTLE_RESET_MODES
@@ -254,8 +286,6 @@ def main() -> int:
     )
     previous_stable = torch.zeros_like(previous_clearance)
     previous_secured = torch.zeros_like(previous_clearance)
-    previous_face_contact = torch.zeros_like(previous_clearance)
-    previous_tread_contact = torch.zeros_like(previous_clearance)
     mode_trials = {name: 0 for name in reset_modes.values()}
     mode_clearance = {name: 0 for name in reset_modes.values()}
     mode_stable = {name: 0 for name in reset_modes.values()}
@@ -266,22 +296,24 @@ def main() -> int:
     face_contact_events = 0
     tread_contact_events = 0
     tread_contact_source_steps: list[int] = []
-    body_part_tread_latched = {
-        name: torch.zeros_like(previous_clearance)
+    face_contact_metrics = ContactTrajectoryMetrics(args.num_envs, args.device)
+    tread_contact_metrics = ContactTrajectoryMetrics(args.num_envs, args.device)
+    body_part_tread_metrics = {
+        name: ContactTrajectoryMetrics(args.num_envs, args.device)
         for name, sensor_name in BODY_PART_CONTACT_SENSORS.items()
         if sensor_name in base_env.scene.sensors
     }
-    body_part_tread_events = {name: 0 for name in body_part_tread_latched}
+    body_part_tread_events = {name: 0 for name in body_part_tread_metrics}
     body_part_force_max = {
         name: torch.zeros(args.num_envs, dtype=torch.float32, device=args.device)
-        for name in body_part_tread_latched
+        for name in body_part_tread_metrics
     }
     body_part_power_max = {
         name: torch.zeros_like(previous_clearance, dtype=torch.float32)
-        for name in body_part_tread_latched
+        for name in body_part_tread_metrics
     }
-    body_part_trial_forces = {name: [] for name in body_part_tread_latched}
-    body_part_trial_powers = {name: [] for name in body_part_tread_latched}
+    body_part_trial_forces = {name: [] for name in body_part_tread_metrics}
+    body_part_trial_powers = {name: [] for name in body_part_tread_metrics}
     a12_metrics = A12TrajectoryMetrics(args.num_envs, args.device)
     a12_event_counts = {
         "root_center_over_lip": 0,
@@ -326,21 +358,30 @@ def main() -> int:
             secured = getattr(
                 base_env, "_stair_first_tread_secured_latched", previous_secured
             )
-            face_contact = getattr(
-                base_env,
-                "_stair_riser_face_contact_latched",
-                previous_face_contact,
-            )
-            tread_contact = getattr(
-                base_env,
-                "_stair_first_tread_contact_latched",
-                previous_tread_contact,
+            global_contact = base_env.scene.sensors["robot_ground_contact"].data
+            if (
+                global_contact.found is None
+                or global_contact.pos is None
+                or global_contact.normal is None
+            ):
+                raise RuntimeError(
+                    "robot_ground_contact must provide found, pos, and normal"
+                )
+            raw_face, raw_tread = classify_standard_stair_contacts(
+                global_contact.found,
+                global_contact.pos,
+                global_contact.normal,
+                base_env.scene.terrain.env_origins,
             )
             new_clearance = clearance & ~previous_clearance
             new_stable = stable & ~previous_stable
             new_secured = secured & ~previous_secured
-            new_face_contact = face_contact & ~previous_face_contact
-            new_tread_contact = tread_contact & ~previous_tread_contact
+            new_face_contact = face_contact_metrics.observe(
+                raw_face.any(dim=-1), base_env.episode_length_buf
+            )
+            new_tread_contact = tread_contact_metrics.observe(
+                raw_tread.any(dim=-1), base_env.episode_length_buf
+            )
             clearance_events += int(new_clearance.sum().item())
             stable_events += int(new_stable.sum().item())
             secured_events += int(new_secured.sum().item())
@@ -358,7 +399,7 @@ def main() -> int:
             done_mask = dones.bool()
             origins = base_env.scene.terrain.env_origins
             for body_part, sensor_name in BODY_PART_CONTACT_SENSORS.items():
-                if body_part not in body_part_tread_latched:
+                if body_part not in body_part_tread_metrics:
                     continue
                 sensor_data = base_env.scene.sensors[sensor_name].data
                 if (
@@ -377,13 +418,16 @@ def main() -> int:
                     origins,
                 )
                 current_body_tread = body_tread.any(dim=-1)
-                new_body_tread = (
-                    current_body_tread & ~body_part_tread_latched[body_part]
+                new_body_tread = body_part_tread_metrics[body_part].observe(
+                    current_body_tread, base_env.episode_length_buf
                 )
                 body_part_tread_events[body_part] += int(
                     new_body_tread.sum().item()
                 )
-                body_part_tread_latched[body_part] |= current_body_tread
+                eligible = (
+                    base_env.episode_length_buf
+                    >= A12_IGNORE_INITIAL_CONTROL_STEPS
+                )
                 normal_force = torch.abs(
                     torch.sum(sensor_data.force * sensor_data.normal, dim=-1)
                 )
@@ -402,9 +446,12 @@ def main() -> int:
                     pitch_torque * robot.data.root_link_ang_vel_w[:, 1], min=0.0
                 )
                 pitch_power = torch.where(
-                    current_body_tread,
+                    current_body_tread & eligible,
                     pitch_power,
                     torch.zeros_like(pitch_power),
+                )
+                strongest_force = torch.where(
+                    eligible, strongest_force, torch.zeros_like(strongest_force)
                 )
                 body_part_force_max[body_part] = torch.maximum(
                     body_part_force_max[body_part], strongest_force
@@ -442,15 +489,13 @@ def main() -> int:
             previous_clearance = clearance.clone()
             previous_stable = stable.clone()
             previous_secured = secured.clone()
-            previous_face_contact = face_contact.clone()
-            previous_tread_contact = tread_contact.clone()
             previous_clearance[done_mask] = False
             previous_stable[done_mask] = False
             previous_secured[done_mask] = False
-            previous_face_contact[done_mask] = False
-            previous_tread_contact[done_mask] = False
-            for latch in body_part_tread_latched.values():
-                latch[done_mask] = False
+            face_contact_metrics.reset(done_mask)
+            tread_contact_metrics.reset(done_mask)
+            for metrics in body_part_tread_metrics.values():
+                metrics.reset(done_mask)
             a12_metrics.reset(done_mask)
 
             local = robot.data.root_link_pos_w - origins
