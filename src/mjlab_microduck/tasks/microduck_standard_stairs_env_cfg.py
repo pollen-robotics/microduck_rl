@@ -756,6 +756,78 @@ def make_microduck_stair_launch_bank_env_cfg(
     return cfg
 
 
+def make_microduck_stair_apex_mantle_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A5: discover a jump or head/shell mantle from a real handoff."""
+
+    cfg = make_microduck_stair_launch_bank_env_cfg(play=False)
+    reset = cfg.events["route_state_curriculum"].params
+    reset.update(
+        {
+            # Mode 0 is now an imperfect launch release, mode 1 is a
+            # non-penetrating head-lever seed, and mode 3 remains the only
+            # unassisted state family that can validate transfer.
+            "lip_release_fraction": 0.25,
+            "shell_brace_fraction": 0.15,
+            "tread_recovery_fraction": 0.0,
+            "real_handoff_fraction": 0.60,
+            "lip_local_x_range": (0.515, 0.555),
+            "lip_root_height_range": (0.105, 0.125),
+            "lip_pitch_deg_range": (-5.0, 15.0),
+            "lip_forward_speed_range": (0.20, 0.35),
+            "lip_vertical_speed_range": (0.45, 0.90),
+            "lip_pitch_rate_range": (0.0, 1.5),
+            "shell_local_x_range": (0.540, 0.590),
+            "shell_root_height_range": (0.110, 0.145),
+            "shell_pitch_deg_range": (8.0, 30.0),
+            "shell_forward_speed_range": (0.08, 0.18),
+            "shell_vertical_speed_range": (0.0, 0.10),
+            "shell_pitch_rate_range": (0.3, 1.2),
+        }
+    )
+
+    # The failed A4 run proved that prescribing a crouch did not transfer to
+    # the immutable walker. Pay new physical capability instead: enough
+    # predicted apex to clear the lip, or real head/shell contact that advances
+    # height and crossing. The remaining gates still require actual clearance.
+    cfg.rewards["stair_preload_frontier"].weight = 0.0
+    cfg.rewards["stair_launch_sequence"].weight = 0.0
+    cfg.rewards["stair_takeoff_frontier"].weight = 0.0
+    cfg.rewards["stair_apex_or_mantle_frontier"] = RewardTermCfg(
+        func=microduck_mdp.stair_apex_or_mantle_frontier,
+        weight=6.0,
+        params={
+            "approach_start_x": 0.40,
+            "stair_face_x": STANDARD_STAIR_START_DISTANCE,
+            "crossing_end_x": 0.70,
+            "standing_root_height": STANDARD_STANDING_ROOT_HEIGHT,
+            "clearance_root_height": 0.195,
+            "corridor_half_width": STANDARD_STAIR_WIDTH * 0.40,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["stair_assisted_approach"].params.update(
+        {"start_x": 0.40, "end_x": 0.56}
+    )
+    cfg.rewards["stair_assisted_lift"].weight = 2.0
+    cfg.rewards["stair_assisted_lift"].params.update(
+        {"start_height": 0.105, "clearance_height": 0.195, "x_gate": 0.50}
+    )
+    cfg.rewards["stair_assisted_crossing"].weight = 4.0
+    cfg.rewards["stair_assisted_crossing"].params.update(
+        {"start_x": 0.62, "end_x": 0.70, "clearance_height": 0.165}
+    )
+    cfg.rewards["stair_first_riser_clearance"].params.update(
+        {"max_vertical_speed": 0.60, "hold_time_s": 0.08}
+    )
+    cfg.rewards["stair_first_tread_stable"].weight = 0.0
+    cfg.rewards["stair_first_tread_secured"].weight = 100.0
+    cfg.rewards["stair_first_tread_settle_quality"].weight = 0.0
+    del play
+    return cfg
+
+
 MicroduckStandardStairsRlCfg = deepcopy(MicroduckRlCfg)
 MicroduckStandardStairsRlCfg.experiment_name = "microduck_standard_stairs"
 MicroduckStandardStairsRlCfg.run_name = "microduck_standard_stairs"
@@ -830,3 +902,14 @@ MicroduckStairLaunchBankRlCfg.save_interval = 25
 MicroduckStairLaunchBankRlCfg.actor.distribution_cfg["init_std"] = 0.34
 MicroduckStairLaunchBankRlCfg.algorithm.learning_rate = 2.5e-5
 MicroduckStairLaunchBankRlCfg.algorithm.entropy_coef = 0.0002
+
+MicroduckStairApexMantleRlCfg = deepcopy(MicroduckStairLaunchBankRlCfg)
+MicroduckStairApexMantleRlCfg.experiment_name = (
+    "microduck_stair_apex_mantle_specialist"
+)
+MicroduckStairApexMantleRlCfg.run_name = "microduck_stair_apex_mantle_specialist"
+MicroduckStairApexMantleRlCfg.max_iterations = 100
+MicroduckStairApexMantleRlCfg.save_interval = 25
+MicroduckStairApexMantleRlCfg.actor.distribution_cfg["init_std"] = 0.35
+MicroduckStairApexMantleRlCfg.algorithm.learning_rate = 3.0e-5
+MicroduckStairApexMantleRlCfg.algorithm.entropy_coef = 0.0005

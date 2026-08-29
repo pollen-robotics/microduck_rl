@@ -29,12 +29,14 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     STANDARD_TOP_ROOT_HEIGHT,
     STANDARD_TREAD_DEPTH,
     MicroduckAssistedStairSpecialistRlCfg,
+    MicroduckStairApexMantleRlCfg,
     MicroduckStairBridgeSpecialistRlCfg,
     MicroduckStairLaunchBankRlCfg,
     MicroduckStairWalkerBankRlCfg,
     MicroduckRouteStairsRlCfg,
     MicroduckStairSpecialistRlCfg,
     make_microduck_assisted_stair_specialist_env_cfg,
+    make_microduck_stair_apex_mantle_env_cfg,
     make_microduck_stair_bridge_specialist_env_cfg,
     make_microduck_stair_launch_bank_env_cfg,
     make_microduck_stair_walker_bank_env_cfg,
@@ -356,6 +358,45 @@ def test_launch_bank_stage_uses_early_walker_states_and_impulse_milestones():
         MicroduckStairLaunchBankRlCfg.actor.distribution_cfg["init_std"] == 0.34
     )
     assert MicroduckStairLaunchBankRlCfg.algorithm.learning_rate == 2.5e-5
+
+
+def test_apex_mantle_stage_rewards_capability_from_real_handoff():
+    cfg = make_microduck_stair_apex_mantle_env_cfg()
+    reset = cfg.events["route_state_curriculum"].params
+
+    for terrain in cfg.scene.terrain.terrain_generator.sub_terrains.values():
+        assert terrain.riser_height == 0.17
+        assert terrain.riser_height_range is None
+        assert terrain.tread_depth == 0.28
+        assert terrain.num_steps == 5
+    assert reset["lip_release_fraction"] == 0.25
+    assert reset["shell_brace_fraction"] == 0.15
+    assert reset["tread_recovery_fraction"] == 0.0
+    assert reset["real_handoff_fraction"] == 0.60
+    assert reset["lip_local_x_range"] == (0.515, 0.555)
+    assert reset["lip_vertical_speed_range"] == (0.45, 0.90)
+    assert reset["shell_local_x_range"] == (0.540, 0.590)
+    assert reset["shell_pitch_deg_range"] == (8.0, 30.0)
+    bank_event = cfg.events["walker_state_bank"]
+    assert bank_event.params["bank_path"].endswith(
+        "full170-walker-launch-state-bank.pt"
+    )
+    assert cfg.rewards["stair_preload_frontier"].weight == 0.0
+    assert cfg.rewards["stair_launch_sequence"].weight == 0.0
+    assert cfg.rewards["stair_takeoff_frontier"].weight == 0.0
+    assert cfg.rewards["stair_apex_or_mantle_frontier"].weight == 6.0
+    assert cfg.rewards["stair_assisted_lift"].weight == 2.0
+    assert cfg.rewards["stair_assisted_lift"].params["x_gate"] == 0.50
+    assert cfg.rewards["stair_assisted_crossing"].weight == 4.0
+    assert cfg.rewards["stair_first_tread_stable"].weight == 0.0
+    assert cfg.rewards["stair_first_tread_secured"].weight == 100.0
+    assert cfg.rewards["stair_first_tread_settle_quality"].weight == 0.0
+    assert MicroduckStairApexMantleRlCfg.max_iterations == 100
+    assert MicroduckStairApexMantleRlCfg.save_interval == 25
+    assert (
+        MicroduckStairApexMantleRlCfg.actor.distribution_cfg["init_std"] == 0.35
+    )
+    assert MicroduckStairApexMantleRlCfg.algorithm.learning_rate == 3.0e-5
 
 
 def test_headstand_has_exclusive_contact_gate_and_shared_actor_layout():

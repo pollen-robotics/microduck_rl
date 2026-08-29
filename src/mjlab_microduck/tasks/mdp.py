@@ -1127,6 +1127,18 @@ def reset_assisted_stair_states(
     shell_brace_fraction: float = 0.25,
     tread_recovery_fraction: float = 0.15,
     real_handoff_fraction: float = 0.10,
+    lip_local_x_range: tuple[float, float] | None = None,
+    lip_root_height_range: tuple[float, float] | None = None,
+    lip_pitch_deg_range: tuple[float, float] | None = None,
+    lip_forward_speed_range: tuple[float, float] | None = None,
+    lip_vertical_speed_range: tuple[float, float] | None = None,
+    lip_pitch_rate_range: tuple[float, float] | None = None,
+    shell_local_x_range: tuple[float, float] | None = None,
+    shell_root_height_range: tuple[float, float] | None = None,
+    shell_pitch_deg_range: tuple[float, float] | None = None,
+    shell_forward_speed_range: tuple[float, float] | None = None,
+    shell_vertical_speed_range: tuple[float, float] | None = None,
+    shell_pitch_rate_range: tuple[float, float] | None = None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> None:
     """Stage-A reverse curriculum on one fixed 170 mm home stair.
@@ -1184,6 +1196,14 @@ def reset_assisted_stair_states(
     def sample(count: int, low: float, high: float) -> torch.Tensor:
         return low + (high - low) * torch.rand(count, device=env.device)
 
+    def resolved_range(
+        value: tuple[float, float] | None, default: tuple[float, float]
+    ) -> tuple[float, float]:
+        result = default if value is None else value
+        if result[0] > result[1]:
+            raise ValueError(f"Invalid assisted stair reset range: {result}")
+        return result
+
     def set_pitch(ids: torch.Tensor, low_deg: float, high_deg: float) -> None:
         pitch = torch.deg2rad(sample(len(ids), low_deg, high_deg))
         env.sim.data.qpos[ids, 3] = torch.cos(0.5 * pitch)
@@ -1192,32 +1212,50 @@ def reset_assisted_stair_states(
         env.sim.data.qpos[ids, 6] = 0.0
 
     if len(lip_ids) > 0:
+        local_x = resolved_range(
+            lip_local_x_range,
+            (stair_start_distance + 0.020, stair_start_distance + 0.037),
+        )
+        root_height = resolved_range(lip_root_height_range, (0.198, 0.225))
+        pitch = resolved_range(lip_pitch_deg_range, (30.0, 55.0))
+        forward_speed = resolved_range(lip_forward_speed_range, (0.18, 0.30))
+        vertical_speed = resolved_range(lip_vertical_speed_range, (-0.03, 0.08))
+        pitch_rate = resolved_range(lip_pitch_rate_range, (-1.5, -0.3))
         env.sim.data.qpos[lip_ids, 0] = origins[lip_ids, 0] + sample(
-            len(lip_ids), stair_start_distance + 0.020, stair_start_distance + 0.037
+            len(lip_ids), *local_x
         )
         env.sim.data.qpos[lip_ids, 1] = origins[lip_ids, 1]
         env.sim.data.qpos[lip_ids, 2] = origins[lip_ids, 2] + sample(
-            len(lip_ids), 0.198, 0.225
+            len(lip_ids), *root_height
         )
-        set_pitch(lip_ids, 30.0, 55.0)
+        set_pitch(lip_ids, *pitch)
         env.sim.data.qvel[lip_ids, :6] = 0.0
-        env.sim.data.qvel[lip_ids, 0] = sample(len(lip_ids), 0.18, 0.30)
-        env.sim.data.qvel[lip_ids, 2] = sample(len(lip_ids), -0.03, 0.08)
-        env.sim.data.qvel[lip_ids, 4] = sample(len(lip_ids), -1.5, -0.3)
+        env.sim.data.qvel[lip_ids, 0] = sample(len(lip_ids), *forward_speed)
+        env.sim.data.qvel[lip_ids, 2] = sample(len(lip_ids), *vertical_speed)
+        env.sim.data.qvel[lip_ids, 4] = sample(len(lip_ids), *pitch_rate)
 
     if len(shell_ids) > 0:
+        local_x = resolved_range(
+            shell_local_x_range,
+            (stair_start_distance - 0.020, stair_start_distance + 0.015),
+        )
+        root_height = resolved_range(shell_root_height_range, (0.165, 0.205))
+        pitch = resolved_range(shell_pitch_deg_range, (45.0, 70.0))
+        forward_speed = resolved_range(shell_forward_speed_range, (0.10, 0.22))
+        vertical_speed = resolved_range(shell_vertical_speed_range, (0.08, 0.20))
+        pitch_rate = resolved_range(shell_pitch_rate_range, (0.5, 2.0))
         env.sim.data.qpos[shell_ids, 0] = origins[shell_ids, 0] + sample(
-            len(shell_ids), stair_start_distance - 0.020, stair_start_distance + 0.015
+            len(shell_ids), *local_x
         )
         env.sim.data.qpos[shell_ids, 1] = origins[shell_ids, 1]
         env.sim.data.qpos[shell_ids, 2] = origins[shell_ids, 2] + sample(
-            len(shell_ids), 0.165, 0.205
+            len(shell_ids), *root_height
         )
-        set_pitch(shell_ids, 45.0, 70.0)
+        set_pitch(shell_ids, *pitch)
         env.sim.data.qvel[shell_ids, :6] = 0.0
-        env.sim.data.qvel[shell_ids, 0] = sample(len(shell_ids), 0.10, 0.22)
-        env.sim.data.qvel[shell_ids, 2] = sample(len(shell_ids), 0.08, 0.20)
-        env.sim.data.qvel[shell_ids, 4] = sample(len(shell_ids), 0.5, 2.0)
+        env.sim.data.qvel[shell_ids, 0] = sample(len(shell_ids), *forward_speed)
+        env.sim.data.qvel[shell_ids, 2] = sample(len(shell_ids), *vertical_speed)
+        env.sim.data.qvel[shell_ids, 4] = sample(len(shell_ids), *pitch_rate)
 
     if len(tread_ids) > 0:
         env.sim.data.qpos[tread_ids, 0] = origins[tread_ids, 0] + sample(
@@ -1407,6 +1445,75 @@ def stair_takeoff_frontier(
     )
     value = torch.where(eligible, upward_speed, torch.zeros_like(upward_speed))
     return _new_frontier_delta(env, value, "_stair_takeoff_frontier")
+
+
+def stair_apex_or_mantle_frontier(
+    env: ManagerBasedRlEnv,
+    approach_start_x: float = 0.40,
+    stair_face_x: float = 0.66,
+    crossing_end_x: float = 0.70,
+    standing_root_height: float = 0.115,
+    clearance_root_height: float = 0.195,
+    max_vertical_speed: float = 1.50,
+    corridor_half_width: float = 0.36,
+    head_sensor_name: str = "head_ground_contact",
+    trunk_sensor_name: str = "trunk_ground_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward new ballistic-clearance or contact-mantle frontiers.
+
+    The actor is free to jump directly or exploit the head and shell as a
+    temporary support. Predicted apex pays for physically useful launch energy
+    before contact, while the mantle branch pays only when contact accompanies
+    new height or lip-crossing progress. Episode-best deltas prevent either
+    branch from paying for camping in an assisted start pose.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    vertical_speed = torch.clamp(
+        torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0),
+        min=0.0,
+        max=max_vertical_speed,
+    )
+    predicted_apex = z + vertical_speed.square() / (2.0 * 9.81)
+    approach_gate = torch.clamp(
+        (x - approach_start_x) / max(stair_face_x - approach_start_x, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    height_progress = torch.clamp(
+        (predicted_apex - standing_root_height)
+        / max(clearance_root_height - standing_root_height, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    ballistic = approach_gate * height_progress
+
+    contact = torch.zeros_like(x, dtype=torch.bool)
+    for sensor_name in (head_sensor_name, trunk_sensor_name):
+        if sensor_name in env.scene.sensors:
+            found = env.scene.sensors[sensor_name].data.found
+            contact |= (found.view(found.shape[0], -1) > 0).any(dim=-1)
+    crossing_progress = torch.clamp(
+        (x - stair_face_x) / max(crossing_end_x - stair_face_x, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    current_height_progress = torch.clamp(
+        (z - standing_root_height)
+        / max(clearance_root_height - standing_root_height, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    mantle = contact.to(x.dtype) * 0.5 * (
+        current_height_progress + crossing_progress
+    )
+    value = torch.maximum(ballistic, mantle)
+    value = torch.where(y <= corridor_half_width, value, torch.zeros_like(value))
+    return _new_frontier_delta(env, value, "_stair_apex_or_mantle_frontier")
 
 
 def stair_assisted_approach_frontier(

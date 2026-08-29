@@ -53,6 +53,11 @@ STAIR_TARGETS = {
         "experiment": "microduck_stair_launch_bank_specialist",
         "iterations": 200,
     },
+    "specialist-apex-mantle": {
+        "task": "Mjlab-Stairs-Apex-Mantle-Specialist-MicroDuck",
+        "experiment": "microduck_stair_apex_mantle_specialist",
+        "iterations": 100,
+    },
     "low": {
         "task": "Mjlab-Stairs-MicroDuck",
         "experiment": "microduck_stairs",

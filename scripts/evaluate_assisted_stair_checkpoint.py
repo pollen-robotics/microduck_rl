@@ -27,11 +27,18 @@ TASK_IDS = (
     "Mjlab-Stairs-Bridge-Specialist-MicroDuck",
     "Mjlab-Stairs-Walker-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Launch-Bank-Specialist-MicroDuck",
+    "Mjlab-Stairs-Apex-Mantle-Specialist-MicroDuck",
 )
 RESET_MODES = {
     0: "lip_release",
     1: "shell_brace",
     2: "tread_recovery",
+    3: "real_handoff",
+}
+APEX_MANTLE_RESET_MODES = {
+    0: "launch_release",
+    1: "head_lever",
+    2: "unused_tread",
     3: "real_handoff",
 }
 
@@ -75,6 +82,11 @@ def main() -> int:
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
     if args.num_envs < 1 or args.episodes < 1:
         raise SystemExit("--num-envs and --episodes must be positive")
+    reset_modes = (
+        APEX_MANTLE_RESET_MODES
+        if args.task == "Mjlab-Stairs-Apex-Mantle-Specialist-MicroDuck"
+        else RESET_MODES
+    )
 
     configure_torch_backends()
     env_cfg = load_env_cfg(args.task, play=True)
@@ -101,10 +113,10 @@ def main() -> int:
     )
     previous_stable = torch.zeros_like(previous_clearance)
     previous_secured = torch.zeros_like(previous_clearance)
-    mode_trials = {name: 0 for name in RESET_MODES.values()}
-    mode_clearance = {name: 0 for name in RESET_MODES.values()}
-    mode_stable = {name: 0 for name in RESET_MODES.values()}
-    mode_secured = {name: 0 for name in RESET_MODES.values()}
+    mode_trials = {name: 0 for name in reset_modes.values()}
+    mode_clearance = {name: 0 for name in reset_modes.values()}
+    mode_stable = {name: 0 for name in reset_modes.values()}
+    mode_secured = {name: 0 for name in reset_modes.values()}
     secured_events = 0
     max_x = torch.full((args.num_envs,), -torch.inf, device=args.device)
     max_z = torch.full_like(max_x, -torch.inf)
@@ -135,7 +147,7 @@ def main() -> int:
             secured_events += int(new_secured.sum().item())
             completed_trials += int(dones.sum().item())
             done_mask = dones.bool()
-            for code, name in RESET_MODES.items():
+            for code, name in reset_modes.items():
                 mode_mask = episode_mode == code
                 mode_trials[name] += int((done_mask & mode_mask).sum().item())
                 mode_clearance[name] += int((new_clearance & mode_mask).sum().item())
@@ -157,11 +169,15 @@ def main() -> int:
         env.close()
 
     denominator = max(completed_trials, 1)
-    eligible_names = ("lip_release", "shell_brace", "real_handoff")
+    eligible_names = tuple(
+        name
+        for name in reset_modes.values()
+        if name not in {"tread_recovery", "unused_tread"}
+    )
     eligible_trials = sum(mode_trials[name] for name in eligible_names)
     eligible_clearance = sum(mode_clearance[name] for name in eligible_names)
     mode_report = {}
-    for name in RESET_MODES.values():
+    for name in reset_modes.values():
         trials = mode_trials[name]
         mode_report[name] = {
             "trials": trials,
