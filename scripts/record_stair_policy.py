@@ -29,11 +29,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("checkpoint", type=Path, help="Stair specialist checkpoint.")
     parser.add_argument("output", type=Path)
     parser.add_argument(
+        "--task-id",
+        default=TASK_ID,
+        help="Registered task to replay. Defaults to the full walk-to-stair route.",
+    )
+    parser.add_argument(
         "--walker-checkpoint",
         type=Path,
         help="Immutable manufacturer walker used before the hard stair handoff.",
     )
     parser.add_argument("--steps", type=int, default=700)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--width", type=int, default=960)
     parser.add_argument("--height", type=int, default=540)
@@ -109,10 +115,10 @@ def main() -> int:
         raise SystemExit("--steps, --width, and --height must be positive")
 
     configure_torch_backends()
-    env_cfg = load_env_cfg(TASK_ID, play=True)
-    agent_cfg = load_rl_cfg(TASK_ID)
+    env_cfg = load_env_cfg(args.task_id, play=True)
+    agent_cfg = load_rl_cfg(args.task_id)
     env_cfg.scene.num_envs = 1
-    env_cfg.seed = 0
+    env_cfg.seed = args.seed
     env_cfg.viewer.width = args.width
     env_cfg.viewer.height = args.height
     env_cfg.viewer.distance = 2.4
@@ -124,7 +130,7 @@ def main() -> int:
         render_mode="rgb_array",
     )
     env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
-    runner_cls = load_runner_cls(TASK_ID) or MjlabOnPolicyRunner
+    runner_cls = load_runner_cls(args.task_id) or MjlabOnPolicyRunner
     runner = runner_cls(env, asdict(agent_cfg), device=args.device)
     if walker_checkpoint is not None:
         walker, specialist = load_actor_pair(

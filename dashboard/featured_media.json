@@ -1,7 +1,10 @@
 {
   "showImages": false,
-  "featuredVideos": [],
-  "featuredVideoPrefixes": [
-    "artifacts/verified/stair-policy-evolution/"
-  ]
+  "featuredVideos": [
+    "artifacts/verified/stair-policy-evolution/01-official-walker-to-standard-stair.mp4",
+    "artifacts/verified/stair-policy-evolution/02-dynamic-tread-contact-iter-00025.mp4",
+    "artifacts/verified/stair-policy-evolution/03-sustained-foot-anchor-iter-00050.mp4",
+    "artifacts/verified/stair-policy-evolution/04-policy-evolution-iter-25-left-vs-50-right.mp4"
+  ],
+  "featuredVideoPrefixes": []
 }
