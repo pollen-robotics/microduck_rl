@@ -207,6 +207,9 @@ class SimulatorTaskService:
                 raise InvalidParameters("task does not accept continuous commands")
             if snapshot.state != "RUNNING" or active.handle is None:
                 raise InvalidParameters("task is not running")
+            if active.deadline is not None and self._monotonic_clock() >= active.deadline:
+                self._stop_continuous_locked(active, "TIMED_OUT", "LEASE_EXPIRED")
+                raise InvalidParameters("task is not running")
             assert active.action is not None
             self._validate_command(command, active.action)
             deadline = self._monotonic_clock() + command.leaseMs / 1_000
@@ -303,27 +306,38 @@ class SimulatorTaskService:
         if active.stopped:
             return self._store.get(active.request.taskId)
         active.stopped = True
-        assert active.action is not None
-        zero_parameters = _zero_parameters(active.action)
         try:
-            if active.handle is not None:
-                self._runtime.command(active.handle, zero_parameters)
-        finally:
-            stop_evidence = self._runtime.safe_stop(active.handle, reason)
-        evidence = self._evidence_for(active.action, _Outcome(state, reason), {}, stop_evidence)
-        try:
-            snapshot = self._store.transition(
+            assert active.action is not None
+            safety_failures: list[str] = []
+            zero_parameters = _zero_parameters(active.action)
+            try:
+                if active.handle is not None:
+                    self._runtime.command(active.handle, zero_parameters)
+            except Exception:  # noqa: BLE001 - runtime command failures must not skip safe stopping.
+                safety_failures.append("ZERO_COMMAND_FAILED")
+            stop_evidence = RuntimeEvidence()
+            try:
+                stop_evidence = self._runtime.safe_stop(active.handle, reason)
+            except Exception:  # noqa: BLE001 - a safety-stop failure must still terminalize ownership.
+                safety_failures.append("SAFE_STOP_FAILED")
+            safety_code = "_AND_".join(safety_failures) if safety_failures else None
+            if safety_code is not None:
+                stop_evidence = RuntimeEvidence(metrics={"safetyFailure": safety_code})
+            evidence = self._evidence_for(active.action, _Outcome(state, reason), {}, stop_evidence)
+            payload: dict[str, str] = {"code": reason}
+            if safety_code is not None:
+                payload["safetyCode"] = safety_code
+            return self._store.transition(
                 active.request.taskId,
                 state,
                 event_type=f"TASK_{state}",
-                payload={"code": reason},
+                payload=payload,
                 evidence=evidence,
                 stop_reason=reason,
             )
         finally:
             if self._active is active:
                 self._active = None
-        return snapshot
 
     def _require_preconditions(self, action: ActionDefinition, request: TaskCreateRequest) -> None:
         scenario_terrain = request.scenario.get("terrain")

@@ -29,6 +29,8 @@ class FakeMicroduckRuntime:
         self.validation_error: BaseException | None = None
         self.start_error: BaseException | None = None
         self.status_error: BaseException | None = None
+        self.zero_command_error: BaseException | None = None
+        self.safe_stop_error: BaseException | None = None
         self.safe_stop_metrics: dict[str, Any] = {"safeStop": True}
         self.status_value = robot_status()
 
@@ -78,12 +80,16 @@ class FakeMicroduckRuntime:
         with self._lock:
             self.command_calls.append(command)
             self.operation_log.append(("command", command))
+        if command == {"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0} and self.zero_command_error:
+            raise self.zero_command_error
 
     def safe_stop(self, handle: RuntimeHandle | None, reason: str) -> RuntimeEvidence:
         with self._lock:
             self.safe_stop_calls.append((handle, reason))
             self.operation_log.append(("safe_stop", reason))
         self.safe_stopped.set()
+        if self.safe_stop_error is not None:
+            raise self.safe_stop_error
         return RuntimeEvidence(metrics=self.safe_stop_metrics, stopReason=reason)
 
     def status(self) -> RobotStatus:

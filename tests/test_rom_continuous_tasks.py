@@ -152,6 +152,70 @@ def test_higher_sequence_replaces_the_lease_deadline(service, walk_request, cloc
     assert service.get_task(walk_request.taskId).state == "RUNNING"
 
 
+def test_late_higher_sequence_expires_before_command_persistence(
+    service, walk_request, clock, runtime, db_path
+):
+    """Renewing after a missed deadline would allow a late controller to resurrect motion."""
+    service.create_task(walk_request)
+    service.command(walk_request.taskId, command(sequence=1, vx=0.2, lease_ms=100))
+    with sqlite3.connect(db_path) as connection:
+        before = connection.execute(
+            "SELECT command_sequence, deadline_at FROM task WHERE task_id = ?", (walk_request.taskId,)
+        ).fetchone()
+    clock.advance_ms(101)
+
+    with pytest.raises(InvalidParameters) as error:
+        service.command(walk_request.taskId, command(sequence=2, vx=0.1, lease_ms=500))
+
+    with sqlite3.connect(db_path) as connection:
+        after = connection.execute(
+            "SELECT command_sequence, deadline_at FROM task WHERE task_id = ?", (walk_request.taskId,)
+        ).fetchone()
+    assert error.value.code == "PARAMETER_INVALID"
+    assert before == after == (1, "100.100000000")
+    assert service.get_task(walk_request.taskId).state == "TIMED_OUT"
+    assert runtime.operation_log == [
+        ("command", {"vxMps": 0.2, "vyMps": 0.0, "yawRateRadps": 0.0}),
+        ("command", {"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0}),
+        ("safe_stop", "LEASE_EXPIRED"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("failure", "safety_code", "terminal_state", "reason"),
+    [
+        ("zero_command_error", "ZERO_COMMAND_FAILED", "TIMED_OUT", "LEASE_EXPIRED"),
+        ("safe_stop_error", "SAFE_STOP_FAILED", "CANCELLED", "CANCELLED"),
+    ],
+)
+def test_safety_operation_failure_persists_requested_terminal_and_releases_slot(
+    service, walk_request, clock, runtime, failure, safety_code, terminal_state, reason
+):
+    """Letting either safety failure escape would strand task ownership without a durable terminal result."""
+    service.create_task(walk_request)
+    service.command(walk_request.taskId, command(sequence=1, vx=0.2, lease_ms=100))
+    setattr(runtime, failure, RuntimeError(failure))
+    if terminal_state == "TIMED_OUT":
+        clock.advance_ms(101)
+        service.tick()
+    else:
+        service.cancel_task(walk_request.taskId)
+    next_task = service.create_task(walk_request.model_copy(update={"taskId": "3" * 32}))
+
+    terminal = service.get_task(walk_request.taskId)
+    assert terminal.state == terminal_state
+    assert next_task.state == "RUNNING"
+    assert runtime.operation_log[:3] == [
+        ("command", {"vxMps": 0.2, "vyMps": 0.0, "yawRateRadps": 0.0}),
+        ("command", {"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0}),
+        ("safe_stop", reason),
+    ]
+    assert service.events_after(walk_request.taskId, -1)[-1].payload == {
+        "code": reason,
+        "safetyCode": safety_code,
+    }
+
+
 def test_cancel_zeros_then_stops_when_runtime_health_is_degraded(
     service, walk_request, runtime
 ):
