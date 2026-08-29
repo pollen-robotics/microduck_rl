@@ -2,6 +2,7 @@
   "showImages": false,
   "featuredVideos": [],
   "featuredVideoPrefixes": [
+    "artifacts/training/stair-policy-samples/",
     "artifacts/verified/stair-policy-promotions/"
   ]
 }

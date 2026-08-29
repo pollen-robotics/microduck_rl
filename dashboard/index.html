@@ -28,18 +28,18 @@
       <section class="panel media-panel" aria-labelledby="media-title">
         <div class="section-heading media-heading">
           <div>
-            <p class="eyebrow">Newest promotion first</p>
-            <h2 id="media-title">Verified stair evolution</h2>
-            <p class="gallery-copy">Only checkpoints that improve the full-height stair result appear here.</p>
+            <p class="eyebrow">Newest sample first</p>
+            <h2 id="media-title">Stair-training evolution</h2>
+            <p class="gallery-copy">A 20-second rollout from the newest checkpoint is sampled every 2.5 minutes during active training.</p>
           </div>
           <span id="video-count" class="section-count">0 videos</span>
         </div>
         <div id="media-grid" class="media-grid" aria-live="polite"></div>
-        <div id="media-empty" class="empty-state" hidden>No policy has passed the next promotion gate yet.</div>
+        <div id="media-empty" class="empty-state" hidden>No training samples have been recorded yet.</div>
       </section>
     </main>
 
-    <footer class="footer"><span>MicroDuck RL</span><span id="loaded-at">Waiting for gallery</span></footer>
+    <footer class="footer"><span>MicroDuck RL</span><span id="loaded-at">Waiting for samples</span></footer>
     <script src="/app.js" defer></script>
   </body>
 </html>

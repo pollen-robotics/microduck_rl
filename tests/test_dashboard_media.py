@@ -27,7 +27,7 @@ def test_featured_media_can_be_video_only_by_prefix(tmp_path, monkeypatch) -> No
     assert show_images is False
 
 
-def test_dashboard_lists_only_ten_newest_curated_videos(tmp_path, monkeypatch) -> None:
+def test_dashboard_lists_all_curated_videos_newest_first(tmp_path, monkeypatch) -> None:
     artifacts = tmp_path / "artifacts"
     promotions = artifacts / "verified" / "stair-policy-promotions"
     promotions.mkdir(parents=True)
@@ -58,7 +58,7 @@ def test_dashboard_lists_only_ten_newest_curated_videos(tmp_path, monkeypatch) -
 
     media = serve_dashboard._discover_media()
 
-    assert len(media) == 10
+    assert len(media) == 12
     assert all(item["kind"] == "video" for item in media)
     assert media[0]["name"] == "promotion-11.mp4"
-    assert media[-1]["name"] == "promotion-02.mp4"
+    assert media[-1]["name"] == "promotion-00.mp4"

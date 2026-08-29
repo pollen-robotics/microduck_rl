@@ -24,8 +24,7 @@
   function renderMedia(data) {
     const media = (data.media || [])
       .filter((item) => item.kind === "video")
-      .sort((left, right) => String(right.modified || "").localeCompare(String(left.modified || "")))
-      .slice(0, 10);
+      .sort((left, right) => String(right.modified || "").localeCompare(String(left.modified || "")));
     const grid = $("#media-grid");
     grid.replaceChildren();
     $("#media-empty").hidden = media.length !== 0;
@@ -80,7 +79,7 @@
     } catch (error) {
       setConnection("error", "Offline");
       const banner = $("#error-banner");
-      banner.textContent = `Could not load promotion videos: ${error.message}`;
+      banner.textContent = `Could not load training videos: ${error.message}`;
       banner.hidden = false;
     }
   }

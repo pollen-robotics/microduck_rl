@@ -401,7 +401,7 @@ def _discover_media() -> list[dict[str, Any]]:
     media.sort(key=lambda item: item["timestamp"], reverse=True)
     for item in media:
         item.pop("timestamp", None)
-    return media[:10]
+    return media
 
 
 def dashboard_state(*, include_metrics: bool = True) -> dict[str, Any]:
@@ -430,7 +430,7 @@ def _refresh_state_in_background() -> None:
 
 
 def cached_dashboard_state() -> dict[str, Any]:
-    """Build the small promotion-only snapshot once per browser request."""
+    """Build the retained video snapshot once per browser request."""
 
     return dashboard_state(include_metrics=False)
 
