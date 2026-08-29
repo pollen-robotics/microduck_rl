@@ -35,6 +35,28 @@ def test_expand_action_knots_is_balanced_and_piecewise_constant() -> None:
         SEARCH.expand_action_knots(knots, horizon_steps=0)
 
 
+def test_cem_population_preserves_exact_frozen_prefix() -> None:
+    rng = np.random.default_rng(4)
+    mean = np.arange(12, dtype=np.float64).reshape(3, 4) / 20.0
+    std = np.full_like(mean, 0.25)
+
+    population = SEARCH.sample_cem_population(
+        rng,
+        mean,
+        std,
+        candidates=8,
+        residual_limit=1.0,
+        frozen_prefix_knots=2,
+    )
+
+    assert population.shape == (8, 3, 4)
+    np.testing.assert_array_equal(
+        population[:, :2], np.broadcast_to(mean[:2], (8, 2, 4))
+    )
+    np.testing.assert_array_equal(population[0], mean)
+    assert np.any(population[1:, 2] != mean[2])
+
+
 def test_load_initial_knots_preserves_prefix_and_zero_extends(tmp_path: Path) -> None:
     source = np.arange(12, dtype=np.float32).reshape(3, 4)
     path = tmp_path / "warm.npz"

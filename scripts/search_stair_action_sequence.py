@@ -96,6 +96,35 @@ def expand_action_knots(knots: np.ndarray, horizon_steps: int) -> np.ndarray:
     return np.take(values, knot_indices, axis=-2)
 
 
+def sample_cem_population(
+    rng: np.random.Generator,
+    mean: np.ndarray,
+    std: np.ndarray,
+    *,
+    candidates: int,
+    residual_limit: float,
+    frozen_prefix_knots: int = 0,
+) -> np.ndarray:
+    """Sample CEM candidates while preserving an exact proven prefix."""
+
+    if mean.shape != std.shape or mean.ndim != 2:
+        raise ValueError("mean and std must share shape (knots, actions)")
+    if candidates < 1 or residual_limit <= 0.0:
+        raise ValueError("candidates and residual_limit must be positive")
+    if not 0 <= frozen_prefix_knots <= mean.shape[0]:
+        raise ValueError("frozen_prefix_knots is outside the knot range")
+    population = rng.normal(
+        loc=mean,
+        scale=std,
+        size=(candidates, *mean.shape),
+    )
+    population = np.clip(population, -residual_limit, residual_limit)
+    population[0] = np.clip(mean, -residual_limit, residual_limit)
+    if frozen_prefix_knots:
+        population[:, :frozen_prefix_knots] = mean[:frozen_prefix_knots]
+    return population
+
+
 def expand_sagittal_actions(actions: np.ndarray) -> np.ndarray:
     """Expand seven sagittal controls into the mirrored 14-joint convention."""
 
@@ -318,6 +347,12 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         help="Warm-start the leading knots from a previous A13 NPZ result.",
     )
+    parser.add_argument(
+        "--freeze-prefix-knots",
+        type=int,
+        default=0,
+        help="Keep this many warm-start knots exact and search only the continuation.",
+    )
     parser.add_argument("--max-wall-seconds", type=float, default=900.0)
     parser.add_argument(
         "--gpu-headroom-gb",
@@ -348,6 +383,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--horizon-steps must be <= 250 and --knots <= 50")
     if args.knots > args.horizon_steps:
         raise SystemExit("--knots cannot exceed --horizon-steps")
+    if not 0 <= args.freeze_prefix_knots < args.knots:
+        raise SystemExit("--freeze-prefix-knots must be in [0, knots)")
+    if args.freeze_prefix_knots and args.initial_npz is None:
+        raise SystemExit("--freeze-prefix-knots requires --initial-npz")
     for name in ("residual_std", "residual_limit", "action_limit", "min_std"):
         if getattr(args, name) <= 0.0:
             raise SystemExit(f"--{name.replace('_', '-')} must be positive")
@@ -631,6 +670,8 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
             action_dim=search_action_dim,
         )
         std = np.full_like(mean, args.residual_std)
+        if args.freeze_prefix_knots:
+            std[: args.freeze_prefix_knots] = 0.0
         elite_count = max(1, math.ceil(args.candidates * args.elite_fraction))
         score_config = StrictScoreConfig()
         generation_summaries: list[dict[str, Any]] = []
@@ -644,15 +685,14 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
             if time.monotonic() >= deadline:
                 break
             _check_gpu_headroom(torch, args.device, args.gpu_headroom_gb)
-            population = rng.normal(
-                loc=mean,
-                scale=std,
-                size=(args.candidates, args.knots, search_action_dim),
+            population = sample_cem_population(
+                rng,
+                mean,
+                std,
+                candidates=args.candidates,
+                residual_limit=args.residual_limit,
+                frozen_prefix_knots=args.freeze_prefix_knots,
             )
-            population = np.clip(
-                population, -args.residual_limit, args.residual_limit
-            )
-            population[0] = np.clip(mean, -args.residual_limit, args.residual_limit)
             try:
                 results = _evaluate_candidates(
                     population,
@@ -681,6 +721,8 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
                 args.min_std,
                 (1.0 - args.cem_alpha) * std + args.cem_alpha * elite_std,
             )
+            if args.freeze_prefix_knots:
+                std[: args.freeze_prefix_knots] = 0.0
 
             generation_best_index = int(np.argmax(scores))
             generation_best = results[generation_best_index]
@@ -740,6 +782,7 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
                     if args.initial_npz is not None
                     else None
                 ),
+                "freeze_prefix_knots": args.freeze_prefix_knots,
                 "gpu_headroom_gb": args.gpu_headroom_gb,
                 "max_wall_seconds": args.max_wall_seconds,
                 "elapsed_seconds": elapsed,
