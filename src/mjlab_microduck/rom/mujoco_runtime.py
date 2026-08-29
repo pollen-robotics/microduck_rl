@@ -40,6 +40,7 @@ from .contracts import (
     RobotStatus,
     TaskCreateRequest,
     sha256_prefixed,
+    unsigned_policy_bundle_manifest,
 )
 from .model_semantics import has_exact_passive_roller_topology, has_flat_world_floor
 from .observation import (
@@ -239,12 +240,10 @@ class MicroduckMujocoRuntime:
     def _verify_bundle_identity_and_artifacts(self) -> dict[str, bytes]:
         manifest_path = self._safe_path("microduck-policy-bundle.json")
         try:
-            installed = PolicyBundle.model_validate(
-                json.loads(manifest_path.read_text())
-            )
+            installed = PolicyBundle.model_validate_json(manifest_path.read_bytes())
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             raise ValueError("bundle manifest verification failed") from exc
-        if installed != self._bundle or installed.bundleDigest is None:
+        if installed != self._bundle:
             raise ValueError(
                 "runtime requires the exact previously verified bundle manifest"
             )
@@ -262,8 +261,8 @@ class MicroduckMujocoRuntime:
             digests[artifact.path] = artifact.digest
         expected_bundle_digest = sha256_prefixed(
             {
-                "manifest": installed.model_dump(
-                    mode="json", by_alias=True, exclude={"bundleDigest"}
+                "manifest": unsigned_policy_bundle_manifest(installed).model_dump(
+                    mode="json", by_alias=True
                 ),
                 "artifacts": digests,
             }
@@ -668,14 +667,11 @@ class MicroduckMujocoRuntime:
                 "policy task identity does not match code-owned action semantics"
             )
         self._command_for(action.actionCode, request.parameters, action)
-        if set(request.scenario) != set(spec.scenario_fields):
+        if set(request.scenario.model_fields_set) != set(spec.scenario_fields):
             raise ValueError("scenario must contain exact terrain and seed fields")
         if self._bundle.qualification.get("scenarioProfile") != spec.scenario_profile:
             raise ValueError("bundle scenario profile is incompatible")
-        seed = request.scenario.get("seed")
-        if not isinstance(seed, int) or isinstance(seed, bool) or not 0 <= seed < 2**32:
-            raise ValueError("scenario seed must be an unsigned 32-bit integer")
-        terrain = request.scenario.get("terrain")
+        terrain = request.scenario.terrain
         if terrain != self._bundle.qualification.get("modelTerrain"):
             raise ValueError(
                 "requested terrain is not bound to the qualified loaded model"
@@ -690,7 +686,7 @@ class MicroduckMujocoRuntime:
                 raise RuntimeError("runtime already has an active task")
             if self._fatal_reason is not None:
                 raise RuntimeError("runtime requires restart after a safety fault")
-            self._applied_seed = int(request.scenario.get("seed", 0))
+            self._applied_seed = request.scenario.seed
             self._rng = np.random.default_rng(self._applied_seed)
             spec = ACTION_RUNTIME_SPECS[action.actionCode]
             self._reset_model_locked(self._rng, spec.reset_profile)

@@ -18,6 +18,7 @@ from mjlab_microduck.rom.action_catalog import ACTION_TEMPLATES
 from mjlab_microduck.rom.bundle import BundleBuildRequest, build_bundle
 from mjlab_microduck.rom.contracts import (
     PolicyBundle,
+    UnsignedPolicyBundleManifest,
     canonical_json,
     sha256_prefixed,
 )
@@ -40,6 +41,14 @@ from tests.test_rom_mujoco_runtime import (
 )
 
 NOW = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+
+
+def _unsigned_hash_document(document: dict[str, object]) -> dict[str, object]:
+    try:
+        unsigned = UnsignedPolicyBundleManifest.model_validate(document)
+    except ValidationError:
+        return document
+    return unsigned.model_dump(mode="json", by_alias=True)
 
 
 def _config(
@@ -234,8 +243,7 @@ def _resign_mutated_promoted_bundle(
                 artifact["digest"] = report_digest
     if mutate_manifest is not None:
         mutate_manifest(manifest)
-    manifest["bundleDigest"] = None
-    normalized = PolicyBundle.model_validate(manifest)
+    manifest.pop("bundleDigest", None)
     artifact_digests = {}
     for artifact in [
         manifest["model"],
@@ -247,9 +255,7 @@ def _resign_mutated_promoted_bundle(
         artifact_digests[artifact["path"]] = artifact["digest"]
     manifest["bundleDigest"] = sha256_prefixed(
         {
-            "manifest": normalized.model_dump(
-                mode="json", by_alias=True, exclude={"bundleDigest"}
-            ),
+            "manifest": _unsigned_hash_document(manifest),
             "artifacts": artifact_digests,
         }
     )
@@ -261,8 +267,7 @@ def _candidate_with_unavailable_spin(root: Path):
 
 
 def _resign_bundle_document(document: dict[str, object]) -> str:
-    document["bundleDigest"] = None
-    normalized = PolicyBundle.model_validate(document)
+    document.pop("bundleDigest", None)
     artifacts: dict[str, str] = {}
     for artifact in [
         document["model"],
@@ -274,9 +279,7 @@ def _resign_bundle_document(document: dict[str, object]) -> str:
         artifacts[artifact["path"]] = artifact["digest"]
     digest = sha256_prefixed(
         {
-            "manifest": normalized.model_dump(
-                mode="json", by_alias=True, exclude={"bundleDigest"}
-            ),
+            "manifest": _unsigned_hash_document(document),
             "artifacts": artifacts,
         }
     )
@@ -336,7 +339,7 @@ def test_fully_resigned_subject_and_release_cannot_widen_walk_safety_envelope(
     _resign_bundle_document(manifest)
     manifest_path.write_bytes(canonical_json(manifest))
 
-    with pytest.raises(ValueError, match="code-owned.*action envelope"):
+    with pytest.raises(ValueError, match="bundle manifest is invalid"):
         load_qualified_bundle(installed)
 
 

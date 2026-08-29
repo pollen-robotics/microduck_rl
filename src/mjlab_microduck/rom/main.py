@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
-import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -22,6 +21,7 @@ from .contracts import (
     RobotStatus,
     canonical_json,
     sha256_prefixed,
+    unsigned_policy_bundle_manifest,
 )
 from .runtime import RuntimeEvidence, RuntimeHandle, RuntimeSample, SimulationRuntime
 from .service import SimulatorTaskService
@@ -140,12 +140,9 @@ def load_verified_bundle(bundle_dir: Path) -> PolicyBundle:
     if not root.is_dir() or not manifest_path.is_file():
         raise ValueError("bundle directory does not contain a manifest")
     try:
-        bundle = PolicyBundle.model_validate(json.loads(manifest_path.read_text()))
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        bundle = PolicyBundle.model_validate_json(manifest_path.read_bytes())
+    except (OSError, ValueError) as exc:
         raise ValueError("bundle manifest is invalid") from exc
-    if bundle.bundleDigest is None:
-        raise ValueError("bundle manifest has no digest")
-
     digests: dict[str, str] = {}
     for artifact in _bundle_artifacts(bundle):
         if (
@@ -154,8 +151,8 @@ def load_verified_bundle(bundle_dir: Path) -> PolicyBundle:
         ):
             raise ValueError("bundle artifact verification failed")
         digests[artifact.path] = artifact.digest
-    unsigned_manifest = bundle.model_dump(
-        mode="json", by_alias=True, exclude={"bundleDigest"}
+    unsigned_manifest = unsigned_policy_bundle_manifest(bundle).model_dump(
+        mode="json", by_alias=True
     )
     if not hmac_compare(
         bundle.bundleDigest,
@@ -243,8 +240,8 @@ def load_qualified_bundle(bundle_dir: Path) -> PolicyBundle:
             raise ValueError
         expected_subject_digest = sha256_prefixed(
             {
-                "manifest": subject.model_dump(
-                    mode="json", by_alias=True, exclude={"bundleDigest"}
+                "manifest": unsigned_policy_bundle_manifest(subject).model_dump(
+                    mode="json", by_alias=True
                 ),
                 "artifacts": subject_artifacts,
             }

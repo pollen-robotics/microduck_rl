@@ -239,6 +239,65 @@ def test_app_watchdog_observes_runtime_fault_before_lease_without_http_traffic(
         }
 
 
+def test_watchdog_exception_stops_active_motion_and_gates_only_new_motion(
+    service, walk_request, runtime
+):
+    """A dead watchdog must fail closed without disabling stop or reconciliation reads."""
+    service.create_task(walk_request)
+    service.command(walk_request.taskId, command(sequence=1, vx=0.2, lease_ms=500))
+
+    def fail_watchdog_tick():
+        raise RuntimeError("injected watchdog failure")
+
+    service.tick = fail_watchdog_tick
+    app = create_app(service, "watchdog-token")
+    auth = {"Authorization": "Bearer watchdog-token"}
+    with TestClient(app) as client:
+        assert runtime.safe_stopped.wait(timeout=1.0)
+        with service._lock:
+            pass
+
+        terminal = service.get_task(walk_request.taskId)
+        ready = client.get("/v1/ready", headers=auth)
+        catalog = client.get("/v1/catalog", headers=auth)
+        create = client.post(
+            "/v1/tasks",
+            headers=auth,
+            json=walk_request.model_copy(update={"taskId": "4" * 32}).model_dump(
+                mode="json"
+            ),
+        )
+        renew = client.put(
+            f"/v1/tasks/{walk_request.taskId}/command",
+            headers=auth,
+            json=command(sequence=2, vx=0.1).model_dump(mode="json"),
+        )
+        task = client.get(f"/v1/tasks/{walk_request.taskId}", headers=auth)
+        events = client.get(f"/v1/tasks/{walk_request.taskId}/events", headers=auth)
+        status = client.get("/v1/robot/status", headers=auth)
+        cancel = client.post(f"/v1/tasks/{walk_request.taskId}/cancel", headers=auth)
+
+    assert terminal.state == "FAILED"
+    assert terminal.stopReason == "WATCHDOG_FAILURE"
+    assert terminal.evidence is not None
+    assert terminal.evidence.metrics["safetyFailure"] == "WATCHDOG_FAILURE"
+    assert runtime.operation_log[-2:] == [
+        ("command", {"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0}),
+        ("safe_stop", "WATCHDOG_FAILURE"),
+    ]
+    assert ready.status_code == 200
+    assert ready.json()["ready"] is False
+    assert "WATCHDOG_UNHEALTHY" in ready.json()["reasonCodes"]
+    walk = catalog.json()["actions"][0]
+    assert walk["availability"] == "UNAVAILABLE"
+    assert walk["unavailableReason"] == "WATCHDOG_UNHEALTHY"
+    for response in (create, renew):
+        assert response.status_code == 503
+        assert response.json()["code"] == "NOT_READY"
+    assert task.status_code == events.status_code == status.status_code == 200
+    assert cancel.status_code == 200
+
+
 def test_stale_command_does_not_renew_lease(service, walk_request, clock, runtime):
     """Accepting a lower sequence would let delayed network traffic keep motion alive."""
     service.create_task(walk_request)
@@ -298,7 +357,11 @@ def test_reused_command_sequence_with_different_content_is_a_command_conflict(
         command(sequence=1, vx=0.401),
         command(sequence=1, lease_ms=99),
         command(sequence=1, lease_ms=5_001),
-        command(sequence=1, vx=nan),
+        TaskCommandRequest.model_construct(
+            commandSequence=1,
+            parameters={"vxMps": nan, "vyMps": 0.0, "yawRateRadps": 0.0},
+            leaseMs=500,
+        ),
         TaskCommandRequest(
             commandSequence=1, parameters={"vxMps": 0.0, "vyMps": 0.0}, leaseMs=100
         ),

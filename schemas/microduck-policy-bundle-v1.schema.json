@@ -1,119 +1,977 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://microduck.dev/schemas/microduck-policy-bundle-v1.schema.json",
-  "title": "MicroDuck Policy Bundle V1",
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["schema", "bundleId", "bundleVersion", "bundleDigest", "createdAt", "sourceRepository", "sourceCommit", "robotModel", "observationContract", "actionContract", "model", "policies", "actions", "qualification", "license"],
-  "properties": {
-    "schema": {"const": "MICRODUCK_POLICY_BUNDLE_V1"},
-    "bundleId": {"type": "string", "minLength": 1},
-    "bundleVersion": {"type": "string", "minLength": 1},
-    "bundleDigest": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
-    "createdAt": {"type": "string", "format": "date-time"},
-    "sourceRepository": {"type": "string", "minLength": 1},
-    "sourceCommit": {"type": "string", "minLength": 1},
-    "robotModel": {"const": "MICRODUCK"},
-    "observationContract": {"$ref": "#/$defs/ObservationContract"},
-    "actionContract": {"$ref": "#/$defs/ActionContract"},
-    "model": {"$ref": "#/$defs/ModelArtifact"},
-    "policies": {"type": "array", "items": {"$ref": "#/$defs/PolicyArtifact"}},
-    "actions": {"type": "array", "items": {"$ref": "#/$defs/ActionDefinition"}},
-    "qualification": {"type": "object"},
-    "license": {"type": "object"}
-  },
   "$defs": {
-    "Digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-    "CompletionContract": {
-      "type": "object", "additionalProperties": false,
-      "required": ["terminalConditions", "maxDurationMs"],
-      "properties": {
-        "terminalConditions": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-        "maxDurationMs": {"type": "integer", "exclusiveMinimum": 0}
-      }
-    },
-    "LeaseContract": {
-      "type": "object", "additionalProperties": false,
-      "x-unergy-invariants": ["minLeaseMs <= defaultLeaseMs <= maxLeaseMs", "commandCadenceMs <= minLeaseMs"],
-      "required": ["minLeaseMs", "defaultLeaseMs", "maxLeaseMs", "commandCadenceMs", "zeroCommand", "safeStopBehavior"],
-      "properties": {
-        "minLeaseMs": {"type": "integer", "exclusiveMinimum": 0},
-        "defaultLeaseMs": {"type": "integer", "exclusiveMinimum": 0},
-        "maxLeaseMs": {"type": "integer", "exclusiveMinimum": 0},
-        "commandCadenceMs": {"type": "integer", "exclusiveMinimum": 0},
-        "zeroCommand": {"type": "object", "additionalProperties": {"type": "number"}},
-        "safeStopBehavior": {"const": "ZERO_TWIST", "type": "string"}
-      }
-    },
-    "ObservationContract": {
-      "type": "object", "additionalProperties": false,
-      "required": ["identifier", "dimension", "fields", "units", "normalization"],
-      "properties": {
-        "identifier": {"const": "MICRODUCK_OBS_61_V1"},
-        "dimension": {"const": 61},
-        "fields": {"type": "array", "minItems": 61, "maxItems": 61, "prefixItems": [
-          {"const": "base_ang_vel.roll"}, {"const": "base_ang_vel.pitch"}, {"const": "base_ang_vel.yaw"},
-          {"const": "projected_gravity.x"}, {"const": "projected_gravity.y"}, {"const": "projected_gravity.z"},
-          {"const": "joint_pos_rel.left_hip_yaw"}, {"const": "joint_pos_rel.left_hip_roll"}, {"const": "joint_pos_rel.left_hip_pitch"}, {"const": "joint_pos_rel.left_knee"}, {"const": "joint_pos_rel.left_ankle"}, {"const": "joint_pos_rel.neck_pitch"}, {"const": "joint_pos_rel.head_pitch"}, {"const": "joint_pos_rel.head_yaw"}, {"const": "joint_pos_rel.head_roll"}, {"const": "joint_pos_rel.right_hip_yaw"}, {"const": "joint_pos_rel.right_hip_roll"}, {"const": "joint_pos_rel.right_hip_pitch"}, {"const": "joint_pos_rel.right_knee"}, {"const": "joint_pos_rel.right_ankle"},
-          {"const": "joint_vel_rel.left_hip_yaw"}, {"const": "joint_vel_rel.left_hip_roll"}, {"const": "joint_vel_rel.left_hip_pitch"}, {"const": "joint_vel_rel.left_knee"}, {"const": "joint_vel_rel.left_ankle"}, {"const": "joint_vel_rel.neck_pitch"}, {"const": "joint_vel_rel.head_pitch"}, {"const": "joint_vel_rel.head_yaw"}, {"const": "joint_vel_rel.head_roll"}, {"const": "joint_vel_rel.right_hip_yaw"}, {"const": "joint_vel_rel.right_hip_roll"}, {"const": "joint_vel_rel.right_hip_pitch"}, {"const": "joint_vel_rel.right_knee"}, {"const": "joint_vel_rel.right_ankle"},
-          {"const": "last_action.left_hip_yaw"}, {"const": "last_action.left_hip_roll"}, {"const": "last_action.left_hip_pitch"}, {"const": "last_action.left_knee"}, {"const": "last_action.left_ankle"}, {"const": "last_action.neck_pitch"}, {"const": "last_action.head_pitch"}, {"const": "last_action.head_yaw"}, {"const": "last_action.head_roll"}, {"const": "last_action.right_hip_yaw"}, {"const": "last_action.right_hip_roll"}, {"const": "last_action.right_hip_pitch"}, {"const": "last_action.right_knee"}, {"const": "last_action.right_ankle"},
-          {"const": "twist.lin_vel_x"}, {"const": "twist.lin_vel_y"}, {"const": "twist.ang_vel_z"},
-          {"const": "head_pose.neck_pitch"}, {"const": "head_pose.head_pitch"}, {"const": "head_pose.head_yaw"}, {"const": "head_pose.head_roll"},
-          {"const": "body_pose.x"}, {"const": "body_pose.y"}, {"const": "body_pose.z"}, {"const": "body_pose.roll"}, {"const": "body_pose.pitch"}, {"const": "body_pose.yaw"}
-        ]},
-        "units": {"type": "object", "additionalProperties": {"type": "string"}},
-        "normalization": {"enum": ["BAKED_IN_ONNX", "DECLARED"]}
-      }
-    },
     "ActionContract": {
-      "type": "object", "additionalProperties": false,
-      "required": ["identifier", "dimension", "joints", "units", "scaling", "clipping"],
+      "additionalProperties": false,
       "properties": {
-        "identifier": {"const": "MICRODUCK_ACTION_14_V1"},
-        "dimension": {"const": 14},
-        "joints": {"type": "array", "minItems": 14, "maxItems": 14, "prefixItems": [
-          {"const": "left_hip_yaw"}, {"const": "left_hip_roll"}, {"const": "left_hip_pitch"}, {"const": "left_knee"}, {"const": "left_ankle"}, {"const": "neck_pitch"}, {"const": "head_pitch"}, {"const": "head_yaw"}, {"const": "head_roll"}, {"const": "right_hip_yaw"}, {"const": "right_hip_roll"}, {"const": "right_hip_pitch"}, {"const": "right_knee"}, {"const": "right_ankle"}
-        ]},
-        "units": {"type": "string"}, "scaling": {"type": "object"}, "clipping": {"type": "object"}
-      }
-    },
-    "ModelArtifact": {
-      "type": "object", "additionalProperties": false, "required": ["path", "digest"],
-      "properties": {"path": {"type": "string", "minLength": 1}, "digest": {"$ref": "#/$defs/Digest"}}
-    },
-    "PolicyArtifact": {
-      "type": "object", "additionalProperties": false, "required": ["policyRef", "path", "digest", "runtimeRequirements"],
-      "properties": {
-        "policyRef": {"type": "string", "minLength": 1}, "path": {"type": "string", "minLength": 1},
-        "digest": {"$ref": "#/$defs/Digest"}, "taskId": {"type": ["string", "null"]},
-        "runtimeRequirements": {"type": "object"}, "checkpoint": {"type": ["string", "null"]}, "experimentRef": {"type": ["string", "null"]}
-      }
+        "identifier": {
+          "const": "MICRODUCK_ACTION_14_V1",
+          "title": "Identifier",
+          "type": "string"
+        },
+        "dimension": {
+          "const": 14,
+          "title": "Dimension",
+          "type": "integer"
+        },
+        "joints": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 14,
+          "minItems": 14,
+          "prefixItems": [
+            {
+              "const": "left_hip_yaw"
+            },
+            {
+              "const": "left_hip_roll"
+            },
+            {
+              "const": "left_hip_pitch"
+            },
+            {
+              "const": "left_knee"
+            },
+            {
+              "const": "left_ankle"
+            },
+            {
+              "const": "neck_pitch"
+            },
+            {
+              "const": "head_pitch"
+            },
+            {
+              "const": "head_yaw"
+            },
+            {
+              "const": "head_roll"
+            },
+            {
+              "const": "right_hip_yaw"
+            },
+            {
+              "const": "right_hip_roll"
+            },
+            {
+              "const": "right_hip_pitch"
+            },
+            {
+              "const": "right_knee"
+            },
+            {
+              "const": "right_ankle"
+            }
+          ],
+          "title": "Joints",
+          "type": "array"
+        },
+        "units": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Units",
+          "type": "string"
+        },
+        "scaling": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "maxProperties": 128,
+          "propertyNames": {
+            "maxLength": 128,
+            "minLength": 1
+          },
+          "title": "Scaling",
+          "type": "object"
+        },
+        "clipping": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "maxProperties": 128,
+          "propertyNames": {
+            "maxLength": 128,
+            "minLength": 1
+          },
+          "title": "Clipping",
+          "type": "object"
+        }
+      },
+      "required": [
+        "identifier",
+        "dimension",
+        "joints",
+        "units",
+        "scaling",
+        "clipping"
+      ],
+      "title": "ActionContract",
+      "type": "object"
     },
     "ActionDefinition": {
-      "type": "object", "additionalProperties": false,
-      "required": ["actionCode", "executionMode", "availability", "parameterSchema"],
-      "properties": {
-        "actionCode": {"type": "string", "minLength": 1}, "executionMode": {"enum": ["DISCRETE", "CONTINUOUS_LEASE"]},
-        "availability": {"enum": ["AVAILABLE", "UNAVAILABLE"]}, "policyRef": {"type": ["string", "null"]},
-        "unavailableReason": {"type": ["string", "null"]}, "parameterSchema": {"type": "object"},
-        "completion": {"anyOf": [{"$ref": "#/$defs/CompletionContract"}, {"type": "null"}]},
-        "lease": {"anyOf": [{"$ref": "#/$defs/LeaseContract"}, {"type": "null"}]},
-        "displayName": {"type": ["string", "null"]}, "description": {"type": ["string", "null"]},
-        "localizedLabels": {"type": ["object", "null"], "additionalProperties": {"type": "string"}},
-        "preconditions": {"type": ["object", "null"]}, "safety": {"type": ["object", "null"]},
-        "qualificationRefs": {"type": ["array", "null"], "items": {"type": "string"}}
-      },
+      "additionalProperties": false,
       "allOf": [
-        {"if": {"properties": {"availability": {"const": "AVAILABLE"}}, "required": ["availability"]}, "then": {"required": ["policyRef"], "properties": {"policyRef": {"type": "string", "minLength": 1}}}},
-        {"if": {"properties": {"executionMode": {"const": "CONTINUOUS_LEASE"}}, "required": ["executionMode"]}, "then": {"required": ["lease"], "properties": {"lease": {"$ref": "#/$defs/LeaseContract"}}}}
+        {
+          "if": {
+            "properties": {
+              "availability": {
+                "const": "AVAILABLE"
+              }
+            },
+            "required": [
+              "availability"
+            ]
+          },
+          "then": {
+            "properties": {
+              "policyRef": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "policyRef"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "executionMode": {
+                "const": "CONTINUOUS_LEASE"
+              }
+            },
+            "required": [
+              "executionMode"
+            ]
+          },
+          "then": {
+            "properties": {
+              "lease": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            },
+            "required": [
+              "lease"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "actionCode": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Actioncode",
+          "type": "string"
+        },
+        "executionMode": {
+          "enum": [
+            "DISCRETE",
+            "CONTINUOUS_LEASE"
+          ],
+          "title": "Executionmode",
+          "type": "string"
+        },
+        "availability": {
+          "enum": [
+            "AVAILABLE",
+            "UNAVAILABLE"
+          ],
+          "title": "Availability",
+          "type": "string"
+        },
+        "policyRef": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Policyref"
+        },
+        "unavailableReason": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unavailablereason"
+        },
+        "parameterSchema": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "maxProperties": 128,
+          "propertyNames": {
+            "maxLength": 128,
+            "minLength": 1
+          },
+          "title": "Parameterschema",
+          "type": "object"
+        },
+        "completion": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CompletionContract"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "lease": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LeaseContract"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "displayName": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Displayname"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "localizedLabels": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "maxLength": 1024,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxProperties": 32,
+              "propertyNames": {
+                "maxLength": 128,
+                "minLength": 1
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Localizedlabels"
+        },
+        "preconditions": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "maxProperties": 128,
+              "propertyNames": {
+                "maxLength": 128,
+                "minLength": 1
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Preconditions"
+        },
+        "safety": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "maxProperties": 128,
+              "propertyNames": {
+                "maxLength": 128,
+                "minLength": 1
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Safety"
+        },
+        "qualificationRefs": {
+          "anyOf": [
+            {
+              "items": {
+                "maxLength": 512,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 32,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Qualificationrefs"
+        }
+      },
+      "required": [
+        "actionCode",
+        "executionMode",
+        "availability",
+        "parameterSchema"
+      ],
+      "title": "ActionDefinition",
+      "type": "object"
+    },
+    "CompletionContract": {
+      "additionalProperties": false,
+      "properties": {
+        "terminalConditions": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Terminalconditions",
+          "type": "array"
+        },
+        "maxDurationMs": {
+          "exclusiveMinimum": 0,
+          "maximum": 3600000,
+          "title": "Maxdurationms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "terminalConditions",
+        "maxDurationMs"
+      ],
+      "title": "CompletionContract",
+      "type": "object"
+    },
+    "JsonValue": {
+      "anyOf": [
+        {
+          "maxLength": 1024,
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "maxItems": 256,
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "maxProperties": 128,
+          "propertyNames": {
+            "maxLength": 128,
+            "minLength": 1
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
       ]
     },
-    "SafeJsonValue": {"anyOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}, {"type": "null"}, {"$ref": "#/$defs/SafeJsonObject"}, {"$ref": "#/$defs/SafeJsonArray"}]},
-    "SafeJsonArray": {"type": "array", "items": {"$ref": "#/$defs/SafeJsonValue"}},
-    "SafeJsonObject": {
+    "LeaseContract": {
+      "additionalProperties": false,
+      "properties": {
+        "minLeaseMs": {
+          "exclusiveMinimum": 0,
+          "maximum": 60000,
+          "title": "Minleasems",
+          "type": "integer"
+        },
+        "defaultLeaseMs": {
+          "exclusiveMinimum": 0,
+          "maximum": 60000,
+          "title": "Defaultleasems",
+          "type": "integer"
+        },
+        "maxLeaseMs": {
+          "exclusiveMinimum": 0,
+          "maximum": 60000,
+          "title": "Maxleasems",
+          "type": "integer"
+        },
+        "commandCadenceMs": {
+          "exclusiveMinimum": 0,
+          "maximum": 60000,
+          "title": "Commandcadencems",
+          "type": "integer"
+        },
+        "zeroCommand": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "maxProperties": 16,
+          "propertyNames": {
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "title": "Zerocommand",
+          "type": "object"
+        },
+        "safeStopBehavior": {
+          "const": "ZERO_TWIST",
+          "title": "Safestopbehavior",
+          "type": "string"
+        }
+      },
+      "required": [
+        "minLeaseMs",
+        "defaultLeaseMs",
+        "maxLeaseMs",
+        "commandCadenceMs",
+        "zeroCommand",
+        "safeStopBehavior"
+      ],
+      "title": "LeaseContract",
       "type": "object",
-      "propertyNames": {"not": {"pattern": "(?i:joint|torque|pwm|policypath|policyname)"}},
-      "additionalProperties": {"$ref": "#/$defs/SafeJsonValue"}
+      "x-unergy-invariants": [
+        "minLeaseMs <= defaultLeaseMs <= maxLeaseMs",
+        "commandCadenceMs <= minLeaseMs"
+      ]
+    },
+    "ModelArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Digest",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "digest"
+      ],
+      "title": "ModelArtifact",
+      "type": "object"
+    },
+    "ObservationContract": {
+      "additionalProperties": false,
+      "properties": {
+        "identifier": {
+          "const": "MICRODUCK_OBS_61_V1",
+          "title": "Identifier",
+          "type": "string"
+        },
+        "dimension": {
+          "const": 61,
+          "title": "Dimension",
+          "type": "integer"
+        },
+        "fields": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 61,
+          "minItems": 61,
+          "prefixItems": [
+            {
+              "const": "base_ang_vel.roll"
+            },
+            {
+              "const": "base_ang_vel.pitch"
+            },
+            {
+              "const": "base_ang_vel.yaw"
+            },
+            {
+              "const": "projected_gravity.x"
+            },
+            {
+              "const": "projected_gravity.y"
+            },
+            {
+              "const": "projected_gravity.z"
+            },
+            {
+              "const": "joint_pos_rel.left_hip_yaw"
+            },
+            {
+              "const": "joint_pos_rel.left_hip_roll"
+            },
+            {
+              "const": "joint_pos_rel.left_hip_pitch"
+            },
+            {
+              "const": "joint_pos_rel.left_knee"
+            },
+            {
+              "const": "joint_pos_rel.left_ankle"
+            },
+            {
+              "const": "joint_pos_rel.neck_pitch"
+            },
+            {
+              "const": "joint_pos_rel.head_pitch"
+            },
+            {
+              "const": "joint_pos_rel.head_yaw"
+            },
+            {
+              "const": "joint_pos_rel.head_roll"
+            },
+            {
+              "const": "joint_pos_rel.right_hip_yaw"
+            },
+            {
+              "const": "joint_pos_rel.right_hip_roll"
+            },
+            {
+              "const": "joint_pos_rel.right_hip_pitch"
+            },
+            {
+              "const": "joint_pos_rel.right_knee"
+            },
+            {
+              "const": "joint_pos_rel.right_ankle"
+            },
+            {
+              "const": "joint_vel_rel.left_hip_yaw"
+            },
+            {
+              "const": "joint_vel_rel.left_hip_roll"
+            },
+            {
+              "const": "joint_vel_rel.left_hip_pitch"
+            },
+            {
+              "const": "joint_vel_rel.left_knee"
+            },
+            {
+              "const": "joint_vel_rel.left_ankle"
+            },
+            {
+              "const": "joint_vel_rel.neck_pitch"
+            },
+            {
+              "const": "joint_vel_rel.head_pitch"
+            },
+            {
+              "const": "joint_vel_rel.head_yaw"
+            },
+            {
+              "const": "joint_vel_rel.head_roll"
+            },
+            {
+              "const": "joint_vel_rel.right_hip_yaw"
+            },
+            {
+              "const": "joint_vel_rel.right_hip_roll"
+            },
+            {
+              "const": "joint_vel_rel.right_hip_pitch"
+            },
+            {
+              "const": "joint_vel_rel.right_knee"
+            },
+            {
+              "const": "joint_vel_rel.right_ankle"
+            },
+            {
+              "const": "last_action.left_hip_yaw"
+            },
+            {
+              "const": "last_action.left_hip_roll"
+            },
+            {
+              "const": "last_action.left_hip_pitch"
+            },
+            {
+              "const": "last_action.left_knee"
+            },
+            {
+              "const": "last_action.left_ankle"
+            },
+            {
+              "const": "last_action.neck_pitch"
+            },
+            {
+              "const": "last_action.head_pitch"
+            },
+            {
+              "const": "last_action.head_yaw"
+            },
+            {
+              "const": "last_action.head_roll"
+            },
+            {
+              "const": "last_action.right_hip_yaw"
+            },
+            {
+              "const": "last_action.right_hip_roll"
+            },
+            {
+              "const": "last_action.right_hip_pitch"
+            },
+            {
+              "const": "last_action.right_knee"
+            },
+            {
+              "const": "last_action.right_ankle"
+            },
+            {
+              "const": "twist.lin_vel_x"
+            },
+            {
+              "const": "twist.lin_vel_y"
+            },
+            {
+              "const": "twist.ang_vel_z"
+            },
+            {
+              "const": "head_pose.neck_pitch"
+            },
+            {
+              "const": "head_pose.head_pitch"
+            },
+            {
+              "const": "head_pose.head_yaw"
+            },
+            {
+              "const": "head_pose.head_roll"
+            },
+            {
+              "const": "body_pose.x"
+            },
+            {
+              "const": "body_pose.y"
+            },
+            {
+              "const": "body_pose.z"
+            },
+            {
+              "const": "body_pose.roll"
+            },
+            {
+              "const": "body_pose.pitch"
+            },
+            {
+              "const": "body_pose.yaw"
+            }
+          ],
+          "title": "Fields",
+          "type": "array"
+        },
+        "units": {
+          "additionalProperties": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxProperties": 61,
+          "propertyNames": {
+            "maxLength": 128,
+            "minLength": 1
+          },
+          "title": "Units",
+          "type": "object"
+        },
+        "normalization": {
+          "enum": [
+            "BAKED_IN_ONNX",
+            "DECLARED"
+          ],
+          "title": "Normalization",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identifier",
+        "dimension",
+        "fields",
+        "units",
+        "normalization"
+      ],
+      "title": "ObservationContract",
+      "type": "object"
+    },
+    "PolicyArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "policyRef": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Policyref",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Digest",
+          "type": "string"
+        },
+        "taskId": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Taskid"
+        },
+        "runtimeRequirements": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "maxProperties": 128,
+          "propertyNames": {
+            "maxLength": 128,
+            "minLength": 1
+          },
+          "title": "Runtimerequirements",
+          "type": "object"
+        },
+        "checkpoint": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkpoint"
+        },
+        "experimentRef": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Experimentref"
+        }
+      },
+      "required": [
+        "policyRef",
+        "path",
+        "digest"
+      ],
+      "title": "PolicyArtifact",
+      "type": "object"
     }
-  }
+  },
+  "additionalProperties": false,
+  "description": "Published V1 manifest; a digest is always present and non-null on the wire.",
+  "properties": {
+    "schema": {
+      "const": "MICRODUCK_POLICY_BUNDLE_V1",
+      "title": "Schema",
+      "type": "string"
+    },
+    "bundleId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Bundleid",
+      "type": "string"
+    },
+    "bundleVersion": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+      "title": "Bundleversion",
+      "type": "string"
+    },
+    "createdAt": {
+      "format": "date-time",
+      "title": "Createdat",
+      "type": "string"
+    },
+    "sourceRepository": {
+      "maxLength": 512,
+      "minLength": 1,
+      "title": "Sourcerepository",
+      "type": "string"
+    },
+    "sourceCommit": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Sourcecommit",
+      "type": "string"
+    },
+    "robotModel": {
+      "const": "MICRODUCK",
+      "title": "Robotmodel",
+      "type": "string"
+    },
+    "observationContract": {
+      "$ref": "#/$defs/ObservationContract"
+    },
+    "actionContract": {
+      "$ref": "#/$defs/ActionContract"
+    },
+    "model": {
+      "$ref": "#/$defs/ModelArtifact"
+    },
+    "policies": {
+      "items": {
+        "$ref": "#/$defs/PolicyArtifact"
+      },
+      "maxItems": 256,
+      "title": "Policies",
+      "type": "array"
+    },
+    "actions": {
+      "items": {
+        "$ref": "#/$defs/ActionDefinition"
+      },
+      "maxItems": 256,
+      "title": "Actions",
+      "type": "array"
+    },
+    "qualification": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 128,
+      "propertyNames": {
+        "maxLength": 128,
+        "minLength": 1
+      },
+      "title": "Qualification",
+      "type": "object"
+    },
+    "license": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 128,
+      "propertyNames": {
+        "maxLength": 128,
+        "minLength": 1
+      },
+      "title": "License",
+      "type": "object"
+    },
+    "bundleDigest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Bundledigest",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "bundleId",
+    "bundleVersion",
+    "createdAt",
+    "sourceRepository",
+    "sourceCommit",
+    "robotModel",
+    "observationContract",
+    "actionContract",
+    "model",
+    "policies",
+    "actions",
+    "qualification",
+    "license",
+    "bundleDigest"
+  ],
+  "title": "PolicyBundle",
+  "type": "object"
 }

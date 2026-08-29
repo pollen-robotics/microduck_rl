@@ -21,7 +21,7 @@ from mjlab_microduck.rom.action_catalog import (
 )
 from mjlab_microduck.rom.action_specs import ACTION_RUNTIME_SPECS
 from mjlab_microduck.rom.bundle import BundleBuildRequest, build_bundle
-from mjlab_microduck.rom.contracts import PolicyBundle, sha256_prefixed
+from mjlab_microduck.rom.contracts import UnsignedPolicyBundleManifest, sha256_prefixed
 from mjlab_microduck.rom.main import load_verified_bundle
 
 WALK_ONNX = "walk.onnx"
@@ -259,7 +259,7 @@ def test_candidate_loader_rejects_a_resigned_widened_action_envelope(
     manifest["actions"][0]["parameterSchema"]["properties"]["vxMps"]["maximum"] = (
         1_000.0
     )
-    manifest["bundleDigest"] = None
+    manifest.pop("bundleDigest")
     artifact_digests = {
         item["path"]: item["digest"]
         for item in [
@@ -272,9 +272,9 @@ def test_candidate_loader_rejects_a_resigned_widened_action_envelope(
     }
     manifest["bundleDigest"] = sha256_prefixed(
         {
-            "manifest": PolicyBundle.model_validate(manifest).model_dump(
-                mode="json", by_alias=True, exclude={"bundleDigest"}
-            ),
+            "manifest": UnsignedPolicyBundleManifest.model_validate(
+                manifest
+            ).model_dump(mode="json", by_alias=True),
             "artifacts": artifact_digests,
         }
     )

@@ -44,7 +44,9 @@ def store(db_path):
     return SqliteTaskStore(db_path)
 
 
-def test_create_persists_accepted_snapshot_and_task_one_canonical_request(store, task_request, db_path):
+def test_create_persists_accepted_snapshot_and_task_one_canonical_request(
+    store, task_request, db_path
+):
     """Replacing Task 1 canonical bytes would make persisted identity differ from the API hash."""
     snapshot, created = store.create(task_request, REQUEST_HASH)
 
@@ -93,7 +95,9 @@ def test_two_store_instances_share_idempotent_identity(db_path, task_request):
     assert existing.taskId == task_request.taskId
 
 
-def test_transition_updates_snapshot_and_appends_ordered_event_atomically(store, task_request):
+def test_transition_updates_snapshot_and_appends_ordered_event_atomically(
+    store, task_request
+):
     """Splitting state writes from event appends would leave a task history that contradicts its state."""
     store.create(task_request, REQUEST_HASH)
     validating = store.transition(
@@ -102,11 +106,16 @@ def test_transition_updates_snapshot_and_appends_ordered_event_atomically(store,
         event_type="TASK_VALIDATING",
         payload={"check": "bundle"},
     )
-    running = store.transition(task_request.taskId, "RUNNING", event_type="TASK_STARTED")
+    running = store.transition(
+        task_request.taskId, "RUNNING", event_type="TASK_STARTED"
+    )
 
     assert validating.state == "VALIDATING"
     assert running.state == "RUNNING"
-    assert [(event.sequence, event.eventType, event.payload) for event in store.events_after(task_request.taskId, -1)] == [
+    assert [
+        (event.sequence, event.eventType, event.payload)
+        for event in store.events_after(task_request.taskId, -1)
+    ] == [
         (0, "TASK_VALIDATING", {"check": "bundle"}),
         (1, "TASK_STARTED", {}),
     ]
@@ -119,15 +128,39 @@ def test_append_event_orders_events_across_store_instances(db_path, task_request
     first_store.create(task_request, REQUEST_HASH)
 
     first_store.append_event(task_request.taskId, "TASK_QUEUED", {"queue": 1})
-    second_store.append_event(task_request.taskId, "TASK_OBSERVED", {"observer": "second"})
+    second_store.append_event(
+        task_request.taskId, "TASK_OBSERVED", {"observer": "second"}
+    )
 
-    assert [(event.sequence, event.eventType) for event in first_store.events_after(task_request.taskId, -1)] == [
+    assert [
+        (event.sequence, event.eventType)
+        for event in first_store.events_after(task_request.taskId, -1)
+    ] == [
         (0, "TASK_QUEUED"),
         (1, "TASK_OBSERVED"),
     ]
 
 
-def test_transition_allows_only_linear_lifecycle_and_terminal_is_immutable(store, task_request):
+def test_event_pages_are_bounded_without_duplicates_or_sequence_zero_gaps(
+    store, task_request
+):
+    """An unbounded query or zero-only cursor would lose the first event or amplify storage."""
+    store.create(task_request, REQUEST_HASH)
+    for sequence in range(205):
+        store.append_event(task_request.taskId, "TASK_OBSERVED", {"index": sequence})
+
+    first = store.events_after(task_request.taskId, -1, page_size=100)
+    second = store.events_after(task_request.taskId, first[-1].sequence, page_size=100)
+    third = store.events_after(task_request.taskId, second[-1].sequence, page_size=100)
+
+    assert [event.sequence for event in first] == list(range(100))
+    assert [event.sequence for event in second] == list(range(100, 200))
+    assert [event.sequence for event in third] == list(range(200, 205))
+
+
+def test_transition_allows_only_linear_lifecycle_and_terminal_is_immutable(
+    store, task_request
+):
     """Permitting skipped or terminal transitions would let execution bypass validation or rewrite outcomes."""
     store.create(task_request, REQUEST_HASH)
 
@@ -136,7 +169,9 @@ def test_transition_allows_only_linear_lifecycle_and_terminal_is_immutable(store
 
     store.transition(task_request.taskId, "VALIDATING", event_type="TASK_VALIDATING")
     store.transition(task_request.taskId, "RUNNING", event_type="TASK_STARTED")
-    completed = store.transition(task_request.taskId, "SUCCEEDED", event_type="TASK_SUCCEEDED")
+    completed = store.transition(
+        task_request.taskId, "SUCCEEDED", event_type="TASK_SUCCEEDED"
+    )
 
     assert completed.state == "SUCCEEDED"
     with pytest.raises(IllegalTaskTransition):
@@ -176,7 +211,9 @@ def test_restart_marks_running_unknown(db_path, task_request):
 
     assert SqliteTaskStore(db_path).mark_interrupted_unknown() == 1
     assert SqliteTaskStore(db_path).get(task_request.taskId).state == "UNKNOWN"
-    assert [event.eventType for event in store.events_after(task_request.taskId, -1)][-1] == "TASK_INTERRUPTED"
+    assert [event.eventType for event in store.events_after(task_request.taskId, -1)][
+        -1
+    ] == "TASK_INTERRUPTED"
 
 
 def test_initial_schema_reserves_task_five_command_and_deadline_columns(store, db_path):

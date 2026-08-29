@@ -6,7 +6,9 @@ real task service and its durable SQLite store rather than a mocked endpoint.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -29,7 +31,8 @@ from mjlab_microduck.rom.contracts import (
     PolicyArtifact,
     PolicyBundle,
     TaskCreateRequest,
-    sha256_prefixed,
+    publish_policy_bundle,
+    unsigned_policy_bundle_manifest,
 )
 from mjlab_microduck.rom.main import (
     UnconfiguredRuntime,
@@ -177,7 +180,7 @@ def payload() -> dict[str, Any]:
         "bundleVersion": "1.0.0",
         "bundleDigest": "sha256:" + "a" * 64,
         "parameters": {},
-        "scenario": {"terrain": "flat"},
+        "scenario": {"terrain": "flat", "seed": 1},
         "requestedBy": "api-test",
     }
 
@@ -285,6 +288,97 @@ def test_bad_wire_payload_uses_the_stable_parameter_error_envelope(
     }
 
 
+def test_request_body_limit_rejects_declared_oversize_without_entering_validation(
+    client: TestClient, auth: dict[str, str]
+):
+    """Trusting Content-Length/body parsing would buffer oversized intent before rejection."""
+    response = client.post(
+        "/v1/tasks",
+        headers=auth | {"Content-Type": "application/json"},
+        content=b"x" * 65_537,
+    )
+
+    assert response.status_code == 413
+    assert response.json() == {
+        "code": "REQUEST_BODY_TOO_LARGE",
+        "message": "Request body exceeds the 65536-byte limit",
+        "details": {},
+    }
+
+
+def test_request_body_limit_stops_chunked_input_without_content_length(
+    service: SimulatorTaskService, bearer_token: str
+):
+    """Omitting Content-Length must not permit an unbounded chunked body to be consumed."""
+    app = create_app(service, bearer_token)
+    chunks = iter(
+        [
+            {"type": "http.request", "body": b"a" * 40_000, "more_body": True},
+            {"type": "http.request", "body": b"b" * 30_000, "more_body": True},
+            {"type": "http.request", "body": b"must-not-be-read", "more_body": False},
+        ]
+    )
+    consumed = 0
+    sent: list[dict[str, Any]] = []
+
+    async def receive():
+        nonlocal consumed
+        consumed += 1
+        return next(chunks)
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/tasks",
+        "raw_path": b"/v1/tasks",
+        "query_string": b"",
+        "headers": [
+            (b"authorization", f"Bearer {bearer_token}".encode()),
+            (b"content-type", b"application/json"),
+        ],
+        "client": ("127.0.0.1", 1),
+        "server": ("testserver", 80),
+    }
+
+    asyncio.run(app(scope, receive, send))
+
+    assert consumed == 2
+    assert sent[0]["status"] == 413
+    assert json.loads(sent[1]["body"]) == {
+        "code": "REQUEST_BODY_TOO_LARGE",
+        "message": "Request body exceeds the 65536-byte limit",
+        "details": {},
+    }
+
+
+def test_event_query_defaults_before_sequence_zero_and_enforces_page_size(
+    client: TestClient,
+    auth: dict[str, str],
+    payload: dict[str, Any],
+    service: SimulatorTaskService,
+):
+    """A zero default would permanently skip the first event; unbounded pages amplify history."""
+    request = TaskCreateRequest.model_validate(payload | {"taskId": "9" * 32})
+    service._store.create(request, "sha256:" + "d" * 64)
+    service._store.append_event(request.taskId, "TASK_ACCEPTED", {"code": "ACCEPTED"})
+
+    first = client.get(f"/v1/tasks/{request.taskId}/events?pageSize=1", headers=auth)
+    oversized = client.get(
+        f"/v1/tasks/{request.taskId}/events?pageSize=101", headers=auth
+    )
+
+    assert first.status_code == 200
+    assert [event["sequence"] for event in first.json()["events"]] == [0]
+    assert oversized.status_code == 400
+    assert oversized.json()["code"] == "PARAMETER_INVALID"
+
+
 def test_catalog_is_derived_from_the_installed_service_bundle(
     client: TestClient, auth: dict[str, str], service: SimulatorTaskService
 ):
@@ -383,6 +477,8 @@ def test_generated_openapi_has_exact_v1_operations_security_and_schema_identifie
                 actual_parameters
             ) == _normalize_openapi_schema(expected_parameters)
 
+    assert _normalize_openapi_schema(generated) == _normalize_openapi_schema(checked_in)
+
 
 def _normalize_openapi_schema(value: Any) -> Any:
     """Compare schemas semantically while omitting FastAPI's presentation-only defaults."""
@@ -420,7 +516,7 @@ def _write_verified_bundle(bundle_dir: Path, source: PolicyBundle) -> PolicyBund
         relative_path: f"sha256:{hashlib.sha256(content).hexdigest()}"
         for relative_path, content in files.items()
     }
-    unsigned = source.model_copy(
+    unsigned = unsigned_policy_bundle_manifest(source).model_copy(
         update={
             "model": ModelArtifact(
                 path="models/robot.xml", digest=digests["models/robot.xml"]
@@ -433,21 +529,9 @@ def _write_verified_bundle(bundle_dir: Path, source: PolicyBundle) -> PolicyBund
                     }
                 )
             ],
-            "bundleDigest": None,
         }
     )
-    bundle = unsigned.model_copy(
-        update={
-            "bundleDigest": sha256_prefixed(
-                {
-                    "manifest": unsigned.model_dump(
-                        mode="json", by_alias=True, exclude={"bundleDigest"}
-                    ),
-                    "artifacts": digests,
-                }
-            )
-        }
-    )
+    bundle = publish_policy_bundle(unsigned, digests)
     (bundle_dir / "microduck-policy-bundle.json").write_text(
         bundle.model_dump_json(by_alias=True, exclude_none=True)
     )
@@ -463,7 +547,7 @@ def _running_task(store: SqliteTaskStore, bundle: PolicyBundle) -> TaskCreateReq
             "bundleVersion": bundle.bundleVersion,
             "bundleDigest": bundle.bundleDigest,
             "parameters": {},
-            "scenario": {"terrain": "flat"},
+            "scenario": {"terrain": "flat", "seed": 1},
             "requestedBy": "existing-task",
         }
     )
@@ -499,7 +583,7 @@ def test_invalid_bundle_keeps_liveness_public_but_fails_readiness_and_task_execu
                 "bundleVersion": "1.0.0",
                 "bundleDigest": "sha256:" + "a" * 64,
                 "parameters": {},
-                "scenario": {"terrain": "flat"},
+                "scenario": {"terrain": "flat", "seed": 1},
                 "requestedBy": "api-test",
             },
         )

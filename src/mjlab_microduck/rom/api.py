@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hmac
+import json
+import re
 from contextlib import asynccontextmanager
 from threading import Event, Thread
 from typing import Annotated, Any, Literal
@@ -12,13 +14,17 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer
+from pydantic import Field, StringConstraints
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .contracts import (
     ACTION_CONTRACT,
     OBSERVATION_CONTRACT,
     ActionDefinition,
+    BoundedIdentifier,
     ContractModel,
     RobotStatus,
+    StatusObject,
     TaskCommandRequest,
     TaskCreateRequest,
     TaskEvent,
@@ -29,6 +35,7 @@ from .service import (
     BundleMismatch,
     CommandSequenceConflict,
     InvalidParameters,
+    NotReady,
     PreconditionFailed,
     RobotBusy,
     RuntimeException,
@@ -40,6 +47,8 @@ from .service import (
 )
 
 _TASK_ID_PATTERN = r"^[0-9a-f]{32}$"
+_MAX_REQUEST_BODY_BYTES = 65_536
+_COMMAND_PATH = re.compile(r"^/v1/tasks/[0-9a-f]{32}/command$")
 ErrorCode = Literal[
     "AUTH_REQUIRED",
     "NOT_READY",
@@ -52,14 +61,15 @@ ErrorCode = Literal[
     "COMMAND_SEQUENCE_CONFLICT",
     "STALE_COMMAND",
     "TASK_NOT_FOUND",
+    "REQUEST_BODY_TOO_LARGE",
     "INTERNAL_ERROR",
 ]
 
 
 class Error(ContractModel):
     code: ErrorCode
-    message: str
-    details: dict[str, Any]
+    message: Annotated[str, StringConstraints(min_length=1, max_length=256)]
+    details: StatusObject
 
 
 class HealthResponse(ContractModel):
@@ -68,28 +78,110 @@ class HealthResponse(ContractModel):
 
 class ReadyResponse(ContractModel):
     ready: bool
-    robotModel: str | None = None
-    bundleId: str | None = None
-    bundleVersion: str | None = None
-    bundleDigest: str | None = None
-    reasonCodes: list[str]
+    robotModel: BoundedIdentifier | None = None
+    bundleId: BoundedIdentifier | None = None
+    bundleVersion: BoundedIdentifier | None = None
+    bundleDigest: (
+        Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")] | None
+    ) = None
+    reasonCodes: list[BoundedIdentifier] = Field(max_length=32)
 
 
 class CatalogResponse(ContractModel):
-    bundleId: str | None = None
-    bundleVersion: str | None = None
-    bundleDigest: str | None = None
+    bundleId: BoundedIdentifier | None = None
+    bundleVersion: BoundedIdentifier | None = None
+    bundleDigest: (
+        Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")] | None
+    ) = None
     observationContract: Literal["MICRODUCK_OBS_61_V1"] = OBSERVATION_CONTRACT
     actionContract: Literal["MICRODUCK_ACTION_14_V1"] = ACTION_CONTRACT
-    actions: list[ActionDefinition]
+    actions: list[ActionDefinition] = Field(max_length=256)
 
 
 class TaskEventPage(ContractModel):
-    events: list[TaskEvent]
+    events: list[TaskEvent] = Field(max_length=100)
 
 
-class NotReady(SimulatorServiceError):
-    code = "NOT_READY"
+class RequestBodyLimitMiddleware:
+    """Reject bounded V1 request bodies without buffering chunked input."""
+
+    def __init__(self, app: ASGIApp, *, max_body_bytes: int) -> None:
+        self.app = app
+        self.max_body_bytes = max_body_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if not _route_has_json_body(scope):
+            await self.app(scope, receive, send)
+            return
+        content_length = _content_length(scope)
+        if content_length is not None and content_length > self.max_body_bytes:
+            await self._reject(send)
+            return
+
+        consumed = 0
+        buffered: list[Message] = []
+        while True:
+            message = await receive()
+            buffered.append(message)
+            if message["type"] == "http.request":
+                consumed += len(message.get("body", b""))
+                if consumed > self.max_body_bytes:
+                    buffered.clear()
+                    await self._reject(send)
+                    return
+                if not message.get("more_body", False):
+                    break
+            elif message["type"] == "http.disconnect":
+                break
+
+        async def replay_receive() -> Message:
+            if buffered:
+                return buffered.pop(0)
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
+
+    async def _reject(self, send: Send) -> None:
+        body = json.dumps(
+            {
+                "code": "REQUEST_BODY_TOO_LARGE",
+                "message": f"Request body exceeds the {self.max_body_bytes}-byte limit",
+                "details": {},
+            },
+            separators=(",", ":"),
+        ).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
+def _route_has_json_body(scope: Scope) -> bool:
+    if scope["type"] != "http":
+        return False
+    method = scope.get("method")
+    path = scope.get("path", "")
+    return (method == "POST" and path == "/v1/tasks") or (
+        method == "PUT" and _COMMAND_PATH.fullmatch(path) is not None
+    )
+
+
+def _content_length(scope: Scope) -> int | None:
+    for name, value in scope.get("headers", []):
+        if name.lower() == b"content-length":
+            try:
+                parsed = int(value)
+            except ValueError:
+                return _MAX_REQUEST_BODY_BYTES + 1
+            return parsed if parsed >= 0 else _MAX_REQUEST_BODY_BYTES + 1
+    return None
 
 
 _SERVICE_ERRORS: dict[type[SimulatorServiceError], tuple[int, ErrorCode, str]] = {
@@ -152,6 +244,11 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
                     service.tick()
                 except Exception:  # noqa: BLE001 - one tick must not kill the deadman.
                     app.state.watchdog_healthy = False
+                    try:
+                        service.watchdog_failed()
+                    except Exception:  # noqa: BLE001 - readiness remains failed closed.
+                        app.state.watchdog_terminalization_failed = True
+                    return
             watchdog_stop.wait(0.01)
 
     @asynccontextmanager
@@ -173,8 +270,19 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
             else:
                 app.state.watchdog_thread = None
 
-    app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
+    app = FastAPI(
+        title="MicroDuck ROM Simulator API",
+        version="1.0.0",
+        description="Versioned typed-intent API for the MicroDuck MuJoCo simulator.",
+        docs_url=None,
+        redoc_url=None,
+        lifespan=lifespan,
+    )
+    app.add_middleware(
+        RequestBodyLimitMiddleware, max_body_bytes=_MAX_REQUEST_BODY_BYTES
+    )
     app.state.watchdog_healthy = True
+    app.state.watchdog_terminalization_failed = False
 
     async def require_bearer(
         request: Request,
@@ -219,7 +327,7 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
             raise NotReady("simulator is not ready")
         return bundle
 
-    def ready_response() -> ReadyResponse:
+    def motion_readiness() -> tuple[bool, tuple[str, ...]]:
         reason_codes = list(getattr(app.state, "readiness_reason_codes", ()))
         if not app.state.watchdog_healthy:
             reason_codes.append("WATCHDOG_UNHEALTHY")
@@ -230,21 +338,31 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
             reason_codes.append("BEARER_TOKEN_MISSING")
         if bundle is None:
             reason_codes.append("BUNDLE_UNAVAILABLE")
-        runtime_ready = False
-        if service is not None:
-            try:
-                runtime_ready = bool(service.robot_status().health.get("ready"))
-            except Exception:  # noqa: BLE001 - readiness must fail closed.
-                reason_codes.append("RUNTIME_UNAVAILABLE")
-        if not runtime_ready:
+        if service is None:
             reason_codes.append("RUNTIME_UNAVAILABLE")
+        else:
+            _, service_reasons = service.motion_readiness()
+            reason_codes.extend(service_reasons)
+        unique = tuple(sorted(set(reason_codes)))
+        return not unique, unique
+
+    def require_motion_ready() -> None:
+        ready, _ = motion_readiness()
+        if not ready:
+            raise NotReady("simulator is not ready")
+
+    def ready_response() -> ReadyResponse:
+        ready, reason_codes = motion_readiness()
+        bundle = getattr(
+            service, "_bundle", getattr(app.state, "installed_bundle", None)
+        )
         return ReadyResponse(
-            ready=not reason_codes,
+            ready=ready,
             robotModel=bundle.robotModel if bundle is not None else None,
             bundleId=bundle.bundleId if bundle is not None else None,
             bundleVersion=bundle.bundleVersion if bundle is not None else None,
             bundleDigest=bundle.bundleDigest if bundle is not None else None,
-            reasonCodes=sorted(set(reason_codes)),
+            reasonCodes=list(reason_codes),
         )
 
     @app.get("/v1/health", operation_id="health", response_model=HealthResponse)
@@ -266,24 +384,23 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
         operation_id="catalog",
         response_model=CatalogResponse,
         dependencies=[Depends(require_bearer)],
-        responses={401: {"model": Error}},
+        responses={401: {"model": Error}, 503: {"model": Error}},
     )
     def catalog() -> CatalogResponse:
         bundle = installed_bundle()
-        runtime_ready = False
-        if service is not None:
-            try:
-                health = service.robot_status().health
-                runtime_ready = bool(health.get("ready") and health.get("healthy"))
-            except Exception:  # noqa: BLE001 - catalog availability must fail closed.
-                runtime_ready = False
+        runtime_ready, reason_codes = motion_readiness()
         actions = bundle.actions
         if not runtime_ready:
+            unavailable_reason = (
+                "WATCHDOG_UNHEALTHY"
+                if "WATCHDOG_UNHEALTHY" in reason_codes
+                else "RUNTIME_UNAVAILABLE"
+            )
             actions = [
                 action.model_copy(
                     update={
                         "availability": "UNAVAILABLE",
-                        "unavailableReason": "RUNTIME_UNAVAILABLE",
+                        "unavailableReason": unavailable_reason,
                     }
                 )
                 if action.availability == "AVAILABLE"
@@ -302,7 +419,7 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
         operation_id="robotStatus",
         response_model=RobotStatus,
         dependencies=[Depends(require_bearer)],
-        responses={401: {"model": Error}},
+        responses={401: {"model": Error}, 503: {"model": Error}},
     )
     def robot_status() -> RobotStatus:
         if service is None:
@@ -319,11 +436,14 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
             400: {"model": Error},
             401: {"model": Error},
             409: {"model": Error},
+            413: {"model": Error},
+            503: {"model": Error},
         },
     )
     def create_task(request: TaskCreateRequest) -> TaskSnapshot:
         if service is None:
             raise NotReady("simulator is not ready")
+        require_motion_ready()
         return service.create_task(request)
 
     @app.get(
@@ -332,8 +452,10 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
         response_model=TaskSnapshot,
         dependencies=[Depends(require_bearer)],
         responses={
+            400: {"model": Error},
             401: {"model": Error},
             404: {"model": Error},
+            503: {"model": Error},
         },
     )
     def get_task(
@@ -349,8 +471,10 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
         response_model=TaskSnapshot,
         dependencies=[Depends(require_bearer)],
         responses={
+            400: {"model": Error},
             401: {"model": Error},
             404: {"model": Error},
+            503: {"model": Error},
         },
     )
     def cancel_task(
@@ -370,6 +494,8 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
             401: {"model": Error},
             404: {"model": Error},
             409: {"model": Error},
+            413: {"model": Error},
+            503: {"model": Error},
         },
     )
     def command_task(
@@ -378,6 +504,7 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
     ) -> TaskSnapshot:
         if service is None:
             raise NotReady("simulator is not ready")
+        require_motion_ready()
         return service.command(task_id, command)
 
     @app.get(
@@ -386,17 +513,22 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
         response_model=TaskEventPage,
         dependencies=[Depends(require_bearer)],
         responses={
+            400: {"model": Error},
             401: {"model": Error},
             404: {"model": Error},
+            503: {"model": Error},
         },
     )
     def task_events(
         task_id: Annotated[str, Path(alias="taskId", pattern=_TASK_ID_PATTERN)],
-        after_sequence: Annotated[int, Query(alias="afterSequence", ge=0)] = 0,
+        after_sequence: Annotated[int, Query(alias="afterSequence", ge=-1)] = -1,
+        page_size: Annotated[int, Query(alias="pageSize", ge=1, le=100)] = 100,
     ) -> TaskEventPage:
         if service is None:
             raise NotReady("simulator is not ready")
-        return TaskEventPage(events=service.events_after(task_id, after_sequence))
+        return TaskEventPage(
+            events=service.events_after(task_id, after_sequence, page_size=page_size)
+        )
 
     def openapi() -> dict[str, Any]:
         if app.openapi_schema is None:

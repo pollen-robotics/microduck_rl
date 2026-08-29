@@ -27,7 +27,8 @@ from .contracts import (
     ObservationContract,
     PolicyArtifact,
     PolicyBundle,
-    sha256_prefixed,
+    UnsignedPolicyBundleManifest,
+    publish_policy_bundle,
 )
 from .mirroring import (
     MICRODUCK_JOINT_MIRROR_PERMUTATION,
@@ -480,7 +481,7 @@ def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
         raise ValueError("duplicate archive path")
 
     observation_contract, action_contract = _contracts()
-    unsigned = PolicyBundle(
+    unsigned = UnsignedPolicyBundleManifest(
         schema="MICRODUCK_POLICY_BUNDLE_V1",
         bundleId="org.microduck.policy",
         bundleVersion=request.release,
@@ -517,13 +518,7 @@ def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
     artifact_digests = {
         archive_path: _file_digest(source) for archive_path, source in sorted(staged)
     }
-    unsigned_mapping = unsigned.model_dump(
-        mode="json", by_alias=True, exclude={"bundleDigest"}
-    )
-    digest = sha256_prefixed(
-        {"manifest": unsigned_mapping, "artifacts": artifact_digests}
-    )
-    manifest = unsigned.model_copy(update={"bundleDigest": digest})
+    manifest = publish_policy_bundle(unsigned, artifact_digests)
     manifest_json = manifest.model_dump_json(
         by_alias=True, exclude_none=True, indent=None
     ).encode()

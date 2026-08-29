@@ -230,6 +230,14 @@ BUNDLE_VERSION=$(printf '%s' "$CATALOG" | jq -r .bundleVersion)
 BUNDLE_DIGEST=$(printf '%s' "$CATALOG" | jq -r .bundleDigest)
 ```
 
+Task and command JSON bodies are limited to 65,536 bytes. The limit is enforced
+while ASGI chunks arrive even when `Content-Length` is absent; an oversized
+body receives HTTP 413 with `REQUEST_BODY_TOO_LARGE`. Contract strings,
+collections, parameter maps, scenarios, event payloads, and persisted canonical
+requests have smaller schema bounds. V1 accepts only the exact seeded scenario
+object `{"terrain":"flat"|"ramp","seed":<uint32>}` and rejects extra fields
+or JSON type coercion.
+
 Create a short continuous task, renew it once, then cancel it:
 
 ```bash
@@ -245,6 +253,26 @@ curl --fail --silent -H "$AUTH" -H 'Content-Type: application/json' \
 curl --fail --silent -H "$AUTH" -X POST \
   "http://127.0.0.1:8000/v1/tasks/$TASK/cancel"
 ```
+
+Task events are returned in bounded pages. `afterSequence` defaults to `-1` so
+the first request includes lifecycle sequence `0`; `pageSize` defaults to 100
+and must be from 1 through 100. Continue with the last returned sequence until
+the `events` array is empty. The exclusive cursor prevents duplicates:
+
+```bash
+curl --fail --silent -H "$AUTH" \
+  "http://127.0.0.1:8000/v1/tasks/$TASK/events?afterSequence=-1&pageSize=100"
+```
+
+One fail-closed readiness predicate governs executable catalog availability,
+new task creation, and continuous command renewal. If the watchdog fails,
+`/v1/ready` reports `ready:false` with `WATCHDOG_UNHEALTHY`, installed catalog
+entries are masked unavailable, and create/command return HTTP 503 `NOT_READY`.
+An active continuous owner is immediately zeroed/stopped and durably becomes
+`FAILED / WATCHDOG_FAILURE`. Authenticated cancellation and diagnostic task,
+status, and event reads remain available. Catalog and robot status also
+document HTTP 503 `NOT_READY` for startup states in which their required
+installed bundle or runtime is absent.
 
 To smoke the deadman, create a distinct continuous task with `"leaseMs":200`,
 send no renewal, wait more than 200 ms, and query it:

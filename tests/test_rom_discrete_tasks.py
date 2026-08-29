@@ -19,6 +19,7 @@ from mjlab_microduck.rom.contracts import (
     ObservationContract,
     PolicyArtifact,
     PolicyBundle,
+    Scenario,
     TaskCreateRequest,
     canonical_json,
     sha256_prefixed,
@@ -28,9 +29,9 @@ from mjlab_microduck.rom.service import (
     ActionUnavailable,
     BundleMismatch,
     InvalidParameters,
+    NotReady,
     PreconditionFailed,
     RobotBusy,
-    RuntimeException,
     SimulatorTaskService,
 )
 from mjlab_microduck.rom.store import SqliteTaskStore
@@ -132,15 +133,17 @@ def test_rejects_nonflat_or_unhealthy_runtime_before_creating_task(
     service, stand_request, runtime, store
 ):
     """Skipping terrain and health gates would command an unqualified or unready robot."""
-    wrong_terrain = stand_request.model_copy(update={"scenario": {"terrain": "stairs"}})
+    wrong_terrain = stand_request.model_copy(
+        update={"scenario": Scenario(terrain="ramp", seed=stand_request.scenario.seed)}
+    )
     with pytest.raises(PreconditionFailed) as terrain_error:
         service.create_task(wrong_terrain)
     assert terrain_error.value.code == "PRECONDITION_FAILED"
 
     runtime.status_value = robot_status(healthy=False)
-    with pytest.raises(PreconditionFailed) as health_error:
+    with pytest.raises(NotReady) as health_error:
         service.create_task(stand_request)
-    assert health_error.value.code == "PRECONDITION_FAILED"
+    assert health_error.value.code == "NOT_READY"
     assert store.get(stand_request.taskId) is None
 
 
@@ -150,10 +153,10 @@ def test_status_runtime_exception_has_a_stable_public_code(
     """Leaking a runtime status exception would make callers branch on implementation details."""
     runtime.status_error = RuntimeError("status transport failed")
 
-    with pytest.raises(RuntimeException) as error:
+    with pytest.raises(NotReady) as error:
         service.create_task(stand_request)
 
-    assert error.value.code == "RUNTIME_EXCEPTION"
+    assert error.value.code == "NOT_READY"
 
 
 def test_start_exception_safely_stops_before_recording_runtime_failure(

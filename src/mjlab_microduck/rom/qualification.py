@@ -22,7 +22,9 @@ from .contracts import (
     PolicyBundle,
     TaskCreateRequest,
     canonical_json,
+    publish_policy_bundle,
     sha256_prefixed,
+    unsigned_policy_bundle_manifest,
 )
 from .main import load_verified_bundle
 from .mujoco_runtime import MicroduckMujocoRuntime
@@ -122,8 +124,8 @@ class QualificationRollout(ContractModel):
     scenarioProfile: str
     seed: int
     requestedParameters: dict[str, Any]
-    requestedMotion: dict[str, tuple[float, ...]]
-    appliedMotion: dict[str, tuple[float, ...]]
+    requestedMotion: dict[str, list[float]]
+    appliedMotion: dict[str, list[float]]
     startedAt: datetime
     finishedAt: datetime
     steps: int
@@ -460,20 +462,20 @@ _QUALIFICATION_FAILURE_REASONS = {
 
 def _expected_qualification_motion(
     action_code: str, parameters: Mapping[str, Any]
-) -> dict[str, tuple[float, ...]]:
+) -> dict[str, list[float]]:
     spec = ACTION_RUNTIME_SPECS[action_code]
     zero = {
-        "twist": (0.0, 0.0, 0.0),
-        "headPose": (0.0, 0.0, 0.0, 0.0),
-        "bodyPose": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        "twist": [0.0, 0.0, 0.0],
+        "headPose": [0.0, 0.0, 0.0, 0.0],
+        "bodyPose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     }
     if spec.command_profile == "TWIST_VELOCITY":
         return zero | {
-            "twist": (
+            "twist": [
                 float(parameters["vxMps"]),
                 float(parameters["vyMps"]),
                 float(parameters["yawRateRadps"]),
-            )
+            ]
         }
     if spec.command_profile in {"SIT_FLAG_ZERO", "ZERO_TWIST_LEASE"}:
         return zero
@@ -1162,11 +1164,10 @@ def _promote_qualified_bundle(
         "subjectManifestPath": SUBJECT_MANIFEST_PATH,
         "subjectManifestDigest": subject_manifest_artifact.digest,
     }
-    unsigned = bundle.model_copy(
+    unsigned = unsigned_policy_bundle_manifest(bundle).model_copy(
         update={
             "bundleVersion": configuration.release,
             "createdAt": configuration.createdAt,
-            "bundleDigest": None,
             "actions": promoted_actions,
             "qualification": qualification,
         }
@@ -1203,15 +1204,7 @@ def _promote_qualified_bundle(
             raise ValueError("qualification artifact path already exists")
         contents[artifact_path] = artifact_bytes
         artifact_digests[artifact_path] = artifact_digest
-    digest = sha256_prefixed(
-        {
-            "manifest": unsigned.model_dump(
-                mode="json", by_alias=True, exclude={"bundleDigest"}
-            ),
-            "artifacts": artifact_digests,
-        }
-    )
-    manifest = unsigned.model_copy(update={"bundleDigest": digest})
+    manifest = publish_policy_bundle(unsigned, artifact_digests)
     contents["microduck-policy-bundle.json"] = canonical_json(manifest)
 
     output.parent.mkdir(parents=True, exist_ok=True)

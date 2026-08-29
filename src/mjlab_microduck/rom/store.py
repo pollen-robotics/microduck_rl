@@ -246,8 +246,16 @@ class SqliteTaskStore:
             connection.commit()
             return snapshot, True
 
-    def events_after(self, task_id: str, sequence: int) -> list[TaskEvent]:
+    def events_after(
+        self, task_id: str, sequence: int, *, page_size: int = 100
+    ) -> list[TaskEvent]:
         """Return task events strictly after ``sequence`` in durable sequence order."""
+        if (
+            not isinstance(page_size, int)
+            or isinstance(page_size, bool)
+            or not 1 <= page_size <= 100
+        ):
+            raise ValueError("page_size must be an integer between 1 and 100")
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -255,8 +263,9 @@ class SqliteTaskStore:
                 FROM task_event
                 WHERE task_id = ? AND sequence > ?
                 ORDER BY sequence
+                LIMIT ?
                 """,
-                (task_id, sequence),
+                (task_id, sequence, page_size),
             ).fetchall()
         return [
             TaskEvent(

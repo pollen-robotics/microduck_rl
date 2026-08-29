@@ -8,9 +8,19 @@ import math
 import re
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, get_origin
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 POLICY_BUNDLE_SCHEMA = "MICRODUCK_POLICY_BUNDLE_V1"
 SIM_TASK_SCHEMA = "MICRODUCK_SIM_TASK_V1"
@@ -62,6 +72,125 @@ OBSERVATION_FIELDS = (
 _TASK_ID_PATTERN = r"^[0-9a-f]{32}$"
 _DIGEST_PATTERN = r"^sha256:[0-9a-f]{64}$"
 _RAW_CONTROL_KEY = re.compile(r"joint|torque|pwm|policypath|policyname", re.IGNORECASE)
+_RFC3339_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+)
+
+_MAX_IDENTIFIER_LENGTH = 128
+_MAX_PATH_LENGTH = 512
+_MAX_DESCRIPTION_LENGTH = 1_024
+_MAX_MANIFEST_COLLECTION_ITEMS = 256
+_MAX_MANIFEST_MAP_ITEMS = 128
+_MAX_MANIFEST_DEPTH = 8
+_MAX_MANIFEST_JSON_BYTES = 65_536
+_MAX_PARAMETER_ITEMS = 16
+_MAX_EVENT_PAYLOAD_ITEMS = 16
+_MAX_EVIDENCE_METRICS = 32
+_MAX_STATUS_MAP_ITEMS = 32
+_MAX_STATUS_JSON_BYTES = 4_096
+
+BoundedIdentifier = Annotated[
+    str, StringConstraints(strict=True, min_length=1, max_length=_MAX_IDENTIFIER_LENGTH)
+]
+BoundedPath = Annotated[
+    str, StringConstraints(strict=True, min_length=1, max_length=_MAX_PATH_LENGTH)
+]
+BoundedDescription = Annotated[
+    str,
+    StringConstraints(strict=True, min_length=1, max_length=_MAX_DESCRIPTION_LENGTH),
+]
+BoundedJsonKey = Annotated[
+    str, StringConstraints(strict=True, min_length=1, max_length=128)
+]
+BoundedJsonString = Annotated[str, StringConstraints(strict=True, max_length=1_024)]
+FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+JsonScalar = BoundedJsonString | StrictInt | FiniteFloat | StrictBool | None
+type JsonValue = (
+    BoundedJsonString
+    | StrictInt
+    | FiniteFloat
+    | StrictBool
+    | None
+    | Annotated[list["JsonValue"], Field(max_length=_MAX_MANIFEST_COLLECTION_ITEMS)]
+    | Annotated[
+        dict[BoundedJsonKey, "JsonValue"], Field(max_length=_MAX_MANIFEST_MAP_ITEMS)
+    ]
+)
+
+
+def _validate_bounded_json(
+    value: Mapping[str, JsonValue],
+    *,
+    max_items: int,
+    max_depth: int,
+    max_bytes: int,
+) -> Mapping[str, JsonValue]:
+    def visit(candidate: JsonValue, depth: int) -> None:
+        if depth > max_depth:
+            raise ValueError("JSON nesting exceeds the wire limit")
+        if isinstance(candidate, Mapping):
+            if len(candidate) > _MAX_MANIFEST_MAP_ITEMS:
+                raise ValueError("JSON object exceeds the wire item limit")
+            for key, nested in candidate.items():
+                if not isinstance(key, str) or not key or len(key) > 128:
+                    raise ValueError("JSON keys must be bounded non-empty strings")
+                visit(nested, depth + 1)
+        elif isinstance(candidate, list):
+            if len(candidate) > _MAX_MANIFEST_COLLECTION_ITEMS:
+                raise ValueError("JSON array exceeds the wire item limit")
+            for nested in candidate:
+                visit(nested, depth + 1)
+        elif isinstance(candidate, float) and not math.isfinite(candidate):
+            raise ValueError("JSON numbers must be finite")
+
+    if len(value) > max_items:
+        raise ValueError("JSON object exceeds the wire item limit")
+    visit(value, 0)
+    if len(canonical_json(value)) > max_bytes:
+        raise ValueError("JSON object exceeds the encoded wire limit")
+    return value
+
+
+def _manifest_object(value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
+    return _validate_bounded_json(
+        value,
+        max_items=_MAX_MANIFEST_MAP_ITEMS,
+        max_depth=_MAX_MANIFEST_DEPTH,
+        max_bytes=_MAX_MANIFEST_JSON_BYTES,
+    )
+
+
+def _status_object(value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
+    return _validate_bounded_json(
+        value,
+        max_items=_MAX_STATUS_MAP_ITEMS,
+        max_depth=4,
+        max_bytes=_MAX_STATUS_JSON_BYTES,
+    )
+
+
+ManifestObject = Annotated[
+    dict[BoundedJsonKey, JsonValue],
+    Field(max_length=_MAX_MANIFEST_MAP_ITEMS),
+    AfterValidator(_manifest_object),
+]
+StatusObject = Annotated[
+    dict[BoundedJsonKey, JsonValue],
+    Field(max_length=_MAX_STATUS_MAP_ITEMS),
+    AfterValidator(_status_object),
+]
+ParameterKey = Annotated[
+    str, StringConstraints(strict=True, min_length=1, max_length=64)
+]
+ParameterObject = Annotated[
+    dict[ParameterKey, JsonScalar], Field(max_length=_MAX_PARAMETER_ITEMS)
+]
+EventPayload = Annotated[
+    dict[ParameterKey, JsonScalar], Field(max_length=_MAX_EVENT_PAYLOAD_ITEMS)
+]
+EvidenceMetrics = Annotated[
+    dict[ParameterKey, JsonScalar], Field(max_length=_MAX_EVIDENCE_METRICS)
+]
 
 
 class ContractModel(BaseModel):
@@ -69,23 +198,57 @@ class ContractModel(BaseModel):
 
     model_config = ConfigDict(
         extra="forbid",
+        strict=True,
+        allow_inf_nan=False,
         validate_by_alias=True,
         validate_by_name=True,
         serialize_by_alias=True,
     )
 
+    @field_validator("*", mode="before")
+    @classmethod
+    def validate_wire_types(cls, value: Any, info) -> Any:
+        field = cls.model_fields.get(info.field_name)
+        if field is None:
+            return value
+        if get_origin(field.annotation) is tuple and isinstance(value, list):
+            return tuple(value)
+        if field.annotation is not datetime:
+            return value
+        if isinstance(value, datetime):
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError("date-time values must include an RFC3339 timezone")
+            return value
+        if not isinstance(value, str) or _RFC3339_PATTERN.fullmatch(value) is None:
+            raise ValueError("date-time values must be RFC3339 strings with timezone")
+        parsed = datetime.fromisoformat(
+            value.removesuffix("Z") + "+00:00" if value.endswith("Z") else value
+        )
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("date-time values must include an RFC3339 timezone")
+        return parsed
+
 
 class CompletionContract(ContractModel):
-    terminalConditions: list[str] = Field(min_length=1)
-    maxDurationMs: int = Field(gt=0)
+    terminalConditions: list[BoundedIdentifier] = Field(min_length=1, max_length=16)
+    maxDurationMs: int = Field(gt=0, le=3_600_000)
 
 
 class LeaseContract(ContractModel):
-    minLeaseMs: int = Field(gt=0)
-    defaultLeaseMs: int = Field(gt=0)
-    maxLeaseMs: int = Field(gt=0)
-    commandCadenceMs: int = Field(gt=0)
-    zeroCommand: dict[str, float]
+    model_config = ConfigDict(
+        json_schema_extra={
+            "x-unergy-invariants": [
+                "minLeaseMs <= defaultLeaseMs <= maxLeaseMs",
+                "commandCadenceMs <= minLeaseMs",
+            ]
+        }
+    )
+
+    minLeaseMs: int = Field(gt=0, le=60_000)
+    defaultLeaseMs: int = Field(gt=0, le=60_000)
+    maxLeaseMs: int = Field(gt=0, le=60_000)
+    commandCadenceMs: int = Field(gt=0, le=60_000)
+    zeroCommand: ParameterObject
     safeStopBehavior: Literal["ZERO_TWIST"]
 
     @model_validator(mode="after")
@@ -102,8 +265,14 @@ class LeaseContract(ContractModel):
 class ObservationContract(ContractModel):
     identifier: Literal["MICRODUCK_OBS_61_V1"]
     dimension: Literal[61]
-    fields: list[str] = Field(min_length=1)
-    units: dict[str, str]
+    fields: list[BoundedIdentifier] = Field(
+        min_length=61,
+        max_length=61,
+        json_schema_extra={
+            "prefixItems": [{"const": field} for field in OBSERVATION_FIELDS]
+        },
+    )
+    units: dict[BoundedJsonKey, BoundedIdentifier] = Field(max_length=61)
     normalization: Literal["BAKED_IN_ONNX", "DECLARED"]
 
     @model_validator(mode="after")
@@ -116,10 +285,16 @@ class ObservationContract(ContractModel):
 class ActionContract(ContractModel):
     identifier: Literal["MICRODUCK_ACTION_14_V1"]
     dimension: Literal[14]
-    joints: list[str] = Field(min_length=14, max_length=14)
-    units: str
-    scaling: dict[str, Any]
-    clipping: dict[str, Any]
+    joints: list[BoundedIdentifier] = Field(
+        min_length=14,
+        max_length=14,
+        json_schema_extra={
+            "prefixItems": [{"const": joint} for joint in CONTROLLED_SERVO_JOINTS]
+        },
+    )
+    units: BoundedIdentifier
+    scaling: ManifestObject
+    clipping: ManifestObject
 
     @model_validator(mode="after")
     def validate_controlled_servo_order(self) -> ActionContract:
@@ -129,35 +304,64 @@ class ActionContract(ContractModel):
 
 
 class PolicyArtifact(ContractModel):
-    policyRef: str = Field(min_length=1)
-    path: str = Field(min_length=1)
+    policyRef: BoundedIdentifier
+    path: BoundedPath
     digest: str = Field(pattern=_DIGEST_PATTERN)
-    taskId: str | None = None
-    runtimeRequirements: dict[str, Any] = Field(default_factory=dict)
-    checkpoint: str | None = None
-    experimentRef: str | None = None
+    taskId: BoundedIdentifier | None = None
+    runtimeRequirements: ManifestObject = Field(default_factory=dict)
+    checkpoint: BoundedPath | None = None
+    experimentRef: BoundedPath | None = None
 
 
 class ModelArtifact(ContractModel):
-    path: str = Field(min_length=1)
+    path: BoundedPath
     digest: str = Field(pattern=_DIGEST_PATTERN)
 
 
 class ActionDefinition(ContractModel):
-    actionCode: str = Field(min_length=1)
+    model_config = ConfigDict(
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {"availability": {"const": "AVAILABLE"}},
+                        "required": ["availability"],
+                    },
+                    "then": {
+                        "required": ["policyRef"],
+                        "properties": {"policyRef": {"type": "string", "minLength": 1}},
+                    },
+                },
+                {
+                    "if": {
+                        "properties": {"executionMode": {"const": "CONTINUOUS_LEASE"}},
+                        "required": ["executionMode"],
+                    },
+                    "then": {
+                        "required": ["lease"],
+                        "properties": {"lease": {"not": {"type": "null"}}},
+                    },
+                },
+            ]
+        }
+    )
+
+    actionCode: BoundedIdentifier
     executionMode: Literal["DISCRETE", "CONTINUOUS_LEASE"]
     availability: Literal["AVAILABLE", "UNAVAILABLE"]
-    policyRef: str | None = None
-    unavailableReason: str | None = None
-    parameterSchema: dict[str, Any]
+    policyRef: BoundedIdentifier | None = None
+    unavailableReason: BoundedIdentifier | None = None
+    parameterSchema: ManifestObject
     completion: CompletionContract | None = None
     lease: LeaseContract | None = None
-    displayName: str | None = None
-    description: str | None = None
-    localizedLabels: dict[str, str] | None = None
-    preconditions: dict[str, Any] | None = None
-    safety: dict[str, Any] | None = None
-    qualificationRefs: list[str] | None = None
+    displayName: BoundedIdentifier | None = None
+    description: BoundedDescription | None = None
+    localizedLabels: dict[BoundedIdentifier, BoundedDescription] | None = Field(
+        default=None, max_length=32
+    )
+    preconditions: ManifestObject | None = None
+    safety: ManifestObject | None = None
+    qualificationRefs: list[BoundedPath] | None = Field(default=None, max_length=32)
 
     @model_validator(mode="after")
     def validate_mode_and_artifact(self) -> ActionDefinition:
@@ -168,31 +372,40 @@ class ActionDefinition(ContractModel):
         return self
 
 
-class PolicyBundle(ContractModel):
+class UnsignedPolicyBundleManifest(ContractModel):
+    """Builder-only manifest representation which cannot be published as signed V1."""
+
     schema_: Literal["MICRODUCK_POLICY_BUNDLE_V1"] = Field(
         ..., alias="schema", serialization_alias="schema"
     )
-    bundleId: str = Field(min_length=1)
-    bundleVersion: str = Field(min_length=1)
-    bundleDigest: str | None = Field(default=None, pattern=_DIGEST_PATTERN)
+    bundleId: BoundedIdentifier
+    bundleVersion: Annotated[
+        str,
+        StringConstraints(
+            strict=True,
+            min_length=1,
+            max_length=64,
+            pattern=r"^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$",
+        ),
+    ]
     createdAt: datetime
-    sourceRepository: str = Field(min_length=1)
-    sourceCommit: str = Field(min_length=1)
+    sourceRepository: BoundedPath
+    sourceCommit: BoundedIdentifier
     robotModel: Literal["MICRODUCK"]
     observationContract: ObservationContract
     actionContract: ActionContract
     model: ModelArtifact
-    policies: list[PolicyArtifact]
-    actions: list[ActionDefinition]
-    qualification: dict[str, Any]
-    license: dict[str, Any]
+    policies: list[PolicyArtifact] = Field(max_length=_MAX_MANIFEST_COLLECTION_ITEMS)
+    actions: list[ActionDefinition] = Field(max_length=_MAX_MANIFEST_COLLECTION_ITEMS)
+    qualification: ManifestObject
+    license: ManifestObject
 
     @property
     def schema(self) -> str:
         return self.schema_
 
     @model_validator(mode="after")
-    def validate_unique_references(self) -> PolicyBundle:
+    def validate_unique_references(self) -> UnsignedPolicyBundleManifest:
         policy_refs = [policy.policyRef for policy in self.policies]
         if len(policy_refs) != len(set(policy_refs)):
             raise ValueError("policyRef values must be unique")
@@ -206,6 +419,41 @@ class PolicyBundle(ContractModel):
         return self
 
 
+class PolicyBundle(UnsignedPolicyBundleManifest):
+    """Published V1 manifest; a digest is always present and non-null on the wire."""
+
+    bundleDigest: str = Field(pattern=_DIGEST_PATTERN)
+
+
+def unsigned_policy_bundle_manifest(
+    bundle: PolicyBundle | UnsignedPolicyBundleManifest,
+) -> UnsignedPolicyBundleManifest:
+    """Return the explicit digest-free manifest used as the bundle hash input."""
+    if isinstance(bundle, UnsignedPolicyBundleManifest) and not isinstance(
+        bundle, PolicyBundle
+    ):
+        return bundle
+    return UnsignedPolicyBundleManifest.model_validate(
+        bundle.model_dump(mode="python", by_alias=True, exclude={"bundleDigest"})
+    )
+
+
+def publish_policy_bundle(
+    unsigned: UnsignedPolicyBundleManifest,
+    artifact_digests: Mapping[str, str],
+) -> PolicyBundle:
+    """Bind an unsigned manifest to the canonical artifact map and publish strict V1."""
+    digest = sha256_prefixed(
+        {
+            "manifest": unsigned.model_dump(mode="json", by_alias=True),
+            "artifacts": artifact_digests,
+        }
+    )
+    return PolicyBundle.model_validate(
+        unsigned.model_dump(mode="python", by_alias=True) | {"bundleDigest": digest}
+    )
+
+
 def _reject_raw_control_keys(value: Any) -> None:
     if isinstance(value, Mapping):
         for key, nested_value in value.items():
@@ -217,52 +465,63 @@ def _reject_raw_control_keys(value: Any) -> None:
             _reject_raw_control_keys(nested_value)
 
 
+class Scenario(ContractModel):
+    """Exact seeded reset scenario supported by the governed V1 runtime."""
+
+    terrain: Literal["flat", "ramp"]
+    seed: int = Field(ge=0, le=4_294_967_295)
+
+
 class TaskCreateRequest(ContractModel):
     schema_: Literal["MICRODUCK_SIM_TASK_V1"] = Field(
         ..., alias="schema", serialization_alias="schema"
     )
     taskId: str = Field(pattern=_TASK_ID_PATTERN)
-    actionCode: str = Field(min_length=1)
-    bundleVersion: str = Field(min_length=1)
+    actionCode: BoundedIdentifier
+    bundleVersion: BoundedIdentifier
     bundleDigest: str = Field(pattern=_DIGEST_PATTERN)
-    parameters: dict[str, Any]
-    scenario: dict[str, Any]
-    leaseMs: int | None = Field(default=None, gt=0)
-    requestedBy: str = Field(min_length=1)
+    parameters: ParameterObject
+    scenario: Scenario
+    leaseMs: int | None = Field(default=None, gt=0, le=60_000)
+    requestedBy: Annotated[
+        str, StringConstraints(strict=True, min_length=1, max_length=256)
+    ]
 
     @property
     def schema(self) -> str:
         return self.schema_
 
-    @model_validator(mode="after")
-    def reject_raw_control_intent(self) -> TaskCreateRequest:
-        _reject_raw_control_keys(self.parameters)
-        return self
+    @field_validator("parameters", mode="before")
+    @classmethod
+    def reject_raw_control_intent(cls, value: Any) -> Any:
+        _reject_raw_control_keys(value)
+        return value
 
 
 class TaskCommandRequest(ContractModel):
-    commandSequence: int = Field(ge=0)
-    parameters: dict[str, Any]
-    leaseMs: int = Field(gt=0)
+    commandSequence: int = Field(ge=0, le=9_223_372_036_854_775_807)
+    parameters: ParameterObject
+    leaseMs: int = Field(gt=0, le=60_000)
 
-    @model_validator(mode="after")
-    def reject_raw_control_intent(self) -> TaskCommandRequest:
-        _reject_raw_control_keys(self.parameters)
-        return self
+    @field_validator("parameters", mode="before")
+    @classmethod
+    def reject_raw_control_intent(cls, value: Any) -> Any:
+        _reject_raw_control_keys(value)
+        return value
 
 
 class TaskEvidence(ContractModel):
     bundleDigest: str = Field(pattern=_DIGEST_PATTERN)
     policyDigest: str = Field(pattern=_DIGEST_PATTERN)
     modelDigest: str | None = Field(default=None, pattern=_DIGEST_PATTERN)
-    metrics: dict[str, Any] = Field(default_factory=dict)
-    stopReason: str | None = None
+    metrics: EvidenceMetrics = Field(default_factory=dict)
+    stopReason: BoundedIdentifier | None = None
 
 
 class TaskEvent(ContractModel):
-    sequence: int = Field(ge=0)
-    eventType: str = Field(min_length=1)
-    payload: dict[str, Any] = Field(default_factory=dict)
+    sequence: int = Field(ge=0, le=9_223_372_036_854_775_807)
+    eventType: BoundedIdentifier
+    payload: EventPayload = Field(default_factory=dict)
     createdAt: datetime
 
 
@@ -278,13 +537,13 @@ class TaskSnapshot(ContractModel):
         "TIMED_OUT",
         "UNKNOWN",
     ]
-    actionCode: str = Field(min_length=1)
-    bundleVersion: str = Field(min_length=1)
+    actionCode: BoundedIdentifier
+    bundleVersion: BoundedIdentifier
     bundleDigest: str = Field(pattern=_DIGEST_PATTERN)
     requestedAt: datetime
     updatedAt: datetime
     evidence: TaskEvidence | None = None
-    stopReason: str | None = None
+    stopReason: BoundedIdentifier | None = None
 
 
 class RobotStatus(ContractModel):
@@ -292,58 +551,58 @@ class RobotStatus(ContractModel):
         ..., alias="schema", serialization_alias="schema"
     )
     timestamp: datetime
-    basePositionM: tuple[float, float, float]
-    baseOrientationXyzw: tuple[float, float, float, float]
-    baseLinearVelocityMps: tuple[float, float, float] = Field(
+    basePositionM: tuple[FiniteFloat, FiniteFloat, FiniteFloat]
+    baseOrientationXyzw: tuple[FiniteFloat, FiniteFloat, FiniteFloat, FiniteFloat]
+    baseLinearVelocityMps: tuple[FiniteFloat, FiniteFloat, FiniteFloat] = Field(
         description="World-frame trunk-base linear velocity."
     )
-    baseAngularVelocityRadps: tuple[float, float, float] = Field(
+    baseAngularVelocityRadps: tuple[FiniteFloat, FiniteFloat, FiniteFloat] = Field(
         description="Trunk-body-frame angular velocity, matching the training IMU gyro."
     )
     jointPositionsRad: tuple[
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
     ]
     jointVelocitiesRadps: tuple[
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
     ]
-    policyTarget: dict[str, Any]
-    requestedMotion: dict[str, Any]
-    appliedMotion: dict[str, Any]
-    limitingReason: str | None = None
-    activePolicyRef: str | None = None
-    activeActionCode: str | None = None
+    policyTarget: StatusObject
+    requestedMotion: StatusObject
+    appliedMotion: StatusObject
+    limitingReason: BoundedIdentifier | None = None
+    activePolicyRef: BoundedIdentifier | None = None
+    activeActionCode: BoundedIdentifier | None = None
     activeTaskId: str | None = Field(default=None, pattern=_TASK_ID_PATTERN)
-    simulationTimeS: float = Field(ge=0)
-    loopFrequencyHz: float = Field(ge=0)
+    simulationTimeS: FiniteFloat = Field(ge=0)
+    loopFrequencyHz: FiniteFloat = Field(ge=0)
     fallen: bool
     limp: bool
-    health: dict[str, Any]
+    health: StatusObject
 
     @property
     def schema(self) -> str:
@@ -358,9 +617,10 @@ def _canonical_value(value: Any) -> Any:
             value.model_dump(mode="json", by_alias=True, exclude_none=True)
         )
     if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("canonical JSON object keys must be strings")
         return {
-            str(key): _canonical_value(nested_value)
-            for key, nested_value in value.items()
+            key: _canonical_value(nested_value) for key, nested_value in value.items()
         }
     if isinstance(value, tuple | list):
         return [_canonical_value(nested_value) for nested_value in value]

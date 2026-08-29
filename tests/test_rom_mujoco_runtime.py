@@ -13,6 +13,7 @@ import onnx
 import pytest
 from fastapi.testclient import TestClient
 from onnx import TensorProto, helper
+from pydantic import ValidationError
 
 from mjlab_microduck.rom.action_catalog import (
     CODE_OWNED_ACTION_CODES,
@@ -28,8 +29,12 @@ from mjlab_microduck.rom.contracts import (
     ObservationContract,
     PolicyArtifact,
     PolicyBundle,
+    Scenario,
     TaskCreateRequest,
+    UnsignedPolicyBundleManifest,
+    publish_policy_bundle,
     sha256_prefixed,
+    unsigned_policy_bundle_manifest,
 )
 from mjlab_microduck.rom.main import create_configured_app, load_verified_bundle
 from mjlab_microduck.rom.mujoco_runtime import MicroduckMujocoRuntime
@@ -590,7 +595,7 @@ def _write_verified_bundle(
         scaling={},
         clipping={},
     )
-    unsigned = PolicyBundle(
+    unsigned = UnsignedPolicyBundleManifest(
         schema="MICRODUCK_POLICY_BUNDLE_V1",
         bundleId="org.microduck.fixture",
         bundleVersion="1.0.0",
@@ -630,18 +635,7 @@ def _write_verified_bundle(
     }
     if include_dependency and declare_dependency:
         artifact_digests["models/extra.xml"] = _digest(dependency_path)
-    bundle = unsigned.model_copy(
-        update={
-            "bundleDigest": sha256_prefixed(
-                {
-                    "manifest": unsigned.model_dump(
-                        mode="json", by_alias=True, exclude={"bundleDigest"}
-                    ),
-                    "artifacts": artifact_digests,
-                }
-            )
-        }
-    )
+    bundle = publish_policy_bundle(unsigned, artifact_digests)
     (root / "microduck-policy-bundle.json").write_text(
         bundle.model_dump_json(by_alias=True, exclude_none=True)
     )
@@ -678,8 +672,8 @@ def _rewrite_as_stand_bundle(root: Path, source: PolicyBundle) -> PolicyBundle:
         )
         for code in CODE_OWNED_ACTION_CODES
     ]
-    unsigned = source.model_copy(
-        update={"bundleDigest": None, "policies": [policy], "actions": actions}
+    unsigned = unsigned_policy_bundle_manifest(source).model_copy(
+        update={"policies": [policy], "actions": actions}
     )
     digests = {
         source.model.path: source.model.digest,
@@ -688,18 +682,7 @@ def _rewrite_as_stand_bundle(root: Path, source: PolicyBundle) -> PolicyBundle:
             item["path"]: item["digest"] for item in source.license.get("artifacts", [])
         },
     }
-    rewritten = unsigned.model_copy(
-        update={
-            "bundleDigest": sha256_prefixed(
-                {
-                    "manifest": unsigned.model_dump(
-                        mode="json", by_alias=True, exclude={"bundleDigest"}
-                    ),
-                    "artifacts": digests,
-                }
-            )
-        }
-    )
+    rewritten = publish_policy_bundle(unsigned, digests)
     (root / "microduck-policy-bundle.json").write_text(
         rewritten.model_dump_json(by_alias=True, exclude_none=True)
     )
@@ -725,8 +708,8 @@ def test_runtime_readiness_rejects_available_action_with_wrong_policy_task_ident
     wrong_policy = source.policies[0].model_copy(
         update={"taskId": "Mjlab-VelStand-Flat-MicroDuck"}
     )
-    unsigned = source.model_copy(
-        update={"bundleDigest": None, "policies": [wrong_policy]}
+    unsigned = unsigned_policy_bundle_manifest(source).model_copy(
+        update={"policies": [wrong_policy]}
     )
     artifact_digests = {
         source.model.path: source.model.digest,
@@ -735,18 +718,7 @@ def test_runtime_readiness_rejects_available_action_with_wrong_policy_task_ident
             item["path"]: item["digest"] for item in source.license.get("artifacts", [])
         },
     }
-    rewritten = unsigned.model_copy(
-        update={
-            "bundleDigest": sha256_prefixed(
-                {
-                    "manifest": unsigned.model_dump(
-                        mode="json", by_alias=True, exclude={"bundleDigest"}
-                    ),
-                    "artifacts": artifact_digests,
-                }
-            )
-        }
-    )
+    rewritten = publish_policy_bundle(unsigned, artifact_digests)
     (root / "microduck-policy-bundle.json").write_text(
         rewritten.model_dump_json(by_alias=True, exclude_none=True)
     )
@@ -833,8 +805,8 @@ def test_runtime_readiness_rejects_action_preconditions_outside_qualification(
             }
         }
     )
-    unsigned = source.model_copy(
-        update={"bundleDigest": None, "actions": [action, *source.actions[1:]]}
+    unsigned = unsigned_policy_bundle_manifest(source).model_copy(
+        update={"actions": [action, *source.actions[1:]]}
     )
     artifacts = {
         source.model.path: source.model.digest,
@@ -843,18 +815,7 @@ def test_runtime_readiness_rejects_action_preconditions_outside_qualification(
             item["path"]: item["digest"] for item in source.license.get("artifacts", [])
         },
     }
-    rewritten = unsigned.model_copy(
-        update={
-            "bundleDigest": sha256_prefixed(
-                {
-                    "manifest": unsigned.model_dump(
-                        mode="json", by_alias=True, exclude={"bundleDigest"}
-                    ),
-                    "artifacts": artifacts,
-                }
-            )
-        }
-    )
+    rewritten = publish_policy_bundle(unsigned, artifacts)
     (root / "microduck-policy-bundle.json").write_text(
         rewritten.model_dump_json(by_alias=True, exclude_none=True)
     )
@@ -1277,7 +1238,7 @@ def test_runtime_rejects_requested_terrain_not_bound_to_loaded_model(
     request = _request().model_copy(
         update={
             "bundleDigest": bundle.bundleDigest,
-            "scenario": {"terrain": "slope", "seed": 7},
+            "scenario": Scenario(terrain="ramp", seed=7),
         }
     )
 
@@ -1287,18 +1248,11 @@ def test_runtime_rejects_requested_terrain_not_bound_to_loaded_model(
 
 def test_runtime_rejects_unknown_scenario_fields(tmp_path: Path) -> None:
     """Manifest-like free-form scenario data must not silently alter deployment semantics."""
-    root = tmp_path / "bundle"
-    bundle = _write_verified_bundle(root)
-    runtime = MicroduckMujocoRuntime(root, bundle, realtime=False)
-    request = _request().model_copy(
-        update={
-            "bundleDigest": bundle.bundleDigest,
-            "scenario": {"terrain": "flat", "seed": 7, "friction": 0.01},
-        }
-    )
+    payload = _request().model_dump(mode="json", by_alias=True)
+    payload["scenario"]["friction"] = 0.01
 
-    with pytest.raises(ValueError, match="exact terrain and seed"):
-        runtime.validate(bundle.actions[0], request)
+    with pytest.raises(ValidationError):
+        TaskCreateRequest.model_validate(payload)
 
 
 def test_seed_materializes_a_reproducible_physical_servo_reset(tmp_path: Path) -> None:
@@ -1317,7 +1271,7 @@ def test_seed_materializes_a_reproducible_physical_servo_reset(tmp_path: Path) -
     runtime.safe_stop(same_handle, "CANCELLED")
 
     other_request = first_request.model_copy(
-        update={"taskId": "3" * 32, "scenario": {"terrain": "flat", "seed": 8}}
+        update={"taskId": "3" * 32, "scenario": Scenario(terrain="flat", seed=8)}
     )
     other_handle = runtime.start(bundle.actions[0], other_request)
     other_reset = runtime._data.qpos[runtime._joint_qpos_indices].copy()

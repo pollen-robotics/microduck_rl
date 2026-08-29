@@ -68,6 +68,10 @@ class PreconditionFailed(SimulatorServiceError):
     code = "PRECONDITION_FAILED"
 
 
+class NotReady(SimulatorServiceError):
+    code = "NOT_READY"
+
+
 class RuntimeException(SimulatorServiceError):
     code = "RUNTIME_EXCEPTION"
 
@@ -123,8 +127,6 @@ class SimulatorTaskService:
         pollIntervalS: float = 0.05,
         monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        if bundle.bundleDigest is None:
-            raise ValueError("an executable bundle requires a bundle digest")
         validate_bundle_action_envelope(bundle)
         if pollIntervalS <= 0:
             raise ValueError("pollIntervalS must be positive")
@@ -136,6 +138,7 @@ class SimulatorTaskService:
         self._monotonic_clock = monotonic_clock
         self._lock = Lock()
         self._active: _ActiveTask | None = None
+        self._watchdog_healthy = True
 
     def create_task(self, request: TaskCreateRequest):
         """Accept a valid discrete task and begin its durable worker lifecycle."""
@@ -149,6 +152,7 @@ class SimulatorTaskService:
                     raise TaskConflict(str(exc)) from exc
                 return snapshot
 
+            self._require_motion_ready()
             action = self._validate_request(request)
             if self._active is not None:
                 raise RobotBusy("robot already has an active task")
@@ -208,18 +212,47 @@ class SimulatorTaskService:
                 )
             return self._store.get(task_id) or snapshot
 
-    def events_after(self, task_id: str, sequence: int):
+    def events_after(self, task_id: str, sequence: int, *, page_size: int = 100):
         """Return ordered durable events, preserving the not-found API contract."""
         self.get_task(task_id)
-        return self._store.events_after(task_id, sequence)
+        return self._store.events_after(task_id, sequence, page_size=page_size)
 
     def robot_status(self):
         """Expose the runtime's bounded robot status snapshot."""
         return self._runtime.status()
 
+    def motion_readiness(self) -> tuple[bool, tuple[str, ...]]:
+        """Return the one fail-closed predicate used for new or renewed motion."""
+        reasons: list[str] = []
+        if not self._watchdog_healthy:
+            reasons.append("WATCHDOG_UNHEALTHY")
+        try:
+            health = self._runtime.status().health
+            if health.get("ready") is not True or health.get("healthy") is not True:
+                reasons.append("RUNTIME_UNAVAILABLE")
+        except Exception:  # noqa: BLE001 - readiness must not expose runtime failures.
+            reasons.append("RUNTIME_UNAVAILABLE")
+        unique = tuple(sorted(set(reasons)))
+        return not unique, unique
+
+    def watchdog_failed(self) -> None:
+        """Permanently fail closed and terminalize continuous ownership safely."""
+        with self._lock:
+            self._watchdog_healthy = False
+            active = self._active
+            if active is None or not active.continuous:
+                return
+            self._stop_continuous_locked(
+                active,
+                "FAILED",
+                "WATCHDOG_FAILURE",
+                sample_metrics={"safetyFailure": "WATCHDOG_FAILURE"},
+            )
+
     def command(self, task_id: str, command: TaskCommandRequest):
         """Accept a monotonic continuous command and renew its target-side lease."""
         with self._lock:
+            self._require_motion_ready()
             snapshot = self._store.get(task_id)
             if snapshot is None:
                 raise TaskNotFound(f"task not found: {task_id}")
@@ -324,6 +357,11 @@ class SimulatorTaskService:
             raise ActionUnavailable("action policy identity is not executable")
         self._require_preconditions(action, request)
         return action
+
+    def _require_motion_ready(self) -> None:
+        ready, _ = self.motion_readiness()
+        if not ready:
+            raise NotReady("simulator is not ready for motion")
 
     def _validate_command(
         self, command: TaskCommandRequest, action: ActionDefinition
@@ -442,7 +480,7 @@ class SimulatorTaskService:
     def _require_preconditions(
         self, action: ActionDefinition, request: TaskCreateRequest
     ) -> None:
-        scenario_terrain = request.scenario.get("terrain")
+        scenario_terrain = request.scenario.terrain
         expected = code_owned_action_definition(
             action.actionCode,
             availability=action.availability,
@@ -452,10 +490,7 @@ class SimulatorTaskService:
         )
         conditions = expected.preconditions or {}
         allowed_terrains = conditions["allowedTerrains"]
-        if (
-            not isinstance(scenario_terrain, str)
-            or scenario_terrain not in allowed_terrains
-        ):
+        if scenario_terrain not in allowed_terrains:
             raise PreconditionFailed("scenario terrain is not allowed for this action")
         try:
             status = self._runtime.status()

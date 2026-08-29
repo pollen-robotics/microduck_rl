@@ -11,13 +11,20 @@ from pydantic import ValidationError
 from mjlab_microduck.rom.contracts import (
     ActionContract,
     ActionDefinition,
+    CompletionContract,
     LeaseContract,
     ObservationContract,
     PolicyBundle,
     RobotStatus,
+    Scenario,
+    TaskCommandRequest,
     TaskCreateRequest,
+    TaskEvent,
+    TaskEvidence,
+    UnsignedPolicyBundleManifest,
     canonical_json,
     sha256_prefixed,
+    unsigned_policy_bundle_manifest,
 )
 
 CONTROLLED_JOINTS = (
@@ -274,6 +281,122 @@ def test_published_v1_models_require_explicit_schema_identifiers():
             model.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        (CompletionContract, {"terminalConditions": ["DONE"], "maxDurationMs": "1"}),
+        (
+            TaskCommandRequest,
+            {"commandSequence": 1.0, "parameters": {}, "leaseMs": 100},
+        ),
+        (
+            TaskCommandRequest,
+            {"commandSequence": True, "parameters": {}, "leaseMs": 100},
+        ),
+        (
+            RobotStatus,
+            valid_robot_status() | {"loopFrequencyHz": "50.0"},
+        ),
+    ],
+)
+def test_wire_models_reject_numeric_and_string_coercion(model, payload):
+    """Weakening strict validation would let distinct JSON types share one intent hash."""
+    with pytest.raises(ValidationError):
+        model.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [0, "0", "2026-08-29", "2026-08-29 00:00:00Z", "2026-08-29T00:00:00"],
+)
+def test_wire_datetimes_accept_only_rfc3339_strings_with_timezone(timestamp):
+    """Permissive datetime coercion would make event timestamps non-portable across clients."""
+    payload = {
+        "sequence": 0,
+        "eventType": "TASK_VALIDATING",
+        "payload": {},
+        "createdAt": timestamp,
+    }
+
+    with pytest.raises(ValidationError):
+        TaskEvent.model_validate(payload)
+
+    accepted = TaskEvent.model_validate(payload | {"createdAt": "2026-08-29T00:00:00Z"})
+    assert accepted.createdAt.isoformat() == "2026-08-29T00:00:00+00:00"
+
+
+def test_published_bundle_requires_digest_and_unsigned_hashing_is_explicit():
+    """Making the published digest nullable would let an unsigned manifest cross the trust boundary."""
+    payload = valid_bundle()
+    payload.pop("bundleDigest")
+    with pytest.raises(ValidationError):
+        PolicyBundle.model_validate(payload)
+    with pytest.raises(ValidationError):
+        PolicyBundle.model_validate(payload | {"bundleDigest": None})
+
+    unsigned = UnsignedPolicyBundleManifest.model_validate(payload)
+    published = PolicyBundle.model_validate(
+        payload | {"bundleDigest": "sha256:" + "a" * 64}
+    )
+    assert unsigned_policy_bundle_manifest(published) == unsigned
+    assert "bundleDigest" not in unsigned.model_dump(by_alias=True)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        {"terrain": "stairs", "seed": 1},
+        {"terrain": "flat", "seed": -1},
+        {"terrain": "flat", "seed": 2**32},
+        {"terrain": "flat", "seed": "1"},
+        {"terrain": "flat", "seed": 1, "friction": 0.1},
+    ],
+)
+def test_scenario_is_the_exact_seeded_v1_runtime_contract(scenario):
+    """A free-form scenario would let callers mutate reset/runtime semantics outside V1."""
+    with pytest.raises(ValidationError):
+        Scenario.model_validate(scenario)
+
+    assert Scenario.model_validate({"terrain": "ramp", "seed": 2**32 - 1}) == Scenario(
+        terrain="ramp", seed=2**32 - 1
+    )
+
+
+def test_task_parameters_evidence_and_event_payloads_are_flat_and_bounded():
+    """Unbounded nested request/evidence maps would permit persistence and response amplification."""
+    task = {
+        "schema": "MICRODUCK_SIM_TASK_V1",
+        "taskId": "0" * 32,
+        "actionCode": "STAND",
+        "bundleVersion": "1.0.0",
+        "bundleDigest": "sha256:" + "a" * 64,
+        "parameters": {},
+        "scenario": {"terrain": "flat", "seed": 1},
+        "requestedBy": "execution-1",
+    }
+    with pytest.raises(ValidationError):
+        TaskCreateRequest.model_validate(task | {"parameters": {"nested": {"x": 1}}})
+    with pytest.raises(ValidationError):
+        TaskCreateRequest.model_validate(
+            task | {"parameters": {f"p{index}": index for index in range(17)}}
+        )
+    with pytest.raises(ValidationError):
+        TaskEvidence(
+            bundleDigest="sha256:" + "a" * 64,
+            policyDigest="sha256:" + "b" * 64,
+            metrics={f"metric{index}": index for index in range(33)},
+        )
+    with pytest.raises(ValidationError):
+        TaskEvent.model_validate(
+            {
+                "sequence": 0,
+                "eventType": "TASK_EVENT",
+                "payload": {f"field{index}": index for index in range(17)},
+                "createdAt": "2026-08-29T00:00:00Z",
+            }
+        )
+
+
 def test_lease_contract_rejects_invalid_semantic_bounds():
     """Ignoring lease ordering would let a manifest declare an impossible deadman interval."""
     with pytest.raises(ValidationError, match="lease bounds"):
@@ -347,7 +470,7 @@ def test_checked_in_schemas_lock_layouts_error_codes_and_portable_lease_invarian
             },
             "then": {
                 "required": ["lease"],
-                "properties": {"lease": {"$ref": "#/$defs/LeaseContract"}},
+                "properties": {"lease": {"not": {"type": "null"}}},
             },
         },
     ]
@@ -362,3 +485,29 @@ def test_checked_in_schemas_lock_layouts_error_codes_and_portable_lease_invarian
     assert "schema" in bundle_schema["required"]
     assert "schema" in openapi["components"]["schemas"]["TaskCreateRequest"]["required"]
     assert "schema" in openapi["components"]["schemas"]["RobotStatus"]["required"]
+
+
+def test_tracked_bundle_schema_matches_the_complete_generated_contract():
+    """Partial hand-maintained parity would leave bounds or required fields inconsistent."""
+    tracked = json.loads(
+        (
+            Path(__file__).parents[1] / "schemas/microduck-policy-bundle-v1.schema.json"
+        ).read_text()
+    )
+    tracked.pop("$schema")
+    tracked.pop("$id")
+    generated = PolicyBundle.model_json_schema(by_alias=True)
+
+    assert _normalize_json_schema(tracked) == _normalize_json_schema(generated)
+
+
+def _normalize_json_schema(value):
+    if isinstance(value, list):
+        return [_normalize_json_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: _normalize_json_schema(item)
+        for key, item in value.items()
+        if key != "title" and not (key == "additionalProperties" and item is True)
+    }

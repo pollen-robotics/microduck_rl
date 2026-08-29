@@ -2,212 +2,1231 @@ openapi: 3.1.0
 info:
   title: MicroDuck ROM Simulator API
   version: 1.0.0
-  description: Versioned typed-intent API for the MicroDuck MuJoCo simulator.
 paths:
   /v1/health:
     get:
+      summary: Health
       operationId: health
-      summary: Process liveness
       responses:
         '200':
-          description: Simulator process is alive.
+          description: Successful Response
           content:
             application/json:
-              schema: {$ref: '#/components/schemas/HealthResponse'}
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
   /v1/ready:
     get:
+      summary: Ready
       operationId: ready
-      security: [{bearerAuth: []}]
       responses:
-        '200': {description: Readiness status, content: {application/json: {schema: {$ref: '#/components/schemas/ReadyResponse'}}}}
-        '401': {$ref: '#/components/responses/AuthRequired'}
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
   /v1/catalog:
     get:
+      summary: Catalog
       operationId: catalog
-      security: [{bearerAuth: []}]
       responses:
-        '200': {description: Installed manifest actions and availability, content: {application/json: {schema: {$ref: '#/components/schemas/CatalogResponse'}}}}
-        '401': {$ref: '#/components/responses/AuthRequired'}
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
   /v1/robot/status:
     get:
+      summary: Robot Status
       operationId: robotStatus
-      security: [{bearerAuth: []}]
       responses:
-        '200': {description: Bounded BIPED_POSE_V1 snapshot, content: {application/json: {schema: {$ref: '#/components/schemas/RobotStatus'}}}}
-        '401': {$ref: '#/components/responses/AuthRequired'}
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RobotStatus'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
   /v1/tasks:
     post:
+      summary: Create Task
       operationId: createTask
-      security: [{bearerAuth: []}]
       requestBody:
-        required: true
         content:
-          application/json: {schema: {$ref: '#/components/schemas/TaskCreateRequest'}}
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCreateRequest'
+        required: true
       responses:
-        '202': {description: Created or idempotently returned task, content: {application/json: {schema: {$ref: '#/components/schemas/TaskSnapshot'}}}}
-        '400': {$ref: '#/components/responses/ParameterInvalid'}
-        '401': {$ref: '#/components/responses/AuthRequired'}
-        '409': {$ref: '#/components/responses/TaskConflict'}
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskSnapshot'
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Request Entity Too Large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
   /v1/tasks/{taskId}:
-    parameters: [{$ref: '#/components/parameters/TaskId'}]
     get:
+      summary: Get Task
       operationId: getTask
-      security: [{bearerAuth: []}]
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: taskId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: ^[0-9a-f]{32}$
+          title: Taskid
       responses:
-        '200': {description: Durable task snapshot, content: {application/json: {schema: {$ref: '#/components/schemas/TaskSnapshot'}}}}
-        '401': {$ref: '#/components/responses/AuthRequired'}
-        '404': {$ref: '#/components/responses/TaskNotFound'}
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskSnapshot'
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Bad Request
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Unauthorized
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Service Unavailable
   /v1/tasks/{taskId}/cancel:
-    parameters: [{$ref: '#/components/parameters/TaskId'}]
     post:
+      summary: Cancel Task
       operationId: cancelTask
-      security: [{bearerAuth: []}]
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: taskId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: ^[0-9a-f]{32}$
+          title: Taskid
       responses:
-        '200': {description: Idempotent safe-stop result, content: {application/json: {schema: {$ref: '#/components/schemas/TaskSnapshot'}}}}
-        '401': {$ref: '#/components/responses/AuthRequired'}
-        '404': {$ref: '#/components/responses/TaskNotFound'}
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskSnapshot'
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Bad Request
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Unauthorized
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Service Unavailable
   /v1/tasks/{taskId}/command:
-    parameters: [{$ref: '#/components/parameters/TaskId'}]
     put:
+      summary: Command Task
       operationId: commandTask
-      security: [{bearerAuth: []}]
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: taskId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: ^[0-9a-f]{32}$
+          title: Taskid
       requestBody:
         required: true
         content:
-          application/json: {schema: {$ref: '#/components/schemas/TaskCommandRequest'}}
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCommandRequest'
       responses:
-        '200': {description: Idempotently accepted command, content: {application/json: {schema: {$ref: '#/components/schemas/TaskSnapshot'}}}}
-        '400': {$ref: '#/components/responses/ParameterInvalid'}
-        '401': {$ref: '#/components/responses/AuthRequired'}
-        '404': {$ref: '#/components/responses/TaskNotFound'}
-        '409': {$ref: '#/components/responses/CommandConflict'}
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskSnapshot'
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Bad Request
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Unauthorized
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Conflict
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Request Entity Too Large
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Service Unavailable
   /v1/tasks/{taskId}/events:
-    parameters: [{$ref: '#/components/parameters/TaskId'}]
     get:
+      summary: Task Events
       operationId: taskEvents
-      security: [{bearerAuth: []}]
+      security:
+      - bearerAuth: []
       parameters:
-        - name: afterSequence
-          in: query
-          required: false
-          schema: {type: integer, minimum: 0, default: 0}
+      - name: taskId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: ^[0-9a-f]{32}$
+          title: Taskid
+      - name: afterSequence
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: -1
+          default: -1
+          title: Aftersequence
+      - name: pageSize
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 100
+          minimum: 1
+          default: 100
+          title: Pagesize
       responses:
-        '200': {description: Ordered event page, content: {application/json: {schema: {$ref: '#/components/schemas/TaskEventPage'}}}}
-        '401': {$ref: '#/components/responses/AuthRequired'}
-        '404': {$ref: '#/components/responses/TaskNotFound'}
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskEventPage'
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Bad Request
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Unauthorized
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Service Unavailable
 components:
-  securitySchemes:
-    bearerAuth: {type: http, scheme: bearer, bearerFormat: opaque-token}
-  parameters:
-    TaskId:
-      name: taskId
-      in: path
-      required: true
-      schema: {type: string, pattern: '^[0-9a-f]{32}$'}
-  responses:
-    AuthRequired:
-      description: Bearer token is absent or invalid.
-      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}, example: {code: AUTH_REQUIRED, message: Authentication is required, details: {}}}}
-    ParameterInvalid:
-      description: Typed intent is invalid.
-      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}, example: {code: PARAMETER_INVALID, message: Parameters are invalid, details: {}}}}
-    TaskConflict:
-      description: Task ID is reused with different content or the robot is busy.
-      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}, examples: {taskIdConflict: {value: {code: TASK_ID_CONFLICT, message: Task ID conflicts with an existing request, details: {}}}, robotBusy: {value: {code: ROBOT_BUSY, message: Robot already has an active task, details: {}}}}}}
-    StaleCommand:
-      description: Command sequence is stale.
-      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}, example: {code: STALE_COMMAND, message: Command sequence is stale, details: {}}}}
-    CommandConflict:
-      description: Command sequence is stale or reused with different command content.
-      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}, examples: {staleCommand: {value: {code: STALE_COMMAND, message: Command sequence is stale, details: {}}}, sequenceConflict: {value: {code: COMMAND_SEQUENCE_CONFLICT, message: Command sequence conflicts with already accepted content, details: {}}}}}}
-    TaskNotFound:
-      description: Task does not exist.
-      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}, example: {code: TASK_NOT_FOUND, message: Task was not found, details: {}}}}
   schemas:
-    Digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
-    Error:
-      type: object
-      additionalProperties: false
-      required: [code, message, details]
-      properties: {code: {type: string, enum: [AUTH_REQUIRED, NOT_READY, BUNDLE_MISMATCH, ACTION_UNAVAILABLE, PARAMETER_INVALID, PRECONDITION_FAILED, ROBOT_BUSY, TASK_ID_CONFLICT, COMMAND_SEQUENCE_CONFLICT, STALE_COMMAND, TASK_NOT_FOUND, INTERNAL_ERROR]}, message: {type: string}, details: {type: object}}
-    HealthResponse:
-      type: object
-      additionalProperties: false
-      required: [alive]
-      properties: {alive: {const: true}}
-    ReadyResponse:
-      type: object
-      additionalProperties: false
-      required: [ready, reasonCodes]
-      properties: {ready: {type: boolean}, robotModel: {type: [string, 'null']}, bundleId: {type: [string, 'null']}, bundleVersion: {type: [string, 'null']}, bundleDigest: {anyOf: [{$ref: '#/components/schemas/Digest'}, {type: 'null'}]}, reasonCodes: {type: array, items: {type: string}}}
-    CatalogResponse:
-      type: object
-      additionalProperties: false
-      required: [observationContract, actionContract, actions]
-      properties: {bundleId: {type: [string, 'null']}, bundleVersion: {type: [string, 'null']}, bundleDigest: {anyOf: [{$ref: '#/components/schemas/Digest'}, {type: 'null'}]}, observationContract: {const: MICRODUCK_OBS_61_V1}, actionContract: {const: MICRODUCK_ACTION_14_V1}, actions: {type: array, items: {$ref: '#/components/schemas/ActionDefinition'}}}
-    CompletionContract:
-      type: object
-      additionalProperties: false
-      required: [terminalConditions, maxDurationMs]
-      properties: {terminalConditions: {type: array, minItems: 1, items: {type: string}}, maxDurationMs: {type: integer, exclusiveMinimum: 0}}
-    LeaseContract:
-      type: object
-      additionalProperties: false
-      x-unergy-invariants: [minLeaseMs <= defaultLeaseMs <= maxLeaseMs, commandCadenceMs <= minLeaseMs]
-      required: [minLeaseMs, defaultLeaseMs, maxLeaseMs, commandCadenceMs, zeroCommand, safeStopBehavior]
-      properties: {minLeaseMs: {type: integer, exclusiveMinimum: 0}, defaultLeaseMs: {type: integer, exclusiveMinimum: 0}, maxLeaseMs: {type: integer, exclusiveMinimum: 0}, commandCadenceMs: {type: integer, exclusiveMinimum: 0}, zeroCommand: {type: object, additionalProperties: {type: number}}, safeStopBehavior: {const: ZERO_TWIST}}
     ActionDefinition:
-      type: object
-      additionalProperties: false
-      required: [actionCode, executionMode, availability, parameterSchema]
-      properties: {actionCode: {type: string}, executionMode: {enum: [DISCRETE, CONTINUOUS_LEASE]}, availability: {enum: [AVAILABLE, UNAVAILABLE]}, policyRef: {type: [string, 'null']}, unavailableReason: {type: [string, 'null']}, parameterSchema: {type: object}, completion: {anyOf: [{$ref: '#/components/schemas/CompletionContract'}, {type: 'null'}]}, lease: {anyOf: [{$ref: '#/components/schemas/LeaseContract'}, {type: 'null'}]}, displayName: {type: [string, 'null']}, description: {type: [string, 'null']}, localizedLabels: {type: [object, 'null'], additionalProperties: {type: string}}, preconditions: {type: [object, 'null']}, safety: {type: [object, 'null']}, qualificationRefs: {type: [array, 'null'], items: {type: string}}}
       allOf:
-        - if: {properties: {availability: {const: AVAILABLE}}, required: [availability]}
-          then: {required: [policyRef], properties: {policyRef: {type: string, minLength: 1}}}
-        - if: {properties: {executionMode: {const: CONTINUOUS_LEASE}}, required: [executionMode]}
-          then: {required: [lease], properties: {lease: {$ref: '#/components/schemas/LeaseContract'}}}
-    SafeJsonValue:
-      anyOf: [{type: string}, {type: number}, {type: boolean}, {type: 'null'}, {$ref: '#/components/schemas/SafeJsonObject'}, {$ref: '#/components/schemas/SafeJsonArray'}]
-    SafeJsonArray: {type: array, items: {$ref: '#/components/schemas/SafeJsonValue'}}
-    SafeJsonObject:
-      type: object
-      propertyNames: {not: {pattern: '(?i:joint|torque|pwm|policypath|policyname)'}}
-      additionalProperties: {$ref: '#/components/schemas/SafeJsonValue'}
-    TaskCreateRequest:
-      type: object
+      - if:
+          properties:
+            availability:
+              const: AVAILABLE
+          required:
+          - availability
+        then:
+          properties:
+            policyRef:
+              type: string
+              minLength: 1
+          required:
+          - policyRef
+      - if:
+          properties:
+            executionMode:
+              const: CONTINUOUS_LEASE
+          required:
+          - executionMode
+        then:
+          properties:
+            lease:
+              not:
+                type: 'null'
+          required:
+          - lease
+      properties:
+        actionCode:
+          type: string
+          maxLength: 128
+          minLength: 1
+          title: Actioncode
+        executionMode:
+          type: string
+          enum:
+          - DISCRETE
+          - CONTINUOUS_LEASE
+          title: Executionmode
+        availability:
+          type: string
+          enum:
+          - AVAILABLE
+          - UNAVAILABLE
+          title: Availability
+        policyRef:
+          anyOf:
+          - type: string
+            maxLength: 128
+            minLength: 1
+          - type: 'null'
+          title: Policyref
+        unavailableReason:
+          anyOf:
+          - type: string
+            maxLength: 128
+            minLength: 1
+          - type: 'null'
+          title: Unavailablereason
+        parameterSchema:
+          additionalProperties:
+            $ref: '#/components/schemas/JsonValue'
+          propertyNames:
+            maxLength: 128
+            minLength: 1
+          type: object
+          maxProperties: 128
+          title: Parameterschema
+        completion:
+          anyOf:
+          - $ref: '#/components/schemas/CompletionContract'
+          - type: 'null'
+        lease:
+          anyOf:
+          - $ref: '#/components/schemas/LeaseContract'
+          - type: 'null'
+        displayName:
+          anyOf:
+          - type: string
+            maxLength: 128
+            minLength: 1
+          - type: 'null'
+          title: Displayname
+        description:
+          anyOf:
+          - type: string
+            maxLength: 1024
+            minLength: 1
+          - type: 'null'
+          title: Description
+        localizedLabels:
+          anyOf:
+          - additionalProperties:
+              type: string
+              maxLength: 1024
+              minLength: 1
+            propertyNames:
+              maxLength: 128
+              minLength: 1
+            type: object
+            maxProperties: 32
+          - type: 'null'
+          title: Localizedlabels
+        preconditions:
+          anyOf:
+          - additionalProperties:
+              $ref: '#/components/schemas/JsonValue'
+            propertyNames:
+              maxLength: 128
+              minLength: 1
+            type: object
+            maxProperties: 128
+          - type: 'null'
+          title: Preconditions
+        safety:
+          anyOf:
+          - additionalProperties:
+              $ref: '#/components/schemas/JsonValue'
+            propertyNames:
+              maxLength: 128
+              minLength: 1
+            type: object
+            maxProperties: 128
+          - type: 'null'
+          title: Safety
+        qualificationRefs:
+          anyOf:
+          - items:
+              type: string
+              maxLength: 512
+              minLength: 1
+            type: array
+            maxItems: 32
+          - type: 'null'
+          title: Qualificationrefs
       additionalProperties: false
-      required: [schema, taskId, actionCode, bundleVersion, bundleDigest, parameters, scenario, requestedBy]
-      properties: {schema: {const: MICRODUCK_SIM_TASK_V1}, taskId: {type: string, pattern: '^[0-9a-f]{32}$'}, actionCode: {type: string}, bundleVersion: {type: string}, bundleDigest: {$ref: '#/components/schemas/Digest'}, parameters: {$ref: '#/components/schemas/SafeJsonObject'}, scenario: {type: object}, leaseMs: {type: [integer, 'null'], exclusiveMinimum: 0}, requestedBy: {type: string}}
-    TaskCommandRequest:
       type: object
+      required:
+      - actionCode
+      - executionMode
+      - availability
+      - parameterSchema
+      title: ActionDefinition
+    CatalogResponse:
+      properties:
+        bundleId:
+          anyOf:
+          - type: string
+            maxLength: 128
+            minLength: 1
+          - type: 'null'
+          title: Bundleid
+        bundleVersion:
+          anyOf:
+          - type: string
+            maxLength: 128
+            minLength: 1
+          - type: 'null'
+          title: Bundleversion
+        bundleDigest:
+          anyOf:
+          - type: string
+            pattern: ^sha256:[0-9a-f]{64}$
+          - type: 'null'
+          title: Bundledigest
+        observationContract:
+          type: string
+          const: MICRODUCK_OBS_61_V1
+          title: Observationcontract
+          default: MICRODUCK_OBS_61_V1
+        actionContract:
+          type: string
+          const: MICRODUCK_ACTION_14_V1
+          title: Actioncontract
+          default: MICRODUCK_ACTION_14_V1
+        actions:
+          items:
+            $ref: '#/components/schemas/ActionDefinition'
+          type: array
+          maxItems: 256
+          title: Actions
       additionalProperties: false
-      required: [commandSequence, parameters, leaseMs]
-      properties: {commandSequence: {type: integer, minimum: 0}, parameters: {$ref: '#/components/schemas/SafeJsonObject'}, leaseMs: {type: integer, exclusiveMinimum: 0}}
-    TaskEvidence:
       type: object
+      required:
+      - actions
+      title: CatalogResponse
+    CompletionContract:
+      properties:
+        terminalConditions:
+          items:
+            type: string
+            maxLength: 128
+            minLength: 1
+          type: array
+          maxItems: 16
+          minItems: 1
+          title: Terminalconditions
+        maxDurationMs:
+          type: integer
+          maximum: 3600000.0
+          exclusiveMinimum: 0.0
+          title: Maxdurationms
       additionalProperties: false
-      required: [bundleDigest, policyDigest, metrics]
-      properties: {bundleDigest: {$ref: '#/components/schemas/Digest'}, policyDigest: {$ref: '#/components/schemas/Digest'}, modelDigest: {anyOf: [{$ref: '#/components/schemas/Digest'}, {type: 'null'}]}, metrics: {type: object}, stopReason: {type: [string, 'null']}}
-    TaskSnapshot:
       type: object
+      required:
+      - terminalConditions
+      - maxDurationMs
+      title: CompletionContract
+    Error:
+      properties:
+        code:
+          type: string
+          enum:
+          - AUTH_REQUIRED
+          - NOT_READY
+          - BUNDLE_MISMATCH
+          - ACTION_UNAVAILABLE
+          - PARAMETER_INVALID
+          - PRECONDITION_FAILED
+          - ROBOT_BUSY
+          - TASK_ID_CONFLICT
+          - COMMAND_SEQUENCE_CONFLICT
+          - STALE_COMMAND
+          - TASK_NOT_FOUND
+          - REQUEST_BODY_TOO_LARGE
+          - INTERNAL_ERROR
+          title: Code
+        message:
+          type: string
+          maxLength: 256
+          minLength: 1
+          title: Message
+        details:
+          additionalProperties:
+            $ref: '#/components/schemas/JsonValue'
+          propertyNames:
+            maxLength: 128
+            minLength: 1
+          type: object
+          maxProperties: 32
+          title: Details
       additionalProperties: false
-      required: [taskId, state, actionCode, bundleVersion, bundleDigest, requestedAt, updatedAt]
-      properties: {taskId: {type: string, pattern: '^[0-9a-f]{32}$'}, state: {enum: [ACCEPTED, VALIDATING, RUNNING, SUCCEEDED, FAILED, CANCELLED, TIMED_OUT, UNKNOWN]}, actionCode: {type: string}, bundleVersion: {type: string}, bundleDigest: {$ref: '#/components/schemas/Digest'}, requestedAt: {type: string, format: date-time}, updatedAt: {type: string, format: date-time}, evidence: {anyOf: [{$ref: '#/components/schemas/TaskEvidence'}, {type: 'null'}]}, stopReason: {type: [string, 'null']}}
-    TaskEvent:
       type: object
-      additionalProperties: false
-      required: [sequence, eventType, payload, createdAt]
-      properties: {sequence: {type: integer, minimum: 0}, eventType: {type: string}, payload: {type: object}, createdAt: {type: string, format: date-time}}
-    TaskEventPage:
+      required:
+      - code
+      - message
+      - details
+      title: Error
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
       type: object
+      title: HTTPValidationError
+    HealthResponse:
+      properties:
+        alive:
+          type: boolean
+          const: true
+          title: Alive
+          default: true
       additionalProperties: false
-      required: [events]
-      properties: {events: {type: array, items: {$ref: '#/components/schemas/TaskEvent'}}}
+      type: object
+      title: HealthResponse
+    JsonValue:
+      anyOf:
+      - type: string
+        maxLength: 1024
+      - type: integer
+      - type: number
+      - type: boolean
+      - items:
+          $ref: '#/components/schemas/JsonValue'
+        type: array
+        maxItems: 256
+      - additionalProperties:
+          $ref: '#/components/schemas/JsonValue'
+        propertyNames:
+          maxLength: 128
+          minLength: 1
+        type: object
+        maxProperties: 128
+      - type: 'null'
+    LeaseContract:
+      properties:
+        minLeaseMs:
+          type: integer
+          maximum: 60000.0
+          exclusiveMinimum: 0.0
+          title: Minleasems
+        defaultLeaseMs:
+          type: integer
+          maximum: 60000.0
+          exclusiveMinimum: 0.0
+          title: Defaultleasems
+        maxLeaseMs:
+          type: integer
+          maximum: 60000.0
+          exclusiveMinimum: 0.0
+          title: Maxleasems
+        commandCadenceMs:
+          type: integer
+          maximum: 60000.0
+          exclusiveMinimum: 0.0
+          title: Commandcadencems
+        zeroCommand:
+          additionalProperties:
+            anyOf:
+            - type: string
+              maxLength: 1024
+            - type: integer
+            - type: number
+            - type: boolean
+            - type: 'null'
+          propertyNames:
+            maxLength: 64
+            minLength: 1
+          type: object
+          maxProperties: 16
+          title: Zerocommand
+        safeStopBehavior:
+          type: string
+          const: ZERO_TWIST
+          title: Safestopbehavior
+      additionalProperties: false
+      type: object
+      required:
+      - minLeaseMs
+      - defaultLeaseMs
+      - maxLeaseMs
+      - commandCadenceMs
+      - zeroCommand
+      - safeStopBehavior
+      title: LeaseContract
+      x-unergy-invariants:
+      - minLeaseMs <= defaultLeaseMs <= maxLeaseMs
+      - commandCadenceMs <= minLeaseMs
+    ReadyResponse:
+      properties:
+        ready:
+          type: boolean
+          title: Ready
+        robotModel:
+          anyOf:
+          - type: string
+            maxLength: 128
+            minLength: 1
+          - type: 'null'
+          title: Robotmodel
+        bundleId:
+          anyOf:
+          - type: string
+            maxLength: 128
+            minLength: 1
+          - type: 'null'
+          title: Bundleid
+        bundleVersion:
+          anyOf:
+          - type: string
+            maxLength: 128
+            minLength: 1
+          - type: 'null'
+          title: Bundleversion
+        bundleDigest:
+          anyOf:
+          - type: string
+            pattern: ^sha256:[0-9a-f]{64}$
+          - type: 'null'
+          title: Bundledigest
+        reasonCodes:
+          items:
+            type: string
+            maxLength: 128
+            minLength: 1
+          type: array
+          maxItems: 32
+          title: Reasoncodes
+      additionalProperties: false
+      type: object
+      required:
+      - ready
+      - reasonCodes
+      title: ReadyResponse
     RobotStatus:
-      type: object
+      properties:
+        schema:
+          type: string
+          const: BIPED_POSE_V1
+          title: Schema
+        timestamp:
+          type: string
+          format: date-time
+          title: Timestamp
+        basePositionM:
+          prefixItems:
+          - type: number
+          - type: number
+          - type: number
+          type: array
+          maxItems: 3
+          minItems: 3
+          title: Basepositionm
+        baseOrientationXyzw:
+          prefixItems:
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          type: array
+          maxItems: 4
+          minItems: 4
+          title: Baseorientationxyzw
+        baseLinearVelocityMps:
+          prefixItems:
+          - type: number
+          - type: number
+          - type: number
+          type: array
+          maxItems: 3
+          minItems: 3
+          title: Baselinearvelocitymps
+          description: World-frame trunk-base linear velocity.
+        baseAngularVelocityRadps:
+          prefixItems:
+          - type: number
+          - type: number
+          - type: number
+          type: array
+          maxItems: 3
+          minItems: 3
+          title: Baseangularvelocityradps
+          description: Trunk-body-frame angular velocity, matching the training IMU
+            gyro.
+        jointPositionsRad:
+          prefixItems:
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          type: array
+          maxItems: 14
+          minItems: 14
+          title: Jointpositionsrad
+        jointVelocitiesRadps:
+          prefixItems:
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          type: array
+          maxItems: 14
+          minItems: 14
+          title: Jointvelocitiesradps
+        policyTarget:
+          additionalProperties:
+            $ref: '#/components/schemas/JsonValue'
+          propertyNames:
+            maxLength: 128
+            minLength: 1
+          type: object
+          maxProperties: 32
+          title: Policytarget
+        requestedMotion:
+          additionalProperties:
+            $ref: '#/components/schemas/JsonValue'
+          propertyNames:
+            maxLength: 128
+            minLength: 1
+          type: object
+          maxProperties: 32
+          title: Requestedmotion
+        appliedMotion:
+          additionalProperties:
+            $ref: '#/components/schemas/JsonValue'
+          propertyNames:
+            maxLength: 128
+            minLength: 1
+          type: object
+          maxProperties: 32
+          title: Appliedmotion
+        limitingReason:
+          anyOf:
+          - type: string
+            maxLength: 128
+            minLength: 1
+          - type: 'null'
+          title: Limitingreason
+        activePolicyRef:
+          anyOf:
+          - type: string
+            maxLength: 128
+            minLength: 1
+          - type: 'null'
+          title: Activepolicyref
+        activeActionCode:
+          anyOf:
+          - type: string
+            maxLength: 128
+            minLength: 1
+          - type: 'null'
+          title: Activeactioncode
+        activeTaskId:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{32}$
+          - type: 'null'
+          title: Activetaskid
+        simulationTimeS:
+          type: number
+          minimum: 0.0
+          title: Simulationtimes
+        loopFrequencyHz:
+          type: number
+          minimum: 0.0
+          title: Loopfrequencyhz
+        fallen:
+          type: boolean
+          title: Fallen
+        limp:
+          type: boolean
+          title: Limp
+        health:
+          additionalProperties:
+            $ref: '#/components/schemas/JsonValue'
+          propertyNames:
+            maxLength: 128
+            minLength: 1
+          type: object
+          maxProperties: 32
+          title: Health
       additionalProperties: false
-      required: [schema, timestamp, basePositionM, baseOrientationXyzw, baseLinearVelocityMps, baseAngularVelocityRadps, jointPositionsRad, jointVelocitiesRadps, policyTarget, requestedMotion, appliedMotion, simulationTimeS, loopFrequencyHz, fallen, limp, health]
-      properties: {schema: {const: BIPED_POSE_V1}, timestamp: {type: string, format: date-time}, basePositionM: {$ref: '#/components/schemas/Vec3'}, baseOrientationXyzw: {$ref: '#/components/schemas/Vec4'}, baseLinearVelocityMps: {$ref: '#/components/schemas/Vec3', description: World-frame trunk-base linear velocity.}, baseAngularVelocityRadps: {$ref: '#/components/schemas/Vec3', description: 'Trunk-body-frame angular velocity, matching the training IMU gyro.'}, jointPositionsRad: {$ref: '#/components/schemas/Vec14'}, jointVelocitiesRadps: {$ref: '#/components/schemas/Vec14'}, policyTarget: {type: object}, requestedMotion: {type: object}, appliedMotion: {type: object}, limitingReason: {type: [string, 'null']}, activePolicyRef: {type: [string, 'null']}, activeActionCode: {type: [string, 'null']}, activeTaskId: {type: [string, 'null'], pattern: '^[0-9a-f]{32}$'}, simulationTimeS: {type: number, minimum: 0}, loopFrequencyHz: {type: number, minimum: 0}, fallen: {type: boolean}, limp: {type: boolean}, health: {type: object}}
-    Vec3: {type: array, minItems: 3, maxItems: 3, items: {type: number}}
-    Vec4: {type: array, minItems: 4, maxItems: 4, items: {type: number}}
-    Vec14: {type: array, minItems: 14, maxItems: 14, items: {type: number}}
+      type: object
+      required:
+      - schema
+      - timestamp
+      - basePositionM
+      - baseOrientationXyzw
+      - baseLinearVelocityMps
+      - baseAngularVelocityRadps
+      - jointPositionsRad
+      - jointVelocitiesRadps
+      - policyTarget
+      - requestedMotion
+      - appliedMotion
+      - simulationTimeS
+      - loopFrequencyHz
+      - fallen
+      - limp
+      - health
+      title: RobotStatus
+    Scenario:
+      properties:
+        terrain:
+          type: string
+          enum:
+          - flat
+          - ramp
+          title: Terrain
+        seed:
+          type: integer
+          maximum: 4294967295.0
+          minimum: 0.0
+          title: Seed
+      additionalProperties: false
+      type: object
+      required:
+      - terrain
+      - seed
+      title: Scenario
+      description: Exact seeded reset scenario supported by the governed V1 runtime.
+    TaskCommandRequest:
+      properties:
+        commandSequence:
+          type: integer
+          maximum: 9.223372036854776e+18
+          minimum: 0.0
+          title: Commandsequence
+        parameters:
+          additionalProperties:
+            anyOf:
+            - type: string
+              maxLength: 1024
+            - type: integer
+            - type: number
+            - type: boolean
+            - type: 'null'
+          propertyNames:
+            maxLength: 64
+            minLength: 1
+          type: object
+          maxProperties: 16
+          title: Parameters
+        leaseMs:
+          type: integer
+          maximum: 60000.0
+          exclusiveMinimum: 0.0
+          title: Leasems
+      additionalProperties: false
+      type: object
+      required:
+      - commandSequence
+      - parameters
+      - leaseMs
+      title: TaskCommandRequest
+    TaskCreateRequest:
+      properties:
+        schema:
+          type: string
+          const: MICRODUCK_SIM_TASK_V1
+          title: Schema
+        taskId:
+          type: string
+          pattern: ^[0-9a-f]{32}$
+          title: Taskid
+        actionCode:
+          type: string
+          maxLength: 128
+          minLength: 1
+          title: Actioncode
+        bundleVersion:
+          type: string
+          maxLength: 128
+          minLength: 1
+          title: Bundleversion
+        bundleDigest:
+          type: string
+          pattern: ^sha256:[0-9a-f]{64}$
+          title: Bundledigest
+        parameters:
+          additionalProperties:
+            anyOf:
+            - type: string
+              maxLength: 1024
+            - type: integer
+            - type: number
+            - type: boolean
+            - type: 'null'
+          propertyNames:
+            maxLength: 64
+            minLength: 1
+          type: object
+          maxProperties: 16
+          title: Parameters
+        scenario:
+          $ref: '#/components/schemas/Scenario'
+        leaseMs:
+          anyOf:
+          - type: integer
+            maximum: 60000.0
+            exclusiveMinimum: 0.0
+          - type: 'null'
+          title: Leasems
+        requestedBy:
+          type: string
+          maxLength: 256
+          minLength: 1
+          title: Requestedby
+      additionalProperties: false
+      type: object
+      required:
+      - schema
+      - taskId
+      - actionCode
+      - bundleVersion
+      - bundleDigest
+      - parameters
+      - scenario
+      - requestedBy
+      title: TaskCreateRequest
+    TaskEvent:
+      properties:
+        sequence:
+          type: integer
+          maximum: 9.223372036854776e+18
+          minimum: 0.0
+          title: Sequence
+        eventType:
+          type: string
+          maxLength: 128
+          minLength: 1
+          title: Eventtype
+        payload:
+          additionalProperties:
+            anyOf:
+            - type: string
+              maxLength: 1024
+            - type: integer
+            - type: number
+            - type: boolean
+            - type: 'null'
+          propertyNames:
+            maxLength: 64
+            minLength: 1
+          type: object
+          maxProperties: 16
+          title: Payload
+        createdAt:
+          type: string
+          format: date-time
+          title: Createdat
+      additionalProperties: false
+      type: object
+      required:
+      - sequence
+      - eventType
+      - createdAt
+      title: TaskEvent
+    TaskEventPage:
+      properties:
+        events:
+          items:
+            $ref: '#/components/schemas/TaskEvent'
+          type: array
+          maxItems: 100
+          title: Events
+      additionalProperties: false
+      type: object
+      required:
+      - events
+      title: TaskEventPage
+    TaskEvidence:
+      properties:
+        bundleDigest:
+          type: string
+          pattern: ^sha256:[0-9a-f]{64}$
+          title: Bundledigest
+        policyDigest:
+          type: string
+          pattern: ^sha256:[0-9a-f]{64}$
+          title: Policydigest
+        modelDigest:
+          anyOf:
+          - type: string
+            pattern: ^sha256:[0-9a-f]{64}$
+          - type: 'null'
+          title: Modeldigest
+        metrics:
+          additionalProperties:
+            anyOf:
+            - type: string
+              maxLength: 1024
+            - type: integer
+            - type: number
+            - type: boolean
+            - type: 'null'
+          propertyNames:
+            maxLength: 64
+            minLength: 1
+          type: object
+          maxProperties: 32
+          title: Metrics
+        stopReason:
+          anyOf:
+          - type: string
+            maxLength: 128
+            minLength: 1
+          - type: 'null'
+          title: Stopreason
+      additionalProperties: false
+      type: object
+      required:
+      - bundleDigest
+      - policyDigest
+      title: TaskEvidence
+    TaskSnapshot:
+      properties:
+        taskId:
+          type: string
+          pattern: ^[0-9a-f]{32}$
+          title: Taskid
+        state:
+          type: string
+          enum:
+          - ACCEPTED
+          - VALIDATING
+          - RUNNING
+          - SUCCEEDED
+          - FAILED
+          - CANCELLED
+          - TIMED_OUT
+          - UNKNOWN
+          title: State
+        actionCode:
+          type: string
+          maxLength: 128
+          minLength: 1
+          title: Actioncode
+        bundleVersion:
+          type: string
+          maxLength: 128
+          minLength: 1
+          title: Bundleversion
+        bundleDigest:
+          type: string
+          pattern: ^sha256:[0-9a-f]{64}$
+          title: Bundledigest
+        requestedAt:
+          type: string
+          format: date-time
+          title: Requestedat
+        updatedAt:
+          type: string
+          format: date-time
+          title: Updatedat
+        evidence:
+          anyOf:
+          - $ref: '#/components/schemas/TaskEvidence'
+          - type: 'null'
+        stopReason:
+          anyOf:
+          - type: string
+            maxLength: 128
+            minLength: 1
+          - type: 'null'
+          title: Stopreason
+      additionalProperties: false
+      type: object
+      required:
+      - taskId
+      - state
+      - actionCode
+      - bundleVersion
+      - bundleDigest
+      - requestedAt
+      - updatedAt
+      title: TaskSnapshot
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+        input:
+          title: Input
+        ctx:
+          type: object
+          title: Context
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-token
