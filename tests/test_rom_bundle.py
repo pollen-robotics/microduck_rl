@@ -351,7 +351,7 @@ def test_builder_rejects_unusable_or_collision_incompatible_flat_floor(
 def test_builder_rejects_roller_masks_incompatible_with_usable_floor(
     tmp_path: Path,
 ) -> None:
-    """Each exact wheel collision geom must have a compatible floor mask pair."""
+    """Fake ankle fixtures cannot replace floor-incompatible wheel contacts."""
     model_dir = tmp_path / "model"
     shutil.copytree(MICRODUCK_WALK_XML.parent, model_dir)
     robot = model_dir / "robot_allcollisions_rollers.xml"
@@ -397,7 +397,7 @@ def test_builder_rejects_roller_masks_incompatible_with_usable_floor(
         item for item in bundle.actions if item.actionCode == "ROLLER_VELOCITY"
     )
     assert roller.availability == "UNAVAILABLE"
-    assert roller.unavailableReason == "MODEL_CAPABILITY_MISSING"
+    assert roller.unavailableReason == "MODEL_QUALIFICATION_INCOMPATIBLE"
 
 
 def test_identical_policy_bytes_do_not_cross_deduplicate_task_identities(
@@ -519,6 +519,162 @@ def test_checked_in_roller_scene_qualifies_exact_passive_wheel_topology(
     assert "ROLLER_FEET" in bundle.qualification["modelCapabilities"]
 
 
+def test_builder_rejects_tiny_ankle_fixtures_when_intended_feet_are_disabled(
+    tmp_path: Path,
+) -> None:
+    """Arbitrary ankle descendants cannot impersonate the checked-in sole surfaces."""
+    model_dir = tmp_path / "model"
+    shutil.copytree(MICRODUCK_WALK_XML.parent, model_dir)
+    robot = model_dir / MICRODUCK_WALK_XML.name
+    rewritten: list[str] = []
+    for line in robot.read_text().splitlines():
+        if (
+            'name="left_foot_collision"' in line
+            or 'name="right_foot_collision"' in line
+        ):
+            line = line.replace(
+                'class="collision"',
+                'class="collision" contype="0" conaffinity="0"',
+            )
+        rewritten.append(line)
+        if "<joint" in line:
+            for ankle in ("left_ankle", "right_ankle"):
+                if f'name="{ankle}"' in line:
+                    rewritten.append(
+                        f'<geom name="spoof_{ankle}_contact" type="sphere" '
+                        'size="0.0001" mass="0.0001" '
+                        'contype="1" conaffinity="1"/>'
+                    )
+    robot.write_text("\n".join(rewritten))
+    policy = write_release_onnx(
+        tmp_path / WALK_ONNX, task_id="Mjlab-Velocity-Flat-MicroDuck"
+    )
+
+    bundle = build_bundle(
+        BundleBuildRequest(
+            release="1.0.0",
+            output_zip=tmp_path / "spoofed-feet.zip",
+            artifacts={"WALK_VELOCITY": policy},
+            model_path=model_dir / "scene_walk.xml",
+            model_terrain="flat",
+            scenario_profile="SEEDED_SERVO_RESET_V1",
+            source_repository="microduck-rl",
+            source_commit="a" * 40,
+            created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            checkpoint="model_100.pt",
+            experiment_ref="mjlab_microduck/test-run",
+        )
+    ).manifest
+
+    walk = next(item for item in bundle.actions if item.actionCode == "WALK_VELOCITY")
+    assert walk.availability == "UNAVAILABLE"
+    assert walk.unavailableReason == "MODEL_QUALIFICATION_INCOMPATIBLE"
+
+
+def test_builder_rejects_tiny_mesh_spoofing_canonical_foot_names(
+    tmp_path: Path,
+) -> None:
+    """Canonical geom/mesh names still require the checked-in physical scale."""
+    model_dir = tmp_path / "model"
+    shutil.copytree(MICRODUCK_WALK_XML.parent, model_dir)
+    robot = model_dir / MICRODUCK_WALK_XML.name
+    robot.write_text(
+        robot.read_text()
+        .replace(
+            '<mesh file="sole_left.stl"/>',
+            '<mesh file="sole_left.stl" scale="0.1 0.1 0.1"/>',
+        )
+        .replace(
+            '<mesh file="sole_right.stl"/>',
+            '<mesh file="sole_right.stl" scale="0.1 0.1 0.1"/>',
+        )
+    )
+    policy = write_release_onnx(
+        tmp_path / WALK_ONNX, task_id="Mjlab-Velocity-Flat-MicroDuck"
+    )
+
+    bundle = build_bundle(
+        BundleBuildRequest(
+            release="1.0.0",
+            output_zip=tmp_path / "tiny-named-feet.zip",
+            artifacts={"WALK_VELOCITY": policy},
+            model_path=model_dir / "scene_walk.xml",
+            model_terrain="flat",
+            scenario_profile="SEEDED_SERVO_RESET_V1",
+            source_repository="microduck-rl",
+            source_commit="a" * 40,
+            created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            checkpoint="model_100.pt",
+            experiment_ref="mjlab_microduck/test-run",
+        )
+    ).manifest
+
+    walk = next(item for item in bundle.actions if item.actionCode == "WALK_VELOCITY")
+    assert walk.availability == "UNAVAILABLE"
+    assert walk.unavailableReason == "MODEL_QUALIFICATION_INCOMPATIBLE"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("extra_passive_wheel", "MODEL_CAPABILITY_MISSING"),
+        ("renamed_wheel_body", "MODEL_QUALIFICATION_INCOMPATIBLE"),
+        ("tiny_wheel_mesh", "MODEL_QUALIFICATION_INCOMPATIBLE"),
+    ],
+)
+def test_builder_rejects_noncanonical_complete_roller_topology(
+    tmp_path: Path, mutation: str, reason: str
+) -> None:
+    """The four code-owned wheel joints, bodies, and no extra wheels are exact."""
+    model_dir = tmp_path / "model"
+    shutil.copytree(MICRODUCK_WALK_XML.parent, model_dir)
+    robot = model_dir / "robot_allcollisions_rollers.xml"
+    contents = robot.read_text()
+    if mutation == "extra_passive_wheel":
+        target = '<joint axis="0 0 1" name="passive_LF_wheel" class="passive_joint"/>'
+        contents = contents.replace(
+            target,
+            target + '<body name="spare_tire"><joint name="passive_spare_wheel" '
+            'type="hinge"/><geom type="cylinder" size="0.001 0.001"/></body>',
+        )
+    elif mutation == "renamed_wheel_body":
+        contents = contents.replace(
+            '<body name="tire" pos=', '<body name="fake_tire" pos='
+        )
+    else:
+        contents = contents.replace(
+            '<mesh file="tire.stl"/>',
+            '<mesh file="tire.stl" scale="0.1 0.1 0.1"/>',
+        )
+    robot.write_text(contents)
+    policy = write_release_onnx(
+        tmp_path / "roller.onnx",
+        task_id="Mjlab-Velocity-Flat-MicroDuck-Rollers",
+    )
+
+    bundle = build_bundle(
+        BundleBuildRequest(
+            release="1.0.0",
+            output_zip=tmp_path / f"{mutation}.zip",
+            artifacts={"ROLLER_VELOCITY": policy},
+            model_path=model_dir / "scene_rollers.xml",
+            model_terrain="flat",
+            scenario_profile="SEEDED_SERVO_RESET_V1",
+            source_repository="microduck-rl",
+            source_commit="a" * 40,
+            created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            checkpoint="model_100.pt",
+            experiment_ref="mjlab_microduck/test-run",
+        )
+    ).manifest
+
+    roller = next(
+        item for item in bundle.actions if item.actionCode == "ROLLER_VELOCITY"
+    )
+    assert roller.availability == "UNAVAILABLE"
+    assert roller.unavailableReason == reason
+
+
 def test_floor_scene_without_exact_position_actuator_contract_is_unavailable(
     tmp_path: Path,
 ):
@@ -580,6 +736,53 @@ def test_builder_rejects_non_position_affine_actuator_terms(
         BundleBuildRequest(
             release="1.0.0",
             output_zip=tmp_path / "invalid-affine.zip",
+            artifacts={"WALK_VELOCITY": policy},
+            model_path=model_dir / "scene_walk.xml",
+            model_terrain="flat",
+            scenario_profile="SEEDED_SERVO_RESET_V1",
+            source_repository="microduck-rl",
+            source_commit="a" * 40,
+            created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            checkpoint="model_100.pt",
+            experiment_ref="mjlab_microduck/test-run",
+        )
+    ).manifest
+
+    walk = next(item for item in bundle.actions if item.actionCode == "WALK_VELOCITY")
+    assert walk.availability == "UNAVAILABLE"
+    assert walk.unavailableReason == "MODEL_RUNTIME_INCOMPATIBLE"
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        '<position class="chosen_actuator" kp="inf" name=',
+        (
+            '<general class="chosen_actuator" gaintype="fixed" '
+            'biastype="affine" gainprm="0.55" biasprm="0 -0.55 -inf" name='
+        ),
+    ],
+)
+def test_builder_rejects_non_finite_position_actuator_semantics(
+    tmp_path: Path, replacement: str
+) -> None:
+    """Infinite gains or bias terms cannot qualify as physical radian servos."""
+    model_dir = tmp_path / "model"
+    shutil.copytree(MICRODUCK_WALK_XML.parent, model_dir)
+    robot = model_dir / MICRODUCK_WALK_XML.name
+    robot.write_text(
+        robot.read_text().replace(
+            '<position class="chosen_actuator" name=', replacement
+        )
+    )
+    policy = write_release_onnx(
+        tmp_path / WALK_ONNX, task_id="Mjlab-Velocity-Flat-MicroDuck"
+    )
+
+    bundle = build_bundle(
+        BundleBuildRequest(
+            release="1.0.0",
+            output_zip=tmp_path / "non-finite-actuator.zip",
             artifacts={"WALK_VELOCITY": policy},
             model_path=model_dir / "scene_walk.xml",
             model_terrain="flat",

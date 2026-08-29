@@ -56,6 +56,8 @@ def _write_policy(
     identity_before_normalizer: bool = False,
     bypass_normalizer: bool = False,
     second_normalizer: bool = False,
+    normalizer_constant_transform: str | None = None,
+    second_normalizer_constant_transform: str | None = None,
     actor_post_normalization: bool = False,
     task_id: str = TASK_ID,
 ) -> None:
@@ -104,25 +106,67 @@ def _write_policy(
     second_std = helper.make_tensor("second_std", TensorProto.FLOAT, [61], [2.0] * 61)
     actor_mean = helper.make_tensor("actor_mean", TensorProto.FLOAT, [14], [0.25] * 14)
     actor_std = helper.make_tensor("actor_std", TensorProto.FLOAT, [14], [2.0] * 14)
+    constant_nodes: list[onnx.NodeProto] = []
+    constant_initializers: list[onnx.TensorProto] = []
+
+    def transformed_constant(name: str, transform: str | None) -> str:
+        if transform is None:
+            return name
+        output_name = f"{name}_{transform.lower()}"
+        if transform == "Identity":
+            constant_nodes.append(helper.make_node("Identity", [name], [output_name]))
+        elif transform == "Cast":
+            constant_nodes.append(
+                helper.make_node("Cast", [name], [output_name], to=TensorProto.FLOAT)
+            )
+        elif transform == "Reshape":
+            shape_name = f"{name}_shape"
+            constant_initializers.append(
+                helper.make_tensor(shape_name, TensorProto.INT64, [1], [61])
+            )
+            constant_nodes.append(
+                helper.make_node("Reshape", [name, shape_name], [output_name])
+            )
+        elif transform == "Neg":
+            constant_nodes.append(helper.make_node("Neg", [name], [output_name]))
+        else:
+            raise ValueError(f"unsupported test constant transform: {transform}")
+        return output_name
+
+    normalizer_mean_input = transformed_constant(
+        "normalizer_mean", normalizer_constant_transform
+    )
+    normalizer_std_input = transformed_constant(
+        "normalizer_std", normalizer_constant_transform
+    )
+    second_mean_input = transformed_constant(
+        "second_mean", second_normalizer_constant_transform
+    )
+    second_std_input = transformed_constant(
+        "second_std", second_normalizer_constant_transform
+    )
     normalizer_input = "prefixed" if identity_before_normalizer else "observations"
     actor_input = "normalized_twice" if second_normalizer else "normalized"
     linear_output = "linear_raw" if actor_post_normalization else "linear"
     nodes = [
+        *constant_nodes,
         *(
             [helper.make_node("Identity", ["observations"], ["prefixed"])]
             if identity_before_normalizer
             else []
         ),
-        helper.make_node("Sub", [normalizer_input, "normalizer_mean"], ["centered"]),
-        helper.make_node("Div", ["centered", "normalizer_std"], ["normalized"]),
+        helper.make_node(
+            "Sub", [normalizer_input, normalizer_mean_input], ["centered"]
+        ),
+        helper.make_node("Div", ["centered", normalizer_std_input], ["normalized"]),
         *(
             [
                 helper.make_node(
-                    "Sub", ["normalized", "second_mean"], ["centered_twice"]
+                    "Sub", ["normalized", second_mean_input], ["centered_twice"]
                 ),
                 helper.make_node(
                     "Div",
-                    ["centered_twice", "second_std"],
+                    ["centered_twice", second_std_input],
                     ["normalized_twice"],
                 ),
             ]
@@ -146,7 +190,13 @@ def _write_policy(
         ),
         helper.make_node("Add", ["linear", "bias"], ["actions"]),
     ]
-    initializers = [normalizer_mean, normalizer_std, weights, bias]
+    initializers = [
+        normalizer_mean,
+        normalizer_std,
+        weights,
+        bias,
+        *constant_initializers,
+    ]
     if second_normalizer:
         initializers.extend([second_mean, second_std])
     if actor_post_normalization:
@@ -201,13 +251,67 @@ def _write_model(
     wheel_conaffinity: int = 1,
     trunk_contype: int = 1,
     trunk_conaffinity: int = 1,
+    exact_foot_topology: bool = True,
+    extra_passive_wheel_joint: bool = False,
 ) -> None:
+    mesh_vertices = (
+        "-0.01 -0.01 -0.002  0.01 -0.01 -0.002  "
+        "0.01 0.01 -0.002  -0.01 0.01 -0.002  "
+        "-0.01 -0.01 0.002  0.01 -0.01 0.002  "
+        "0.01 0.01 0.002  -0.01 0.01 0.002"
+    )
+    mesh_faces = (
+        "0 2 1 0 3 2 4 5 6 4 6 7 0 1 5 0 5 4 1 2 6 1 6 5 2 3 7 2 7 6 3 0 4 3 4 7"
+    )
     bodies: list[str] = []
     closing: list[str] = []
     for index, joint in enumerate(CONTROLLED_SERVO_JOINTS):
+        if joint == "left_ankle":
+            body_name = "ankle_l_v1" if roller_topology else "ankle_left"
+        elif joint == "right_ankle":
+            body_name = "ankle_r_v1" if roller_topology else "ankle_right"
+        else:
+            body_name = f"link_{index}"
+        contact_z = -0.12 - 0.005 * index
+        foot_contact = []
+        if not roller_topology and joint in {"left_ankle", "right_ankle"}:
+            side = "left" if joint == "left_ankle" else "right"
+            geom_name = (
+                f"{side}_foot_collision"
+                if exact_foot_topology
+                else f"spoof_{side}_ankle_contact"
+            )
+            foot_contact = [
+                (
+                    f'<geom name="{geom_name}" type="mesh" mesh="sole_{side}" '
+                    f'pos="0 {0.03 if side == "left" else -0.03} {contact_z}" '
+                    'mass="0" contype="1" conaffinity="1"/>'
+                )
+            ]
+        wheel_bodies = []
+        if roller_topology and joint in {"left_ankle", "right_ankle"}:
+            wheels = (
+                (("LF", "tire"), ("LR", "tire_2"))
+                if joint == "left_ankle"
+                else (("RF", "tire_3"), ("RR", "tire_4"))
+            )
+            wheel_bodies = [
+                f'<body name="{wheel_body}" '
+                f'pos="{-0.03 if wheel in {"LF", "RF"} else 0.03} 0 {contact_z}">'
+                f'<joint name="passive_{wheel}_wheel" type="hinge" axis="0 0 1"/>'
+                f'<geom type="mesh" mesh="tire" mass="0.001" '
+                f'contype="{wheel_contype}" conaffinity="{wheel_conaffinity}"/>'
+                "</body>"
+                for wheel, wheel_body in wheels
+            ]
+            if extra_passive_wheel_joint and joint == "left_ankle":
+                wheel_bodies.append(
+                    '<body name="spare_tire"><joint name="passive_spare_wheel" '
+                    'type="hinge"/><geom type="sphere" size="0.001"/></body>'
+                )
         bodies.extend(
             [
-                f'<body name="link_{index}" pos="0 0 0.005">',
+                f'<body name="{body_name}" pos="0 0 0.005">',
                 f'<joint name="{joint}" type="hinge" axis="0 0 1" range="-2 2" armature="0.01" damping="0.1"/>',
                 *(
                     [
@@ -217,17 +321,8 @@ def _write_model(
                     else []
                 ),
                 '<geom type="sphere" size="0.002" mass="0.01"/>',
-                *(
-                    [
-                        f'<body name="wheel_{wheel}"><joint name="passive_{wheel}_wheel" type="hinge" axis="0 1 0"/>'
-                        f'<geom type="cylinder" size="0.003 0.002" mass="0.001" contype="{wheel_contype}" conaffinity="{wheel_conaffinity}"/></body>'
-                        for wheel in (
-                            ("LF", "LR") if joint == "left_ankle" else ("RF", "RR")
-                        )
-                    ]
-                    if roller_topology and joint in {"left_ankle", "right_ankle"}
-                    else []
-                ),
+                *foot_contact,
+                *wheel_bodies,
             ]
         )
         closing.append("</body>")
@@ -239,6 +334,8 @@ def _write_model(
         )
         if actuator_kind == "position":
             return f'<position {common} kp="1"/>'
+        if actuator_kind == "position_infinite_gain":
+            return f'<position {common} kp="inf"/>'
         if actuator_kind == "general_user_gain":
             return (
                 f'<general {common} gaintype="user" biastype="affine" '
@@ -260,6 +357,11 @@ def _write_model(
                 f'<general {common} gaintype="fixed" biastype="affine" '
                 'gainprm="1" biasprm="0 -1 0.25"/>'
             )
+        if actuator_kind == "general_negative_infinite_bias":
+            return (
+                f'<general {common} gaintype="fixed" biastype="affine" '
+                'gainprm="1" biasprm="0 -1 -inf"/>'
+            )
         return f"<{actuator_kind} {common}/>"
 
     actuators = "\n".join(
@@ -274,6 +376,11 @@ def _write_model(
 <mujoco model="microduck-runtime-fixture">
   <compiler angle="radian"/>
   {f'<include file="{include_file}"/>' if include_file else ""}
+  <asset>
+    <mesh name="sole_left" vertex="{mesh_vertices}" face="{mesh_faces}"/>
+    <mesh name="sole_right" vertex="{mesh_vertices}" face="{mesh_faces}"/>
+    <mesh name="tire" vertex="{mesh_vertices}" face="{mesh_faces}"/>
+  </asset>
   <option timestep="0.005" gravity="0 0 0"/>
   <worldbody>
     <geom name="floor" type="plane" size="0 0 0.05" pos="{floor_pos}" quat="{
@@ -285,7 +392,12 @@ def _write_model(
             trunk_contype
         }" conaffinity="{trunk_conaffinity}"/>
       <site name="imu" quat="{imu_site_quat}"/>
-      <body name="roller"><joint name="passive_wheel" type="hinge"/><geom type="sphere" size="0.002" mass="0.001"/></body>
+      {
+            '<body name="roller"><joint name="passive_wheel" type="hinge"/>'
+            '<geom type="sphere" size="0.002" mass="0.001"/></body>'
+            if not roller_topology or extra_passive_actuator
+            else ""
+        }
       {"".join(bodies)}
       {"".join(reversed(closing))}
     </body>
@@ -339,6 +451,8 @@ def _write_verified_bundle(
     wheel_conaffinity: int = 1,
     trunk_contype: int = 1,
     trunk_conaffinity: int = 1,
+    exact_foot_topology: bool = True,
+    extra_passive_wheel_joint: bool = False,
 ) -> PolicyBundle:
     model_path = root / "models" / "robot.xml"
     policy_path = root / "policies" / "walk.onnx"
@@ -365,6 +479,8 @@ def _write_verified_bundle(
         wheel_conaffinity=wheel_conaffinity,
         trunk_contype=trunk_contype,
         trunk_conaffinity=trunk_conaffinity,
+        exact_foot_topology=exact_foot_topology,
+        extra_passive_wheel_joint=extra_passive_wheel_joint,
         include_file="extra.xml" if include_dependency else None,
     )
     _write_policy(
@@ -667,6 +783,30 @@ def test_runtime_rejects_rollers_whose_masks_cannot_collide_with_floor(
         MicroduckMujocoRuntime(root, bundle, realtime=False)
 
 
+def test_runtime_rejects_arbitrary_ankle_descendants_as_floor_contacts(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root, exact_foot_topology=False)
+
+    with pytest.raises(ValueError, match="qualified model capabilities"):
+        MicroduckMujocoRuntime(root, bundle, realtime=False)
+
+
+def test_runtime_rejects_extra_passive_wheel_joint(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(
+        root,
+        action_code="ROLLER_VELOCITY",
+        task_id="Mjlab-Velocity-Flat-MicroDuck-Rollers",
+        roller_topology=True,
+        extra_passive_wheel_joint=True,
+    )
+
+    with pytest.raises(ValueError, match="qualified model capabilities"):
+        MicroduckMujocoRuntime(root, bundle, realtime=False)
+
+
 def test_runtime_readiness_rejects_action_preconditions_outside_qualification(
     tmp_path: Path,
 ) -> None:
@@ -746,6 +886,11 @@ def test_runtime_rejects_non_position_actuator_semantics(tmp_path: Path) -> None
         ({"actuator_kind": "general_dynamic"}, "actuator dynamics"),
         ({"actuator_kind": "general_affine_offset"}, "position actuator semantics"),
         ({"actuator_kind": "general_velocity_bias"}, "position actuator semantics"),
+        ({"actuator_kind": "position_infinite_gain"}, "position actuator semantics"),
+        (
+            {"actuator_kind": "general_negative_infinite_bias"},
+            "position actuator semantics",
+        ),
         ({"extra_passive_actuator": True}, "exactly 14 total actuators"),
     ],
 )
@@ -974,6 +1119,35 @@ def test_normalizer_validator_rejects_second_empirical_stats_stage(
 
     with pytest.raises(ValueError, match="exactly one.*normalization"):
         inspect_normalized_actor(onnx.load(policy, load_external_data=False))
+
+
+@pytest.mark.parametrize("transform", ["Identity", "Cast", "Reshape", "Neg"])
+def test_normalizer_validator_rejects_hidden_second_stats_constant_lineage(
+    tmp_path: Path, transform: str
+) -> None:
+    """Constant-only exporter nodes cannot hide a second 61D Sub/Div stage."""
+    policy = tmp_path / f"twice-normalized-{transform.lower()}.onnx"
+    _write_policy(
+        policy,
+        second_normalizer=True,
+        second_normalizer_constant_transform=transform,
+    )
+
+    with pytest.raises(ValueError, match="exactly one.*normalization"):
+        inspect_normalized_actor(onnx.load(policy, load_external_data=False))
+
+
+@pytest.mark.parametrize("transform", ["Identity", "Cast", "Reshape"])
+def test_normalizer_validator_accepts_valid_stats_constant_transforms(
+    tmp_path: Path, transform: str
+) -> None:
+    """Common exporter constant transforms preserve one validated normalizer."""
+    policy = tmp_path / f"normalized-{transform.lower()}.onnx"
+    _write_policy(policy, normalizer_constant_transform=transform)
+
+    inspected = inspect_normalized_actor(onnx.load(policy, load_external_data=False))
+
+    assert inspected.fingerprint.startswith("sha256:")
 
 
 def test_normalizer_validator_allows_actor_arithmetic_after_empirical_prefix(

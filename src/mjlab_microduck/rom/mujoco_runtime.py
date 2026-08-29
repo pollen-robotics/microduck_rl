@@ -403,7 +403,7 @@ class MicroduckMujocoRuntime:
                 raise ValueError("radian controlled joint must be a scalar hinge")
             actuator_id = int(matching_actuators[0])
             gear = self._model.actuator_gear[actuator_id]
-            if not np.allclose(
+            if not np.isfinite(gear).all() or not np.allclose(
                 gear, np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0]), atol=1e-12
             ):
                 raise ValueError(
@@ -416,25 +416,29 @@ class MicroduckMujocoRuntime:
                 raise ValueError("position actuator requires fixed gain semantics")
             if self._model.actuator_dyntype[actuator_id] != mujoco.mjtDyn.mjDYN_NONE:
                 raise ValueError("position actuator must not declare actuator dynamics")
+            gain_parameters = self._model.actuator_gainprm[actuator_id]
+            bias_parameters = self._model.actuator_biasprm[actuator_id]
             if (
                 self._model.actuator_trntype[actuator_id] != mujoco.mjtTrn.mjTRN_JOINT
                 or self._model.actuator_biastype[actuator_id]
                 != mujoco.mjtBias.mjBIAS_AFFINE
-                or self._model.actuator_gainprm[actuator_id, 0] <= 0.0
+                or not np.isfinite(gain_parameters).all()
+                or not np.isfinite(bias_parameters).all()
+                or gain_parameters[0] <= 0.0
                 or not math.isclose(
-                    self._model.actuator_biasprm[actuator_id, 0],
+                    bias_parameters[0],
                     0.0,
                     abs_tol=1e-12,
                     rel_tol=0.0,
                 )
                 or not math.isclose(
-                    self._model.actuator_biasprm[actuator_id, 1],
-                    -self._model.actuator_gainprm[actuator_id, 0],
+                    bias_parameters[1],
+                    -gain_parameters[0],
                     abs_tol=1e-12,
                     rel_tol=0.0,
                 )
                 or not math.isclose(
-                    self._model.actuator_biasprm[actuator_id, 2],
+                    bias_parameters[2],
                     0.0,
                     abs_tol=1e-12,
                     rel_tol=0.0,
