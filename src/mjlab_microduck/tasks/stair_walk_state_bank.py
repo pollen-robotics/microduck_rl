@@ -313,6 +313,9 @@ class WalkerStateBankReset:
         )
         self._local_x_range = cfg.params.get("local_x_range")
         self._local_y_range = cfg.params.get("local_y_range")
+        self._zero_missing_pose_commands = bool(
+            cfg.params.get("zero_missing_pose_commands", False)
+        )
 
         robot = env.scene["robot"]
         saved_joint_names = self._bank["metadata"].get("joint_names")
@@ -327,8 +330,15 @@ class WalkerStateBankReset:
         canonicalize_heading: bool = False,
         local_x_range: tuple[float, float] | None = None,
         local_y_range: tuple[float, float] | None = None,
+        zero_missing_pose_commands: bool = False,
     ) -> None:
-        del bank_path, canonicalize_heading, local_x_range, local_y_range
+        del (
+            bank_path,
+            canonicalize_heading,
+            local_x_range,
+            local_y_range,
+            zero_missing_pose_commands,
+        )
         mode = getattr(env, "_stair_assisted_reset_mode", None)
         if mode is None:
             raise RuntimeError("Walker-state replay requires assisted reset mode tracking")
@@ -422,6 +432,11 @@ class WalkerStateBankReset:
                 if field == "time_left":
                     value = value + self._env.step_dt
                 getattr(term, field)[ids] = value
+        if self._zero_missing_pose_commands:
+            for name in ("head_pose", "body_pose"):
+                if name not in saved["commands"]:
+                    term = self._env.command_manager.get_term(name)
+                    term._command[ids] = 0.0
 
         delays = self._env.observation_manager._group_obs_term_delay_buffer
         for key, delay_state in saved["observation_delays"].items():

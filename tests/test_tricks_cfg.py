@@ -414,8 +414,9 @@ def test_roulade_bank_stage_requires_contact_supported_tread_progress():
     )
     bank = cfg.events["walker_state_bank"].params
     assert bank["canonicalize_heading"] is False
-    assert bank["local_x_range"] == (0.54, 0.62)
+    assert bank["local_x_range"] == (0.48, 0.58)
     assert bank["local_y_range"] == (-0.08, 0.08)
+    assert bank["zero_missing_pose_commands"] is True
     crossing = cfg.rewards["stair_assisted_crossing"]
     assert crossing.params["hard_height_gate"] is True
     assert crossing.params["clearance_height"] == 0.17

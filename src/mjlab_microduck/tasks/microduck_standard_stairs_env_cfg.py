@@ -849,8 +849,9 @@ def make_microduck_stair_roulade_bank_env_cfg(
         params={
             "bank_path": ".tmp/codex/full170-roulade-state-bank.pt",
             "canonicalize_heading": False,
-            "local_x_range": (0.54, 0.62),
+            "local_x_range": (0.48, 0.58),
             "local_y_range": (-0.08, 0.08),
+            "zero_missing_pose_commands": True,
         },
     )
 
