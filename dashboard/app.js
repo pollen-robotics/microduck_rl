@@ -1,7 +1,12 @@
 (() => {
   "use strict";
 
-  const state = { data: null, selectedRun: null };
+  const state = {
+    data: null,
+    selectedRun: null,
+    mediaSignature: null,
+    mediaObserver: null,
+  };
   const $ = (selector) => document.querySelector(selector);
 
   function text(value) {
@@ -137,19 +142,44 @@
 
   function renderMedia(data) {
     const grid = $("#media-grid");
-    grid.replaceChildren();
     const media = (data.media || [])
       .filter((item) => item.kind === "video")
       .sort((left, right) => left.name.localeCompare(right.name));
+    const signature = JSON.stringify(media.map((item) => [item.name, item.url, item.modified]));
+    if (signature === state.mediaSignature) return;
+    state.mediaSignature = signature;
+    state.mediaObserver?.disconnect();
+    state.mediaObserver = null;
+    grid.replaceChildren();
     $("#media-empty").hidden = media.length !== 0;
+
+    const loadVideo = (video) => {
+      if (video.src || !video.dataset.src) return;
+      video.src = video.dataset.src;
+      video.load();
+    };
+    if ("IntersectionObserver" in window) {
+      state.mediaObserver = new IntersectionObserver((entries, observer) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          loadVideo(entry.target);
+          observer.unobserve(entry.target);
+        }
+      }, { rootMargin: "360px 0px" });
+    }
+
     for (const item of media) {
       const card = el("article", "media-card");
       const preview = el("div", "media-preview");
       const video = document.createElement("video");
       video.controls = true;
-      video.preload = "metadata";
-      video.src = item.url;
+      video.preload = "none";
+      video.dataset.src = item.url;
       video.setAttribute("aria-label", item.name);
+      video.addEventListener("pointerdown", () => loadVideo(video), { once: true });
+      video.addEventListener("focus", () => loadVideo(video), { once: true });
+      if (state.mediaObserver) state.mediaObserver.observe(video);
+      else loadVideo(video);
       preview.append(video);
       const meta = el("div", "media-meta");
       const location = item.source === "runs" ? item.path : `${item.source}/${item.path || item.name}`;
