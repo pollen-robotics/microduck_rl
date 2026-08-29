@@ -16,6 +16,7 @@ from mjlab_microduck.rom.contracts import (
     PolicyArtifact,
     PolicyBundle,
     TaskCreateRequest,
+    canonical_json,
     sha256_prefixed,
 )
 from mjlab_microduck.rom.runtime import RuntimeEvidence, RuntimeSample
@@ -228,6 +229,24 @@ def test_runtime_metrics_allow_bounded_scalar_summary():
     sample = RuntimeSample(running=False, terminalState="SUCCEEDED", metrics={"upright": True, "score": 0.25})
 
     assert sample.metrics == {"upright": True, "score": 0.25}
+
+
+def test_terminal_evidence_drops_lower_priority_metrics_to_stay_aggregate_bounded(
+    service, stand_request, runtime
+):
+    """Concatenating valid sample and stop metrics must not persist an oversized evidence blob."""
+    sample_metrics = {f"sample-{index:02d}": "s" * 60 for index in range(12)}
+    runtime.safe_stop_metrics = {f"stop-{index:02d}": "t" * 60 for index in range(12)}
+    RuntimeSample(running=False, terminalState="SUCCEEDED", metrics=sample_metrics)
+    RuntimeEvidence(metrics=runtime.safe_stop_metrics)
+    runtime.complete_next(state="SUCCEEDED", metrics=sample_metrics)
+
+    created = service.create_task(stand_request)
+    terminal = wait_for_state(service, created.taskId, "SUCCEEDED", runtime.safe_stopped)
+
+    assert terminal.evidence is not None
+    assert terminal.evidence.metrics == sample_metrics | {"stop-00": "t" * 60}
+    assert len(canonical_json(terminal.evidence.metrics)) <= 1_024
 
 
 def test_cancel_during_validation_is_idempotent_and_does_not_skip_store_states(

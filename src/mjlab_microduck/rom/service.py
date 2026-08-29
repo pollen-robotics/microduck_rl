@@ -300,10 +300,18 @@ def _policy_for(bundle: PolicyBundle, action: ActionDefinition) -> PolicyArtifac
 def _merge_metrics(
     stop_metrics: Mapping[str, RuntimeMetric], sample_metrics: Mapping[str, RuntimeMetric]
 ) -> dict[str, RuntimeMetric]:
-    merged = dict(stop_metrics)
-    merged.update(sample_metrics)
-    if len(merged) > 32:
-        return dict(list(merged.items())[:32])
+    """Keep primary runtime outcome metrics before lower-priority safe-stop diagnostics."""
+    merged: dict[str, RuntimeMetric] = {}
+    for metrics in (sample_metrics, stop_metrics):
+        for key in sorted(metrics):
+            if key in merged:
+                continue
+            candidate = merged | {key: metrics[key]}
+            try:
+                RuntimeEvidence(metrics=candidate)
+            except (TypeError, ValueError):
+                continue
+            merged = candidate
     return merged
 
 

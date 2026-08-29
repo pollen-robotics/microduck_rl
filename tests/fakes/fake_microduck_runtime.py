@@ -26,6 +26,7 @@ class FakeMicroduckRuntime:
         self.validation_error: BaseException | None = None
         self.start_error: BaseException | None = None
         self.status_error: BaseException | None = None
+        self.safe_stop_metrics: dict[str, Any] = {"safeStop": True}
         self.status_value = robot_status()
 
     def complete_next(
@@ -68,7 +69,7 @@ class FakeMicroduckRuntime:
         with self._lock:
             self.safe_stop_calls.append((handle, reason))
         self.safe_stopped.set()
-        return RuntimeEvidence(metrics={"safeStop": True}, stopReason=reason)
+        return RuntimeEvidence(metrics=self.safe_stop_metrics, stopReason=reason)
 
     def status(self) -> RobotStatus:
         if self.status_error is not None:
