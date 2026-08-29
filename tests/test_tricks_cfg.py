@@ -1,4 +1,7 @@
 import math
+from types import SimpleNamespace
+
+import torch
 
 from mjlab_microduck.tasks.microduck_backflip_env_cfg import (
     MicroduckBackflipRlCfg,
@@ -35,6 +38,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     make_microduck_stair_specialist_env_cfg,
     make_microduck_standard_stairs_env_cfg,
 )
+from mjlab_microduck.tasks.stair_action import StairHistoryJointPositionAction
 
 
 def test_stairs_are_dedicated_low_rise_terrain():
@@ -182,6 +186,41 @@ def test_stair_specialist_uses_only_full_height_handoff_states():
     assert MicroduckStairSpecialistRlCfg.max_iterations == 800
     assert MicroduckStairSpecialistRlCfg.algorithm.learning_rate == 1.0e-4
     assert MicroduckStairSpecialistRlCfg.algorithm.schedule == "fixed"
+    assert cfg.actions["joint_pos"].__class__.__name__ == (
+        "StairHistoryJointPositionActionCfg"
+    )
+
+
+def test_stair_action_restores_history_after_manager_reset():
+    term = StairHistoryJointPositionAction.__new__(StairHistoryJointPositionAction)
+    current = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    previous = current - 0.25
+    previous_previous = current - 0.50
+    manager = SimpleNamespace(
+        _action=torch.zeros_like(current),
+        _prev_action=torch.zeros_like(current),
+        _prev_prev_action=torch.zeros_like(current),
+    )
+    term._env = SimpleNamespace(
+        action_manager=manager,
+        _stair_reset_action_history={
+            "current": current,
+            "previous": previous,
+            "previous_previous": previous_previous,
+        },
+    )
+    term._raw_actions = torch.zeros_like(current)
+    term._processed_actions = torch.zeros_like(current)
+    term._scale = 2.0
+    term._offset = 0.5
+
+    ids = torch.tensor([1])
+    term.reset(ids)
+
+    assert torch.equal(manager._action[ids], current[ids])
+    assert torch.equal(manager._prev_action[ids], previous[ids])
+    assert torch.equal(manager._prev_prev_action[ids], previous_previous[ids])
+    assert torch.equal(term._processed_actions[ids], current[ids] * 2.0 + 0.5)
 
 
 def test_assisted_stair_specialist_keeps_full_geometry_and_stage_a_gates():

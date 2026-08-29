@@ -1097,6 +1097,20 @@ def _seed_action_history_from_joint_pose(
     scale_value = scale[env_ids] if isinstance(scale, torch.Tensor) else scale
     raw_action = (joint_pos - offset_value) / scale_value
     manager = env.action_manager
+    if not hasattr(env, "_stair_reset_action_history"):
+        env._stair_reset_action_history = {
+            "current": torch.zeros_like(manager._action),
+            "previous": torch.zeros_like(manager._prev_action),
+            "previous_previous": torch.zeros_like(manager._prev_prev_action),
+        }
+    history = env._stair_reset_action_history
+    history["current"][env_ids] = raw_action
+    history["previous"][env_ids] = raw_action
+    history["previous_previous"][env_ids] = raw_action
+
+    # These writes make the state immediately coherent inside the reset event.
+    # StairHistoryJointPositionAction repeats them after ActionManager.reset,
+    # which otherwise zeros all three buffers later in mjlab's reset sequence.
     manager._action[env_ids] = raw_action
     manager._prev_action[env_ids] = raw_action
     manager._prev_prev_action[env_ids] = raw_action

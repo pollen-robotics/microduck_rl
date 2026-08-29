@@ -31,6 +31,7 @@ from mjlab_microduck.tasks.microduck_velocity_env_cfg import (
     make_microduck_velocity_env_cfg,
 )
 from mjlab_microduck.tasks import mdp as microduck_mdp
+from mjlab_microduck.tasks.stair_action import with_stair_history_seed
 
 
 STANDARD_RISER_HEIGHT = 0.17
@@ -481,6 +482,7 @@ def make_microduck_stair_specialist_env_cfg(
     """Train only the post-handoff specialist on the full home staircase."""
     cfg = make_microduck_route_stairs_env_cfg(play=False)
     cfg.episode_length_s = 8.0
+    cfg.actions["joint_pos"] = with_stair_history_seed(cfg.actions["joint_pos"])
 
     # Keep the procedural row layout used by route cues, but make every row
     # the same physical five-step, 170 mm staircase. There is no miniature
