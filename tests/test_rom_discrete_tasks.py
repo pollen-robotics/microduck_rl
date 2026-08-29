@@ -1,0 +1,311 @@
+from __future__ import annotations
+
+import time
+from datetime import UTC, datetime
+from threading import Event
+
+import pytest
+
+from mjlab_microduck.rom.contracts import (
+    CONTROLLED_SERVO_JOINTS,
+    OBSERVATION_FIELDS,
+    ActionContract,
+    ActionDefinition,
+    ModelArtifact,
+    ObservationContract,
+    PolicyArtifact,
+    PolicyBundle,
+    TaskCreateRequest,
+)
+from mjlab_microduck.rom.service import (
+    ActionUnavailable,
+    BundleMismatch,
+    InvalidParameters,
+    PreconditionFailed,
+    RobotBusy,
+    RuntimeException,
+    SimulatorTaskService,
+)
+from mjlab_microduck.rom.store import SqliteTaskStore
+from tests.fakes.fake_microduck_runtime import FakeMicroduckRuntime, robot_status
+
+
+def test_discrete_task_records_terminal_evidence(service, stand_request, runtime):
+    """Dropping provenance or bounded completion metrics would make a result unreplayable."""
+    runtime.complete_next(state="SUCCEEDED", metrics={"upright": True})
+
+    created = service.create_task(stand_request)
+    terminal = wait_for_state(service, created.taskId, "SUCCEEDED", runtime.safe_stopped)
+
+    assert terminal.evidence is not None
+    assert terminal.evidence.bundleDigest == stand_request.bundleDigest
+    assert terminal.evidence.policyDigest == "sha256:" + "b" * 64
+    assert terminal.evidence.metrics == {"safeStop": True, "upright": True}
+    assert len(runtime.safe_stop_calls) == 1
+
+
+def test_only_one_motion_task_runs(service, stand_request, kick_request, runtime):
+    """Removing active-slot ownership would let conflicting motions reach one robot."""
+    service.create_task(stand_request)
+    assert runtime.started.wait(timeout=1.0)
+
+    with pytest.raises(RobotBusy) as error:
+        service.create_task(kick_request)
+
+    assert error.value.code == "ROBOT_BUSY"
+
+
+def test_rejects_unavailable_action_before_creating_task(runtime, store, stand_request, bundle):
+    """Treating unavailable artifacts as executable would start a policy with no release evidence."""
+    unavailable = bundle.model_copy(
+        update={
+            "actions": [
+                action.model_copy(update={"availability": "UNAVAILABLE", "policyRef": None})
+                if action.actionCode == "STAND"
+                else action
+                for action in bundle.actions
+            ]
+        }
+    )
+    service = SimulatorTaskService(unavailable, store, runtime)
+
+    with pytest.raises(ActionUnavailable) as error:
+        service.create_task(stand_request)
+
+    assert error.value.code == "ACTION_UNAVAILABLE"
+    assert store.get(stand_request.taskId) is None
+
+
+def test_rejects_bundle_mismatch_before_creating_task(service, stand_request, store):
+    """Ignoring a requested release digest could silently run a different policy than selected."""
+    wrong_digest = stand_request.model_copy(update={"bundleDigest": "sha256:" + "f" * 64})
+
+    with pytest.raises(BundleMismatch) as error:
+        service.create_task(wrong_digest)
+
+    assert error.value.code == "BUNDLE_MISMATCH"
+    assert store.get(wrong_digest.taskId) is None
+
+
+def test_rejects_parameters_outside_action_schema(service, stand_request, store):
+    """Relaxing additionalProperties would admit undeclared task controls into execution."""
+    invalid = stand_request.model_copy(update={"parameters": {"unexpected": 1}})
+
+    with pytest.raises(InvalidParameters) as error:
+        service.create_task(invalid)
+
+    assert error.value.code == "PARAMETER_INVALID"
+    assert store.get(invalid.taskId) is None
+
+
+def test_rejects_nonflat_or_unhealthy_runtime_before_creating_task(
+    service, stand_request, runtime, store
+):
+    """Skipping terrain and health gates would command an unqualified or unready robot."""
+    wrong_terrain = stand_request.model_copy(update={"scenario": {"terrain": "stairs"}})
+    with pytest.raises(PreconditionFailed) as terrain_error:
+        service.create_task(wrong_terrain)
+    assert terrain_error.value.code == "PRECONDITION_FAILED"
+
+    runtime.status_value = robot_status(healthy=False)
+    with pytest.raises(PreconditionFailed) as health_error:
+        service.create_task(stand_request)
+    assert health_error.value.code == "PRECONDITION_FAILED"
+    assert store.get(stand_request.taskId) is None
+
+
+def test_status_runtime_exception_has_a_stable_public_code(service, stand_request, runtime):
+    """Leaking a runtime status exception would make callers branch on implementation details."""
+    runtime.status_error = RuntimeError("status transport failed")
+
+    with pytest.raises(RuntimeException) as error:
+        service.create_task(stand_request)
+
+    assert error.value.code == "RUNTIME_EXCEPTION"
+
+
+def test_start_exception_safely_stops_before_recording_runtime_failure(
+    service, stand_request, runtime
+):
+    """A start failure after ownership begins must still invoke the runtime's safe stop."""
+    runtime.start_error = RuntimeError("start failed")
+    created = service.create_task(stand_request)
+
+    terminal = wait_for_state(service, created.taskId, "FAILED", runtime.safe_stopped)
+
+    assert terminal.stopReason == "RUNTIME_EXCEPTION"
+    assert len(runtime.safe_stop_calls) == 1
+
+
+def test_runtime_exception_safely_stops_and_records_failed_evidence(service, stand_request, runtime):
+    """Letting runtime failures escape would leave the active robot slot and evidence ambiguous."""
+    runtime.fail_next_sample(RuntimeError("simulator fault"))
+    created = service.create_task(stand_request)
+
+    terminal = wait_for_state(service, created.taskId, "FAILED", runtime.safe_stopped)
+
+    assert terminal.stopReason == "RUNTIME_EXCEPTION"
+    assert terminal.evidence is not None
+    assert terminal.evidence.stopReason == "RUNTIME_EXCEPTION"
+    assert len(runtime.safe_stop_calls) == 1
+
+
+def test_discrete_max_duration_times_out_and_safely_stops(bundle, store, runtime, stand_request):
+    """Ignoring a discrete deadline would permit a policy to hold robot ownership indefinitely."""
+    short_bundle = bundle.model_copy(
+        update={
+            "actions": [
+                action.model_copy(update={"completion": action.completion.model_copy(update={"maxDurationMs": 1})})
+                if action.actionCode == "STAND"
+                else action
+                for action in bundle.actions
+            ]
+        }
+    )
+    service = SimulatorTaskService(short_bundle, store, runtime, pollIntervalS=0.001)
+    created = service.create_task(stand_request)
+
+    terminal = wait_for_state(service, created.taskId, "TIMED_OUT", runtime.safe_stopped)
+
+    assert terminal.stopReason == "MAX_DURATION_EXCEEDED"
+    assert len(runtime.safe_stop_calls) == 1
+
+
+def test_cancel_during_validation_is_idempotent_and_does_not_skip_store_states(
+    service, stand_request, runtime
+):
+    """Transitioning VALIDATING directly to CANCELLED would violate the durable lifecycle."""
+    runtime.validation_release.clear()
+    created = service.create_task(stand_request)
+    assert runtime.validation_started.wait(timeout=1.0)
+
+    first = service.cancel_task(created.taskId)
+    second = service.cancel_task(created.taskId)
+    assert first.state == second.state == "VALIDATING"
+    runtime.validation_release.set()
+
+    terminal = wait_for_state(service, created.taskId, "CANCELLED")
+    assert terminal.stopReason == "CANCELLED"
+    assert len(runtime.safe_stop_calls) == 0
+    assert [event.eventType for event in service.events_after(created.taskId, -1)] == [
+        "TASK_VALIDATING",
+        "TASK_CANCEL_REQUESTED",
+        "TASK_STARTED",
+        "TASK_CANCELLED",
+    ]
+
+
+def test_cancelled_running_task_safely_stops_once_and_releases_slot(
+    service, stand_request, kick_request, runtime
+):
+    """A repeated cancel must not double-stop a running runtime or keep the robot busy."""
+    created = service.create_task(stand_request)
+    assert runtime.started.wait(timeout=1.0)
+
+    service.cancel_task(created.taskId)
+    terminal = wait_for_state(service, created.taskId, "CANCELLED", runtime.safe_stopped)
+    service.cancel_task(created.taskId)
+
+    assert terminal.stopReason == "CANCELLED"
+    assert len(runtime.safe_stop_calls) == 1
+    runtime.complete_next(state="SUCCEEDED", metrics={})
+    next_task = service.create_task(kick_request)
+    assert next_task.taskId == kick_request.taskId
+
+
+@pytest.fixture
+def bundle() -> PolicyBundle:
+    observation = ObservationContract(
+        identifier="MICRODUCK_OBS_61_V1",
+        dimension=61,
+        fields=list(OBSERVATION_FIELDS),
+        units={},
+        normalization="BAKED_IN_ONNX",
+    )
+    action_contract = ActionContract(
+        identifier="MICRODUCK_ACTION_14_V1",
+        dimension=14,
+        joints=list(CONTROLLED_SERVO_JOINTS),
+        units="rad",
+        scaling={},
+        clipping={},
+    )
+    return PolicyBundle(
+        schema="MICRODUCK_POLICY_BUNDLE_V1",
+        bundleId="microduck-test",
+        bundleVersion="1.0.0",
+        bundleDigest="sha256:" + "a" * 64,
+        createdAt=datetime(2026, 8, 29, tzinfo=UTC),
+        sourceRepository="microduck-rl",
+        sourceCommit="c" * 40,
+        robotModel="MICRODUCK",
+        observationContract=observation,
+        actionContract=action_contract,
+        model=ModelArtifact(path="models/robot.xml", digest="sha256:" + "c" * 64),
+        policies=[PolicyArtifact(policyRef="stand", path="policies/stand.onnx", digest="sha256:" + "b" * 64)],
+        actions=[
+            ActionDefinition(
+                actionCode=code,
+                executionMode="DISCRETE",
+                availability="AVAILABLE",
+                policyRef="stand",
+                parameterSchema={"type": "object", "additionalProperties": False, "properties": {}},
+                completion={"terminalConditions": ["TASK_COMPLETE", "TIMEOUT"], "maxDurationMs": 1000},
+                preconditions={"allowedTerrains": ["flat"]},
+            )
+            for code in ("STAND", "KICK_LEFT")
+        ],
+        qualification={},
+        license={},
+    )
+
+
+@pytest.fixture
+def store(tmp_path) -> SqliteTaskStore:
+    return SqliteTaskStore(tmp_path / "simulator.sqlite3")
+
+
+@pytest.fixture
+def runtime() -> FakeMicroduckRuntime:
+    return FakeMicroduckRuntime()
+
+
+@pytest.fixture
+def service(bundle, store, runtime) -> SimulatorTaskService:
+    return SimulatorTaskService(bundle, store, runtime, pollIntervalS=0.001)
+
+
+@pytest.fixture
+def stand_request() -> TaskCreateRequest:
+    return request_for("0" * 32, "STAND")
+
+
+@pytest.fixture
+def kick_request() -> TaskCreateRequest:
+    return request_for("1" * 32, "KICK_LEFT")
+
+
+def request_for(task_id: str, action_code: str) -> TaskCreateRequest:
+    return TaskCreateRequest(
+        schema="MICRODUCK_SIM_TASK_V1",
+        taskId=task_id,
+        actionCode=action_code,
+        bundleVersion="1.0.0",
+        bundleDigest="sha256:" + "a" * 64,
+        parameters={},
+        scenario={"terrain": "flat", "seed": 1},
+        requestedBy="test-execution",
+    )
+
+
+def wait_for_state(service: SimulatorTaskService, task_id: str, state: str, signal: Event | None = None):
+    """Wait on a runtime coordination signal, then observe the durable terminal snapshot."""
+    if signal is not None:
+        assert signal.wait(timeout=1.0)
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        snapshot = service.get_task(task_id)
+        if snapshot.state == state:
+            return snapshot
+        Event().wait(0.001)
+    pytest.fail(f"task {task_id} did not reach {state}")
