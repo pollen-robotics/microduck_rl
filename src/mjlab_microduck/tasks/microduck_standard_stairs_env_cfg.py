@@ -12,28 +12,26 @@ from dataclasses import dataclass
 
 import mujoco
 import numpy as np
-
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers import EventTermCfg, RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.terrains.terrain_generator import (
     SubTerrainCfg,
     TerrainGeneratorCfg,
     TerrainGeometry,
     TerrainOutput,
 )
-from mjlab.sensor import ContactMatch, ContactSensorCfg
 
 from mjlab_microduck.robot.microduck_constants import MICRODUCK_STANDUP_ROBOT_CFG
+from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.microduck_velocity_env_cfg import (
     MicroduckRlCfg,
     _soften_terrain_contacts,
     make_microduck_velocity_env_cfg,
 )
-from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.stair_action import with_stair_history_seed
 from mjlab_microduck.tasks.stair_walk_state_bank import WalkerStateBankReset
-
 
 STANDARD_RISER_HEIGHT = 0.17
 STANDARD_TREAD_DEPTH = 0.28
@@ -946,6 +944,33 @@ def make_microduck_stair_roulade_bank_env_cfg(
     return cfg
 
 
+def make_microduck_stair_phase_balanced_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A18: replay every phase of the exact manufacturer roll evenly."""
+
+    cfg = make_microduck_stair_roulade_bank_env_cfg(play=False)
+    bank = cfg.events["walker_state_bank"].params
+    bank.update(
+        {
+            "phase_balanced": True,
+            "phase_bucket_count": 4,
+        }
+    )
+    # Four temporal buckets explicitly expose preload, contact, apex, and
+    # release. This is reference-state initialization, not a scripted action
+    # trajectory: the policy still controls every motor after reset.
+    cfg.episode_length_s = 8.0
+    cfg.events["walker_state_bank"] = EventTermCfg(
+        func=WalkerStateBankReset,
+        mode="reset",
+        params=bank,
+    )
+    cfg.rewards["stair_first_tread_secured"].weight = 400.0
+    del play
+    return cfg
+
+
 def make_microduck_stair_tread_contact_bank_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -1189,6 +1214,16 @@ MicroduckStairRouladeBankRlCfg.save_interval = 25
 MicroduckStairRouladeBankRlCfg.actor.distribution_cfg["init_std"] = 0.28
 MicroduckStairRouladeBankRlCfg.algorithm.learning_rate = 2.0e-5
 MicroduckStairRouladeBankRlCfg.algorithm.entropy_coef = 0.0002
+
+MicroduckStairPhaseBalancedRsiRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)
+MicroduckStairPhaseBalancedRsiRlCfg.experiment_name = (
+    "microduck_stair_phase_balanced_rsi"
+)
+MicroduckStairPhaseBalancedRsiRlCfg.run_name = "microduck_stair_phase_balanced_rsi"
+MicroduckStairPhaseBalancedRsiRlCfg.max_iterations = 400
+MicroduckStairPhaseBalancedRsiRlCfg.save_interval = 25
+MicroduckStairPhaseBalancedRsiRlCfg.actor.distribution_cfg["init_std"] = 0.30
+MicroduckStairPhaseBalancedRsiRlCfg.algorithm.learning_rate = 2.0e-5
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)
 MicroduckStairTreadContactBankRlCfg.experiment_name = (

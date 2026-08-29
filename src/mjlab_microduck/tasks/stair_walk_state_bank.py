@@ -7,7 +7,6 @@ from typing import Any
 
 import torch
 
-
 BANK_SCHEMA_VERSION = 1
 STANDARD_RISER_HEIGHT_M = 0.170
 STANDARD_TREAD_DEPTH_M = 0.280
@@ -353,6 +352,53 @@ def eligible_walk_state_rows(
     return rows
 
 
+def phase_balanced_row_buckets(
+    states: dict[str, Any],
+    eligible_rows: torch.Tensor,
+    *,
+    source_episode_step_range: tuple[int, int],
+    bucket_count: int = 4,
+) -> tuple[torch.Tensor, ...]:
+    """Split eligible reference states into equal temporal phase buckets.
+
+    Reference-state initialization is most useful when every rollout sees a
+    comparable amount of preload, contact, apex, and release motion. The raw
+    bank is not uniformly distributed in time, so sampling eligible rows
+    uniformly can almost eliminate the late-release states. Buckets are based
+    on the source episode step, while the rows inside each bucket remain
+    stochastic.
+    """
+    if bucket_count < 2:
+        raise ValueError("Phase-balanced sampling requires at least two buckets")
+    if len(eligible_rows) == 0:
+        raise ValueError("Phase-balanced sampling requires eligible rows")
+    if "source_episode_step" not in states:
+        raise ValueError(
+            "Phase-balanced sampling requires source_episode_step in the bank"
+        )
+    low, high = source_episode_step_range
+    if high < low:
+        raise ValueError("Source episode step range must be ascending")
+    source_steps = states["source_episode_step"][eligible_rows]
+    span = max(high - low + 1, 1)
+    bucket_ids = torch.div(
+        (source_steps - low).clamp(min=0, max=span - 1) * bucket_count,
+        span,
+        rounding_mode="floor",
+    ).clamp(max=bucket_count - 1)
+    buckets = tuple(
+        eligible_rows[bucket_ids == bucket_index]
+        for bucket_index in range(bucket_count)
+    )
+    if any(len(bucket) == 0 for bucket in buckets):
+        counts = [len(bucket) for bucket in buckets]
+        raise ValueError(
+            "Phase-balanced sampling produced an empty bucket: "
+            f"counts={counts}, range={source_episode_step_range}"
+        )
+    return buckets
+
+
 class WalkerStateBankReset:
     """Replace assisted mode 3 with a real frozen-walker handoff state."""
 
@@ -370,6 +416,8 @@ class WalkerStateBankReset:
         self._zero_missing_pose_commands = bool(
             cfg.params.get("zero_missing_pose_commands", False)
         )
+        self._phase_balanced = bool(cfg.params.get("phase_balanced", False))
+        self._phase_bucket_count = int(cfg.params.get("phase_bucket_count", 4))
         self._eligible_rows = eligible_walk_state_rows(
             self._states,
             source_episode_step_range=cfg.params.get("source_episode_step_range"),
@@ -382,6 +430,19 @@ class WalkerStateBankReset:
             max_abs_lateral_speed=cfg.params.get("max_abs_lateral_speed"),
             max_abs_yaw_rate=cfg.params.get("max_abs_yaw_rate"),
         )
+        self._phase_rows: tuple[torch.Tensor, ...] | None = None
+        if self._phase_balanced:
+            source_range = cfg.params.get("source_episode_step_range")
+            if source_range is None:
+                raise ValueError(
+                    "Phase-balanced walker replay requires source_episode_step_range"
+                )
+            self._phase_rows = phase_balanced_row_buckets(
+                self._states,
+                self._eligible_rows,
+                source_episode_step_range=source_range,
+                bucket_count=self._phase_bucket_count,
+            )
 
         robot = env.scene["robot"]
         saved_joint_names = self._bank["metadata"].get("joint_names")
@@ -406,6 +467,8 @@ class WalkerStateBankReset:
         max_abs_local_y: float | None = None,
         max_abs_lateral_speed: float | None = None,
         max_abs_yaw_rate: float | None = None,
+        phase_balanced: bool = False,
+        phase_bucket_count: int = 4,
     ) -> None:
         del (
             bank_path,
@@ -422,6 +485,8 @@ class WalkerStateBankReset:
             max_abs_local_y,
             max_abs_lateral_speed,
             max_abs_yaw_rate,
+            phase_balanced,
+            phase_bucket_count,
         )
         mode = getattr(env, "_stair_assisted_reset_mode", None)
         if mode is None:
@@ -442,13 +507,32 @@ class WalkerStateBankReset:
             self._pending_rows = None
             return
 
-        row_indices = torch.randint(
-            0,
-            len(self._eligible_rows),
-            (len(selected_ids),),
-            device=env.device,
-        )
-        rows = self._eligible_rows.to(env.device)[row_indices]
+        if self._phase_rows is None:
+            row_indices = torch.randint(
+                0,
+                len(self._eligible_rows),
+                (len(selected_ids),),
+                device=env.device,
+            )
+            rows = self._eligible_rows.to(env.device)[row_indices]
+        else:
+            bucket_indices = torch.randint(
+                0,
+                len(self._phase_rows),
+                (len(selected_ids),),
+                device=env.device,
+            )
+            rows = torch.empty(len(selected_ids), dtype=torch.long, device=env.device)
+            for bucket_index, bucket_rows in enumerate(self._phase_rows):
+                bucket_mask = bucket_indices == bucket_index
+                if torch.any(bucket_mask):
+                    choices = torch.randint(
+                        0,
+                        len(bucket_rows),
+                        (int(bucket_mask.sum().item()),),
+                        device=env.device,
+                    )
+                    rows[bucket_mask] = bucket_rows.to(env.device)[choices]
         env._stair_walker_bank_row[selected_ids] = rows
         if "source_episode_step" in self._states:
             env._stair_walker_bank_source_step[selected_ids] = self._states[

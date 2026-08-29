@@ -96,6 +96,7 @@ uv run python scripts/record_policy.py --walking .tmp/codex/BEST_alpha_walking.o
 | `Mjlab-Roulade-Flat-MicroDuck` | flat | Forward roll over the head, land back on the feet |
 | `Mjlab-Stairs-MicroDuck` | low stairs | Dedicated 0 to 15 mm stair ascent curriculum |
 | `Mjlab-Stairs-Standard-MicroDuck` | standard-height stairs | Five 170 mm risers with 280 mm treads, a fixed forward walking command, and a one-shot upright top-landing goal |
+| `Mjlab-Stairs-Phase-Balanced-RSI-Specialist-MicroDuck` | standard-height stairs | Research-inspired reference-state initialization with balanced manufacturer-roll preload, contact, apex, and release phases |
 | `Mjlab-Headstand-Flat-MicroDuck` | flat | Experimental head-supported balance freeze |
 | `Mjlab-Backflip-Flat-MicroDuck` | flat | Experimental staged backward aerial rotation and landing |
 | `Mjlab-Velocity-Flat-MicroDuck-Rollers` | flat | Roller-skate velocity tracking (passive wheels under the feet) |
@@ -124,6 +125,19 @@ The helper also finds the newest local walking checkpoint when
 `--walking-checkpoint` is omitted. Use `--num-envs 4` only for a local
 pipeline check. The native viewer uses four fixed terrain patches in a 2x2
 layout so all four robots remain visible at once.
+
+For the current specialist experiment, train headlessly with the same exact
+manufacturer-roll checkpoint used by the ordinary roulade-bank stage:
+
+```powershell
+uv run train Mjlab-Stairs-Phase-Balanced-RSI-Specialist-MicroDuck `
+  --env.scene.num-envs 256 `
+  --agent.max-iterations 400
+```
+
+The phase-balanced reset exposes sparse late-roll states evenly to PPO. Full
+route evaluation still uses the immutable walking policy for the approach and
+the 170 mm staircase for promotion.
 behind a shared 61-dimensional observation contract, so any of them can take
 over the robot at any moment. `scripts/infer_policy.py` rehearses exactly that:
 

@@ -251,6 +251,10 @@ Never launch a long run without one.
 - `Mjlab-Stairs-Standard-MicroDuck` is the visible challenge: five 170 mm
   risers, 280 mm treads, a 1.2 m approach, and a flat top landing. These are
   representative simulation dimensions, not a building-code claim.
+- `Mjlab-Stairs-Phase-Balanced-RSI-Specialist-MicroDuck` is the current
+  breakthrough experiment: it replays four equally sampled phases from the
+  exact manufacturer roulade state bank, covering preload, contact, apex, and
+  release. It is a reset distribution for PPO, not a scripted climbing path.
 - The standard task keeps the 61D actor interface, sets forward commands to
   `0.10..0.30 m/s`, fixes the initial yaw and lateral offset, and uses
   potential-based route and height shaping plus a one-shot upright top-goal

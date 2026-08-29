@@ -8,6 +8,7 @@ from mjlab_microduck.tasks.stair_walk_state_bank import (
     _restore_circular_rows,
     concatenate_walk_state_rows,
     eligible_walk_state_rows,
+    phase_balanced_row_buckets,
 )
 
 
@@ -152,3 +153,19 @@ def test_vault_filter_rejects_sideways_offset_and_yawing_rows():
     )
 
     assert torch.equal(rows, torch.tensor([0]))
+
+
+def test_phase_balanced_buckets_cover_sparse_late_reference_motion():
+    states = {
+        "source_episode_step": torch.tensor([15, 16, 28, 29, 40, 41, 55]),
+    }
+    rows = torch.arange(7)
+
+    buckets = phase_balanced_row_buckets(
+        states,
+        rows,
+        source_episode_step_range=(15, 60),
+        bucket_count=4,
+    )
+
+    assert [bucket.tolist() for bucket in buckets] == [[0, 1], [2, 3], [4, 5], [6]]
