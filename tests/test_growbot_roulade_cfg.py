@@ -8,7 +8,9 @@ from mjlab_microduck.tasks.growbot_roulade_env_cfg import (
 
 def test_growbot_env_builds_train_and_play_configs():
     assert make_growbot_roulade_env_cfg() is not None
-    assert make_growbot_roulade_env_cfg(play=True) is not None
+    play_cfg = make_growbot_roulade_env_cfg(play=True)
+    assert play_cfg.viewer.body_name == "trunk_base"
+    assert play_cfg.viewer.distance == 0.65
 
 
 def test_growbot_task_uses_16_actuator_footed_asset():
