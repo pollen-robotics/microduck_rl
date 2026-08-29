@@ -121,6 +121,10 @@ def main() -> int:
             )
         event.params["standing_prob"] = 1.0
         event.params["midroll_prob"] = 0.0
+        base_pose = env_cfg.events["reset_base"].params["pose_range"]
+        base_pose["x"] = (0.0, 0.0)
+        base_pose["y"] = (0.0, 0.0)
+        base_pose["yaw"] = (0.0, 0.0)
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.seed = 0
     base_env = ManagerBasedRlEnv(cfg=env_cfg, device=args.device, render_mode=None)
@@ -242,6 +246,7 @@ def main() -> int:
             ],
             "capture_every_n_steps": args.capture_every_n_steps,
             "standing_only_reset": args.standing_only_reset,
+            "canonical_source_xy_yaw": args.standing_only_reset,
         },
         "states": states,
     }

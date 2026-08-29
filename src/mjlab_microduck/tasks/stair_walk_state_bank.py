@@ -243,6 +243,37 @@ def _select_rows(value: Any, rows: torch.Tensor, device: str) -> Any:
     return value[rows.cpu()].to(device)
 
 
+def _canonicalize_root_heading(
+    root_qpos: torch.Tensor, root_qvel: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Rotate a saved free-joint state so its travelled heading is +x."""
+    root_qpos = root_qpos.clone()
+    root_qvel = root_qvel.clone()
+    quat = root_qpos[:, 3:7]
+    w, x, y, z = (component.clone() for component in quat.unbind(dim=-1))
+    # Euler yaw is ambiguous during a forward roll near 90 degrees of pitch.
+    # The source starts at the terrain origin, so its horizontal displacement
+    # is the stable path heading across every captured roll phase.
+    heading = torch.atan2(root_qpos[:, 1], root_qpos[:, 0])
+    half = -0.5 * heading
+    yaw_w = torch.cos(half)
+    yaw_z = torch.sin(half)
+
+    # Left-multiply q by the inverse world-yaw quaternion [cy, 0, 0, sy].
+    root_qpos[:, 3] = yaw_w * w - yaw_z * z
+    root_qpos[:, 4] = yaw_w * x - yaw_z * y
+    root_qpos[:, 5] = yaw_w * y + yaw_z * x
+    root_qpos[:, 6] = yaw_w * z + yaw_z * w
+
+    cos_yaw = torch.cos(heading)
+    sin_yaw = torch.sin(heading)
+    vx = root_qvel[:, 0].clone()
+    vy = root_qvel[:, 1].clone()
+    root_qvel[:, 0] = cos_yaw * vx + sin_yaw * vy
+    root_qvel[:, 1] = -sin_yaw * vx + cos_yaw * vy
+    return root_qpos, root_qvel
+
+
 def load_walk_state_bank(path: str | Path) -> dict[str, Any]:
     bank_path = Path(path).expanduser().resolve()
     if not bank_path.is_file():
@@ -277,14 +308,27 @@ class WalkerStateBankReset:
         self._states = self._bank["states"]
         self._pending_env_ids: torch.Tensor | None = None
         self._pending_rows: torch.Tensor | None = None
+        self._canonicalize_heading = bool(
+            cfg.params.get("canonicalize_heading", False)
+        )
+        self._local_x_range = cfg.params.get("local_x_range")
+        self._local_y_range = cfg.params.get("local_y_range")
 
         robot = env.scene["robot"]
         saved_joint_names = self._bank["metadata"].get("joint_names")
         if saved_joint_names != list(robot.joint_names):
             raise ValueError("Walker state bank joint ordering does not match the robot")
 
-    def __call__(self, env: Any, env_ids: torch.Tensor, bank_path: str) -> None:
-        del bank_path
+    def __call__(
+        self,
+        env: Any,
+        env_ids: torch.Tensor,
+        bank_path: str,
+        canonicalize_heading: bool = False,
+        local_x_range: tuple[float, float] | None = None,
+        local_y_range: tuple[float, float] | None = None,
+    ) -> None:
+        del bank_path, canonicalize_heading, local_x_range, local_y_range
         mode = getattr(env, "_stair_assisted_reset_mode", None)
         if mode is None:
             raise RuntimeError("Walker-state replay requires assisted reset mode tracking")
@@ -304,11 +348,18 @@ class WalkerStateBankReset:
         saved = _select_rows(self._states, rows, env.device)
         robot = env.scene["robot"]
         root_qpos = saved["root_qpos_local"].clone()
+        root_qvel = saved["root_qvel"].clone()
+        if self._canonicalize_heading:
+            root_qpos, root_qvel = _canonicalize_root_heading(root_qpos, root_qvel)
+        if self._local_x_range is not None:
+            low, high = self._local_x_range
+            root_qpos[:, 0].uniform_(low, high)
+        if self._local_y_range is not None:
+            low, high = self._local_y_range
+            root_qpos[:, 1].uniform_(low, high)
         root_qpos[:, :3] += env.scene.terrain.env_origins[selected_ids]
         env.sim.data.qpos[selected_ids[:, None], robot.indexing.free_joint_q_adr] = root_qpos
-        env.sim.data.qvel[selected_ids[:, None], robot.indexing.free_joint_v_adr] = saved[
-            "root_qvel"
-        ]
+        env.sim.data.qvel[selected_ids[:, None], robot.indexing.free_joint_v_adr] = root_qvel
         env.sim.data.qpos[selected_ids[:, None], robot.indexing.joint_q_adr] = saved[
             "joint_qpos"
         ]

@@ -846,7 +846,12 @@ def make_microduck_stair_roulade_bank_env_cfg(
     cfg.events["walker_state_bank"] = EventTermCfg(
         func=WalkerStateBankReset,
         mode="reset",
-        params={"bank_path": ".tmp/codex/full170-roulade-state-bank.pt"},
+        params={
+            "bank_path": ".tmp/codex/full170-roulade-state-bank.pt",
+            "canonicalize_heading": False,
+            "local_x_range": (0.54, 0.62),
+            "local_y_range": (-0.08, 0.08),
+        },
     )
 
     # A transplanted phase is useful only if the real collision converts the

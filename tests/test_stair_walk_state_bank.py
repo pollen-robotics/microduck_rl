@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import torch
 
 from mjlab_microduck.tasks.stair_walk_state_bank import (
+    _canonicalize_root_heading,
     _preappend_history,
     _restore_circular_rows,
     concatenate_walk_state_rows,
@@ -49,3 +50,19 @@ def test_nested_walker_state_chunks_concatenate_along_state_axis():
     merged = concatenate_walk_state_rows(chunks)
     assert merged["root_qpos_local"].shape == (3, 7)
     assert merged["nested"]["x"].shape == (3, 2)
+
+
+def test_heading_canonicalization_preserves_motion_in_forward_frame():
+    half_sqrt = 2.0**-0.5
+    qpos = torch.tensor([[0.0, 0.2, 0.1, half_sqrt, 0.0, 0.0, half_sqrt]])
+    qvel = torch.tensor([[0.0, 0.4, 0.1, 0.0, 2.0, 0.0]])
+
+    aligned_qpos, aligned_qvel = _canonicalize_root_heading(qpos, qvel)
+
+    assert torch.allclose(
+        aligned_qpos[:, 3:7], torch.tensor([[1.0, 0.0, 0.0, 0.0]]), atol=1e-6
+    )
+    assert torch.allclose(
+        aligned_qvel[:, :3], torch.tensor([[0.4, 0.0, 0.1]]), atol=1e-6
+    )
+    assert torch.equal(aligned_qvel[:, 3:], qvel[:, 3:])
