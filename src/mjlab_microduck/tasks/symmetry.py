@@ -1,4 +1,4 @@
-"""Bilateral (left-right) symmetry augmentation for the microduck 61-D envs.
+"""Bilateral symmetry augmentation for 14-DOF Microduck and 16-DOF Growbot.
 
 Migrated 2026-08-13 from the old 51-D layout to the current 61-D family
 (velocity/velstand/standup/roulade — twist + head_command + body_command obs
@@ -64,50 +64,70 @@ SYMMETRY_CFG = {
 # Permutation and sign tables
 # ---------------------------------------------------------------------------
 
-# Within a 14-joint block: left (0-4) <-> right (9-13), midline (5-8) fixed
-_JOINT_PERM: list[int] = [9, 10, 11, 12, 13, 5, 6, 7, 8, 0, 1, 2, 3, 4]
+# Within a 14-joint block: left (0-4) <-> right (9-13), midline (5-8) fixed.
+# Growbot appends left/right elbow pitch at indices 14/15; those swap without a
+# sign change because both elbow hinge axes use the same lateral convention.
+_MICRODUCK_JOINT_PERM: list[int] = [9, 10, 11, 12, 13, 5, 6, 7, 8, 0, 1, 2, 3, 4]
 
 # Signs applied AFTER permutation for each joint position
-_JOINT_SIGN: list[float] = [-1, -1, -1, -1, -1, 1, 1, -1, -1, -1, -1, -1, -1, -1]
-
-# Full 61-dim actor obs permutation (all command slots mirror in place)
-_OBS_PERM: list[int] = (
-    [0, 1, 2]                           # base_ang_vel (indices unchanged)
-    + [3, 4, 5]                         # projected_gravity
-    + [6 + j for j in _JOINT_PERM]     # joint_pos
-    + [20 + j for j in _JOINT_PERM]    # joint_vel
-    + [34 + j for j in _JOINT_PERM]    # last_action
-    + [48, 49, 50]                      # twist command
-    + [51, 52, 53, 54]                  # head command
-    + [55, 56, 57, 58, 59, 60]          # body command
-)
-
-# Full 61-dim sign vector
-_OBS_SIGN: list[float] = (
-    [-1.0, 1.0, -1.0]   # base_ang_vel: negate roll, yaw
-    + [1.0, -1.0, 1.0]  # projected_gravity: negate gy
-    + _JOINT_SIGN       # joint_pos
-    + _JOINT_SIGN       # joint_vel
-    + _JOINT_SIGN       # last_action
-    + [1.0, -1.0, -1.0] # twist: negate lin_vel_y, ang_vel_z
-    + [1.0, 1.0, -1.0, -1.0]  # head: negate head_yaw, head_roll
-    + [1.0, -1.0, 1.0, -1.0, 1.0, -1.0]  # body: negate y, roll, yaw
-)
+_MICRODUCK_JOINT_SIGN: list[float] = [
+    -1, -1, -1, -1, -1, 1, 1, -1, -1, -1, -1, -1, -1, -1
+]
 
 # Cache tensors per device to avoid reallocating on every call
-_cache: dict[torch.device, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+_cache: dict[
+    tuple[torch.device, int],
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+] = {}
+
+
+def _symmetry_tables(num_joints: int) -> tuple[list[int], list[float], list[int], list[float]]:
+    if num_joints == 14:
+        joint_perm = _MICRODUCK_JOINT_PERM
+        joint_sign = _MICRODUCK_JOINT_SIGN
+    elif num_joints == 16:
+        joint_perm = _MICRODUCK_JOINT_PERM + [15, 14]
+        joint_sign = _MICRODUCK_JOINT_SIGN + [1.0, 1.0]
+    else:
+        raise ValueError(f"Symmetry supports 14 or 16 joints, got {num_joints}")
+
+    pos_start = 6
+    vel_start = pos_start + num_joints
+    action_start = vel_start + num_joints
+    command_start = action_start + num_joints
+    obs_perm = (
+        [0, 1, 2]
+        + [3, 4, 5]
+        + [pos_start + j for j in joint_perm]
+        + [vel_start + j for j in joint_perm]
+        + [action_start + j for j in joint_perm]
+        + list(range(command_start, command_start + 13))
+    )
+    obs_sign = (
+        [-1.0, 1.0, -1.0]
+        + [1.0, -1.0, 1.0]
+        + joint_sign * 3
+        + [1.0, -1.0, -1.0]
+        + [1.0, 1.0, -1.0, -1.0]
+        + [1.0, -1.0, 1.0, -1.0, 1.0, -1.0]
+    )
+    return obs_perm, obs_sign, joint_perm, joint_sign
 
 
 def _get_tensors(
     device: torch.device,
+    num_joints: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    if device not in _cache:
-        obs_perm = torch.tensor(_OBS_PERM, dtype=torch.long, device=device)
-        obs_sign = torch.tensor(_OBS_SIGN, dtype=torch.float32, device=device)
-        act_perm = torch.tensor(_JOINT_PERM, dtype=torch.long, device=device)
-        act_sign = torch.tensor(_JOINT_SIGN, dtype=torch.float32, device=device)
-        _cache[device] = (obs_perm, obs_sign, act_perm, act_sign)
-    return _cache[device]
+    key = (device, num_joints)
+    if key not in _cache:
+        obs_perm, obs_sign, joint_perm, joint_sign = _symmetry_tables(num_joints)
+        _cache[key] = (
+            torch.tensor(obs_perm, dtype=torch.long, device=device),
+            torch.tensor(obs_sign, dtype=torch.float32, device=device),
+            torch.tensor(joint_perm, dtype=torch.long, device=device),
+            torch.tensor(joint_sign, dtype=torch.float32, device=device),
+        )
+    return _cache[key]
 
 
 # ---------------------------------------------------------------------------
@@ -141,8 +161,9 @@ def microduck_vel_symmetry(
     aug_actions: torch.Tensor | None = None
 
     if obs is not None:
-        actor_orig: torch.Tensor = obs["actor"]  # [B, 51]
-        obs_perm, obs_sign, _, _ = _get_tensors(actor_orig.device)
+        actor_orig: torch.Tensor = obs["actor"]
+        num_joints = (actor_orig.shape[-1] - 19) // 3
+        obs_perm, obs_sign, _, _ = _get_tensors(actor_orig.device, num_joints)
         actor_sym = actor_orig[:, obs_perm] * obs_sign
 
         critic_orig: torch.Tensor = obs["critic"]
@@ -162,7 +183,7 @@ def microduck_vel_symmetry(
         )
 
     if actions is not None:
-        _, _, act_perm, act_sign = _get_tensors(actions.device)
+        _, _, act_perm, act_sign = _get_tensors(actions.device, actions.shape[-1])
         actions_sym = actions[:, act_perm] * act_sign
         aug_actions = torch.cat([actions, actions_sym], dim=0)
 
