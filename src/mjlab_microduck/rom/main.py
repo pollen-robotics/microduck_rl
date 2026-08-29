@@ -168,7 +168,7 @@ def _runtime_is_ready(runtime: SimulationRuntime) -> bool:
 
 
 class UnconfiguredRuntime:
-    """Task-7 runtime placeholder: status is explicitly unready and all motion methods refuse work."""
+    """Explicit fail-closed placeholder whose motion methods always refuse work."""
 
     def _unavailable(self) -> None:
         raise RuntimeError("simulator runtime is not configured")
@@ -212,7 +212,7 @@ class UnconfiguredRuntime:
 def create_configured_app(
     environ: Mapping[str, str] = os.environ, *, runtime: SimulationRuntime | None = None
 ):
-    """Compose a fail-closed HTTP app; Task 7 replaces the explicit runtime placeholder."""
+    """Compose the verified concrete runtime, or remain explicitly fail-closed."""
     configuration = read_configuration(environ)
     reasons: list[str] = []
     service: SimulatorTaskService | None = None
@@ -231,6 +231,14 @@ def create_configured_app(
     )
     if not state_db_usable:
         reasons.append("STATE_DB_UNAVAILABLE")
+    if bundle is not None and runtime is None:
+        try:
+            from .mujoco_runtime import MicroduckMujocoRuntime
+
+            assert configuration.bundle_dir is not None
+            runtime = MicroduckMujocoRuntime(configuration.bundle_dir, bundle)
+        except Exception:  # noqa: BLE001 - startup must fail closed without artifact details.
+            runtime = None
     if bundle is not None:
         if runtime is None or not _runtime_is_ready(runtime):
             reasons.append("RUNTIME_UNAVAILABLE")

@@ -13,10 +13,18 @@ import termios
 import threading
 import time
 import tty
-import numpy as np
+
 import mujoco
 import mujoco.viewer
+import numpy as np
 import onnxruntime as ort
+
+from mjlab_microduck.rom.observation import (
+    DEFAULT_JOINT_POSE,
+    DeploymentCommand,
+    DeploymentState,
+    build_actor_observation,
+)
 
 MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene.xml"
 # MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene_ramps.xml"
@@ -43,22 +51,7 @@ BALL_RADIUS = 0.035
 # STAND2 pose (matches HOME_FRAME in microduck_constants.py): trunk shifted
 # ~5mm forward so the CoM sits over the ankle axis. Leg pitch chain leaned
 # forward vs the old pose: hip_pitch 30°→26.24°, ankle 30°→25.95°, knee 0°→0.28°.
-DEFAULT_POSE = np.array([
-    0.0,      # left_hip_yaw
-    -0.0873,  # left_hip_roll
-    -0.4579,  # left_hip_pitch
-    -0.0049,  # left_knee
-    0.4530,   # left_ankle
-    0.3491,   # neck_pitch
-    0.3491,   # head_pitch
-    0.0,      # head_yaw
-    0.0,      # head_roll
-    0.0,      # right_hip_yaw
-    0.0873,   # right_hip_roll
-    0.4579,   # right_hip_pitch
-    0.0049,   # right_knee
-    -0.4530,  # right_ankle
-], dtype=np.float32)
+DEFAULT_POSE = DEFAULT_JOINT_POSE
 
 
 class TerminalInput:
@@ -581,24 +574,45 @@ class PolicyInference:
         3. joint_pos (14D) - relative to default
         4. joint_vel (14D)
         5. actions (14D) - last action
-        6. command (3D) - vel cmd (walking) or normalized body pose cmd (standing)
-        Total: 51D
+        6. command - legacy 3D, or unified twist(3)+head(4)+body(6)
+        Total: 51D legacy or the shared 61D deployment contract
         """
-        obs = []
+        gravity = (
+            self.get_projected_gravity()
+            if self.use_projected_gravity
+            else self.get_raw_accelerometer()
+        )
+        if self.new_cmd_obs:
+            return build_actor_observation(
+                DeploymentState(
+                    base_angular_velocity_radps=self.get_base_ang_vel(),
+                    # gravity_vector_body preserves the rehearsal's selectable
+                    # projected-gravity/raw-accelerometer behavior exactly.
+                    base_orientation_wxyz=np.array([1.0, 0.0, 0.0, 0.0]),
+                    joint_positions_rad=(
+                        self.get_joint_pos_relative() + DEFAULT_JOINT_POSE
+                    ),
+                    joint_velocities_radps=self.get_joint_vel(),
+                    previous_action=self.last_action,
+                    gravity_vector_body=gravity,
+                ),
+                DeploymentCommand(
+                    twist=self.command[0:3],
+                    head_pose=self.command[3:7],
+                    body_pose=self.command[7:13],
+                ),
+            )
 
-        obs.append(self.get_base_ang_vel())
-
-        if self.use_projected_gravity:
-            obs.append(self.get_projected_gravity())
-        else:
-            obs.append(self.get_raw_accelerometer())
-
-        obs.append(self.get_joint_pos_relative())
-        obs.append(self.get_joint_vel())
-        obs.append(self.last_action)
-        obs.append(self.command)
-
-        return np.concatenate(obs).astype(np.float32)
+        return np.concatenate(
+            (
+                self.get_base_ang_vel(),
+                gravity,
+                self.get_joint_pos_relative(),
+                self.get_joint_vel(),
+                self.last_action,
+                self.command,
+            )
+        ).astype(np.float32)
 
     def trigger_ground_pick(self):
         """Start one ground pick cycle. Automatically returns to walking when done."""
