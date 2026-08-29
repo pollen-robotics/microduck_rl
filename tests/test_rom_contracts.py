@@ -310,6 +310,7 @@ def test_checked_in_schemas_lock_layouts_error_codes_and_portable_lease_invarian
         "fields"
     ]
     action_joints = bundle_schema["$defs"]["ActionContract"]["properties"]["joints"]
+    assert "bundleDigest" in bundle_schema["required"]
     assert [entry["const"] for entry in observation_fields["prefixItems"]] == list(
         OBSERVATION_FIELDS
     )
@@ -328,6 +329,28 @@ def test_checked_in_schemas_lock_layouts_error_codes_and_portable_lease_invarian
     openapi_lease = openapi["components"]["schemas"]["LeaseContract"]
     assert {"zeroCommand", "safeStopBehavior"} <= set(openapi_lease["required"])
     assert openapi_lease["properties"]["safeStopBehavior"]["const"] == "ZERO_TWIST"
+    assert bundle_schema["$defs"]["ActionDefinition"]["allOf"] == [
+        {
+            "if": {
+                "properties": {"availability": {"const": "AVAILABLE"}},
+                "required": ["availability"],
+            },
+            "then": {
+                "required": ["policyRef"],
+                "properties": {"policyRef": {"type": "string", "minLength": 1}},
+            },
+        },
+        {
+            "if": {
+                "properties": {"executionMode": {"const": "CONTINUOUS_LEASE"}},
+                "required": ["executionMode"],
+            },
+            "then": {
+                "required": ["lease"],
+                "properties": {"lease": {"$ref": "#/$defs/LeaseContract"}},
+            },
+        },
+    ]
     assert (
         "TASK_NOT_FOUND"
         in openapi["components"]["schemas"]["Error"]["properties"]["code"]["enum"]
