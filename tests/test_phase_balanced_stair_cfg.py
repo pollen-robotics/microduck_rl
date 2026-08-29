@@ -114,6 +114,8 @@ def test_contact_continuation_uses_only_full_height_challenge_rows():
         )
         assert cfg.events["route_challenge_levels"].params["standard_fraction"] == 1.0
         assert "terrain_levels" not in cfg.curriculum
+        assert cfg.rewards["stair_first_tread_contact"].weight == 150.0
+        assert cfg.rewards["stair_tread_support_frontier"].weight == 15.0
         assert cfg.rewards["stair_first_tread_secured"].weight == 600.0
 
     assert STAIR_DISCOVERY_SOLREF_TIME_CONSTANT == 0.10

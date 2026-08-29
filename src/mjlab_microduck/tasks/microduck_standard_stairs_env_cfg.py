@@ -1198,6 +1198,12 @@ def _make_microduck_stair_contact_continuation_env_cfg(
     cfg.scene.terrain.max_init_terrain_level = STAIR_MECHANISM_CURRICULUM_LEVELS - 1
     cfg.events["route_challenge_levels"].params["standard_fraction"] = 1.0
     cfg.curriculum.pop("terrain_levels", None)
+    # This stage is fixed at the literal 170 mm geometry, so the exact contact
+    # terms are valid again. Reward a newly created first-tread contact, then
+    # only new contact-supported x/z progress. Clearance and secured support
+    # remain the much larger acceptance events.
+    cfg.rewards["stair_first_tread_contact"].weight = 150.0
+    cfg.rewards["stair_tread_support_frontier"].weight = 15.0
     return cfg
 
 
