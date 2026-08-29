@@ -85,3 +85,27 @@ def test_walker_cues_are_zeroed_without_changing_specialist_input() -> None:
     assert torch.count_nonzero(walker.last_actor_observations[:, 55:61]) == 0
     assert torch.equal(specialist.last_actor_observations, original)
     assert torch.equal(observations["actor"], original)
+
+
+def test_handoff_can_blend_over_bounded_control_frames() -> None:
+    env = _fake_env(num_envs=1)
+    walker = RecordingActor(1.0)
+    specialist = RecordingActor(3.0)
+    policy = HardStairHandoffPolicy(
+        walker,
+        specialist,
+        env,
+        switch_local_x_m=0.60,
+        blend_steps=4,
+    )
+    observations = _observations(num_envs=1)
+
+    env.scene["robot"].data.root_link_pos_w[:, 0] = 0.60
+    values = [float(policy(observations)[0, 0]) for _ in range(4)]
+    assert values == [1.5, 2.0, 2.5, 3.0]
+    assert policy.handoff_count == 1
+
+    env.episode_length_buf[:] = 1
+    env.scene["robot"].data.root_link_pos_w[:, 0] = 0.20
+    assert float(policy(observations)[0, 0]) == 1.0
+    assert int(policy.blend_progress[0]) == 0

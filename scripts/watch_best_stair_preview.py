@@ -45,8 +45,12 @@ def physics_improves(candidate: dict[str, object], current: dict[str, object]) -
     if candidate_success != current_success:
         return candidate_success > current_success
 
-    candidate_x = float(candidate["best_route_x_m"])
-    current_x = float(current["best_route_x_m"])
+    candidate_x = float(
+        candidate.get("best_corridor_route_x_m", candidate["best_route_x_m"])
+    )
+    current_x = float(
+        current.get("best_corridor_route_x_m", current["best_route_x_m"])
+    )
     if candidate_x >= current_x + 0.02:
         return True
 

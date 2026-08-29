@@ -1,4 +1,4 @@
-"""Hard handoff from the manufacturer walker to a stair specialist."""
+"""Latched handoff from the manufacturer walker to a stair specialist."""
 
 from __future__ import annotations
 
@@ -62,6 +62,7 @@ class HardStairHandoffPolicy(torch.nn.Module):
         env: Any,
         *,
         switch_local_x_m: float = 0.56,
+        blend_steps: int = 0,
         route_cue_slice: slice = slice(55, 61),
     ) -> None:
         super().__init__()
@@ -69,6 +70,9 @@ class HardStairHandoffPolicy(torch.nn.Module):
         self.specialist = specialist
         self._env = env
         self.switch_local_x_m = float(switch_local_x_m)
+        if blend_steps < 0:
+            raise ValueError("blend_steps must be nonnegative")
+        self.blend_steps = int(blend_steps)
         self.route_cue_slice = route_cue_slice
         self.register_buffer(
             "specialist_latched",
@@ -77,6 +81,11 @@ class HardStairHandoffPolicy(torch.nn.Module):
         )
         self.register_buffer(
             "handoff_events",
+            torch.zeros(env.num_envs, dtype=torch.long, device=env.device),
+            persistent=False,
+        )
+        self.register_buffer(
+            "blend_progress",
             torch.zeros(env.num_envs, dtype=torch.long, device=env.device),
             persistent=False,
         )
@@ -93,6 +102,7 @@ class HardStairHandoffPolicy(torch.nn.Module):
     def forward(self, observations: TensorDict) -> torch.Tensor:
         fresh = self._env.episode_length_buf <= 1
         self.specialist_latched[fresh] = False
+        self.blend_progress[fresh] = 0
         newly_latched = (~self.specialist_latched) & (
             self._local_x() >= self.switch_local_x_m
         )
@@ -111,8 +121,13 @@ class HardStairHandoffPolicy(torch.nn.Module):
 
         walker_actions = self.walker(walker_observations)
         specialist_actions = self.specialist(observations)
-        return torch.where(
-            self.specialist_latched.unsqueeze(-1),
-            specialist_actions,
-            walker_actions,
-        )
+        if self.blend_steps == 0:
+            alpha = self.specialist_latched.to(walker_actions.dtype)
+        else:
+            self.blend_progress = torch.where(
+                self.specialist_latched,
+                torch.clamp(self.blend_progress + 1, max=self.blend_steps),
+                torch.zeros_like(self.blend_progress),
+            )
+            alpha = self.blend_progress.to(walker_actions.dtype) / self.blend_steps
+        return torch.lerp(walker_actions, specialist_actions, alpha.unsqueeze(-1))

@@ -27,6 +27,7 @@ from mjlab_microduck.policies import HardStairHandoffPolicy, load_actor_pair
 
 TASK_ID = "Mjlab-Stairs-Route-MicroDuck"
 STANDARD_RISER_HEIGHT_M = 0.170
+STAIR_CORRIDOR_HALF_WIDTH_M = 0.90 * 0.40
 
 
 def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
@@ -56,8 +57,20 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         help=(
             "Immutable manufacturer walking checkpoint. When provided, walk to "
-            "the stair and hard-switch to the specialist 100 mm before its face."
+            "the stair and hand off to the specialist."
         ),
+    )
+    parser.add_argument(
+        "--handoff-local-x",
+        type=float,
+        default=0.56,
+        help="Local x coordinate where the walker-to-specialist handoff starts.",
+    )
+    parser.add_argument(
+        "--handoff-blend-steps",
+        type=int,
+        default=0,
+        help="Control frames used to blend actors. Zero preserves the hard switch.",
     )
     parser.add_argument("--num-envs", type=int, default=8)
     parser.add_argument(
@@ -86,8 +99,8 @@ def main() -> int:
     )
     if walker_checkpoint is not None and not walker_checkpoint.is_file():
         raise SystemExit(f"Walker checkpoint not found: {walker_checkpoint}")
-    if args.num_envs < 1 or args.steps < 1:
-        raise SystemExit("--num-envs and --steps must be positive")
+    if args.num_envs < 1 or args.steps < 1 or args.handoff_blend_steps < 0:
+        raise SystemExit("Environment counts and steps must be positive; blend steps cannot be negative")
 
     configure_torch_backends()
     env_cfg = load_env_cfg(TASK_ID, play=True)
@@ -106,8 +119,18 @@ def main() -> int:
             checkpoint,
             device=args.device,
         )
-        policy = HardStairHandoffPolicy(walker, specialist, base_env)
-        policy_mode = "hard_walker_to_specialist_handoff"
+        policy = HardStairHandoffPolicy(
+            walker,
+            specialist,
+            base_env,
+            switch_local_x_m=args.handoff_local_x,
+            blend_steps=args.handoff_blend_steps,
+        )
+        policy_mode = (
+            "hard_walker_to_specialist_handoff"
+            if args.handoff_blend_steps == 0
+            else "blended_walker_to_specialist_handoff"
+        )
     else:
         runner.load(
             str(checkpoint),
@@ -121,6 +144,9 @@ def main() -> int:
     device = torch.device(args.device)
     max_x = torch.full((args.num_envs,), -torch.inf, device=device)
     max_z = torch.full((args.num_envs,), -torch.inf, device=device)
+    max_any_x = torch.full((args.num_envs,), -torch.inf, device=device)
+    max_any_z = torch.full((args.num_envs,), -torch.inf, device=device)
+    max_abs_y = torch.zeros(args.num_envs, device=device)
     max_upright = torch.zeros(args.num_envs, device=device)
     success_count = torch.zeros(args.num_envs, dtype=torch.long, device=device)
     previous_latch = torch.zeros(args.num_envs, dtype=torch.bool, device=device)
@@ -136,6 +162,7 @@ def main() -> int:
             origins = base_env.scene.terrain.env_origins
             root_pos = robot.data.root_link_pos_w
             local_x = root_pos[:, 0] - origins[:, 0]
+            local_y = root_pos[:, 1] - origins[:, 1]
             local_z = root_pos[:, 2] - origins[:, 2]
             quat = robot.data.root_link_quat_w
             upright = torch.clamp(
@@ -143,8 +170,19 @@ def main() -> int:
                 min=0.0,
                 max=1.0,
             )
-            max_x = torch.maximum(max_x, torch.nan_to_num(local_x, nan=-torch.inf))
-            max_z = torch.maximum(max_z, torch.nan_to_num(local_z, nan=-torch.inf))
+            finite_x = torch.nan_to_num(local_x, nan=-torch.inf)
+            finite_z = torch.nan_to_num(local_z, nan=-torch.inf)
+            abs_y = torch.abs(torch.nan_to_num(local_y, nan=1.0e9))
+            in_corridor = abs_y <= STAIR_CORRIDOR_HALF_WIDTH_M
+            max_x = torch.maximum(
+                max_x, torch.where(in_corridor, finite_x, -torch.inf)
+            )
+            max_z = torch.maximum(
+                max_z, torch.where(in_corridor, finite_z, -torch.inf)
+            )
+            max_any_x = torch.maximum(max_any_x, finite_x)
+            max_any_z = torch.maximum(max_any_z, finite_z)
+            max_abs_y = torch.maximum(max_abs_y, abs_y)
             max_upright = torch.maximum(max_upright, torch.nan_to_num(upright, nan=0.0))
 
             latch = getattr(base_env, "_stair_goal_latched", previous_latch)
@@ -157,7 +195,7 @@ def main() -> int:
 
     successes = int(success_count.sum().item())
     report: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "task": TASK_ID,
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": _sha256(checkpoint),
@@ -177,15 +215,24 @@ def main() -> int:
             if isinstance(policy, HardStairHandoffPolicy)
             else 0
         ),
+        "handoff_blend_steps": (
+            policy.blend_steps if isinstance(policy, HardStairHandoffPolicy) else None
+        ),
         "standard_riser_height_m": STANDARD_RISER_HEIGHT_M,
+        "stair_corridor_half_width_m": STAIR_CORRIDOR_HALF_WIDTH_M,
         "num_envs": args.num_envs,
         "steps": args.steps,
         "successes": successes,
         "success_rate": successes / args.num_envs,
         "mean_max_route_x_m": float(max_x.mean().item()),
         "best_route_x_m": float(max_x.max().item()),
+        "mean_max_corridor_route_x_m": float(max_x.mean().item()),
+        "best_corridor_route_x_m": float(max_x.max().item()),
         "mean_max_root_height_m": float(max_z.mean().item()),
         "best_root_height_m": float(max_z.max().item()),
+        "best_any_route_x_m": float(max_any_x.max().item()),
+        "best_any_root_height_m": float(max_any_z.max().item()),
+        "maximum_abs_lateral_offset_m": float(max_abs_y.max().item()),
         "mean_max_upright": float(max_upright.mean().item()),
         "verified_full_route": successes > 0,
     }

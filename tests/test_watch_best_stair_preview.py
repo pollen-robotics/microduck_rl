@@ -16,3 +16,11 @@ def test_physics_gate_prefers_success_then_material_progress_or_height():
     assert physics_improves(_report(x=0.58, z=0.16), baseline)
     assert not physics_improves(_report(x=0.61, z=0.14), baseline)
     assert not physics_improves(_report(x=0.55, z=0.20), baseline)
+
+
+def test_physics_gate_rejects_lateral_progress_outside_stair_corridor():
+    baseline = _report()
+    candidate = _report(x=0.90)
+    candidate["best_corridor_route_x_m"] = 0.59
+    candidate["best_any_route_x_m"] = 0.90
+    assert not physics_improves(candidate, baseline)
