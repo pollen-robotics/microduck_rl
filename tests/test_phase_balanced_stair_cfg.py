@@ -2,6 +2,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     MicroduckStairCurriculumRsiRlCfg,
     MicroduckStairContactMantleRsiRlCfg,
     MicroduckStairContactReleaseRsiRlCfg,
+    MicroduckStairLipCommitmentRsiRlCfg,
     MicroduckStairMediumDynamicsRsiRlCfg,
     MicroduckStairPhaseBalancedRsiRlCfg,
     MicroduckStairSoftDynamicsRsiRlCfg,
@@ -13,6 +14,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     make_microduck_stair_curriculum_rsi_env_cfg,
     make_microduck_stair_contact_mantle_rsi_env_cfg,
     make_microduck_stair_contact_release_rsi_env_cfg,
+    make_microduck_stair_lip_commitment_rsi_env_cfg,
     make_microduck_stair_medium_dynamics_rsi_env_cfg,
     make_microduck_stair_phase_balanced_rsi_env_cfg,
     make_microduck_stair_soft_dynamics_rsi_env_cfg,
@@ -154,3 +156,32 @@ def test_contact_release_replaces_contact_jackpots_with_one_transition_gate():
     assert cfg.rewards["stair_first_tread_secured"].weight == 600.0
     assert MicroduckStairContactReleaseRsiRlCfg.max_iterations == 75
     assert MicroduckStairContactReleaseRsiRlCfg.save_interval == 25
+
+
+def test_lip_commitment_starts_near_stair_and_requires_spatial_conversion():
+    baseline = make_microduck_stair_contact_release_rsi_env_cfg()
+    cfg = make_microduck_stair_lip_commitment_rsi_env_cfg()
+    bank = cfg.events["walker_state_bank"].params
+    commitment = cfg.rewards["stair_contact_lip_commitment"]
+
+    assert tuple(cfg.observations["actor"].terms) == tuple(
+        baseline.observations["actor"].terms
+    )
+    assert bank["phase_balanced"] is False
+    assert bank["late_fraction"] == 0.50
+    assert bank["late_source_episode_step_range"] == (38, 60)
+    assert bank["phase_aligned_local_x_range"] == (0.54, 0.64)
+    assert bank["phase_aligned_x_jitter"] == 0.005
+    assert cfg.rewards["stair_contact_loaded_release"].weight == 0.0
+    assert commitment.weight == 50.0
+    assert commitment.params["impulse_window_steps"] == 12
+    assert commitment.params["min_forward_velocity_gain"] == 0.05
+    assert commitment.params["min_vertical_velocity_gain"] == 0.08
+    assert commitment.params["commitment_delay_steps"] == 4
+    assert commitment.params["commitment_hold_steps"] == 2
+    assert commitment.params["commitment_x"] == 0.645
+    assert commitment.params["commitment_z"] == 0.175
+    assert cfg.rewards["stair_first_riser_clearance"].weight == 500.0
+    assert cfg.rewards["stair_first_tread_secured"].weight == 600.0
+    assert MicroduckStairLipCommitmentRsiRlCfg.max_iterations == 75
+    assert MicroduckStairLipCommitmentRsiRlCfg.save_interval == 25

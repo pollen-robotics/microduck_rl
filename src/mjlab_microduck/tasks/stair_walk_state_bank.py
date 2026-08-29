@@ -449,6 +449,12 @@ class WalkerStateBankReset:
         self._source_episode_step_range = cfg.params.get(
             "source_episode_step_range"
         )
+        self._late_fraction = float(cfg.params.get("late_fraction", 0.0))
+        self._late_source_episode_step_range = cfg.params.get(
+            "late_source_episode_step_range"
+        )
+        if not 0.0 <= self._late_fraction <= 1.0:
+            raise ValueError("late_fraction must be between zero and one")
         self._eligible_rows = eligible_walk_state_rows(
             self._states,
             source_episode_step_range=self._source_episode_step_range,
@@ -474,6 +480,29 @@ class WalkerStateBankReset:
                 source_episode_step_range=source_range,
                 bucket_count=self._phase_bucket_count,
             )
+        self._late_rows: torch.Tensor | None = None
+        if self._late_fraction > 0.0:
+            if self._phase_balanced:
+                raise ValueError(
+                    "Late-mixture replay and phase-balanced replay are mutually exclusive"
+                )
+            late_range = self._late_source_episode_step_range
+            if late_range is None or "source_episode_step" not in self._states:
+                raise ValueError(
+                    "Late-mixture replay requires late_source_episode_step_range "
+                    "and source_episode_step"
+                )
+            low, high = late_range
+            if high < low:
+                raise ValueError("Late source episode step range must be ascending")
+            eligible_steps = self._states["source_episode_step"][self._eligible_rows]
+            self._late_rows = self._eligible_rows[
+                (eligible_steps >= low) & (eligible_steps <= high)
+            ]
+            if len(self._late_rows) == 0:
+                raise ValueError(
+                    "Late-mixture filters rejected every eligible bank row"
+                )
         if self._phase_aligned_local_x_range is not None:
             if self._local_x_range is not None:
                 raise ValueError(
@@ -513,6 +542,8 @@ class WalkerStateBankReset:
         phase_bucket_count: int = 4,
         phase_aligned_local_x_range: tuple[float, float] | None = None,
         phase_aligned_x_jitter: float = 0.0,
+        late_fraction: float = 0.0,
+        late_source_episode_step_range: tuple[int, int] | None = None,
     ) -> None:
         del (
             bank_path,
@@ -533,6 +564,8 @@ class WalkerStateBankReset:
             phase_bucket_count,
             phase_aligned_local_x_range,
             phase_aligned_x_jitter,
+            late_fraction,
+            late_source_episode_step_range,
         )
         mode = getattr(env, "_stair_assisted_reset_mode", None)
         if mode is None:
@@ -553,7 +586,24 @@ class WalkerStateBankReset:
             self._pending_rows = None
             return
 
-        if self._phase_rows is None:
+        if self._late_rows is not None:
+            late_mask = (
+                torch.rand(len(selected_ids), device=env.device) < self._late_fraction
+            )
+            rows = torch.empty(len(selected_ids), dtype=torch.long, device=env.device)
+            for row_mask, row_pool in (
+                (late_mask, self._late_rows),
+                (~late_mask, self._eligible_rows),
+            ):
+                if torch.any(row_mask):
+                    choices = torch.randint(
+                        0,
+                        len(row_pool),
+                        (int(row_mask.sum().item()),),
+                        device=env.device,
+                    )
+                    rows[row_mask] = row_pool.to(env.device)[choices]
+        elif self._phase_rows is None:
             row_indices = torch.randint(
                 0,
                 len(self._eligible_rows),

@@ -2007,6 +2007,262 @@ def stair_contact_loaded_release(
     return payout
 
 
+def stair_contact_lip_commitment(
+    env: ManagerBasedRlEnv,
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.20,
+    arm_hold_steps: int = 2,
+    impulse_window_steps: int = 12,
+    min_forward_velocity_gain: float = 0.05,
+    min_vertical_velocity_gain: float = 0.08,
+    commitment_delay_steps: int = 4,
+    commitment_hold_steps: int = 2,
+    commitment_x: float = 0.645,
+    commitment_z: float = 0.175,
+    root_over_lip_x: float = 0.665,
+    target_forward_delta: float = 0.040,
+    target_vertical_delta: float = 0.025,
+    sensor_names: tuple[str, ...] = (
+        "robot_ground_contact",
+        "head_ground_contact",
+        "legs_ground_contact",
+        "trunk_ground_contact",
+    ),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay once when a contact-created impulse commits the root to the lip.
+
+    Stable face or tread contact snapshots root pose and velocity. A later
+    impulse must increase both forward and vertical velocity relative to that
+    snapshot. Four control steps later, the root must occupy the lip-height
+    corridor for two consecutive frames. Instantaneous collision bounces and
+    contact duration therefore pay nothing.
+    """
+
+    if min(
+        arm_hold_steps,
+        impulse_window_steps,
+        commitment_delay_steps,
+        commitment_hold_steps,
+    ) < 1:
+        raise ValueError("Lip-commitment step counts must be positive")
+
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    local_y = (
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    abs_y = torch.abs(local_y)
+    linear_velocity = torch.nan_to_num(asset.data.root_link_lin_vel_w, nan=0.0)
+    vx = linear_velocity[:, 0]
+    vz = linear_velocity[:, 2]
+    finite = torch.isfinite(torch.stack((x, z, abs_y, vx, vz), dim=-1)).all(
+        dim=-1
+    )
+
+    face_contact = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    tread_contact = torch.zeros_like(face_contact)
+    for sensor_name in sensor_names:
+        if sensor_name not in env.scene.sensors:
+            raise RuntimeError(f"Missing required contact sensor: {sensor_name}")
+        face, tread, _ = _standard_stair_contact_masks(
+            env,
+            sensor_name,
+            stair_face_x=stair_face_x,
+            riser_height=riser_height,
+            tread_depth=tread_depth,
+            corridor_half_width=corridor_half_width,
+        )
+        face_contact |= face.any(dim=-1)
+        tread_contact |= tread.any(dim=-1)
+    contact = face_contact | tread_contact
+
+    if not hasattr(env, "_stair_lip_commitment_load_streak"):
+        env._stair_lip_commitment_load_streak = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+        env._stair_lip_commitment_armed = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._stair_lip_commitment_paid = torch.zeros_like(
+            env._stair_lip_commitment_armed
+        )
+        env._stair_lip_commitment_impulse_seen = torch.zeros_like(
+            env._stair_lip_commitment_armed
+        )
+        env._stair_lip_commitment_impulse_window = torch.zeros_like(
+            env._stair_lip_commitment_load_streak
+        )
+        env._stair_lip_commitment_delay = torch.zeros_like(
+            env._stair_lip_commitment_load_streak
+        )
+        env._stair_lip_commitment_check_remaining = torch.zeros_like(
+            env._stair_lip_commitment_load_streak
+        )
+        env._stair_lip_commitment_hold_streak = torch.zeros_like(
+            env._stair_lip_commitment_load_streak
+        )
+        env._stair_lip_commitment_arm_x = torch.zeros_like(x)
+        env._stair_lip_commitment_arm_z = torch.zeros_like(z)
+        env._stair_lip_commitment_arm_vx = torch.zeros_like(vx)
+        env._stair_lip_commitment_arm_vz = torch.zeros_like(vz)
+        env._stair_lip_commitment_impulse_latched = torch.zeros_like(
+            env._stair_lip_commitment_armed
+        )
+        env._stair_lip_commitment_latched = torch.zeros_like(
+            env._stair_lip_commitment_armed
+        )
+
+    fresh = env.episode_length_buf <= 1
+    env._stair_lip_commitment_load_streak[fresh] = 0
+    env._stair_lip_commitment_armed[fresh] = False
+    env._stair_lip_commitment_paid[fresh] = False
+    env._stair_lip_commitment_impulse_seen[fresh] = False
+    env._stair_lip_commitment_impulse_window[fresh] = 0
+    env._stair_lip_commitment_delay[fresh] = 0
+    env._stair_lip_commitment_check_remaining[fresh] = 0
+    env._stair_lip_commitment_hold_streak[fresh] = 0
+    env._stair_lip_commitment_arm_x[fresh] = 0.0
+    env._stair_lip_commitment_arm_z[fresh] = 0.0
+    env._stair_lip_commitment_arm_vx[fresh] = 0.0
+    env._stair_lip_commitment_arm_vz[fresh] = 0.0
+    env._stair_lip_commitment_impulse_latched[fresh] = False
+    env._stair_lip_commitment_latched[fresh] = False
+
+    cleared = getattr(env, "_stair_first_riser_latched", None)
+    if cleared is None:
+        cleared = torch.zeros_like(env._stair_lip_commitment_armed)
+    arm_candidate = (
+        (env.episode_length_buf >= 3)
+        & finite
+        & (abs_y <= corridor_half_width)
+        & contact
+        & ~cleared
+        & ((x < root_over_lip_x) | (z < commitment_z))
+        & ~env._stair_lip_commitment_armed
+    )
+    env._stair_lip_commitment_load_streak = torch.where(
+        arm_candidate,
+        env._stair_lip_commitment_load_streak + 1,
+        torch.zeros_like(env._stair_lip_commitment_load_streak),
+    )
+    newly_armed = (
+        env._stair_lip_commitment_load_streak >= arm_hold_steps
+    ) & ~env._stair_lip_commitment_armed
+    env._stair_lip_commitment_armed |= newly_armed
+    env._stair_lip_commitment_arm_x[newly_armed] = x[newly_armed]
+    env._stair_lip_commitment_arm_z[newly_armed] = z[newly_armed]
+    env._stair_lip_commitment_arm_vx[newly_armed] = vx[newly_armed]
+    env._stair_lip_commitment_arm_vz[newly_armed] = vz[newly_armed]
+    env._stair_lip_commitment_impulse_window = torch.where(
+        newly_armed,
+        torch.full_like(
+            env._stair_lip_commitment_impulse_window, impulse_window_steps
+        ),
+        env._stair_lip_commitment_impulse_window,
+    )
+
+    impulse = (
+        env._stair_lip_commitment_armed
+        & ~newly_armed
+        & ~env._stair_lip_commitment_impulse_seen
+        & (env._stair_lip_commitment_impulse_window > 0)
+        & finite
+        & ((vx - env._stair_lip_commitment_arm_vx) >= min_forward_velocity_gain)
+        & ((vz - env._stair_lip_commitment_arm_vz) >= min_vertical_velocity_gain)
+        & (vx > 0.0)
+        & (vz > 0.0)
+        & (abs_y <= corridor_half_width)
+    )
+    env._stair_lip_commitment_impulse_seen |= impulse
+    env._stair_lip_commitment_impulse_latched |= impulse
+    decay_window = (
+        env._stair_lip_commitment_armed
+        & ~newly_armed
+        & ~env._stair_lip_commitment_impulse_seen
+    )
+    env._stair_lip_commitment_impulse_window = torch.where(
+        decay_window,
+        torch.clamp(env._stair_lip_commitment_impulse_window - 1, min=0),
+        env._stair_lip_commitment_impulse_window,
+    )
+
+    previous_delay = env._stair_lip_commitment_delay.clone()
+    env._stair_lip_commitment_delay = torch.where(
+        impulse,
+        torch.full_like(
+            env._stair_lip_commitment_delay, commitment_delay_steps
+        ),
+        env._stair_lip_commitment_delay,
+    )
+    delay_active = (
+        env._stair_lip_commitment_impulse_seen
+        & ~impulse
+        & (env._stair_lip_commitment_delay > 0)
+    )
+    start_commitment_check = delay_active & (previous_delay == 1)
+    env._stair_lip_commitment_delay = torch.where(
+        delay_active,
+        torch.clamp(env._stair_lip_commitment_delay - 1, min=0),
+        env._stair_lip_commitment_delay,
+    )
+    env._stair_lip_commitment_check_remaining = torch.where(
+        start_commitment_check,
+        torch.full_like(
+            env._stair_lip_commitment_check_remaining, commitment_hold_steps
+        ),
+        env._stair_lip_commitment_check_remaining,
+    )
+
+    check_active = (
+        env._stair_lip_commitment_impulse_seen
+        & ~env._stair_lip_commitment_paid
+        & (env._stair_lip_commitment_check_remaining > 0)
+    )
+    commitment_candidate = (
+        check_active
+        & finite
+        & (x >= commitment_x)
+        & (z >= commitment_z)
+        & (abs_y <= corridor_half_width)
+    )
+    env._stair_lip_commitment_hold_streak = torch.where(
+        commitment_candidate,
+        env._stair_lip_commitment_hold_streak + 1,
+        torch.where(
+            check_active,
+            torch.zeros_like(env._stair_lip_commitment_hold_streak),
+            env._stair_lip_commitment_hold_streak,
+        ),
+    )
+    commitment = (
+        env._stair_lip_commitment_hold_streak >= commitment_hold_steps
+    ) & ~env._stair_lip_commitment_paid
+    env._stair_lip_commitment_check_remaining = torch.where(
+        check_active,
+        torch.clamp(env._stair_lip_commitment_check_remaining - 1, min=0),
+        env._stair_lip_commitment_check_remaining,
+    )
+
+    forward_progress = torch.clamp(
+        (x - env._stair_lip_commitment_arm_x) / max(target_forward_delta, 1e-6),
+        0.0,
+        1.0,
+    )
+    vertical_progress = torch.clamp(
+        (z - env._stair_lip_commitment_arm_z) / max(target_vertical_delta, 1e-6),
+        0.0,
+        1.0,
+    )
+    progress = 0.70 * forward_progress + 0.30 * vertical_progress
+    payout = torch.where(commitment, progress, torch.zeros_like(progress))
+    env._stair_lip_commitment_paid |= commitment
+    env._stair_lip_commitment_latched |= commitment
+    return payout
+
+
 def stair_apex_or_mantle_frontier(
     env: ManagerBasedRlEnv,
     approach_start_x: float = 0.40,

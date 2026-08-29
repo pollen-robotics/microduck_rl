@@ -38,6 +38,7 @@ TASK_IDS = (
     "Mjlab-Stairs-Soft-Dynamics-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Medium-Dynamics-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Contact-Release-RSI-Specialist-MicroDuck",
+    "Mjlab-Stairs-Lip-Commitment-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
     "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
@@ -262,6 +263,7 @@ def main() -> int:
         "Mjlab-Stairs-Soft-Dynamics-RSI-Specialist-MicroDuck",
         "Mjlab-Stairs-Medium-Dynamics-RSI-Specialist-MicroDuck",
         "Mjlab-Stairs-Contact-Release-RSI-Specialist-MicroDuck",
+        "Mjlab-Stairs-Lip-Commitment-RSI-Specialist-MicroDuck",
     }:
         reset_modes = ROULADE_BANK_RESET_MODES
     elif args.task == "Mjlab-Stairs-Apex-Mantle-Specialist-MicroDuck":
@@ -295,6 +297,8 @@ def main() -> int:
     previous_stable = torch.zeros_like(previous_clearance)
     previous_secured = torch.zeros_like(previous_clearance)
     previous_contact_release = torch.zeros_like(previous_clearance)
+    previous_lip_impulse = torch.zeros_like(previous_clearance)
+    previous_lip_commitment = torch.zeros_like(previous_clearance)
     mode_trials = {name: 0 for name in reset_modes.values()}
     mode_clearance = {name: 0 for name in reset_modes.values()}
     mode_stable = {name: 0 for name in reset_modes.values()}
@@ -302,10 +306,14 @@ def main() -> int:
     mode_face_contact = {name: 0 for name in reset_modes.values()}
     mode_tread_contact = {name: 0 for name in reset_modes.values()}
     mode_contact_release = {name: 0 for name in reset_modes.values()}
+    mode_lip_impulse = {name: 0 for name in reset_modes.values()}
+    mode_lip_commitment = {name: 0 for name in reset_modes.values()}
     secured_events = 0
     face_contact_events = 0
     tread_contact_events = 0
     contact_release_events = 0
+    lip_impulse_events = 0
+    lip_commitment_events = 0
     tread_contact_source_steps: list[int] = []
     face_contact_metrics = ContactTrajectoryMetrics(args.num_envs, args.device)
     tread_contact_metrics = ContactTrajectoryMetrics(args.num_envs, args.device)
@@ -374,6 +382,16 @@ def main() -> int:
                 "_stair_contact_loaded_release_latched",
                 previous_contact_release,
             )
+            lip_impulse = getattr(
+                base_env,
+                "_stair_lip_commitment_impulse_latched",
+                previous_lip_impulse,
+            )
+            lip_commitment = getattr(
+                base_env,
+                "_stair_lip_commitment_latched",
+                previous_lip_commitment,
+            )
             global_contact = base_env.scene.sensors["robot_ground_contact"].data
             if (
                 global_contact.found is None
@@ -393,6 +411,8 @@ def main() -> int:
             new_stable = stable & ~previous_stable
             new_secured = secured & ~previous_secured
             new_contact_release = contact_release & ~previous_contact_release
+            new_lip_impulse = lip_impulse & ~previous_lip_impulse
+            new_lip_commitment = lip_commitment & ~previous_lip_commitment
             new_face_contact = face_contact_metrics.observe(
                 raw_face.any(dim=-1), base_env.episode_length_buf
             )
@@ -403,6 +423,8 @@ def main() -> int:
             stable_events += int(new_stable.sum().item())
             secured_events += int(new_secured.sum().item())
             contact_release_events += int(new_contact_release.sum().item())
+            lip_impulse_events += int(new_lip_impulse.sum().item())
+            lip_commitment_events += int(new_lip_commitment.sum().item())
             face_contact_events += int(new_face_contact.sum().item())
             tread_contact_events += int(new_tread_contact.sum().item())
             source_steps = getattr(base_env, "_stair_walker_bank_source_step", None)
@@ -507,14 +529,24 @@ def main() -> int:
                 mode_contact_release[name] += int(
                     (new_contact_release & mode_mask).sum().item()
                 )
+                mode_lip_impulse[name] += int(
+                    (new_lip_impulse & mode_mask).sum().item()
+                )
+                mode_lip_commitment[name] += int(
+                    (new_lip_commitment & mode_mask).sum().item()
+                )
             previous_clearance = clearance.clone()
             previous_stable = stable.clone()
             previous_secured = secured.clone()
             previous_contact_release = contact_release.clone()
+            previous_lip_impulse = lip_impulse.clone()
+            previous_lip_commitment = lip_commitment.clone()
             previous_clearance[done_mask] = False
             previous_stable[done_mask] = False
             previous_secured[done_mask] = False
             previous_contact_release[done_mask] = False
+            previous_lip_impulse[done_mask] = False
+            previous_lip_commitment[done_mask] = False
             face_contact_metrics.reset(done_mask)
             tread_contact_metrics.reset(done_mask)
             for metrics in body_part_tread_metrics.values():
@@ -568,6 +600,11 @@ def main() -> int:
             "contact_loaded_release_events": mode_contact_release[name],
             "contact_loaded_release_rate": mode_contact_release[name]
             / max(trials, 1),
+            "lip_commitment_impulse_events": mode_lip_impulse[name],
+            "lip_commitment_impulse_rate": mode_lip_impulse[name]
+            / max(trials, 1),
+            "lip_commitment_events": mode_lip_commitment[name],
+            "lip_commitment_rate": mode_lip_commitment[name] / max(trials, 1),
             "root_center_over_lip_events": mode_a12_event_counts[name][
                 "root_center_over_lip"
             ],
@@ -588,7 +625,7 @@ def main() -> int:
         }
     iteration_match = re.search(r"model_(\d+)$", checkpoint.stem)
     report: dict[str, object] = {
-        "schema_version": 4,
+        "schema_version": 5,
         "task": args.task,
         "checkpoint": str(checkpoint),
         "checkpoint_iteration": (
@@ -648,6 +685,10 @@ def main() -> int:
         "first_tread_contact_rate": tread_contact_events / denominator,
         "contact_loaded_release_events": contact_release_events,
         "contact_loaded_release_rate": contact_release_events / denominator,
+        "lip_commitment_impulse_events": lip_impulse_events,
+        "lip_commitment_impulse_rate": lip_impulse_events / denominator,
+        "lip_commitment_events": lip_commitment_events,
+        "lip_commitment_rate": lip_commitment_events / denominator,
         "body_part_tread_contact_events": body_part_tread_events,
         "body_part_tread_contact_rates": {
             name: events / denominator

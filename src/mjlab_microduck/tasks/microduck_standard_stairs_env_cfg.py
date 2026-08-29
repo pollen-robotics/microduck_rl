@@ -1271,6 +1271,63 @@ def make_microduck_stair_contact_release_rsi_env_cfg(
     return cfg
 
 
+def make_microduck_stair_lip_commitment_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A24: require loaded impulse and spatial commitment at the lip."""
+
+    cfg = make_microduck_stair_contact_release_rsi_env_cfg(play=play)
+    bank = cfg.events["walker_state_bank"].params
+    bank.update(
+        {
+            "phase_balanced": False,
+            "late_fraction": 0.50,
+            "late_source_episode_step_range": (38, 60),
+            "phase_aligned_local_x_range": (0.54, 0.64),
+            "phase_aligned_x_jitter": 0.005,
+        }
+    )
+    # Half of each batch starts from late manufacturer roll rows nearest the
+    # lip under the existing phase alignment; the other half remains uniform
+    # over every eligible exact row. No contact, action, or goal state is
+    # injected, and the complete saved actuator/history state is restored.
+    cfg.events["walker_state_bank"] = EventTermCfg(
+        func=WalkerStateBankReset,
+        mode="reset",
+        params=bank,
+    )
+    cfg.rewards["stair_contact_loaded_release"].weight = 0.0
+    cfg.rewards["stair_contact_lip_commitment"] = RewardTermCfg(
+        func=microduck_mdp.stair_contact_lip_commitment,
+        weight=50.0,
+        params={
+            "stair_face_x": STANDARD_STAIR_START_DISTANCE,
+            "riser_height": STANDARD_RISER_HEIGHT,
+            "tread_depth": STANDARD_TREAD_DEPTH,
+            "corridor_half_width": 0.20,
+            "arm_hold_steps": 2,
+            "impulse_window_steps": 12,
+            "min_forward_velocity_gain": 0.05,
+            "min_vertical_velocity_gain": 0.08,
+            "commitment_delay_steps": 4,
+            "commitment_hold_steps": 2,
+            "commitment_x": 0.645,
+            "commitment_z": 0.175,
+            "root_over_lip_x": 0.665,
+            "target_forward_delta": 0.040,
+            "target_vertical_delta": 0.025,
+            "sensor_names": (
+                "robot_ground_contact",
+                "head_ground_contact",
+                "legs_ground_contact",
+                "trunk_ground_contact",
+            ),
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    return cfg
+
+
 def make_microduck_stair_tread_contact_bank_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -1583,6 +1640,20 @@ MicroduckStairContactReleaseRsiRlCfg.max_iterations = 75
 MicroduckStairContactReleaseRsiRlCfg.save_interval = 25
 MicroduckStairContactReleaseRsiRlCfg.actor.distribution_cfg["init_std"] = 0.22
 MicroduckStairContactReleaseRsiRlCfg.algorithm.learning_rate = 1.0e-5
+
+MicroduckStairLipCommitmentRsiRlCfg = deepcopy(
+    MicroduckStairContactReleaseRsiRlCfg
+)
+MicroduckStairLipCommitmentRsiRlCfg.experiment_name = (
+    "microduck_stair_lip_commitment_rsi_specialist"
+)
+MicroduckStairLipCommitmentRsiRlCfg.run_name = (
+    "microduck_stair_lip_commitment_rsi_specialist"
+)
+MicroduckStairLipCommitmentRsiRlCfg.max_iterations = 75
+MicroduckStairLipCommitmentRsiRlCfg.save_interval = 25
+MicroduckStairLipCommitmentRsiRlCfg.actor.distribution_cfg["init_std"] = 0.22
+MicroduckStairLipCommitmentRsiRlCfg.algorithm.learning_rate = 1.0e-5
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)
 MicroduckStairTreadContactBankRlCfg.experiment_name = (
