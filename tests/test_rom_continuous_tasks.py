@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 from datetime import UTC, datetime
 from math import nan
@@ -221,6 +222,164 @@ def test_blocked_safe_stop_becomes_unresponsive_without_duplicate_stop_attempts(
     assert runtime.emergency_stop_calls == ["RUNTIME_UNRESPONSIVE"]
 
 
+def test_newer_accepted_command_skips_older_delayed_publication(
+    service, walk_request, runtime, monkeypatch
+):
+    """Concurrent callers may persist in order but must never publish in reverse."""
+    service.create_task(walk_request)
+    original_invoke = service._invoke_runtime
+    older_accepted = Event()
+    release_older = Event()
+
+    def delay_older(operation, function, active, **kwargs):
+        if (
+            operation == "command"
+            and threading.current_thread().name == "older-command"
+        ):
+            older_accepted.set()
+            assert release_older.wait(timeout=0.5)
+        return original_invoke(operation, function, active, **kwargs)
+
+    monkeypatch.setattr(service, "_invoke_runtime", delay_older)
+    outcome: dict[str, object] = {}
+
+    def publish_older() -> None:
+        try:
+            outcome["result"] = service.command(
+                walk_request.taskId, command(sequence=1, vx=0.1)
+            )
+        except BaseException as exc:  # noqa: BLE001 - assert the concurrent outcome.
+            outcome["error"] = exc
+
+    older_thread = Thread(target=publish_older, name="older-command", daemon=True)
+    older_thread.start()
+    assert older_accepted.wait(timeout=0.2)
+
+    service.command(walk_request.taskId, command(sequence=2, vx=0.2))
+    release_older.set()
+    older_thread.join(timeout=0.2)
+
+    assert not older_thread.is_alive()
+    assert "error" not in outcome
+    assert runtime.command_calls == [{"vxMps": 0.2, "vyMps": 0.0, "yawRateRadps": 0.0}]
+
+
+def test_stop_claim_invalidates_queued_commands_before_zero_publication(
+    service, walk_request, runtime, db_path, monkeypatch
+):
+    """Once stop is claimed, accepted commands cannot publish after zero intent."""
+    service.create_task(walk_request)
+    monkeypatch.setattr(service, "_require_motion_ready", lambda: None)
+    runtime.command_release.clear()
+    original_invoke = service._invoke_runtime
+    zero_reached = Event()
+    release_zero = Event()
+
+    def delay_zero(operation, function, active, **kwargs):
+        if operation == "zero_command":
+            zero_reached.set()
+            assert release_zero.wait(timeout=0.5)
+        return original_invoke(operation, function, active, **kwargs)
+
+    monkeypatch.setattr(service, "_invoke_runtime", delay_zero)
+    first_done, _, first_thread = _invoke_daemon(
+        lambda: service.command(walk_request.taskId, command(sequence=1, vx=0.1))
+    )
+    assert runtime.command_started.wait(timeout=0.2)
+    second_done, second_outcome, second_thread = _invoke_daemon(
+        lambda: service.command(walk_request.taskId, command(sequence=2, vx=0.2))
+    )
+    deadline = time.monotonic() + 0.2
+    while time.monotonic() < deadline:
+        with sqlite3.connect(db_path) as connection:
+            sequence = connection.execute(
+                "SELECT command_sequence FROM task WHERE task_id = ?",
+                (walk_request.taskId,),
+            ).fetchone()[0]
+        if sequence == 2:
+            break
+        time.sleep(0.002)
+    assert sequence == 2
+
+    cancel_done, cancel_outcome, cancel_thread = _invoke_daemon(
+        lambda: service.cancel_task(walk_request.taskId)
+    )
+    assert zero_reached.wait(timeout=0.2)
+    runtime.command_release.set()
+    assert first_done.wait(timeout=0.2)
+    release_zero.set()
+    assert second_done.wait(timeout=0.2)
+    assert cancel_done.wait(timeout=0.2)
+    first_thread.join(timeout=0.2)
+    second_thread.join(timeout=0.2)
+    cancel_thread.join(timeout=0.2)
+
+    assert "error" not in second_outcome
+    assert "error" not in cancel_outcome
+    assert runtime.operation_log == [
+        ("command", {"vxMps": 0.1, "vyMps": 0.0, "yawRateRadps": 0.0}),
+        ("command", {"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0}),
+        ("safe_stop", "CANCELLED"),
+    ]
+
+
+def test_runtime_supervisor_bounds_twenty_four_stalled_callers(service, runtime):
+    """One wedged native call must not accumulate one thread per API caller."""
+    service._runtime_call_timeout_s = 0.05
+    runtime.status_started.clear()
+    runtime.status_release.clear()
+    worker_identities_before = {
+        thread.ident
+        for thread in threading.enumerate()
+        if thread.name.startswith("microduck-runtime-")
+    }
+    callers = [_invoke_daemon(service.robot_status) for _ in range(24)]
+    assert runtime.status_started.wait(timeout=0.2)
+
+    try:
+        for completed, outcome, _ in callers:
+            assert completed.wait(timeout=0.2)
+            assert "error" not in outcome
+        added_workers = [
+            thread
+            for thread in threading.enumerate()
+            if thread.name.startswith("microduck-runtime-")
+            and thread.ident not in worker_identities_before
+        ]
+        assert runtime.status_call_count == 2
+        assert added_workers == []
+        assert service._runtime_dispatcher.worker.is_alive()
+    finally:
+        runtime.status_release.set()
+        for _, _, thread in callers:
+            thread.join(timeout=0.2)
+
+
+def test_constructor_status_stall_is_bounded_and_fail_closed(bundle, store):
+    """Application composition cannot hang forever on the initial status probe."""
+    runtime = FakeMicroduckRuntime()
+    runtime.status_release.clear()
+    completed, outcome, constructor_thread = _invoke_daemon(
+        lambda: SimulatorTaskService(bundle, store, runtime, runtimeCallTimeoutS=0.05)
+    )
+
+    try:
+        assert runtime.status_started.wait(timeout=0.2)
+        assert completed.wait(timeout=0.2)
+        assert "error" not in outcome
+        constructed = outcome["result"]
+        assert isinstance(constructed, SimulatorTaskService)
+        assert constructed.motion_readiness() == (
+            False,
+            ("RUNTIME_UNRESPONSIVE",),
+        )
+        assert constructed.robot_status().health["ready"] is False
+        assert runtime.status_call_count == 1
+    finally:
+        runtime.status_release.set()
+        constructor_thread.join(timeout=0.2)
+
+
 def test_expired_lease_zeros_velocity_stops_and_times_out(
     service, walk_request, clock, runtime
 ):
@@ -361,10 +520,7 @@ def test_app_watchdog_expires_initial_lease_without_http_traffic(
         assert response.status_code == 202
         clock.advance_ms(501)
         assert runtime.safe_stopped.wait(timeout=1.0)
-        with service._lock:
-            pass
-
-        terminal = service.get_task(walk_request.taskId)
+        terminal = _wait_for_terminal(service, walk_request.taskId)
         assert terminal.state == "TIMED_OUT"
         assert runtime.operation_log == [
             ("command", {"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0}),
@@ -391,10 +547,7 @@ def test_app_watchdog_observes_runtime_fault_before_lease_without_http_traffic(
             stop_reason="CONTROL_LOOP_OVERRUN",
         )
         assert runtime.safe_stopped.wait(timeout=1.0)
-        with service._lock:
-            pass
-
-        terminal = service.get_task(walk_request.taskId)
+        terminal = _wait_for_terminal(service, walk_request.taskId)
         assert terminal.state == "FAILED"
         assert terminal.stopReason == "CONTROL_LOOP_OVERRUN"
         assert runtime.last_command == {
@@ -419,10 +572,7 @@ def test_watchdog_exception_stops_active_motion_and_gates_only_new_motion(
     auth = {"Authorization": "Bearer watchdog-token"}
     with TestClient(app) as client:
         assert runtime.safe_stopped.wait(timeout=1.0)
-        with service._lock:
-            pass
-
-        terminal = service.get_task(walk_request.taskId)
+        terminal = _wait_for_terminal(service, walk_request.taskId)
         ready = client.get("/v1/ready", headers=auth)
         catalog = client.get("/v1/catalog", headers=auth)
         create = client.post(

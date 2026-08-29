@@ -47,6 +47,8 @@ from .service import (
 
 _TASK_ID_PATTERN = r"^[0-9a-f]{32}$"
 _MAX_REQUEST_BODY_BYTES = 65_536
+_SIGNED_INT_MIN = -(2**63)
+_SIGNED_INT_MAX = 2**63 - 1
 ErrorCode = Literal[
     "AUTH_REQUIRED",
     "NOT_READY",
@@ -178,6 +180,49 @@ def _content_length(scope: Scope) -> int | None:
                 return _MAX_REQUEST_BODY_BYTES + 1
             return parsed if parsed >= 0 else _MAX_REQUEST_BODY_BYTES + 1
     return None
+
+
+def _restore_exact_integer_bounds(value: Any) -> None:
+    """Emit integer-schema bounds as exact JSON integers, including int64."""
+    if isinstance(value, list):
+        for item in value:
+            _restore_exact_integer_bounds(item)
+        return
+    if not isinstance(value, dict):
+        return
+    if value.get("type") == "integer":
+        for keyword in (
+            "minimum",
+            "maximum",
+            "exclusiveMinimum",
+            "exclusiveMaximum",
+        ):
+            bound = value.get(keyword)
+            if keyword in {"maximum", "exclusiveMaximum"} and (
+                isinstance(bound, float) and bound == float(_SIGNED_INT_MAX)
+            ):
+                value[keyword] = _SIGNED_INT_MAX
+            elif keyword in {"minimum", "exclusiveMinimum"} and (
+                isinstance(bound, float) and bound == float(_SIGNED_INT_MIN)
+            ):
+                value[keyword] = _SIGNED_INT_MIN
+            elif isinstance(bound, float) and bound.is_integer():
+                value[keyword] = int(bound)
+    for key, item in value.items():
+        if (
+            key == "maximum"
+            and isinstance(item, float)
+            and item == float(_SIGNED_INT_MAX)
+        ):
+            value[key] = _SIGNED_INT_MAX
+        elif (
+            key == "minimum"
+            and isinstance(item, float)
+            and item == float(_SIGNED_INT_MIN)
+        ):
+            value[key] = _SIGNED_INT_MIN
+        else:
+            _restore_exact_integer_bounds(item)
 
 
 _SERVICE_ERRORS: dict[type[SimulatorServiceError], tuple[int, ErrorCode, str]] = {
@@ -541,6 +586,7 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
                 for operation in path.values():
                     if isinstance(operation, dict):
                         operation.get("responses", {}).pop("422", None)
+            _restore_exact_integer_bounds(app.openapi_schema)
         return app.openapi_schema
 
     app.openapi = openapi

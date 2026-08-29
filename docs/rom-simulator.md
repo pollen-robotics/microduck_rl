@@ -284,15 +284,19 @@ status, and event reads remain available. Catalog and robot status also
 document HTTP 503 `NOT_READY` for startup states in which their required
 installed bundle or runtime is absent.
 
-Every runtime call is supervised outside the service ownership mutex by a
-monotonic deadline. If sampling, validation, start, command, status, or safe
-stop stalls, readiness fails closed as `RUNTIME_UNRESPONSIVE`, active ownership
-is durably terminalized as `FAILED`, and one lock-independent emergency
-zero/disable attempt is made. Late runtime returns have no task authority and
-cannot republish command or ownership. Diagnostic reads and cancellation remain
-available from durable/cached state. If the underlying runtime thread cannot
-join after emergency stop, do not reuse that process: restart the
-process/container before accepting any further motion.
+Every runtime call is supervised outside the service ownership mutex by one
+long-lived daemon worker, a bounded admission queue, and a monotonic deadline.
+If sampling, validation, start, command, status, or safe stop stalls, the
+dispatcher rejects all further work, readiness fails closed as
+`RUNTIME_UNRESPONSIVE`, active ownership is durably terminalized as `FAILED`,
+and one lock-independent emergency zero/disable attempt is made. Emergency stop
+publishes fatal/zero intent before attempting the native-data guard and never
+waits for that guard. Late runtime returns have no task authority and cannot
+republish command or ownership. Diagnostic reads and cancellation remain
+available from durable/cached state. At most one native runtime call can remain
+hung; if it cannot return/join or the direct zero/disable guard is unavailable,
+do not reuse that process: restart the process/container before accepting any
+further motion.
 
 To smoke the deadman, create a distinct continuous task with `"leaseMs":200`,
 send no renewal, wait more than 200 ms, and query it:

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from mjlab_microduck.rom.contracts import (
@@ -470,6 +471,83 @@ def test_shared_portability_fixtures_match_python_semantic_validation():
         else:
             accepted = True
         assert accepted is case["accepted"], case["name"]
+
+
+def test_openapi_int64_bounds_are_exact_and_standard_schema_rejects_overflow():
+    """Rounded float maxima silently admit signed-int64 overflow in ROM validators."""
+    from mjlab_microduck.rom.api import create_app
+
+    repository = Path(__file__).parents[1]
+    openapi = yaml.safe_load(
+        (repository / "schemas/microduck-simulator-api-v1.openapi.yaml").read_text()
+    )
+    fixture = json.loads(
+        (repository / "schemas/microduck-v1-portability-fixtures.json").read_text()
+    )
+    maximum = 9_223_372_036_854_775_807
+    minimum = -9_223_372_036_854_775_808
+    schemas = openapi["components"]["schemas"]
+
+    assert (
+        schemas["TaskCommandRequest"]["properties"]["commandSequence"]["maximum"]
+        == maximum
+    )
+    assert schemas["TaskEvent"]["properties"]["sequence"]["maximum"] == maximum
+    json_integers = schemas["TaskCommandRequest"]["properties"]["parameters"][
+        "additionalProperties"
+    ]["anyOf"][1]
+    assert json_integers["minimum"] == minimum
+    assert json_integers["maximum"] == maximum
+    event_query = next(
+        parameter
+        for parameter in openapi["paths"]["/v1/tasks/{taskId}/events"]["get"][
+            "parameters"
+        ]
+        if parameter["name"] == "afterSequence"
+    )
+    assert event_query["schema"]["minimum"] == -1
+    assert event_query["schema"]["maximum"] == maximum
+    for bound in (
+        schemas["TaskEvent"]["properties"]["sequence"]["maximum"],
+        schemas["TaskCommandRequest"]["properties"]["commandSequence"]["maximum"],
+        json_integers["minimum"],
+        json_integers["maximum"],
+        event_query["schema"]["maximum"],
+    ):
+        assert type(bound) is int
+
+    def assert_exact_integer_bounds(value) -> None:
+        if isinstance(value, list):
+            for item in value:
+                assert_exact_integer_bounds(item)
+            return
+        if not isinstance(value, dict):
+            return
+        if value.get("type") == "integer":
+            for keyword in (
+                "minimum",
+                "maximum",
+                "exclusiveMinimum",
+                "exclusiveMaximum",
+            ):
+                if keyword in value:
+                    assert type(value[keyword]) is int
+        for item in value.values():
+            assert_exact_integer_bounds(item)
+
+    assert_exact_integer_bounds(openapi)
+    assert_exact_integer_bounds(create_app(None, "schema-test-token").openapi())
+
+    overflow_case = next(
+        case
+        for case in fixture["cases"]
+        if case["name"] == "event-rejects-sequence-overflow"
+    )
+    payload = deepcopy(fixture["basePayloads"][overflow_case["base"]])
+    for pointer, value in overflow_case["set"].items():
+        _set_json_pointer(payload, pointer, value)
+    errors = list(Draft202012Validator(schemas["TaskEvent"]).iter_errors(payload))
+    assert errors
 
 
 def _set_json_pointer(document, pointer: str, value) -> None:

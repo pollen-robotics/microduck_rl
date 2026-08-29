@@ -825,6 +825,78 @@ def test_late_blocked_start_cannot_publish_runtime_ownership_after_emergency(
     )
 
 
+def test_emergency_stop_signals_immediately_when_emergency_guard_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The emergency signal path cannot wait behind a stalled start publication."""
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root)
+    runtime = MicroduckMujocoRuntime(root, bundle, realtime=False)
+    request = _request().model_copy(update={"bundleDigest": bundle.bundleDigest})
+    guard_held = threading.Event()
+    guard_release = threading.Event()
+    reset_completed = threading.Event()
+    original_reset = runtime._reset_model_locked
+    outcome: dict[str, object] = {}
+
+    def hold_emergency_guard() -> None:
+        with runtime._emergency_guard:
+            guard_held.set()
+            guard_release.wait()
+
+    def observed_reset(*args):
+        result = original_reset(*args)
+        reset_completed.set()
+        return result
+
+    monkeypatch.setattr(runtime, "_reset_model_locked", observed_reset)
+    holder = threading.Thread(target=hold_emergency_guard, daemon=True)
+    holder.start()
+    assert guard_held.wait(timeout=0.2)
+
+    def invoke_start() -> None:
+        try:
+            outcome["result"] = runtime.start(bundle.actions[0], request)
+        except BaseException as exc:  # noqa: BLE001 - assert late-start rejection.
+            outcome["error"] = exc
+
+    start_thread = threading.Thread(target=invoke_start, daemon=True)
+    start_thread.start()
+    assert reset_completed.wait(timeout=0.2)
+    emergency_done = threading.Event()
+    emergency_outcome: dict[str, object] = {}
+
+    def invoke_emergency() -> None:
+        try:
+            runtime.emergency_stop("RUNTIME_UNRESPONSIVE")
+        except BaseException as exc:  # noqa: BLE001 - assert the emergency outcome.
+            emergency_outcome["error"] = exc
+        finally:
+            emergency_done.set()
+
+    emergency_thread = threading.Thread(target=invoke_emergency, daemon=True)
+    emergency_thread.start()
+
+    try:
+        assert emergency_done.wait(timeout=0.05)
+        assert "error" not in emergency_outcome
+        assert runtime._emergency_event.is_set()
+        assert runtime._stop_event.is_set()
+        assert runtime._fatal_reason == "RUNTIME_UNRESPONSIVE"
+    finally:
+        guard_release.set()
+        holder.join(timeout=0.2)
+        start_thread.join(timeout=0.2)
+        emergency_thread.join(timeout=0.2)
+
+    assert isinstance(outcome.get("error"), RuntimeError)
+    assert "result" not in outcome
+    assert runtime._active_handle is None
+    np.testing.assert_array_equal(
+        runtime._data.ctrl[runtime._actuator_indices], np.zeros(14)
+    )
+
+
 def test_runtime_readiness_rejects_available_action_with_wrong_policy_task_identity(
     tmp_path: Path,
 ) -> None:

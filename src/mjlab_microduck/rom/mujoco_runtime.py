@@ -133,6 +133,7 @@ class MicroduckMujocoRuntime:
         self._emergency_event = threading.Event()
         self._emergency_guard = threading.Lock()
         self._emergency_invoked = False
+        self._emergency_generation = 0
         self._wait: Callable[[float], bool] = self._stop_event.wait
         self._thread: threading.Thread | None = None
         self._active_handle: RuntimeHandle | None = None
@@ -684,6 +685,7 @@ class MicroduckMujocoRuntime:
         self, action: ActionDefinition, request: TaskCreateRequest
     ) -> RuntimeHandle:
         self.validate(action, request)
+        start_generation = self._emergency_generation
         with self._lock:
             if self._active_handle is not None:
                 raise RuntimeError("runtime already has an active task")
@@ -694,9 +696,7 @@ class MicroduckMujocoRuntime:
             spec = ACTION_RUNTIME_SPECS[action.actionCode]
             self._reset_model_locked(self._rng, spec.reset_profile)
             with self._emergency_guard:
-                if self._emergency_event.is_set():
-                    self._disable_actuators_locked()
-                    raise RuntimeError("runtime requires restart after emergency stop")
+                self._reject_emergency_publication_locked(start_generation)
                 self._active_handle = RuntimeHandle(taskId=request.taskId)
                 self._active_action = action
                 self._active_request = request
@@ -740,6 +740,7 @@ class MicroduckMujocoRuntime:
                 self._loop_overruns = 0
                 self._consecutive_overruns = 0
                 self._stop_event.clear()
+                self._reject_emergency_publication_locked(start_generation)
                 handle = self._active_handle
                 if self._realtime:
                     self._thread = threading.Thread(
@@ -756,16 +757,16 @@ class MicroduckMujocoRuntime:
                 raise RuntimeError("runtime requires restart after emergency stop")
             self._require_handle(handle)
             assert self._active_action is not None
+            command_generation = self._emergency_generation
             requested_command, command, limiting_reason = self._command_for(
                 self._active_action.actionCode, parameters, self._active_action
             )
             with self._emergency_guard:
-                if self._emergency_event.is_set():
-                    self._disable_actuators_locked()
-                    raise RuntimeError("runtime requires restart after emergency stop")
+                self._reject_emergency_publication_locked(command_generation)
                 self._requested_command = requested_command
                 self._command = command
                 self._limiting_reason = limiting_reason
+                self._reject_emergency_publication_locked(command_generation)
 
     def sample(self, handle: RuntimeHandle) -> RuntimeSample:
         with self._lock:
@@ -827,28 +828,33 @@ class MicroduckMujocoRuntime:
 
     def emergency_stop(self, reason: str) -> None:
         """Set fatal zero/disable intent without waiting for the primary lock."""
-        with self._emergency_guard:
+        self._emergency_generation += 1
+        self._emergency_event.set()
+        self._stop_event.set()
+        self._fatal_reason = reason
+        self._terminal_state = "FAILED"
+        self._terminal_reason = reason
+        self._limiting_reason = reason
+        self._limp = True
+        self._active_handle = None
+        self._active_action = None
+        self._active_request = None
+        self._active_policy = None
+        self._active_session = None
+        zero = DeploymentCommand.zero()
+        self._requested_command = zero
+        self._command = zero
+        if not self._emergency_guard.acquire(blocking=False):
+            return
+        try:
             if self._emergency_invoked:
                 return
             self._emergency_invoked = True
-            self._emergency_event.set()
-            self._stop_event.set()
-            self._fatal_reason = reason
-            self._terminal_state = "FAILED"
-            self._terminal_reason = reason
-            self._limiting_reason = reason
-            self._limp = True
-            self._active_handle = None
-            self._active_action = None
-            self._active_request = None
-            self._active_policy = None
-            self._active_session = None
-            zero = DeploymentCommand.zero()
-            self._requested_command = zero
-            self._command = zero
             self._data.ctrl[self._actuator_indices] = 0.0
             self._model.actuator_gainprm[self._actuator_indices] = 0.0
             self._model.actuator_biasprm[self._actuator_indices] = 0.0
+        finally:
+            self._emergency_guard.release()
 
     def status(self) -> RobotStatus:
         with self._lock:
@@ -1159,6 +1165,21 @@ class MicroduckMujocoRuntime:
     def _hold_current_position_locked(self) -> None:
         current = self._finite_array(self._data.qpos[self._joint_qpos_indices], 14)
         self._data.ctrl[self._actuator_indices] = current
+
+    def _reject_emergency_publication_locked(self, generation: int) -> None:
+        """Prevent late start/command work from resurrecting motion intent."""
+        if self._emergency_event.is_set() or self._emergency_generation != generation:
+            self._stop_event.set()
+            self._active_handle = None
+            self._active_action = None
+            self._active_request = None
+            self._active_policy = None
+            self._active_session = None
+            zero = DeploymentCommand.zero()
+            self._requested_command = zero
+            self._command = zero
+            self._disable_actuators_locked()
+            raise RuntimeError("runtime requires restart after emergency stop")
 
     def _disable_actuators_locked(self) -> None:
         """Make fatal limp truthful by removing position-servo gain and bias."""

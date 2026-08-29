@@ -568,8 +568,8 @@ components:
           title: Terminalconditions
         maxDurationMs:
           type: integer
-          maximum: 3600000.0
-          exclusiveMinimum: 0.0
+          maximum: 3600000
+          exclusiveMinimum: 0
           title: Maxdurationms
       additionalProperties: false
       type: object
@@ -645,8 +645,8 @@ components:
       - type: string
         maxLength: 1024
       - type: integer
-        maximum: 9.223372036854776e+18
-        minimum: -9.223372036854776e+18
+        maximum: 9223372036854775807
+        minimum: -9223372036854775808
       - type: number
       - type: boolean
       - items:
@@ -665,23 +665,23 @@ components:
       properties:
         minLeaseMs:
           type: integer
-          maximum: 60000.0
-          exclusiveMinimum: 0.0
+          maximum: 60000
+          exclusiveMinimum: 0
           title: Minleasems
         defaultLeaseMs:
           type: integer
-          maximum: 60000.0
-          exclusiveMinimum: 0.0
+          maximum: 60000
+          exclusiveMinimum: 0
           title: Defaultleasems
         maxLeaseMs:
           type: integer
-          maximum: 60000.0
-          exclusiveMinimum: 0.0
+          maximum: 60000
+          exclusiveMinimum: 0
           title: Maxleasems
         commandCadenceMs:
           type: integer
-          maximum: 60000.0
-          exclusiveMinimum: 0.0
+          maximum: 60000
+          exclusiveMinimum: 0
           title: Commandcadencems
         zeroCommand:
           additionalProperties:
@@ -689,8 +689,8 @@ components:
             - type: string
               maxLength: 1024
             - type: integer
-              maximum: 9.223372036854776e+18
-              minimum: -9.223372036854776e+18
+              maximum: 9223372036854775807
+              minimum: -9223372036854775808
             - type: number
             - type: boolean
             - type: 'null'
@@ -988,8 +988,8 @@ components:
           title: Terrain
         seed:
           type: integer
-          maximum: 4294967295.0
-          minimum: 0.0
+          maximum: 4294967295
+          minimum: 0
           title: Seed
       additionalProperties: false
       type: object
@@ -1002,8 +1002,8 @@ components:
       properties:
         commandSequence:
           type: integer
-          maximum: 9.223372036854776e+18
-          minimum: 0.0
+          maximum: 9223372036854775807
+          minimum: 0
           title: Commandsequence
         parameters:
           additionalProperties:
@@ -1011,8 +1011,8 @@ components:
             - type: string
               maxLength: 1024
             - type: integer
-              maximum: 9.223372036854776e+18
-              minimum: -9.223372036854776e+18
+              maximum: 9223372036854775807
+              minimum: -9223372036854775808
             - type: number
             - type: boolean
             - type: 'null'
@@ -1036,8 +1036,8 @@ components:
             - policyName
         leaseMs:
           type: integer
-          maximum: 60000.0
-          exclusiveMinimum: 0.0
+          maximum: 60000
+          exclusiveMinimum: 0
           title: Leasems
       additionalProperties: false
       type: object
@@ -1076,8 +1076,8 @@ components:
             - type: string
               maxLength: 1024
             - type: integer
-              maximum: 9.223372036854776e+18
-              minimum: -9.223372036854776e+18
+              maximum: 9223372036854775807
+              minimum: -9223372036854775808
             - type: number
             - type: boolean
             - type: 'null'
@@ -1104,8 +1104,8 @@ components:
         leaseMs:
           anyOf:
           - type: integer
-            maximum: 60000.0
-            exclusiveMinimum: 0.0
+            maximum: 60000
+            exclusiveMinimum: 0
           - type: 'null'
           title: Leasems
         requestedBy:
@@ -1129,8 +1129,8 @@ components:
       properties:
         sequence:
           type: integer
-          maximum: 9.223372036854776e+18
-          minimum: 0.0
+          maximum: 9223372036854775807
+          minimum: 0
           title: Sequence
         eventType:
           type: string
@@ -1143,8 +1143,8 @@ components:
             - type: string
               maxLength: 1024
             - type: integer
-              maximum: 9.223372036854776e+18
-              minimum: -9.223372036854776e+18
+              maximum: 9223372036854775807
+              minimum: -9223372036854775808
             - type: number
             - type: boolean
             - type: 'null'
@@ -1204,8 +1204,8 @@ components:
             - type: string
               maxLength: 1024
             - type: integer
-              maximum: 9.223372036854776e+18
-              minimum: -9.223372036854776e+18
+              maximum: 9223372036854775807
+              minimum: -9223372036854775808
             - type: number
             - type: boolean
             - type: 'null'

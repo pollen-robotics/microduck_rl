@@ -6,8 +6,11 @@ import math
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from typing import Any
+from weakref import ref
 
 from .action_catalog import (
     action_template,
@@ -105,6 +108,87 @@ class _RuntimeCallSuperseded(RuntimeError):
     """A runtime result arrived after its task generation lost ownership."""
 
 
+class _RuntimeCallRejected(RuntimeError):
+    """The bounded runtime dispatcher rejected an operation."""
+
+
+@dataclass
+class _RuntimeOperation:
+    name: str
+    function: Callable[[], Any]
+    guard: Callable[[], bool] | None = None
+    completed: Event = field(default_factory=Event)
+    result: Any = None
+    error: BaseException | None = None
+
+
+class _RuntimeDispatcher:
+    """Run all runtime calls on one bounded, permanently fail-closed worker."""
+
+    _queue_capacity = 8
+
+    def __init__(self, owner: SimulatorTaskService) -> None:
+        self._owner = ref(owner)
+        self._queue: Queue[_RuntimeOperation] = Queue(maxsize=self._queue_capacity)
+        self._lock = Lock()
+        self._accepting = True
+        self._failure_reason: str | None = None
+        self.thread_name = f"microduck-runtime-dispatcher-{id(owner):x}"
+        self.worker = Thread(
+            target=self._run,
+            name=self.thread_name,
+            daemon=True,
+        )
+        self.worker.start()
+
+    def submit(self, operation: _RuntimeOperation) -> None:
+        with self._lock:
+            if not self._accepting:
+                raise _RuntimeCallRejected(
+                    self._failure_reason or "runtime dispatcher is unavailable"
+                )
+            try:
+                self._queue.put_nowait(operation)
+            except Full as exc:
+                raise _RuntimeCallRejected("runtime dispatcher queue is full") from exc
+
+    def fail(self, reason: str) -> None:
+        """Reject future work and wake every queued caller without spawning."""
+        with self._lock:
+            if self._accepting:
+                self._accepting = False
+                self._failure_reason = reason
+            while True:
+                try:
+                    operation = self._queue.get_nowait()
+                except Empty:
+                    break
+                operation.error = _RuntimeCallRejected(reason)
+                operation.completed.set()
+                self._queue.task_done()
+
+    def _run(self) -> None:
+        while True:
+            try:
+                operation = self._queue.get(timeout=0.05)
+            except Empty:
+                owner = self._owner()
+                if owner is None:
+                    return
+                del owner
+                continue
+            try:
+                if operation.guard is not None and not operation.guard():
+                    raise _RuntimeCallSuperseded(operation.name)
+                operation.result = operation.function()
+            except BaseException as exc:  # noqa: BLE001 - preserve runtime-defined faults.
+                operation.error = exc
+            finally:
+                operation.completed.set()
+                self._queue.task_done()
+                del operation  # release service closures while idle
+
+
 @dataclass
 class _ActiveTask:
     generation: int
@@ -118,6 +202,9 @@ class _ActiveTask:
     stop_claimed: bool = False
     terminalized: bool = False
     emergency_claimed: bool = False
+    command_epoch: int = 0
+    latest_command_sequence: int | None = None
+    latest_command_hash: str | None = None
 
 
 @dataclass
@@ -155,14 +242,24 @@ class SimulatorTaskService:
         self._runtime_call_timeout_s = runtimeCallTimeoutS
         self._monotonic_clock = monotonic_clock
         self._lock = Lock()
-        self._runtime_operation_lock = Lock()
         self._active: _ActiveTask | None = None
         self._watchdog_healthy = True
         self._readiness_failure_reason: str | None = None
         self._next_generation = 1
         self._global_emergency_claimed = False
         self._emergency_stop_failed = False
-        self._last_status = runtime.status()
+        self._last_status = _initializing_robot_status()
+        self._runtime_dispatcher = _RuntimeDispatcher(self)
+        try:
+            self._runtime_status(None)
+        except _RuntimeCallTimedOut:
+            # The supervisor already marked readiness permanently unhealthy.
+            pass
+        except Exception:  # noqa: BLE001 - startup remains diagnostic and fail closed.
+            self._runtime_dispatcher.fail("RUNTIME_UNAVAILABLE")
+            with self._lock:
+                self._watchdog_healthy = False
+                self._readiness_failure_reason = "RUNTIME_UNAVAILABLE"
 
     def create_task(self, request: TaskCreateRequest):
         """Accept a valid discrete task and begin its durable worker lifecycle."""
@@ -310,13 +407,17 @@ class SimulatorTaskService:
                 self._readiness_failure_reason = "WATCHDOG_UNHEALTHY"
             active = self._active
             if active is None or not active.continuous:
+                self._runtime_dispatcher.fail("WATCHDOG_UNHEALTHY")
                 return
-        self._stop_continuous(
-            active,
-            "FAILED",
-            "WATCHDOG_FAILURE",
-            sample_metrics={"safetyFailure": "WATCHDOG_FAILURE"},
-        )
+        try:
+            self._stop_continuous(
+                active,
+                "FAILED",
+                "WATCHDOG_FAILURE",
+                sample_metrics={"safetyFailure": "WATCHDOG_FAILURE"},
+            )
+        finally:
+            self._runtime_dispatcher.fail("WATCHDOG_UNHEALTHY")
 
     def command(self, task_id: str, command: TaskCommandRequest):
         """Accept a monotonic continuous command and renew its target-side lease."""
@@ -335,6 +436,8 @@ class SimulatorTaskService:
                 raise InvalidParameters("task does not accept continuous commands")
             if snapshot.state != "RUNNING" or active.handle is None:
                 raise InvalidParameters("task is not running")
+            if active.stop_claimed or active.terminalized:
+                raise InvalidParameters("task is not running")
             if (
                 active.deadline is not None
                 and self._monotonic_clock() >= active.deadline
@@ -344,9 +447,10 @@ class SimulatorTaskService:
                 assert active.action is not None
                 self._validate_command(command, active.action)
                 deadline = self._monotonic_clock() + command.leaseMs / 1_000
+                command_hash = _command_hash(command)
                 try:
                     accepted, created = self._store.record_command(
-                        task_id, command, _command_hash(command), deadline
+                        task_id, command, command_hash, deadline
                     )
                 except StoreStaleCommand as exc:
                     raise StaleCommand(str(exc)) from exc
@@ -355,6 +459,14 @@ class SimulatorTaskService:
                 if not created:
                     return accepted
                 handle = active.handle
+                active.command_epoch += 1
+                active.latest_command_sequence = command.commandSequence
+                active.latest_command_hash = command_hash
+                command_token = (
+                    active.command_epoch,
+                    command.commandSequence,
+                    command_hash,
+                )
         if expired is not None:
             self._stop_continuous(expired, "TIMED_OUT", "LEASE_EXPIRED")
             raise InvalidParameters("task is not running")
@@ -364,16 +476,17 @@ class SimulatorTaskService:
                 "command",
                 lambda: self._runtime.command(handle, command.parameters),
                 active,
+                guard=lambda: self._command_token_is_current(active, command_token),
             )
         except _RuntimeCallTimedOut as exc:
             raise RuntimeException("simulator command was unresponsive") from exc
-        except _RuntimeCallSuperseded as exc:
-            raise RuntimeException("simulator command lost task ownership") from exc
+        except _RuntimeCallSuperseded:
+            return self._store.get(task_id) or accepted
         except Exception as exc:
             self._stop_continuous(active, "FAILED", "RUNTIME_EXCEPTION")
             raise RuntimeException("could not apply simulator command") from exc
         with self._lock:
-            if self._active is active and not active.terminalized:
+            if self._command_token_is_current_locked(active, command_token):
                 active.deadline = deadline
         return accepted
 
@@ -515,6 +628,7 @@ class SimulatorTaskService:
             if active.stop_claimed:
                 return self._store.get(active.request.taskId)
             active.stop_claimed = True
+            active.command_epoch += 1
             active.stop_event.set()
             handle = active.handle
         assert active.action is not None
@@ -526,6 +640,7 @@ class SimulatorTaskService:
                     "zero_command",
                     lambda: self._runtime.command(handle, zero_parameters),
                     active,
+                    guard=lambda: self._stop_claim_is_current(active),
                 )
             except (_RuntimeCallTimedOut, _RuntimeCallSuperseded):
                 return self._store.get(active.request.taskId)
@@ -537,6 +652,7 @@ class SimulatorTaskService:
                 "safe_stop",
                 lambda: self._runtime.safe_stop(handle, reason),
                 active,
+                guard=lambda: self._stop_claim_is_current(active),
             )
         except (_RuntimeCallTimedOut, _RuntimeCallSuperseded):
             return self._store.get(active.request.taskId)
@@ -604,46 +720,71 @@ class SimulatorTaskService:
         operation: str,
         function: Callable[[], Any],
         active: _ActiveTask | None,
+        *,
+        guard: Callable[[], bool] | None = None,
     ) -> Any:
-        """Run one serialized runtime call under an independent monotonic deadline."""
-        completed = Event()
-        outcome: dict[str, Any] = {}
-
-        def invoke() -> None:
-            try:
-                with self._runtime_operation_lock:
-                    if active is not None and not self._owns_generation(active):
-                        raise _RuntimeCallSuperseded
-                    outcome["result"] = function()
-            except BaseException as exc:  # noqa: BLE001 - propagate runtime-defined errors.
-                outcome["error"] = exc
-            finally:
-                completed.set()
-
-        Thread(
-            target=invoke,
-            name=f"microduck-runtime-{operation}",
-            daemon=True,
-        ).start()
+        """Submit one runtime call to the bounded worker and supervise its deadline."""
+        if guard is None and active is not None:
+            guard = lambda: self._normal_operation_is_current(active)
+        runtime_operation = _RuntimeOperation(operation, function, guard)
+        try:
+            self._runtime_dispatcher.submit(runtime_operation)
+        except _RuntimeCallRejected as exc:
+            self._runtime_unresponsive(active, operation)
+            raise _RuntimeCallTimedOut(operation) from exc
         deadline = time.monotonic() + self._runtime_call_timeout_s
-        while not completed.is_set():
+        while not runtime_operation.completed.is_set():
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
+                self._runtime_dispatcher.fail("RUNTIME_UNRESPONSIVE")
                 self._runtime_unresponsive(active, operation)
                 raise _RuntimeCallTimedOut(operation)
-            completed.wait(remaining)
-        error = outcome.get("error")
+            runtime_operation.completed.wait(remaining)
+        error = runtime_operation.error
+        if isinstance(error, _RuntimeCallRejected):
+            self._runtime_unresponsive(active, operation)
+            raise _RuntimeCallTimedOut(operation) from error
         if error is not None:
             raise error
-        if active is not None and not self._owns_generation(active):
+        if runtime_operation.guard is not None and not runtime_operation.guard():
             raise _RuntimeCallSuperseded(operation)
-        return outcome.get("result")
+        return runtime_operation.result
 
-    def _owns_generation(self, active: _ActiveTask) -> bool:
+    def _normal_operation_is_current(self, active: _ActiveTask) -> bool:
         with self._lock:
             return (
                 self._active is active
                 and self._active.generation == active.generation
+                and not active.stop_claimed
+                and not active.terminalized
+            )
+
+    def _command_token_is_current(
+        self, active: _ActiveTask, token: tuple[int, int, str]
+    ) -> bool:
+        with self._lock:
+            return self._command_token_is_current_locked(active, token)
+
+    def _command_token_is_current_locked(
+        self, active: _ActiveTask, token: tuple[int, int, str]
+    ) -> bool:
+        epoch, sequence, command_hash = token
+        return (
+            self._active is active
+            and self._active.generation == active.generation
+            and not active.stop_claimed
+            and not active.terminalized
+            and active.command_epoch == epoch
+            and active.latest_command_sequence == sequence
+            and active.latest_command_hash == command_hash
+        )
+
+    def _stop_claim_is_current(self, active: _ActiveTask) -> bool:
+        with self._lock:
+            return (
+                self._active is active
+                and self._active.generation == active.generation
+                and active.stop_claimed
                 and not active.terminalized
             )
 
@@ -651,6 +792,7 @@ class SimulatorTaskService:
         """Fail closed exactly once; late runtime results have no service authority."""
         terminalize = False
         emergency = False
+        self._runtime_dispatcher.fail("RUNTIME_UNRESPONSIVE")
         with self._lock:
             self._watchdog_healthy = False
             self._readiness_failure_reason = "RUNTIME_UNRESPONSIVE"
@@ -660,6 +802,7 @@ class SimulatorTaskService:
                 and not active.terminalized
             ):
                 active.stop_claimed = True
+                active.command_epoch += 1
                 active.terminalized = True
                 active.stop_event.set()
                 terminalize = True
@@ -891,6 +1034,32 @@ class SimulatorTaskService:
             metrics=metrics,
             stopReason=outcome.reason,
         )
+
+
+def _initializing_robot_status() -> RobotStatus:
+    """Return a contract-valid synthetic snapshot before the bounded first probe."""
+    return RobotStatus(
+        schema="BIPED_POSE_V1",
+        timestamp=datetime.now(UTC),
+        basePositionM=(0.0, 0.0, 0.0),
+        baseOrientationXyzw=(0.0, 0.0, 0.0, 1.0),
+        baseLinearVelocityMps=(0.0, 0.0, 0.0),
+        baseAngularVelocityRadps=(0.0, 0.0, 0.0),
+        jointPositionsRad=(0.0,) * 14,
+        jointVelocitiesRadps=(0.0,) * 14,
+        policyTarget={},
+        requestedMotion={},
+        appliedMotion={},
+        simulationTimeS=0.0,
+        loopFrequencyHz=0.0,
+        fallen=False,
+        limp=True,
+        health={
+            "ready": False,
+            "healthy": False,
+            "reasonCodes": "RUNTIME_INITIALIZING",
+        },
+    )
 
 
 def _request_hash(request: TaskCreateRequest) -> str:

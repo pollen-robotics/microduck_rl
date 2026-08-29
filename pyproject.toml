@@ -45,6 +45,7 @@ dev = [
     "pytest>=8,<9",
     "httpx>=0.28,<1",
     "ruff>=0.12,<1",
+    "jsonschema>=4,<5",
 ]
 rom = [
     "fastapi==0.141.1",

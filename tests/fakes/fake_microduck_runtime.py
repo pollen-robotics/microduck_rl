@@ -30,6 +30,9 @@ class FakeMicroduckRuntime:
         self.safe_stop_started = Event()
         self.safe_stop_release = Event()
         self.safe_stop_release.set()
+        self.status_started = Event()
+        self.status_release = Event()
+        self.status_release.set()
         self.emergency_stopped = Event()
         self._lock = Lock()
         self._samples: deque[RuntimeSample | BaseException] = deque()
@@ -44,6 +47,7 @@ class FakeMicroduckRuntime:
         self.safe_stop_error: BaseException | None = None
         self.safe_stop_metrics: dict[str, Any] = {"safeStop": True}
         self.status_value = robot_status()
+        self.status_call_count = 0
 
     def complete_next(
         self, *, state: str, metrics: dict[str, Any], stop_reason: str | None = None
@@ -119,6 +123,10 @@ class FakeMicroduckRuntime:
         self.emergency_stopped.set()
 
     def status(self) -> RobotStatus:
+        with self._lock:
+            self.status_call_count += 1
+        self.status_started.set()
+        self.status_release.wait()
         if self.status_error is not None:
             raise self.status_error
         return self.status_value
