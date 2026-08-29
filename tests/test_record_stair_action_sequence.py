@@ -64,6 +64,10 @@ def test_recorder_default_action_limit_matches_a13_search() -> None:
     assert RECORD.DEFAULT_ACTION_LIMIT == SEARCH.DEFAULT_ACTION_LIMIT == 10.0
 
 
+def test_recorder_and_search_share_the_default_task() -> None:
+    assert RECORD.TASK_ID == SEARCH.TASK_ID
+
+
 def test_attempt_step_indices_repeat_the_frozen_sequence() -> None:
     np.testing.assert_array_equal(
         RECORD.attempt_step_indices(10, 4),

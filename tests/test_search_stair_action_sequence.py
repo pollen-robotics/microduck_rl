@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -55,6 +56,41 @@ def test_cem_population_preserves_exact_frozen_prefix() -> None:
     )
     np.testing.assert_array_equal(population[0], mean)
     assert np.any(population[1:, 2] != mean[2])
+
+
+def test_forced_head_lever_reset_is_deterministic() -> None:
+    params = {
+        "lip_release_fraction": 0.1,
+        "shell_brace_fraction": 0.2,
+        "tread_recovery_fraction": 0.0,
+        "real_handoff_fraction": 0.7,
+        "shell_local_x_range": (0.54, 0.59),
+        "shell_pitch_deg_range": (8.0, 30.0),
+        "lip_vertical_speed_range": (0.45, 0.90),
+    }
+    cfg = SimpleNamespace(
+        events={"route_state_curriculum": SimpleNamespace(params=params)}
+    )
+
+    SEARCH.force_assisted_reset_mode(cfg, "head-lever")
+
+    assert params["lip_release_fraction"] == 0.0
+    assert params["shell_brace_fraction"] == 1.0
+    assert params["real_handoff_fraction"] == 0.0
+    assert params["shell_local_x_range"] == (0.565, 0.565)
+    assert params["shell_pitch_deg_range"] == (19.0, 19.0)
+    assert params["lip_vertical_speed_range"] == (0.45, 0.90)
+
+
+def test_bank_reset_position_can_be_pinned_without_changing_other_params() -> None:
+    params = {"bank_path": "bank.pt", "min_root_height": 0.08}
+    cfg = SimpleNamespace(events={"walker_state_bank": SimpleNamespace(params=params)})
+
+    SEARCH.pin_bank_reset_position(cfg, 0.602, 0.0)
+
+    assert params["local_x_range"] == (0.602, 0.602)
+    assert params["local_y_range"] == (0.0, 0.0)
+    assert params["min_root_height"] == 0.08
 
 
 def test_load_initial_knots_preserves_prefix_and_zero_extends(tmp_path: Path) -> None:

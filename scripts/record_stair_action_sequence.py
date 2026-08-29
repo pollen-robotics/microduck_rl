@@ -23,6 +23,8 @@ from search_stair_action_sequence import (
     TASK_ID,
     _pin_loaded_foot_bank_row,
     _validate_fixed_stair,
+    force_assisted_reset_mode,
+    pin_bank_reset_position,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -34,10 +36,22 @@ DEFAULT_SEQUENCE = (
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--task-id",
+        default=TASK_ID,
+        help="Registered fixed-stair specialist task used by the source search.",
+    )
+    parser.add_argument(
+        "--forced-reset-mode",
+        choices=("task-default", "launch-release", "head-lever", "bank"),
+        default="task-default",
+    )
+    parser.add_argument(
         "--baseline-checkpoint", type=Path, default=DEFAULT_BASELINE_CHECKPOINT
     )
     parser.add_argument("--sequence-npz", type=Path, default=DEFAULT_SEQUENCE)
     parser.add_argument("--bank-row", type=int, default=87)
+    parser.add_argument("--bank-local-x", type=float)
+    parser.add_argument("--bank-local-y", type=float)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--duration-seconds", type=float, default=20.0)
     parser.add_argument("--fps", type=float, default=50.0)
@@ -178,8 +192,10 @@ def main() -> int:
 
     configure_torch_backends()
     torch.manual_seed(args.seed)
-    env_cfg = load_env_cfg(TASK_ID, play=True)
-    agent_cfg = load_rl_cfg(TASK_ID)
+    env_cfg = load_env_cfg(args.task_id, play=True)
+    agent_cfg = load_rl_cfg(args.task_id)
+    force_assisted_reset_mode(env_cfg, args.forced_reset_mode)
+    pin_bank_reset_position(env_cfg, args.bank_local_x, args.bank_local_y)
     _validate_fixed_stair(env_cfg)
     env_cfg.scene.num_envs = 1
     env_cfg.seed = args.seed
@@ -199,8 +215,12 @@ def main() -> int:
     temporary_output = temporary_dir / f"a13-stair-recording-{os.getpid()}.mp4"
     writer: subprocess.Popen[bytes] | None = None
     try:
-        selected_row = _pin_loaded_foot_bank_row(base_env, args.bank_row, torch)
-        runner_cls = load_runner_cls(TASK_ID) or MjlabOnPolicyRunner
+        selected_row = None
+        if args.forced_reset_mode in {"task-default", "bank"}:
+            selected_row = _pin_loaded_foot_bank_row(
+                base_env, args.bank_row, torch
+            )
+        runner_cls = load_runner_cls(args.task_id) or MjlabOnPolicyRunner
         runner = runner_cls(env, asdict(agent_cfg), device=args.device)
         baseline_actor = load_frozen_actor(runner, checkpoint, device=args.device)
         if int(env.num_actions) != residual.shape[1]:
@@ -243,7 +263,8 @@ def main() -> int:
                     flush=True,
                 )
         print(
-            f"[a13-video] replayed bank row {selected_row} across {attempts} attempts",
+            f"[a13-video] replayed reset={args.forced_reset_mode} "
+            f"bank_row={selected_row} across {attempts} attempts",
             flush=True,
         )
     finally:

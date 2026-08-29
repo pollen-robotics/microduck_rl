@@ -316,6 +316,17 @@ def score_strict_trajectory(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--task-id",
+        default=TASK_ID,
+        help="Registered fixed-stair specialist task providing the reset bank.",
+    )
+    parser.add_argument(
+        "--forced-reset-mode",
+        choices=("task-default", "launch-release", "head-lever", "bank"),
+        default="task-default",
+        help="Force one deterministic assisted launch family for the search.",
+    )
+    parser.add_argument(
         "--baseline-checkpoint", type=Path, default=DEFAULT_BASELINE_CHECKPOINT
     )
     parser.add_argument("--candidates", type=int, default=64)
@@ -331,6 +342,8 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--bank-row", type=int)
+    parser.add_argument("--bank-local-x", type=float)
+    parser.add_argument("--bank-local-y", type=float)
     parser.add_argument("--horizon-steps", type=int, default=40)
     parser.add_argument("--knots", type=int, default=5)
     parser.add_argument("--residual-std", type=float, default=0.25)
@@ -403,6 +416,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--cem-alpha must be in (0, 1]")
     if args.max_wall_seconds <= 0.0 or args.gpu_headroom_gb < 0.0:
         raise SystemExit("wall-time must be positive and GPU headroom nonnegative")
+    for name in ("bank_local_x", "bank_local_y"):
+        value = getattr(args, name)
+        if value is not None and not math.isfinite(value):
+            raise SystemExit(f"--{name.replace('_', '-')} must be finite")
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -492,6 +509,52 @@ def _validate_fixed_stair(env_cfg: Any) -> None:
         checked += 1
     if checked == 0:
         raise RuntimeError("Could not verify a fixed standard-stair terrain")
+
+
+def force_assisted_reset_mode(env_cfg: Any, mode: str) -> None:
+    """Select one deterministic launch family for fair CEM comparison."""
+
+    if mode == "task-default":
+        return
+    reset = env_cfg.events["route_state_curriculum"].params
+    fractions = {
+        "launch-release": (1.0, 0.0, 0.0, 0.0),
+        "head-lever": (0.0, 1.0, 0.0, 0.0),
+        "bank": (0.0, 0.0, 0.0, 1.0),
+    }
+    lip, shell, tread, handoff = fractions[mode]
+    reset.update(
+        {
+            "lip_release_fraction": lip,
+            "shell_brace_fraction": shell,
+            "tread_recovery_fraction": tread,
+            "real_handoff_fraction": handoff,
+        }
+    )
+    prefix = {"launch-release": "lip_", "head-lever": "shell_"}.get(mode)
+    if prefix is None:
+        return
+    for name, value in tuple(reset.items()):
+        if not name.startswith(prefix) or not name.endswith("_range"):
+            continue
+        if not isinstance(value, tuple) or len(value) != 2:
+            continue
+        midpoint = 0.5 * (float(value[0]) + float(value[1]))
+        reset[name] = (midpoint, midpoint)
+
+
+def pin_bank_reset_position(
+    env_cfg: Any, local_x_m: float | None, local_y_m: float | None
+) -> None:
+    """Remove bank-position randomness when exact CEM comparisons need it."""
+
+    if local_x_m is None and local_y_m is None:
+        return
+    bank = env_cfg.events["walker_state_bank"].params
+    if local_x_m is not None:
+        bank["local_x_range"] = (local_x_m, local_x_m)
+    if local_y_m is not None:
+        bank["local_y_range"] = (local_y_m, local_y_m)
 
 
 def _pin_loaded_foot_bank_row(base_env: Any, requested_row: int | None, torch: Any) -> int:
@@ -657,17 +720,23 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    env_cfg = load_env_cfg(TASK_ID, play=True)
-    agent_cfg = load_rl_cfg(TASK_ID)
+    env_cfg = load_env_cfg(args.task_id, play=True)
+    agent_cfg = load_rl_cfg(args.task_id)
+    force_assisted_reset_mode(env_cfg, args.forced_reset_mode)
+    pin_bank_reset_position(env_cfg, args.bank_local_x, args.bank_local_y)
     _validate_fixed_stair(env_cfg)
     env_cfg.scene.num_envs = args.batch_size
     env_cfg.seed = args.seed
     base_env = ManagerBasedRlEnv(cfg=env_cfg, device=args.device, render_mode=None)
     env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
     try:
-        selected_bank_row = _pin_loaded_foot_bank_row(base_env, args.bank_row, torch)
+        selected_bank_row = None
+        if args.forced_reset_mode in {"task-default", "bank"}:
+            selected_bank_row = _pin_loaded_foot_bank_row(
+                base_env, args.bank_row, torch
+            )
         shell_geom_id = _locate_and_validate_shell(base_env)
-        runner_cls = load_runner_cls(TASK_ID) or MjlabOnPolicyRunner
+        runner_cls = load_runner_cls(args.task_id) or MjlabOnPolicyRunner
         runner = runner_cls(env, asdict(agent_cfg), device=args.device)
         baseline_actor = load_frozen_actor(runner, checkpoint, device=args.device)
         env_action_dim = int(env.num_actions)
@@ -767,7 +836,8 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
         elapsed = time.monotonic() - started
         payload: dict[str, Any] = {
             "schema_version": 1,
-            "task": TASK_ID,
+            "task": args.task_id,
+            "forced_reset_mode": args.forced_reset_mode,
             "baseline_checkpoint": str(checkpoint),
             "loaded_foot_bank_row": selected_bank_row,
             "fixed_stair": {
@@ -798,6 +868,8 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
                 ),
                 "freeze_prefix_knots": args.freeze_prefix_knots,
                 "score_start_step": args.score_start_step,
+                "bank_local_x_m": args.bank_local_x,
+                "bank_local_y_m": args.bank_local_y,
                 "gpu_headroom_gb": args.gpu_headroom_gb,
                 "max_wall_seconds": args.max_wall_seconds,
                 "elapsed_seconds": elapsed,
