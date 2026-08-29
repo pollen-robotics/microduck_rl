@@ -6,6 +6,7 @@ real task service and its durable SQLite store rather than a mocked endpoint.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,8 @@ from mjlab_microduck.rom.contracts import (
     ObservationContract,
     PolicyArtifact,
     PolicyBundle,
+    TaskCreateRequest,
+    sha256_prefixed,
 )
 from mjlab_microduck.rom.main import (
     UnconfiguredRuntime,
@@ -375,6 +378,112 @@ def test_generated_openapi_has_exact_v1_operations_security_and_schema_identifie
         "TaskEventPage",
         "RobotStatus",
     } <= set(generated["components"]["schemas"])
+    assert _normalize_openapi_schema(generated["components"]["schemas"]["Error"]) == (
+        _normalize_openapi_schema(checked_in["components"]["schemas"]["Error"])
+    )
+
+    for path, path_item in checked_in["paths"].items():
+        for method in expected_operations[path]:
+            expected_parameters = [
+                _resolve_openapi_parameter(parameter, checked_in)
+                for parameter in [
+                    *path_item.get("parameters", []),
+                    *path_item[method].get("parameters", []),
+                ]
+            ]
+            actual_parameters = generated["paths"][path][method].get("parameters", [])
+            assert _normalize_openapi_schema(
+                actual_parameters
+            ) == _normalize_openapi_schema(expected_parameters)
+
+
+def _normalize_openapi_schema(value: Any) -> Any:
+    """Compare schemas semantically while omitting FastAPI's presentation-only defaults."""
+    if isinstance(value, list):
+        return [_normalize_openapi_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    normalized = {
+        key: _normalize_openapi_schema(item)
+        for key, item in value.items()
+        if key != "title" and not (key == "additionalProperties" and item is True)
+    }
+    return normalized
+
+
+def _resolve_openapi_parameter(
+    parameter: dict[str, Any], document: dict[str, Any]
+) -> dict[str, Any]:
+    """Dereference checked-in reusable parameters before comparing their full wire shape."""
+    if "$ref" not in parameter:
+        return parameter
+    return document["components"]["parameters"][
+        parameter["$ref"].removeprefix("#/components/parameters/")
+    ]
+
+
+def _write_verified_bundle(bundle_dir: Path, source: PolicyBundle) -> PolicyBundle:
+    """Create a hand-checked installed bundle fixture without using startup verification code."""
+    files = {"models/robot.xml": b"<mujoco/>", "policies/stand.onnx": b"policy"}
+    for relative_path, content in files.items():
+        target = bundle_dir / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    digests = {
+        relative_path: f"sha256:{hashlib.sha256(content).hexdigest()}"
+        for relative_path, content in files.items()
+    }
+    unsigned = source.model_copy(
+        update={
+            "model": ModelArtifact(
+                path="models/robot.xml", digest=digests["models/robot.xml"]
+            ),
+            "policies": [
+                source.policies[0].model_copy(
+                    update={
+                        "path": "policies/stand.onnx",
+                        "digest": digests["policies/stand.onnx"],
+                    }
+                )
+            ],
+            "bundleDigest": None,
+        }
+    )
+    bundle = unsigned.model_copy(
+        update={
+            "bundleDigest": sha256_prefixed(
+                {
+                    "manifest": unsigned.model_dump(
+                        mode="json", by_alias=True, exclude={"bundleDigest"}
+                    ),
+                    "artifacts": digests,
+                }
+            )
+        }
+    )
+    (bundle_dir / "microduck-policy-bundle.json").write_text(
+        bundle.model_dump_json(by_alias=True, exclude_none=True)
+    )
+    return bundle
+
+
+def _running_task(store: SqliteTaskStore, bundle: PolicyBundle) -> TaskCreateRequest:
+    request = TaskCreateRequest.model_validate(
+        {
+            "schema": "MICRODUCK_SIM_TASK_V1",
+            "taskId": "f" * 32,
+            "actionCode": "STAND",
+            "bundleVersion": bundle.bundleVersion,
+            "bundleDigest": bundle.bundleDigest,
+            "parameters": {},
+            "scenario": {"terrain": "flat"},
+            "requestedBy": "existing-task",
+        }
+    )
+    store.create(request, "sha256:" + "d" * 64)
+    store.transition(request.taskId, "VALIDATING", event_type="TASK_VALIDATING")
+    store.transition(request.taskId, "RUNNING", event_type="TASK_STARTED")
+    return request
 
 
 def test_invalid_bundle_keeps_liveness_public_but_fails_readiness_and_task_execution_closed(
@@ -417,6 +526,59 @@ def test_invalid_bundle_keeps_liveness_public_but_fails_readiness_and_task_execu
         "message": "Simulator is not ready",
         "details": {},
     }
+
+
+def test_placeholder_startup_does_not_reconcile_existing_running_task(
+    tmp_path: Path, service: SimulatorTaskService
+):
+    """Constructing an unready service would otherwise rewrite a surviving RUNNING task to UNKNOWN."""
+    bundle_dir = tmp_path / "bundle"
+    bundle = _write_verified_bundle(bundle_dir, service._bundle)
+    state_db = tmp_path / "state.sqlite3"
+    store = SqliteTaskStore(state_db)
+    task = _running_task(store, bundle)
+
+    create_configured_app(
+        {
+            "MICRODUCK_ROM_BUNDLE_DIR": str(bundle_dir),
+            "MICRODUCK_ROM_STATE_DB": str(state_db),
+            "MICRODUCK_ROM_BEARER_TOKEN": "startup-token",
+        }
+    )
+
+    persisted = SqliteTaskStore(state_db)
+    assert persisted.get(task.taskId).state == "RUNNING"
+    assert [event.eventType for event in persisted.events_after(task.taskId, -1)] == [
+        "TASK_VALIDATING",
+        "TASK_STARTED",
+    ]
+
+
+def test_database_startup_failure_has_its_own_readiness_reason(
+    tmp_path: Path, service: SimulatorTaskService
+):
+    """Collapsing a state-store open failure into bundle failure would send operators to the wrong repair."""
+    bundle_dir = tmp_path / "bundle"
+    _write_verified_bundle(bundle_dir, service._bundle)
+    blocked_parent = tmp_path / "blocked-parent"
+    blocked_parent.write_text("not a directory")
+
+    app = create_configured_app(
+        {
+            "MICRODUCK_ROM_BUNDLE_DIR": str(bundle_dir),
+            "MICRODUCK_ROM_STATE_DB": str(blocked_parent / "state.sqlite3"),
+            "MICRODUCK_ROM_BEARER_TOKEN": "startup-token",
+        }
+    )
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/ready", headers={"Authorization": "Bearer startup-token"}
+        )
+
+    assert response.json()["reasonCodes"] == [
+        "RUNTIME_UNAVAILABLE",
+        "STATE_DB_UNAVAILABLE",
+    ]
 
 
 def test_configuration_rejects_unsafe_listener_values_and_runtime_placeholder_refuses_motion():

@@ -16,7 +16,7 @@ import uvicorn
 
 from .api import create_app
 from .contracts import ModelArtifact, PolicyBundle, RobotStatus, sha256_prefixed
-from .runtime import RuntimeEvidence, RuntimeHandle, RuntimeSample
+from .runtime import RuntimeEvidence, RuntimeHandle, RuntimeSample, SimulationRuntime
 from .service import SimulatorTaskService
 from .store import SqliteTaskStore
 
@@ -61,7 +61,7 @@ def read_configuration(environ: Mapping[str, str] = os.environ) -> ServerConfigu
     state_value = environ.get("MICRODUCK_ROM_STATE_DB", "").strip()
     state_path = Path(state_value).expanduser() if state_value else None
     if state_path is not None and (
-        state_path.is_symlink() or (state_path.exists() and state_path.is_dir())
+        state_path.is_symlink() or (state_path.exists() and not state_path.is_file())
     ):
         raise ValueError("MICRODUCK_ROM_STATE_DB must be a file path")
     state_db = state_path.resolve() if state_path is not None else None
@@ -154,6 +154,19 @@ def hmac_compare(left: str, right: str) -> bool:
     return hmac.compare_digest(left, right)
 
 
+def _state_db_path_is_usable(state_db: Path) -> bool:
+    """Reject unavailable state locations without opening or changing the database."""
+    return state_db.parent.is_dir() and os.access(state_db.parent, os.W_OK | os.X_OK)
+
+
+def _runtime_is_ready(runtime: SimulationRuntime) -> bool:
+    """Only a usable runtime may trigger durable task reconciliation."""
+    try:
+        return bool(runtime.status().health.get("ready"))
+    except Exception:  # noqa: BLE001 - startup must fail closed.
+        return False
+
+
 class UnconfiguredRuntime:
     """Task-7 runtime placeholder: status is explicitly unready and all motion methods refuse work."""
 
@@ -196,26 +209,41 @@ class UnconfiguredRuntime:
         )
 
 
-def create_configured_app(environ: Mapping[str, str] = os.environ):
+def create_configured_app(
+    environ: Mapping[str, str] = os.environ, *, runtime: SimulationRuntime | None = None
+):
     """Compose a fail-closed HTTP app; Task 7 replaces the explicit runtime placeholder."""
     configuration = read_configuration(environ)
     reasons: list[str] = []
     service: SimulatorTaskService | None = None
+    bundle: PolicyBundle | None = None
     if not configuration.bearer_token:
         reasons.append("BEARER_TOKEN_MISSING")
     if configuration.bundle_dir is None:
         reasons.append("BUNDLE_UNAVAILABLE")
-    elif configuration.state_db is None:
-        reasons.append("STATE_DB_UNAVAILABLE")
     elif configuration.bearer_token:
         try:
             bundle = load_verified_bundle(configuration.bundle_dir)
-            service = SimulatorTaskService(
-                bundle, SqliteTaskStore(configuration.state_db), UnconfiguredRuntime()
-            )
         except Exception:  # noqa: BLE001 - do not leak filesystem or manifest contents.
             reasons.append("BUNDLE_UNAVAILABLE")
+    state_db_usable = configuration.state_db is not None and _state_db_path_is_usable(
+        configuration.state_db
+    )
+    if not state_db_usable:
+        reasons.append("STATE_DB_UNAVAILABLE")
+    if bundle is not None:
+        if runtime is None or not _runtime_is_ready(runtime):
+            reasons.append("RUNTIME_UNAVAILABLE")
+        elif state_db_usable:
+            assert configuration.state_db is not None
+            try:
+                service = SimulatorTaskService(
+                    bundle, SqliteTaskStore(configuration.state_db), runtime
+                )
+            except Exception:  # noqa: BLE001 - do not leak filesystem or database contents.
+                reasons.append("STATE_DB_UNAVAILABLE")
     app = create_app(service, configuration.bearer_token)
+    app.state.installed_bundle = bundle
     app.state.readiness_reason_codes = reasons
     return app
 

@@ -10,7 +10,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer
-from pydantic import Field
 
 from .contracts import (
     ACTION_CONTRACT,
@@ -39,12 +38,26 @@ from .service import (
 )
 
 _TASK_ID_PATTERN = r"^[0-9a-f]{32}$"
+ErrorCode = Literal[
+    "AUTH_REQUIRED",
+    "NOT_READY",
+    "BUNDLE_MISMATCH",
+    "ACTION_UNAVAILABLE",
+    "PARAMETER_INVALID",
+    "PRECONDITION_FAILED",
+    "ROBOT_BUSY",
+    "TASK_ID_CONFLICT",
+    "COMMAND_SEQUENCE_CONFLICT",
+    "STALE_COMMAND",
+    "TASK_NOT_FOUND",
+    "INTERNAL_ERROR",
+]
 
 
 class Error(ContractModel):
-    code: str
+    code: ErrorCode
     message: str
-    details: dict[str, Any] = Field(default_factory=dict)
+    details: dict[str, Any]
 
 
 class HealthResponse(ContractModel):
@@ -77,7 +90,7 @@ class NotReady(SimulatorServiceError):
     code = "NOT_READY"
 
 
-_SERVICE_ERRORS: dict[type[SimulatorServiceError], tuple[int, str, str]] = {
+_SERVICE_ERRORS: dict[type[SimulatorServiceError], tuple[int, ErrorCode, str]] = {
     BundleMismatch: (
         400,
         "BUNDLE_MISMATCH",
@@ -108,9 +121,10 @@ _SERVICE_ERRORS: dict[type[SimulatorServiceError], tuple[int, str, str]] = {
 }
 
 
-def _error_response(status_code: int, code: str, message: str) -> JSONResponse:
+def _error_response(status_code: int, code: ErrorCode, message: str) -> JSONResponse:
     return JSONResponse(
-        status_code=status_code, content=Error(code=code, message=message).model_dump()
+        status_code=status_code,
+        content=Error(code=code, message=message, details={}).model_dump(),
     )
 
 
@@ -165,15 +179,18 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
         return _error_response(500, "INTERNAL_ERROR", "Simulator operation failed")
 
     def installed_bundle():
-        if service is None:
+        bundle = getattr(
+            service, "_bundle", getattr(app.state, "installed_bundle", None)
+        )
+        if bundle is None:
             raise NotReady("simulator is not ready")
-        return (
-            service._bundle
-        )  # The service owns the bundle that passed startup verification.
+        return bundle
 
     def ready_response() -> ReadyResponse:
         reason_codes = list(getattr(app.state, "readiness_reason_codes", ()))
-        bundle = getattr(service, "_bundle", None)
+        bundle = getattr(
+            service, "_bundle", getattr(app.state, "installed_bundle", None)
+        )
         if not configured_token:
             reason_codes.append("BEARER_TOKEN_MISSING")
         if bundle is None:
