@@ -120,9 +120,9 @@ def test_route_stairs_walk_first_and_progress_to_standard_height():
     assert cfg.rewards["upright"].func.__name__ == "stair_approach_upright"
     assert cfg.rewards["upright"].weight == 2.0
     assert cfg.events["route_challenge_levels"].params["standard_fraction"] == 0.35
-    assert cfg.events["route_state_curriculum"].params["near_face_fraction"] == 0.25
-    assert cfg.events["route_state_curriculum"].params["partial_mantle_fraction"] == 0.25
-    assert cfg.events["route_state_curriculum"].params["on_tread_fraction"] == 0.15
+    assert cfg.events["route_state_curriculum"].params["near_face_fraction"] == 0.20
+    assert cfg.events["route_state_curriculum"].params["partial_mantle_fraction"] == 0.20
+    assert cfg.events["route_state_curriculum"].params["on_tread_fraction"] == 0.10
     assert cfg.observations["actor"].terms["body_command"].func.__name__ == "stair_route_cues"
     assert cfg.observations["critic"].terms["body_command"].func.__name__ == "stair_route_cues"
     assert MicroduckRouteStairsRlCfg.save_interval == 50

@@ -459,9 +459,9 @@ def make_microduck_route_stairs_env_cfg(
             "tread_depth": STANDARD_TREAD_DEPTH,
             "num_steps": STANDARD_NUM_STEPS,
             "standing_root_height": STANDARD_STANDING_ROOT_HEIGHT,
-            "near_face_fraction": 0.0 if play else 0.25,
-            "partial_mantle_fraction": 0.0 if play else 0.25,
-            "on_tread_fraction": 0.0 if play else 0.15,
+            "near_face_fraction": 0.0 if play else 0.20,
+            "partial_mantle_fraction": 0.0 if play else 0.20,
+            "on_tread_fraction": 0.0 if play else 0.10,
         },
     )
     cfg.curriculum["terrain_levels"].func = microduck_mdp.route_terrain_levels

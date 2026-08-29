@@ -15,6 +15,23 @@ class MicroduckOnPolicyRunner(VelocityOnPolicyRunner):
             alg["symmetry_cfg"] = {k: v for k, v in sym.items() if k != "_env"}
 
 
+class MicroduckFrozenActorNormRunner(MicroduckOnPolicyRunner):
+    """Preserve the transferred walking policy's observation coordinates.
+
+    Contact-rich reverse starts have a very different observation distribution
+    from the manufacturer's runway gait. Updating the actor normalizer shifts
+    even unchanged runway observations and destroys walking within a few PPO
+    iterations. The critic normalizer remains adaptive; only the actor's
+    transferred input transform is frozen.
+    """
+
+    def __init__(self, env, train_cfg: dict, log_dir=None, device="cpu", **kwargs):
+        super().__init__(env, train_cfg, log_dir, device, **kwargs)
+        normalizer = getattr(self.alg.actor, "obs_normalizer", None)
+        if hasattr(normalizer, "until"):
+            normalizer.until = 0
+
+
 from .microduck_velocity_env_cfg import (
     make_microduck_velocity_env_cfg,
     MicroduckRlCfg,
@@ -267,7 +284,7 @@ register_mjlab_task(
     env_cfg=make_microduck_route_stairs_env_cfg(),
     play_env_cfg=make_microduck_route_stairs_env_cfg(play=True),
     rl_cfg=MicroduckRouteStairsRlCfg,
-    runner_cls=MicroduckOnPolicyRunner,
+    runner_cls=MicroduckFrozenActorNormRunner,
 )
 
 register_mjlab_task(
