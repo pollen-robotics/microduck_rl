@@ -30,3 +30,17 @@ def test_growbot_task_is_registered():
     import mjlab_microduck.tasks  # noqa: F401
 
     assert "Mjlab-Growbot-Roulade-Flat" in list_tasks()
+
+
+def test_growbot_policy_dimensions_compile_on_cpu():
+    from mjlab.envs import ManagerBasedRlEnv
+
+    cfg = make_growbot_roulade_env_cfg(play=True)
+    cfg.scene.num_envs = 1
+    env = ManagerBasedRlEnv(cfg=cfg, device="cpu")
+    try:
+        assert env.observation_manager.group_obs_dim["actor"] == (67,)
+        assert env.observation_manager.group_obs_dim["critic"] == (80,)
+        assert env.action_manager.total_action_dim == 16
+    finally:
+        env.close()
