@@ -144,7 +144,12 @@
     const grid = $("#media-grid");
     const media = (data.media || [])
       .filter((item) => item.kind === "video")
-      .sort((left, right) => left.name.localeCompare(right.name));
+      .sort((left, right) => {
+        const byModified = String(right.modified || "").localeCompare(
+          String(left.modified || ""),
+        );
+        return byModified || right.name.localeCompare(left.name);
+      });
     const signature = JSON.stringify(media.map((item) => [item.name, item.url, item.modified]));
     if (signature === state.mediaSignature) return;
     state.mediaSignature = signature;
@@ -202,18 +207,16 @@
       const response = await fetch(`/api/state?at=${Date.now()}`, { cache: "no-store" });
       if (!response.ok) throw new Error(`Dashboard API returned ${response.status}`);
       render(await response.json());
-      setConnection("live", "Live");
+      setConnection("live", "Loaded");
       $("#error-banner").hidden = true;
     } catch (error) {
       setConnection("error", "Offline");
       const banner = $("#error-banner");
-      banner.textContent = `Could not refresh training data: ${error.message}`;
+      banner.textContent = `Could not load training data: ${error.message}`;
       banner.hidden = false;
     }
   }
 
-  $("#refresh-button").addEventListener("click", refresh);
   $("#run-select").addEventListener("change", (event) => selectRun(event.target.value));
   refresh();
-  window.setInterval(refresh, 10000);
 })();
