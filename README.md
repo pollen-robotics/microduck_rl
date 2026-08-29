@@ -17,11 +17,15 @@ https://github.com/user-attachments/assets/50c3d537-8db2-4005-9d9c-3472faeec4d0
 The repo encodes the full sim2real recipe: [BAM](https://github.com/Rhoban/bam)
 actuator physics, domain randomization, backlash simulation, and the
 reward-design lessons that made it work
-(see [CLAUDE.md](CLAUDE.md) for the distilled playbook).
+(see [AGENTS.md](AGENTS.md) for the distilled playbook).
 
 ## Quickstart
 
 Requires a CUDA GPU (training runs through MuJoCo Warp) and [uv](https://docs.astral.sh/uv/).
+
+> **On ARM boxes (DGX Spark / GB10, Jetson):** `uv sync` pulls ~2 GB of CUDA
+> wheels on first run and uv's default 30 s HTTP timeout can abort mid-download.
+> Export `UV_HTTP_TIMEOUT=600` for the first sync. 
 
 ```bash
 git clone https://github.com/pollen-robotics/microduck_rl
@@ -166,7 +170,7 @@ Conventions worth knowing:
   deploy ONNX produced by `scripts/export.py`, never a hand-converted
   checkpoint, or the policy sees unnormalized observations at runtime.
 
-[CLAUDE.md](CLAUDE.md) documents the env-building workflow and the reward-design
+[AGENTS.md](AGENTS.md) documents the env-building workflow and the reward-design
 rules learned across the project (also aimed at AI coding agents working in
 this repo).
 
@@ -188,4 +192,4 @@ joint-index mappings, reward sign conventions, and NaN guards.
 ## License
 
 This project is licensed under the Apache 2.0 License. See the [LICENSE](LICENSE) file for details.
-Hardware design files are licensed under Creative Commons BY-SA-NC.
+3D model files are licensed under Creative Commons BY-SA-NC.
