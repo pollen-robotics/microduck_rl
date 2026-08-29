@@ -96,11 +96,11 @@ CKPT_ONE_SHOT=1 uv run python scripts/hf/uploader.py || true
 if [ "$TRAIN_RC" -eq 0 ] && [ "${AUTO_EXPORT:-1}" = "1" ]; then
     set +e
     TASK_ID=${TRAIN_ARGS%% *}
-    CKPT=$(ls -t logs/rsl_rl/*/model_*.pt 2>/dev/null | head -1)
+    CKPT=$(ls -t logs/rsl_rl/*/*/model_*.pt 2>/dev/null | head -1)
     if [ -n "$CKPT" ]; then
         echo "[bootstrap] auto-exporting ONNX from $(basename "$CKPT")"
         uv run python scripts/export.py "$TASK_ID" \
-            --checkpoint-file "$(basename "$CKPT")" \
+            --checkpoint-file "$CKPT" \
             --num-envs 1 --onnx-file /work/policy.onnx \
         && uv run python - <<'PY'
 import os
