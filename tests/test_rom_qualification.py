@@ -299,6 +299,14 @@ def test_optional_action_without_runtime_support_is_not_falsely_qualified(
     assert spin_result.unavailableReason == "POLICY_ARTIFACT_MISSING"
     assert spin_result.rollouts == ()
 
+    installed = tmp_path / "installed"
+    with zipfile.ZipFile(promoted.output_zip) as archive:
+        archive.extractall(installed)
+    loaded = load_qualified_bundle(installed)
+    loaded_spin = next(item for item in loaded.actions if item.actionCode == "SPIN")
+    assert loaded_spin.availability == "UNAVAILABLE"
+    assert loaded_spin.unavailableReason == "POLICY_ARTIFACT_MISSING"
+
 
 def test_mandatory_action_must_be_supported_by_candidate_capabilities(tmp_path: Path):
     """Allowing mandatory unsupported actions would make the release policy impossible to satisfy."""

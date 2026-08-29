@@ -137,12 +137,12 @@ class ActionQualificationResult(ContractModel):
     thresholds: QualificationThresholds
     successRate: float
     fallRate: float
-    meanTrackingError: float | None
+    meanTrackingError: float | None = None
     meanDistanceM: float
     meanEnergyProxy: float
     actuatorClampSteps: int
     physicalJointLimitViolations: int
-    actionMetricMean: float | None
+    actionMetricMean: float | None = None
     runtimeClass: Literal["MicroduckMujocoRuntime"]
     runtimeIdentifier: Literal[
         "mjlab_microduck.rom.mujoco_runtime.MicroduckMujocoRuntime"
@@ -151,11 +151,11 @@ class ActionQualificationResult(ContractModel):
         pattern=r"^mjlab-microduck@[^+]+\+sha256:[0-9a-f]{64}$"
     )
     simulatorVersion: str
-    policyDigest: str | None
+    policyDigest: str | None = None
     modelDigest: str
     sourceCommit: str
-    checkpoint: str | None
-    runIdentity: str | None
+    checkpoint: str | None = None
+    runIdentity: str | None = None
     rollouts: tuple[QualificationRollout, ...]
 
 
