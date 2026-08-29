@@ -20,6 +20,8 @@ class FakeMicroduckRuntime:
         self.validation_release = Event()
         self.validation_release.set()
         self.started = Event()
+        self.start_release = Event()
+        self.start_release.set()
         self.safe_stopped = Event()
         self.sample_started = Event()
         self.sample_release = Event()
@@ -48,6 +50,7 @@ class FakeMicroduckRuntime:
         self.safe_stop_metrics: dict[str, Any] = {"safeStop": True}
         self.status_value = robot_status()
         self.status_call_count = 0
+        self.active_handle: RuntimeHandle | None = None
 
     def complete_next(
         self, *, state: str, metrics: dict[str, Any], stop_reason: str | None = None
@@ -71,10 +74,14 @@ class FakeMicroduckRuntime:
             raise self.validation_error
 
     def start(self, action: Any, request: Any) -> RuntimeHandle:
+        self.started.set()
+        self.start_release.wait()
         if self.start_error is not None:
             raise self.start_error
-        self.started.set()
-        return RuntimeHandle(taskId=request.taskId)
+        handle = RuntimeHandle(taskId=request.taskId)
+        with self._lock:
+            self.active_handle = handle
+        return handle
 
     def sample(self, handle: RuntimeHandle) -> RuntimeSample:
         self.sample_started.set()
@@ -110,7 +117,12 @@ class FakeMicroduckRuntime:
         with self._lock:
             self.safe_stop_calls.append((handle, reason))
             self.operation_log.append(("safe_stop", reason))
+            if self.active_handle is not None and handle != self.active_handle:
+                raise RuntimeError("safe stop did not receive the active handle")
         self.safe_stop_release.wait()
+        with self._lock:
+            if handle == self.active_handle:
+                self.active_handle = None
         self.safe_stopped.set()
         if self.safe_stop_error is not None:
             raise self.safe_stop_error
@@ -120,6 +132,7 @@ class FakeMicroduckRuntime:
         with self._lock:
             self.emergency_stop_calls.append(reason)
             self.operation_log.append(("emergency_stop", reason))
+            self.active_handle = None
         self.emergency_stopped.set()
 
     def status(self) -> RobotStatus:

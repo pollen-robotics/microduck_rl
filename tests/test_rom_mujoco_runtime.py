@@ -897,6 +897,109 @@ def test_emergency_stop_signals_immediately_when_emergency_guard_is_held(
     )
 
 
+@pytest.mark.parametrize("stop_kind", ["cancel", "watchdog"])
+def test_realtime_stop_during_blocked_start_leaves_no_runtime_owner_or_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop_kind: str
+) -> None:
+    """Discarding a late start handle leaves its realtime policy thread in motion."""
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root)
+    runtime = MicroduckMujocoRuntime(root, bundle, realtime=True)
+    service = SimulatorTaskService(
+        bundle,
+        SqliteTaskStore(tmp_path / "tasks.sqlite3"),
+        runtime,
+        runtimeCallTimeoutS=0.5,
+    )
+    request = _request().model_copy(update={"bundleDigest": bundle.bundleDigest})
+    original_reset = runtime._reset_model_locked
+    reset_started = threading.Event()
+    reset_release = threading.Event()
+    create_done = threading.Event()
+    cancel_done = threading.Event()
+    create_outcome: dict[str, object] = {}
+    cancel_outcome: dict[str, object] = {}
+
+    def blocked_reset(*args):
+        reset_started.set()
+        reset_release.wait()
+        return original_reset(*args)
+
+    monkeypatch.setattr(runtime, "_reset_model_locked", blocked_reset)
+
+    def invoke_create() -> None:
+        try:
+            create_outcome["result"] = service.create_task(request)
+        except BaseException as exc:  # noqa: BLE001 - assert concurrent outcome.
+            create_outcome["error"] = exc
+        finally:
+            create_done.set()
+
+    def invoke_cancel() -> None:
+        try:
+            cancel_outcome["result"] = (
+                service.cancel_task(request.taskId)
+                if stop_kind == "cancel"
+                else service.watchdog_failed()
+            )
+        except BaseException as exc:  # noqa: BLE001 - assert concurrent outcome.
+            cancel_outcome["error"] = exc
+        finally:
+            cancel_done.set()
+
+    create_thread = threading.Thread(target=invoke_create, daemon=True)
+    cancel_thread = threading.Thread(target=invoke_cancel, daemon=True)
+    create_thread.start()
+    assert reset_started.wait(timeout=0.2)
+    cancel_thread.start()
+    deadline = time.monotonic() + 0.2
+    while time.monotonic() < deadline:
+        with service._lock:
+            active = service._active
+            stop_claimed = active is not None and active.stop_claimed
+        if stop_claimed:
+            break
+        time.sleep(0.002)
+    assert stop_claimed
+
+    try:
+        reset_release.set()
+        assert create_done.wait(timeout=0.5)
+        assert cancel_done.wait(timeout=0.5)
+        deadline = time.monotonic() + 0.5
+        expected_state = "CANCELLED" if stop_kind == "cancel" else "FAILED"
+        expected_reason = "CANCELLED" if stop_kind == "cancel" else "WATCHDOG_FAILURE"
+        while time.monotonic() < deadline:
+            terminal = service.get_task(request.taskId)
+            if terminal.state == expected_state:
+                break
+            time.sleep(0.002)
+        assert terminal.state == expected_state
+        assert terminal.stopReason == expected_reason
+        assert "error" not in create_outcome
+        assert "error" not in cancel_outcome
+        assert runtime._active_handle is None
+        assert runtime._stop_event.is_set()
+        assert runtime._thread is None or not runtime._thread.is_alive()
+        np.testing.assert_array_equal(runtime._requested_command.twist, np.zeros(3))
+        np.testing.assert_array_equal(runtime._command.twist, np.zeros(3))
+        np.testing.assert_array_equal(
+            runtime._data.ctrl[runtime._actuator_indices], np.zeros(14)
+        )
+        np.testing.assert_array_equal(
+            runtime._model.actuator_gainprm[runtime._actuator_indices],
+            np.zeros((14, 10)),
+        )
+    finally:
+        reset_release.set()
+        runtime.emergency_stop("TEST_CLEANUP")
+        policy_thread = runtime._thread
+        if policy_thread is not None:
+            policy_thread.join(timeout=1.0)
+        create_thread.join(timeout=0.2)
+        cancel_thread.join(timeout=0.2)
+
+
 def test_runtime_readiness_rejects_available_action_with_wrong_policy_task_identity(
     tmp_path: Path,
 ) -> None:

@@ -197,6 +197,7 @@ class _ActiveTask:
     stop_event: Event = field(default_factory=Event)
     cancel_recorded: bool = False
     handle: RuntimeHandle | None = None
+    start_pending: bool = False
     deadline: float | None = None
     continuous: bool = False
     stop_claimed: bool = False
@@ -594,8 +595,14 @@ class SimulatorTaskService:
             self._invoke_runtime(
                 "validate", lambda: self._runtime.validate(action, request), active
             )
+            with self._lock:
+                if not self._normal_operation_is_current_locked(active):
+                    raise _RuntimeCallSuperseded("start")
+                active.start_pending = True
             handle = self._invoke_runtime(
-                "start", lambda: self._runtime.start(action, request), active
+                "start",
+                lambda: self._start_and_register_handle(active, action, request),
+                active,
             )
             assert request.leaseMs is not None
             deadline = self._monotonic_clock() + request.leaseMs / 1_000
@@ -610,6 +617,14 @@ class SimulatorTaskService:
         except _RuntimeCallSuperseded:
             return self._store.get(request.taskId)
         except Exception as exc:
+            with self._lock:
+                stop_won = (
+                    self._active is not active
+                    or active.stop_claimed
+                    or active.terminalized
+                )
+            if stop_won:
+                return self._store.get(request.taskId)
             self._stop_continuous(active, "FAILED", "RUNTIME_EXCEPTION")
             raise RuntimeException("could not start simulator runtime") from exc
 
@@ -630,15 +645,23 @@ class SimulatorTaskService:
             active.stop_claimed = True
             active.command_epoch += 1
             active.stop_event.set()
-            handle = active.handle
+            start_pending = active.start_pending
+            emergency = start_pending and not active.emergency_claimed
+            if emergency:
+                active.emergency_claimed = True
         assert active.action is not None
         safety_failures: list[str] = []
         zero_parameters = _zero_parameters(active.action)
-        if handle is not None:
+        if emergency:
+            try:
+                self._runtime.emergency_stop(reason)
+            except Exception:  # noqa: BLE001 - ordered cleanup must still be attempted.
+                safety_failures.append("EMERGENCY_STOP_FAILED")
+        if not emergency:
             try:
                 self._invoke_runtime(
                     "zero_command",
-                    lambda: self._runtime.command(handle, zero_parameters),
+                    lambda: self._zero_current_handle(active, zero_parameters),
                     active,
                     guard=lambda: self._stop_claim_is_current(active),
                 )
@@ -650,7 +673,7 @@ class SimulatorTaskService:
         try:
             stop_evidence = self._invoke_runtime(
                 "safe_stop",
-                lambda: self._runtime.safe_stop(handle, reason),
+                lambda: self._runtime.safe_stop(self._cleanup_handle(active), reason),
                 active,
                 guard=lambda: self._stop_claim_is_current(active),
             )
@@ -752,12 +775,64 @@ class SimulatorTaskService:
 
     def _normal_operation_is_current(self, active: _ActiveTask) -> bool:
         with self._lock:
-            return (
-                self._active is active
-                and self._active.generation == active.generation
-                and not active.stop_claimed
-                and not active.terminalized
-            )
+            return self._normal_operation_is_current_locked(active)
+
+    def _normal_operation_is_current_locked(self, active: _ActiveTask) -> bool:
+        return (
+            self._active is active
+            and self._active.generation == active.generation
+            and not active.stop_claimed
+            and not active.terminalized
+        )
+
+    def _start_and_register_handle(
+        self,
+        active: _ActiveTask,
+        action: ActionDefinition,
+        request: TaskCreateRequest,
+    ) -> RuntimeHandle:
+        """Retain every live start handle until ordered cleanup has consumed it."""
+        try:
+            handle = self._runtime.start(action, request)
+        except BaseException:
+            with self._lock:
+                if self._active is active:
+                    active.start_pending = False
+            raise
+        with self._lock:
+            if self._active is active and not active.terminalized:
+                active.handle = handle
+                active.start_pending = False
+                return handle
+            active.start_pending = False
+            emergency = not active.emergency_claimed
+            if emergency:
+                active.emergency_claimed = True
+        if emergency:
+            try:
+                self._runtime.emergency_stop("RUNTIME_UNRESPONSIVE")
+            except Exception:  # noqa: BLE001 - still attempt handle-specific cleanup.
+                with self._lock:
+                    self._emergency_stop_failed = True
+        try:
+            self._runtime.safe_stop(handle, "RUNTIME_UNRESPONSIVE")
+        except Exception:  # noqa: BLE001 - the dispatcher is already fail closed.
+            return handle
+        return handle
+
+    def _cleanup_handle(self, active: _ActiveTask) -> RuntimeHandle | None:
+        """Resolve cleanup ownership when its FIFO dispatcher job actually runs."""
+        with self._lock:
+            if self._active is not active or active.terminalized:
+                return None
+            return active.handle
+
+    def _zero_current_handle(
+        self, active: _ActiveTask, parameters: Mapping[str, object]
+    ) -> None:
+        handle = self._cleanup_handle(active)
+        if handle is not None:
+            self._runtime.command(handle, parameters)
 
     def _command_token_is_current(
         self, active: _ActiveTask, token: tuple[int, int, str]
@@ -809,7 +884,6 @@ class SimulatorTaskService:
                 if not active.emergency_claimed:
                     active.emergency_claimed = True
                     emergency = True
-                self._active = None
             elif active is None and not self._global_emergency_claimed:
                 self._global_emergency_claimed = True
                 emergency = True
@@ -821,6 +895,9 @@ class SimulatorTaskService:
                     self._emergency_stop_failed = True
         if terminalize:
             assert active is not None and active.action is not None
+            with self._lock:
+                if self._active is active:
+                    self._active = None
             evidence = self._evidence_for(
                 active.action,
                 _Outcome("FAILED", "RUNTIME_UNRESPONSIVE"),

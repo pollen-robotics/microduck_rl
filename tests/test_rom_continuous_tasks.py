@@ -26,6 +26,7 @@ from mjlab_microduck.rom.contracts import (
     TaskCommandRequest,
     TaskCreateRequest,
 )
+from mjlab_microduck.rom.runtime import RuntimeHandle
 from mjlab_microduck.rom.service import (
     CommandSequenceConflict,
     InvalidParameters,
@@ -378,6 +379,174 @@ def test_constructor_status_stall_is_bounded_and_fail_closed(bundle, store):
     finally:
         runtime.status_release.set()
         constructor_thread.join(timeout=0.2)
+
+
+def test_cancel_during_start_repeatedly_stops_the_returned_handle(
+    service, walk_request, runtime
+):
+    """Capturing a pre-start None handle strands every late runtime owner."""
+    for index in range(3):
+        task_id = f"{index + 3:x}" * 32
+        request = walk_request.model_copy(update={"taskId": task_id})
+        runtime.started.clear()
+        runtime.start_release.clear()
+        runtime.emergency_stopped.clear()
+        runtime.safe_stopped.clear()
+        create_done, create_outcome, create_thread = _invoke_daemon(
+            lambda request=request: service.create_task(request)
+        )
+        assert runtime.started.wait(timeout=0.2)
+        cancel_done, cancel_outcome, cancel_thread = _invoke_daemon(
+            lambda task_id=task_id: service.cancel_task(task_id)
+        )
+
+        deadline = time.monotonic() + 0.2
+        while time.monotonic() < deadline:
+            with service._lock:
+                active = service._active
+                stop_claimed = active is not None and active.stop_claimed
+            if stop_claimed:
+                break
+            time.sleep(0.002)
+        assert stop_claimed
+        runtime.start_release.set()
+        assert create_done.wait(timeout=0.2)
+        assert cancel_done.wait(timeout=0.2)
+        create_thread.join(timeout=0.2)
+        cancel_thread.join(timeout=0.2)
+
+        assert "error" not in create_outcome
+        assert "error" not in cancel_outcome
+        terminal = service.get_task(task_id)
+        assert terminal.state == "CANCELLED"
+        assert runtime.emergency_stop_calls[-1] == "CANCELLED"
+        assert len(runtime.emergency_stop_calls) == index + 1
+        assert runtime.safe_stop_calls[-1] == (
+            RuntimeHandle(taskId=task_id),
+            "CANCELLED",
+        )
+        assert len(runtime.safe_stop_calls) == index + 1
+        assert runtime.active_handle is None
+
+
+def test_watchdog_during_start_publishes_emergency_before_fifo_cleanup(
+    service, walk_request, runtime
+):
+    """A watchdog stop cannot wait for a blocked start before publishing safety intent."""
+    runtime.start_release.clear()
+    create_done, _, create_thread = _invoke_daemon(
+        lambda: service.create_task(walk_request)
+    )
+    assert runtime.started.wait(timeout=0.2)
+    watchdog_done, watchdog_outcome, watchdog_thread = _invoke_daemon(
+        service.watchdog_failed
+    )
+
+    try:
+        assert runtime.emergency_stopped.wait(timeout=0.2)
+    finally:
+        runtime.start_release.set()
+        create_done.wait(timeout=0.2)
+        watchdog_done.wait(timeout=0.2)
+        create_thread.join(timeout=0.2)
+        watchdog_thread.join(timeout=0.2)
+
+    assert "error" not in watchdog_outcome
+    terminal = service.get_task(walk_request.taskId)
+    assert terminal.state == "FAILED"
+    assert terminal.stopReason == "WATCHDOG_FAILURE"
+    assert runtime.emergency_stop_calls == ["WATCHDOG_FAILURE"]
+    assert runtime.safe_stop_calls[-1] == (
+        RuntimeHandle(taskId=walk_request.taskId),
+        "WATCHDOG_FAILURE",
+    )
+    assert len(runtime.safe_stop_calls) == 1
+    assert runtime.active_handle is None
+
+
+def test_start_timeout_cleans_orphan_handle_before_a_new_service_generation(
+    bundle, store, runtime, clock, walk_request
+):
+    """A returned orphan handle must be stopped before another generation can start."""
+    service = SimulatorTaskService(
+        bundle,
+        store,
+        runtime,
+        monotonic_clock=clock,
+        runtimeCallTimeoutS=0.05,
+    )
+    runtime.start_release.clear()
+    create_done, create_outcome, create_thread = _invoke_daemon(
+        lambda: service.create_task(walk_request)
+    )
+    assert runtime.started.wait(timeout=0.2)
+    assert create_done.wait(timeout=0.2)
+    terminal = _wait_for_terminal(service, walk_request.taskId)
+    assert terminal.stopReason == "RUNTIME_UNRESPONSIVE"
+
+    runtime.start_release.set()
+    try:
+        assert runtime.safe_stopped.wait(timeout=0.2)
+    finally:
+        create_thread.join(timeout=0.2)
+
+    assert "error" in create_outcome
+    assert runtime.safe_stop_calls[-1] == (
+        RuntimeHandle(taskId=walk_request.taskId),
+        "RUNTIME_UNRESPONSIVE",
+    )
+    assert runtime.active_handle is None
+
+    replacement = SimulatorTaskService(bundle, store, runtime, monotonic_clock=clock)
+    replacement_request = walk_request.model_copy(update={"taskId": "6" * 32})
+    running = replacement.create_task(replacement_request)
+    assert running.state == "RUNNING"
+    assert runtime.active_handle == RuntimeHandle(taskId=replacement_request.taskId)
+    replacement.cancel_task(replacement_request.taskId)
+
+
+def test_start_timeout_retains_service_owner_until_emergency_attempt_finishes(
+    bundle, store, runtime, clock, walk_request, monkeypatch
+):
+    """Timeout cleanup cannot clear ownership before publishing emergency intent."""
+    service = SimulatorTaskService(
+        bundle,
+        store,
+        runtime,
+        monotonic_clock=clock,
+        runtimeCallTimeoutS=0.05,
+    )
+    runtime.start_release.clear()
+    emergency_started = Event()
+    emergency_release = Event()
+    original_emergency_stop = runtime.emergency_stop
+
+    def blocked_emergency_stop(reason: str) -> None:
+        emergency_started.set()
+        emergency_release.wait()
+        original_emergency_stop(reason)
+
+    monkeypatch.setattr(runtime, "emergency_stop", blocked_emergency_stop)
+    create_done, _, create_thread = _invoke_daemon(
+        lambda: service.create_task(walk_request)
+    )
+    assert runtime.started.wait(timeout=0.2)
+    assert emergency_started.wait(timeout=0.2)
+
+    try:
+        with service._lock:
+            assert service._active is not None
+            assert service._active.request.taskId == walk_request.taskId
+        assert service.get_task(walk_request.taskId).state == "VALIDATING"
+    finally:
+        emergency_release.set()
+        runtime.start_release.set()
+        create_done.wait(timeout=0.2)
+        create_thread.join(timeout=0.2)
+
+    terminal = _wait_for_terminal(service, walk_request.taskId)
+    assert terminal.stopReason == "RUNTIME_UNRESPONSIVE"
+    assert service._active is None
 
 
 def test_expired_lease_zeros_velocity_stops_and_times_out(
