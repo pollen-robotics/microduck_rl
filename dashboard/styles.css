@@ -85,6 +85,10 @@ h2 { margin-bottom: 0; font-size: 1.22rem; letter-spacing: -.035em; }
 .sparkline { display: block; width: 100%; height: 2.2rem; margin-top: .45rem; }
 .sparkline polyline { fill: none; stroke: var(--mint); stroke-linecap: round; stroke-linejoin: round; stroke-width: 2.3; }
 .media-panel { margin-top: 1rem; }
+.video-only-shell { max-width: 1180px; padding-top: 2rem; }
+.video-only-shell .media-panel { margin-top: 0; padding: clamp(1rem, 3vw, 2rem); }
+.gallery-copy { max-width: 38rem; margin: .55rem 0 0; color: var(--muted); font-size: .82rem; }
+.video-only-shell .media-grid { grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr)); gap: 1rem; }
 .filter-group { display: flex; gap: .35rem; }
 .filter-button { padding: .42rem .68rem; color: var(--muted); font-size: .71rem; }
 .filter-button:hover, .filter-button:focus-visible, .filter-button.is-selected { border-color: var(--accent); color: var(--accent); background: rgba(241, 199, 91, .08); }

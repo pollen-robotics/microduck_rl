@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#101419">
-    <title>MicroDuck / training monitor</title>
+    <title>MicroDuck / policy evolution</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/styles.css">
   </head>
@@ -14,8 +14,8 @@
       <div class="brand-lockup">
         <div class="brand-mark" aria-hidden="true">M</div>
         <div>
-          <p class="eyebrow">MicroDuck / lab monitor</p>
-          <h1>Training room</h1>
+          <p class="eyebrow">MicroDuck / stair policies</p>
+          <h1>Policy evolution</h1>
         </div>
       </div>
       <div class="topbar-actions">
@@ -23,56 +23,23 @@
       </div>
     </header>
 
-    <main id="main-content" class="page-shell">
-      <section class="hero-panel" aria-labelledby="overview-title">
-        <div>
-          <p class="eyebrow accent">Loaded snapshot</p>
-          <h2 id="overview-title">Small robot, big motion.</h2>
-          <p class="hero-copy">Full-size home-stair training, checkpoint metrics, and physics-approved policy evolution.</p>
-        </div>
-        <div class="hero-pulse" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
-      </section>
-
-      <section class="stat-grid" aria-label="Training summary">
-        <article class="stat-card"><span class="stat-label">Runs tracked</span><strong id="stat-runs">—</strong><span class="stat-foot">in rsl_rl logs</span></article>
-        <article class="stat-card stat-card-active"><span class="stat-label">Active now</span><strong id="stat-active">—</strong><span class="stat-foot">updated in the last 90s</span></article>
-        <article class="stat-card"><span class="stat-label">Checkpoints</span><strong id="stat-checkpoints">—</strong><span class="stat-foot">weights and exports</span></article>
-        <article class="stat-card"><span class="stat-label">Promotion clips</span><strong id="stat-media">—</strong><span class="stat-foot">physics-gated stair progress</span></article>
-      </section>
-
+    <main id="main-content" class="page-shell video-only-shell">
       <div id="error-banner" class="notice notice-error" hidden role="alert"></div>
-
-      <div class="content-grid">
-        <section class="panel runs-panel" aria-labelledby="runs-title">
-          <div class="section-heading">
-            <div><p class="eyebrow">Experiments</p><h2 id="runs-title">Learning runs</h2></div>
-            <span id="run-count" class="section-count">—</span>
-          </div>
-          <div id="run-grid" class="run-grid" aria-live="polite"></div>
-          <div id="runs-empty" class="empty-state" hidden>No training runs have been found yet.</div>
-        </section>
-
-        <section class="panel metrics-panel" aria-labelledby="metrics-title">
-          <div class="section-heading">
-            <div><p class="eyebrow">TensorBoard scalars</p><h2 id="metrics-title">Latest metrics</h2></div>
-            <label class="visually-hidden" for="run-select">Metric run</label>
-            <select id="run-select" class="select-control"></select>
-          </div>
-          <div id="metric-list" class="metric-list" aria-live="polite"></div>
-          <div id="metrics-empty" class="empty-state" hidden>Scalar event data will appear here when a run writes TensorBoard events.</div>
-        </section>
-      </div>
-
       <section class="panel media-panel" aria-labelledby="media-title">
         <div class="section-heading media-heading">
-          <div><p class="eyebrow">20-second clips · newest promotion first</p><h2 id="media-title">Verified policy improvements</h2></div>
+          <div>
+            <p class="eyebrow">Newest promotion first</p>
+            <h2 id="media-title">Verified stair evolution</h2>
+            <p class="gallery-copy">Only checkpoints that improve the full-height stair result appear here.</p>
+          </div>
+          <span id="video-count" class="section-count">0 videos</span>
         </div>
         <div id="media-grid" class="media-grid" aria-live="polite"></div>
-        <div id="media-empty" class="empty-state" hidden>Mass evaluations stay video-free. A clip appears here only after a physics-gated stair improvement is promoted.</div>
+        <div id="media-empty" class="empty-state" hidden>No policy has passed the next promotion gate yet.</div>
       </section>
     </main>
 
-    <footer class="footer"><span>MicroDuck RL</span><span id="last-updated">Waiting for first update</span></footer>
+    <footer class="footer"><span>MicroDuck RL</span><span id="loaded-at">Waiting for gallery</span></footer>
     <script src="/app.js" defer></script>
   </body>
 </html>

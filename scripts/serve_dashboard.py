@@ -324,63 +324,94 @@ def _featured_media_config() -> tuple[set[str] | None, tuple[str, ...], bool]:
         return set(), (), False
 
 
+def _curated_media_candidates(
+    featured_videos: set[str] | None,
+    featured_prefixes: tuple[str, ...],
+) -> set[tuple[str, Path]]:
+    """Resolve curated paths without traversing the full training log tree."""
+
+    candidates: set[tuple[str, Path]] = set()
+    if featured_videos is None:
+        return candidates
+    for media_key in featured_videos:
+        source, separator, relative = media_key.partition("/")
+        root = MEDIA_ROOTS.get(source)
+        if separator and root is not None:
+            candidates.add((source, root / relative))
+    for prefix in featured_prefixes:
+        source, separator, relative = prefix.partition("/")
+        root = MEDIA_ROOTS.get(source)
+        if not separator or root is None:
+            continue
+        curated_root = root / relative
+        if curated_root.is_dir():
+            candidates.update(
+                (source, path) for path in curated_root.rglob("*") if path.is_file()
+            )
+    return candidates
+
+
 def _discover_media() -> list[dict[str, Any]]:
     media: list[dict[str, Any]] = []
     featured_videos, featured_prefixes, show_images = _featured_media_config()
-    for source, root in MEDIA_ROOTS.items():
-        if not root.is_dir():
-            continue
+    curated = _curated_media_candidates(featured_videos, featured_prefixes)
+    sources = (
+        curated
+        if featured_videos is not None
+        else {
+            (source, path)
+            for source, root in MEDIA_ROOTS.items()
+            if root.is_dir()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+    )
+    for source, path in sources:
+        root = MEDIA_ROOTS[source]
         try:
-            files = root.rglob("*")
-            for path in files:
-                if not path.is_file() or path.suffix.lower() not in MEDIA_EXTENSIONS:
-                    continue
-                stat = path.stat()
-                relative_path = path.relative_to(root).as_posix()
-                kind = "video" if path.suffix.lower() in {".mp4", ".webm", ".mov", ".m4v", ".avi", ".mkv"} else "image"
-                media_key = f"{source}/{relative_path}"
-                if (
-                    kind == "video"
-                    and featured_videos is not None
-                    and media_key not in featured_videos
-                    and not any(
-                        media_key.startswith(prefix) for prefix in featured_prefixes
-                    )
-                ):
-                    continue
-                if kind == "image" and not show_images:
-                    continue
-                media.append({
-                    "name": path.name,
-                    "source": source,
-                    "path": relative_path,
-                    "kind": kind,
-                    "url": "/media/" + source + "/" + relative_path,
-                    "size": _human_size(stat.st_size),
-                    "modified": _iso_timestamp(stat.st_mtime),
-                    "timestamp": stat.st_mtime,
-                })
+            if path.suffix.lower() not in MEDIA_EXTENSIONS:
+                continue
+            stat = path.stat()
+            relative_path = path.relative_to(root).as_posix()
+            kind = "video" if path.suffix.lower() in {".mp4", ".webm", ".mov", ".m4v", ".avi", ".mkv"} else "image"
+            media_key = f"{source}/{relative_path}"
+            if (
+                kind == "video"
+                and featured_videos is not None
+                and media_key not in featured_videos
+                and not any(
+                    media_key.startswith(prefix) for prefix in featured_prefixes
+                )
+            ):
+                continue
+            if kind == "image" and not show_images:
+                continue
+            media.append({
+                "name": path.name,
+                "source": source,
+                "path": relative_path,
+                "kind": kind,
+                "url": "/media/" + source + "/" + relative_path,
+                "size": _human_size(stat.st_size),
+                "modified": _iso_timestamp(stat.st_mtime),
+                "timestamp": stat.st_mtime,
+            })
         except OSError:
             continue
     media.sort(key=lambda item: item["timestamp"], reverse=True)
     for item in media:
         item.pop("timestamp", None)
-    return media[:160]
+    return media[:10]
 
 
 def dashboard_state(*, include_metrics: bool = True) -> dict[str, Any]:
-    runs = _discover_runs(include_metrics=include_metrics)
+    del include_metrics
     media = _discover_media()
-    checkpoints = sum(len(run["checkpoints"]) for run in runs)
     return {
         "generatedAt": _iso_timestamp(time.time()),
         "repo": REPO_ROOT.name,
-        "runs": runs,
         "media": media,
         "summary": {
-            "runs": len(runs),
-            "activeRuns": sum(run["status"] == "active" for run in runs),
-            "checkpoints": checkpoints,
             "media": len(media),
         },
     }
@@ -399,21 +430,9 @@ def _refresh_state_in_background() -> None:
 
 
 def cached_dashboard_state() -> dict[str, Any]:
-    """Return quickly, then refresh expensive TensorBoard metrics off-thread."""
+    """Build the small promotion-only snapshot once per browser request."""
 
-    global _STATE_CACHE, _STATE_REFRESHING
-    with _STATE_LOCK:
-        if _STATE_CACHE is None:
-            _STATE_CACHE = dashboard_state(include_metrics=False)
-        refresh_due = time.monotonic() - _STATE_LAST_REFRESH >= _STATE_REFRESH_INTERVAL
-        if not _STATE_REFRESHING and refresh_due:
-            _STATE_REFRESHING = True
-            Thread(
-                target=_refresh_state_in_background,
-                name="dashboard-state-refresh",
-                daemon=True,
-            ).start()
-        return _STATE_CACHE
+    return dashboard_state(include_metrics=False)
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
