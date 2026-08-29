@@ -313,9 +313,9 @@ def make_microduck_route_stairs_env_cfg(
         name="robot_ground_contact",
         primary=ContactMatch(mode="subtree", pattern="trunk_base", entity="robot"),
         secondary=ContactMatch(mode="body", pattern="terrain"),
-        fields=("found",),
-        reduce="none",
-        num_slots=1,
+        fields=("found", "pos", "normal"),
+        reduce="maxforce",
+        num_slots=4,
     )
     trunk_contact = ContactSensorCfg(
         name="trunk_ground_contact",
@@ -837,10 +837,10 @@ def make_microduck_stair_roulade_bank_env_cfg(
     reset = cfg.events["route_state_curriculum"].params
     reset.update(
         {
-            "lip_release_fraction": 0.10,
-            "shell_brace_fraction": 0.20,
+            "lip_release_fraction": 0.0,
+            "shell_brace_fraction": 0.0,
             "tread_recovery_fraction": 0.0,
-            "real_handoff_fraction": 0.70,
+            "real_handoff_fraction": 1.0,
         }
     )
     cfg.events["walker_state_bank"] = EventTermCfg(
@@ -852,6 +852,10 @@ def make_microduck_stair_roulade_bank_env_cfg(
             "local_x_range": (0.48, 0.58),
             "local_y_range": (-0.08, 0.08),
             "zero_missing_pose_commands": True,
+            "source_episode_step_range": (15, 60),
+            "min_forward_speed": 0.20,
+            "min_vertical_speed": -0.25,
+            "min_root_height": 0.08,
         },
     )
 
@@ -860,6 +864,26 @@ def make_microduck_stair_roulade_bank_env_cfg(
     # by height and corridor, then reward contact-supported x/z progress. The
     # strict clearance and secured-tread latches remain the curriculum gates.
     cfg.rewards["stair_apex_or_mantle_frontier"].weight = 4.0
+    cfg.rewards["stair_riser_face_contact"] = RewardTermCfg(
+        func=microduck_mdp.stair_riser_face_contact,
+        weight=6.0,
+        params={
+            "stair_face_x": STANDARD_STAIR_START_DISTANCE,
+            "riser_height": STANDARD_RISER_HEIGHT,
+            "tread_depth": STANDARD_TREAD_DEPTH,
+            "corridor_half_width": STANDARD_STAIR_WIDTH * 0.40,
+        },
+    )
+    cfg.rewards["stair_first_tread_contact"] = RewardTermCfg(
+        func=microduck_mdp.stair_first_tread_contact,
+        weight=150.0,
+        params={
+            "stair_face_x": STANDARD_STAIR_START_DISTANCE,
+            "riser_height": STANDARD_RISER_HEIGHT,
+            "tread_depth": STANDARD_TREAD_DEPTH,
+            "corridor_half_width": STANDARD_STAIR_WIDTH * 0.40,
+        },
+    )
     cfg.rewards["stair_assisted_approach"].weight = 0.5
     cfg.rewards["stair_assisted_lift"].weight = 3.0
     cfg.rewards["stair_assisted_crossing"].weight = 8.0

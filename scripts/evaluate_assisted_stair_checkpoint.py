@@ -8,6 +8,7 @@ strict full-route promotion remains in evaluate_stair_checkpoint.py.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import hashlib
 import json
 import os
@@ -122,11 +123,18 @@ def main() -> int:
     )
     previous_stable = torch.zeros_like(previous_clearance)
     previous_secured = torch.zeros_like(previous_clearance)
+    previous_face_contact = torch.zeros_like(previous_clearance)
+    previous_tread_contact = torch.zeros_like(previous_clearance)
     mode_trials = {name: 0 for name in reset_modes.values()}
     mode_clearance = {name: 0 for name in reset_modes.values()}
     mode_stable = {name: 0 for name in reset_modes.values()}
     mode_secured = {name: 0 for name in reset_modes.values()}
+    mode_face_contact = {name: 0 for name in reset_modes.values()}
+    mode_tread_contact = {name: 0 for name in reset_modes.values()}
     secured_events = 0
+    face_contact_events = 0
+    tread_contact_events = 0
+    tread_contact_source_steps: list[int] = []
     max_x = torch.full((args.num_envs,), -torch.inf, device=args.device)
     max_z = torch.full_like(max_x, -torch.inf)
     steps = base_env.max_episode_length * args.episodes
@@ -148,12 +156,34 @@ def main() -> int:
             secured = getattr(
                 base_env, "_stair_first_tread_secured_latched", previous_secured
             )
+            face_contact = getattr(
+                base_env,
+                "_stair_riser_face_contact_latched",
+                previous_face_contact,
+            )
+            tread_contact = getattr(
+                base_env,
+                "_stair_first_tread_contact_latched",
+                previous_tread_contact,
+            )
             new_clearance = clearance & ~previous_clearance
             new_stable = stable & ~previous_stable
             new_secured = secured & ~previous_secured
+            new_face_contact = face_contact & ~previous_face_contact
+            new_tread_contact = tread_contact & ~previous_tread_contact
             clearance_events += int(new_clearance.sum().item())
             stable_events += int(new_stable.sum().item())
             secured_events += int(new_secured.sum().item())
+            face_contact_events += int(new_face_contact.sum().item())
+            tread_contact_events += int(new_tread_contact.sum().item())
+            source_steps = getattr(base_env, "_stair_walker_bank_source_step", None)
+            if source_steps is not None:
+                roll_tread = new_tread_contact & (episode_mode == 3)
+                tread_contact_source_steps.extend(
+                    int(step)
+                    for step in source_steps[roll_tread].detach().cpu().tolist()
+                    if int(step) >= 0
+                )
             completed_trials += int(dones.sum().item())
             done_mask = dones.bool()
             for code, name in reset_modes.items():
@@ -162,12 +192,22 @@ def main() -> int:
                 mode_clearance[name] += int((new_clearance & mode_mask).sum().item())
                 mode_stable[name] += int((new_stable & mode_mask).sum().item())
                 mode_secured[name] += int((new_secured & mode_mask).sum().item())
+                mode_face_contact[name] += int(
+                    (new_face_contact & mode_mask).sum().item()
+                )
+                mode_tread_contact[name] += int(
+                    (new_tread_contact & mode_mask).sum().item()
+                )
             previous_clearance = clearance.clone()
             previous_stable = stable.clone()
             previous_secured = secured.clone()
+            previous_face_contact = face_contact.clone()
+            previous_tread_contact = tread_contact.clone()
             previous_clearance[done_mask] = False
             previous_stable[done_mask] = False
             previous_secured[done_mask] = False
+            previous_face_contact[done_mask] = False
+            previous_tread_contact[done_mask] = False
 
             robot = base_env.scene["robot"]
             origins = base_env.scene.terrain.env_origins
@@ -196,10 +236,14 @@ def main() -> int:
             "stable_tread_rate": mode_stable[name] / max(trials, 1),
             "secured_tread_events": mode_secured[name],
             "secured_tread_rate": mode_secured[name] / max(trials, 1),
+            "riser_face_contact_events": mode_face_contact[name],
+            "riser_face_contact_rate": mode_face_contact[name] / max(trials, 1),
+            "first_tread_contact_events": mode_tread_contact[name],
+            "first_tread_contact_rate": mode_tread_contact[name] / max(trials, 1),
         }
     iteration_match = re.search(r"model_(\d+)$", checkpoint.stem)
     report: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "task": args.task,
         "checkpoint": str(checkpoint),
         "checkpoint_iteration": (
@@ -219,6 +263,13 @@ def main() -> int:
         "stable_tread_rate": stable_events / denominator,
         "secured_tread_events": secured_events,
         "secured_tread_rate": secured_events / denominator,
+        "riser_face_contact_events": face_contact_events,
+        "riser_face_contact_rate": face_contact_events / denominator,
+        "first_tread_contact_events": tread_contact_events,
+        "first_tread_contact_rate": tread_contact_events / denominator,
+        "manufacturer_source_steps_with_tread_contact": dict(
+            sorted(Counter(tread_contact_source_steps).items())
+        ),
         "reset_modes": mode_report,
         "best_route_x_m": float(max_x.max().item()),
         "best_root_height_m": float(max_z.max().item()),

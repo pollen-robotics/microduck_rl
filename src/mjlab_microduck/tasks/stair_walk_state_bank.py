@@ -299,6 +299,38 @@ def load_walk_state_bank(path: str | Path) -> dict[str, Any]:
     return bank
 
 
+def eligible_walk_state_rows(
+    states: dict[str, Any],
+    *,
+    source_episode_step_range: tuple[int, int] | None = None,
+    min_forward_speed: float | None = None,
+    min_vertical_speed: float | None = None,
+    min_root_height: float | None = None,
+) -> torch.Tensor:
+    """Return source rows that contain useful dynamic handoff phases."""
+
+    count = walk_state_count(states)
+    eligible = torch.ones(count, dtype=torch.bool)
+    if source_episode_step_range is not None:
+        if "source_episode_step" not in states:
+            raise ValueError(
+                "source_episode_step_range requires source_episode_step in the bank"
+            )
+        low, high = source_episode_step_range
+        step = states["source_episode_step"]
+        eligible &= (step >= low) & (step <= high)
+    if min_forward_speed is not None:
+        eligible &= states["root_qvel"][:, 0] >= min_forward_speed
+    if min_vertical_speed is not None:
+        eligible &= states["root_qvel"][:, 2] >= min_vertical_speed
+    if min_root_height is not None:
+        eligible &= states["root_qpos_local"][:, 2] >= min_root_height
+    rows = torch.nonzero(eligible, as_tuple=False).squeeze(-1)
+    if len(rows) == 0:
+        raise ValueError("Walker-state phase filters rejected every bank row")
+    return rows
+
+
 class WalkerStateBankReset:
     """Replace assisted mode 3 with a real frozen-walker handoff state."""
 
@@ -316,6 +348,13 @@ class WalkerStateBankReset:
         self._zero_missing_pose_commands = bool(
             cfg.params.get("zero_missing_pose_commands", False)
         )
+        self._eligible_rows = eligible_walk_state_rows(
+            self._states,
+            source_episode_step_range=cfg.params.get("source_episode_step_range"),
+            min_forward_speed=cfg.params.get("min_forward_speed"),
+            min_vertical_speed=cfg.params.get("min_vertical_speed"),
+            min_root_height=cfg.params.get("min_root_height"),
+        )
 
         robot = env.scene["robot"]
         saved_joint_names = self._bank["metadata"].get("joint_names")
@@ -331,6 +370,10 @@ class WalkerStateBankReset:
         local_x_range: tuple[float, float] | None = None,
         local_y_range: tuple[float, float] | None = None,
         zero_missing_pose_commands: bool = False,
+        source_episode_step_range: tuple[int, int] | None = None,
+        min_forward_speed: float | None = None,
+        min_vertical_speed: float | None = None,
+        min_root_height: float | None = None,
     ) -> None:
         del (
             bank_path,
@@ -338,23 +381,42 @@ class WalkerStateBankReset:
             local_x_range,
             local_y_range,
             zero_missing_pose_commands,
+            source_episode_step_range,
+            min_forward_speed,
+            min_vertical_speed,
+            min_root_height,
         )
         mode = getattr(env, "_stair_assisted_reset_mode", None)
         if mode is None:
             raise RuntimeError("Walker-state replay requires assisted reset mode tracking")
         env_ids = env_ids.to(env.device, dtype=torch.long)
         selected_ids = env_ids[mode[env_ids] == 3]
+        if not hasattr(env, "_stair_walker_bank_row"):
+            env._stair_walker_bank_row = torch.full(
+                (env.num_envs,), -1, dtype=torch.long, device=env.device
+            )
+            env._stair_walker_bank_source_step = torch.full_like(
+                env._stair_walker_bank_row, -1
+            )
+        env._stair_walker_bank_row[env_ids] = -1
+        env._stair_walker_bank_source_step[env_ids] = -1
         if len(selected_ids) == 0:
             self._pending_env_ids = None
             self._pending_rows = None
             return
 
-        rows = torch.randint(
+        row_indices = torch.randint(
             0,
-            walk_state_count(self._states),
+            len(self._eligible_rows),
             (len(selected_ids),),
             device=env.device,
         )
+        rows = self._eligible_rows.to(env.device)[row_indices]
+        env._stair_walker_bank_row[selected_ids] = rows
+        if "source_episode_step" in self._states:
+            env._stair_walker_bank_source_step[selected_ids] = self._states[
+                "source_episode_step"
+            ][rows.cpu()].to(env.device)
         saved = _select_rows(self._states, rows, env.device)
         robot = env.scene["robot"]
         root_qpos = saved["root_qpos_local"].clone()

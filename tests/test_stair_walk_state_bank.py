@@ -7,6 +7,7 @@ from mjlab_microduck.tasks.stair_walk_state_bank import (
     _preappend_history,
     _restore_circular_rows,
     concatenate_walk_state_rows,
+    eligible_walk_state_rows,
 )
 
 
@@ -66,3 +67,35 @@ def test_heading_canonicalization_preserves_motion_in_forward_frame():
         aligned_qvel[:, :3], torch.tensor([[0.4, 0.0, 0.1]]), atol=1e-6
     )
     assert torch.equal(aligned_qvel[:, 3:], qvel[:, 3:])
+
+
+def test_dynamic_phase_filter_rejects_backward_low_and_crash_rows():
+    states = {
+        "root_qpos_local": torch.tensor(
+            [
+                [0.0, 0.0, 0.12, 1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.05, 1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.12, 1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.12, 1.0, 0.0, 0.0, 0.0],
+            ]
+        ),
+        "root_qvel": torch.tensor(
+            [
+                [0.50, 0.0, 0.20, 0.0, 0.0, 0.0],
+                [0.50, 0.0, 0.20, 0.0, 0.0, 0.0],
+                [-0.10, 0.0, 0.20, 0.0, 0.0, 0.0],
+                [0.50, 0.0, -0.80, 0.0, 0.0, 0.0],
+            ]
+        ),
+        "source_episode_step": torch.tensor([30, 30, 30, 30]),
+    }
+
+    rows = eligible_walk_state_rows(
+        states,
+        source_episode_step_range=(15, 60),
+        min_forward_speed=0.20,
+        min_vertical_speed=-0.25,
+        min_root_height=0.08,
+    )
+
+    assert torch.equal(rows, torch.tensor([0]))

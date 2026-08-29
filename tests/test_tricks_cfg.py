@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 import torch
 
+from mjlab_microduck.tasks.mdp import classify_standard_stair_contacts
+
 from mjlab_microduck.tasks.microduck_backflip_env_cfg import (
     MicroduckBackflipRlCfg,
     make_microduck_backflip_env_cfg,
@@ -405,10 +407,10 @@ def test_roulade_bank_stage_requires_contact_supported_tread_progress():
     cfg = make_microduck_stair_roulade_bank_env_cfg()
     reset = cfg.events["route_state_curriculum"].params
 
-    assert reset["lip_release_fraction"] == 0.10
-    assert reset["shell_brace_fraction"] == 0.20
+    assert reset["lip_release_fraction"] == 0.0
+    assert reset["shell_brace_fraction"] == 0.0
     assert reset["tread_recovery_fraction"] == 0.0
-    assert reset["real_handoff_fraction"] == 0.70
+    assert reset["real_handoff_fraction"] == 1.0
     assert cfg.events["walker_state_bank"].params["bank_path"].endswith(
         "full170-roulade-state-bank.pt"
     )
@@ -417,6 +419,16 @@ def test_roulade_bank_stage_requires_contact_supported_tread_progress():
     assert bank["local_x_range"] == (0.48, 0.58)
     assert bank["local_y_range"] == (-0.08, 0.08)
     assert bank["zero_missing_pose_commands"] is True
+    assert bank["source_episode_step_range"] == (15, 60)
+    assert bank["min_forward_speed"] == 0.20
+    assert bank["min_vertical_speed"] == -0.25
+    assert bank["min_root_height"] == 0.08
+    robot_contact = next(
+        sensor for sensor in cfg.scene.sensors if sensor.name == "robot_ground_contact"
+    )
+    assert robot_contact.fields == ("found", "pos", "normal")
+    assert robot_contact.reduce == "maxforce"
+    assert robot_contact.num_slots == 4
     crossing = cfg.rewards["stair_assisted_crossing"]
     assert crossing.params["hard_height_gate"] is True
     assert crossing.params["clearance_height"] == 0.17
@@ -424,6 +436,8 @@ def test_roulade_bank_stage_requires_contact_supported_tread_progress():
     support = cfg.rewards["stair_tread_support_frontier"]
     assert support.weight == 15.0
     assert support.params["riser_height"] == 0.17
+    assert cfg.rewards["stair_riser_face_contact"].weight == 6.0
+    assert cfg.rewards["stair_first_tread_contact"].weight == 150.0
     assert cfg.rewards["stair_first_riser_clearance"].weight == 400.0
     assert cfg.rewards["stair_first_tread_secured"].weight == 300.0
     assert MicroduckStairRouladeBankRlCfg.max_iterations == 150
@@ -432,6 +446,24 @@ def test_roulade_bank_stage_requires_contact_supported_tread_progress():
         MicroduckStairRouladeBankRlCfg.actor.distribution_cfg["init_std"] == 0.28
     )
     assert MicroduckStairRouladeBankRlCfg.algorithm.learning_rate == 2.0e-5
+
+
+def test_standard_stair_contacts_distinguish_face_tread_and_flat_floor():
+    found = torch.ones(1, 3)
+    positions = torch.tensor(
+        [[[0.660, 0.0, 0.10], [0.720, 0.0, 0.170], [0.40, 0.0, 0.0]]]
+    )
+    normals = torch.tensor(
+        [[[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0]]]
+    )
+    origins = torch.zeros(1, 3)
+
+    face, tread = classify_standard_stair_contacts(
+        found, positions, normals, origins
+    )
+
+    assert torch.equal(face, torch.tensor([[True, False, False]]))
+    assert torch.equal(tread, torch.tensor([[False, True, False]]))
 
 
 def test_headstand_has_exclusive_contact_gate_and_shared_actor_layout():

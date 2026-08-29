@@ -1447,6 +1447,147 @@ def stair_takeoff_frontier(
     return _new_frontier_delta(env, value, "_stair_takeoff_frontier")
 
 
+def classify_standard_stair_contacts(
+    found: torch.Tensor,
+    positions_w: torch.Tensor,
+    normals_w: torch.Tensor,
+    terrain_origins_w: torch.Tensor,
+    *,
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.36,
+    position_tolerance: float = 0.018,
+    normal_alignment: float = 0.70,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Classify contact slots on the first riser face and first tread top."""
+
+    if found.ndim != 2 or positions_w.shape != normals_w.shape:
+        raise ValueError("Stair contact tensors have incompatible shapes")
+    if positions_w.shape[:2] != found.shape or positions_w.shape[-1] != 3:
+        raise ValueError("Stair contact positions must have shape [B, N, 3]")
+    local_pos = positions_w - terrain_origins_w[:, None, :]
+    active = found > 0
+    in_corridor = torch.abs(local_pos[..., 1]) <= corridor_half_width
+    normal = torch.abs(torch.nan_to_num(normals_w, nan=0.0))
+    face = (
+        active
+        & in_corridor
+        & (torch.abs(local_pos[..., 0] - stair_face_x) <= position_tolerance)
+        & (local_pos[..., 2] >= -position_tolerance)
+        & (local_pos[..., 2] <= riser_height + position_tolerance)
+        & (normal[..., 0] >= normal_alignment)
+    )
+    tread = (
+        active
+        & in_corridor
+        & (local_pos[..., 0] >= stair_face_x - position_tolerance)
+        & (
+            local_pos[..., 0]
+            <= stair_face_x + tread_depth + position_tolerance
+        )
+        & (torch.abs(local_pos[..., 2] - riser_height) <= position_tolerance)
+        & (normal[..., 2] >= normal_alignment)
+    )
+    return face, tread
+
+
+def _standard_stair_contact_masks(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    *,
+    stair_face_x: float,
+    riser_height: float,
+    tread_depth: float,
+    corridor_half_width: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if sensor_name not in env.scene.sensors:
+        empty = torch.zeros((env.num_envs, 1), dtype=torch.bool, device=env.device)
+        positions = torch.zeros((env.num_envs, 1, 3), device=env.device)
+        return empty, empty, positions
+    data = env.scene.sensors[sensor_name].data
+    if data.found is None or data.pos is None or data.normal is None:
+        raise RuntimeError(
+            f"{sensor_name} must provide found, pos, and normal contact fields"
+        )
+    face, tread = classify_standard_stair_contacts(
+        data.found,
+        data.pos,
+        data.normal,
+        env.scene.terrain.env_origins,
+        stair_face_x=stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    local_positions = data.pos - env.scene.terrain.env_origins[:, None, :]
+    return face, tread, local_positions
+
+
+def _stair_contact_event(
+    env: ManagerBasedRlEnv, contact: torch.Tensor, latch_name: str
+) -> torch.Tensor:
+    current = contact.any(dim=-1)
+    latch = getattr(env, latch_name, None)
+    if latch is None:
+        latch = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        setattr(env, latch_name, latch)
+    fresh = env.episode_length_buf <= 1
+    latch[fresh] = False
+    newly_contacted = current & ~latch
+    latch |= current
+    return newly_contacted.to(torch.float32)
+
+
+def stair_riser_face_contact(
+    env: ManagerBasedRlEnv,
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.36,
+    sensor_name: str = "robot_ground_contact",
+) -> torch.Tensor:
+    """Reward progressively higher physical contact on the first riser face."""
+
+    face, _, positions = _standard_stair_contact_masks(
+        env,
+        sensor_name,
+        stair_face_x=stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    _stair_contact_event(env, face, "_stair_riser_face_contact_latched")
+    face_height = torch.where(
+        face,
+        positions[..., 2],
+        torch.zeros_like(positions[..., 2]),
+    ).max(dim=-1).values
+    value = torch.clamp(face_height / max(riser_height, 1e-6), 0.0, 1.0)
+    return _new_frontier_delta(env, value, "_stair_riser_face_contact_frontier")
+
+
+def stair_first_tread_contact(
+    env: ManagerBasedRlEnv,
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.36,
+    sensor_name: str = "robot_ground_contact",
+) -> torch.Tensor:
+    """Pay once for actual robot contact with the horizontal first tread."""
+
+    _, tread, _ = _standard_stair_contact_masks(
+        env,
+        sensor_name,
+        stair_face_x=stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    return _stair_contact_event(env, tread, "_stair_first_tread_contact_latched")
+
+
 def stair_apex_or_mantle_frontier(
     env: ManagerBasedRlEnv,
     approach_start_x: float = 0.40,
@@ -1456,17 +1597,17 @@ def stair_apex_or_mantle_frontier(
     clearance_root_height: float = 0.195,
     max_vertical_speed: float = 1.50,
     corridor_half_width: float = 0.36,
-    head_sensor_name: str = "head_ground_contact",
-    trunk_sensor_name: str = "trunk_ground_contact",
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    support_sensor_name: str = "robot_ground_contact",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Reward new ballistic-clearance or contact-mantle frontiers.
 
     The actor is free to jump directly or exploit the head and shell as a
-    temporary support. Predicted apex pays for physically useful launch energy
-    before contact, while the mantle branch pays only when contact accompanies
-    new height or lip-crossing progress. Episode-best deltas prevent either
-    branch from paying for camping in an assisted start pose.
+    temporary support. Ballistic height is predicted at the riser face, rather
+    than at an unconstrained apex that could occur before or after the stair.
+    The mantle branch pays only for a classified face or tread contact.
     """
     asset: Entity = env.scene[asset_cfg.name]
     x, z, _ = _stair_local_state(env, asset_cfg)
@@ -1478,25 +1619,44 @@ def stair_apex_or_mantle_frontier(
         min=0.0,
         max=max_vertical_speed,
     )
-    predicted_apex = z + vertical_speed.square() / (2.0 * 9.81)
+    forward_speed = torch.nan_to_num(
+        asset.data.root_link_lin_vel_w[:, 0], nan=0.0
+    )
+    time_to_face = torch.clamp(
+        (stair_face_x - x) / torch.clamp(forward_speed, min=0.05),
+        min=0.0,
+        max=0.60,
+    )
+    predicted_face_height = (
+        z + vertical_speed * time_to_face - 0.5 * 9.81 * time_to_face.square()
+    )
+    predicted_face_height = torch.where(
+        (x < stair_face_x) & (forward_speed > 0.05),
+        predicted_face_height,
+        z,
+    )
     approach_gate = torch.clamp(
         (x - approach_start_x) / max(stair_face_x - approach_start_x, 1e-6),
         min=0.0,
         max=1.0,
     )
     height_progress = torch.clamp(
-        (predicted_apex - standing_root_height)
+        (predicted_face_height - standing_root_height)
         / max(clearance_root_height - standing_root_height, 1e-6),
         min=0.0,
         max=1.0,
     )
     ballistic = approach_gate * height_progress
 
-    contact = torch.zeros_like(x, dtype=torch.bool)
-    for sensor_name in (head_sensor_name, trunk_sensor_name):
-        if sensor_name in env.scene.sensors:
-            found = env.scene.sensors[sensor_name].data.found
-            contact |= (found.view(found.shape[0], -1) > 0).any(dim=-1)
+    face_contact, tread_contact, _ = _standard_stair_contact_masks(
+        env,
+        support_sensor_name,
+        stair_face_x=stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    contact = face_contact.any(dim=-1) | tread_contact.any(dim=-1)
     crossing_progress = torch.clamp(
         (x - stair_face_x) / max(crossing_end_x - stair_face_x, 1e-6),
         min=0.0,
@@ -1574,6 +1734,7 @@ def stair_tread_support_frontier(
     stair_face_x: float = 0.66,
     target_x: float = 0.74,
     riser_height: float = 0.17,
+    tread_depth: float = 0.28,
     target_root_height: float = 0.205,
     corridor_half_width: float = 0.36,
     support_sensor_name: str = "robot_ground_contact",
@@ -1592,13 +1753,25 @@ def stair_tread_support_frontier(
     y = torch.abs(
         asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
     )
-    support = torch.zeros_like(x, dtype=torch.bool)
-    if support_sensor_name in env.scene.sensors:
-        found = env.scene.sensors[support_sensor_name].data.found
-        support = (found.view(found.shape[0], -1) > 0).any(dim=-1)
+    _, tread_contact, contact_positions = _standard_stair_contact_masks(
+        env,
+        support_sensor_name,
+        stair_face_x=stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    support = tread_contact.any(dim=-1)
+    contact_x = torch.where(
+        tread_contact,
+        contact_positions[..., 0],
+        torch.full_like(contact_positions[..., 0], stair_face_x),
+    ).max(dim=-1).values
 
     x_progress = torch.clamp(
-        (x - stair_face_x) / max(target_x - stair_face_x, 1e-6), 0.0, 1.0
+        (contact_x - stair_face_x) / max(target_x - stair_face_x, 1e-6),
+        0.0,
+        1.0,
     )
     z_progress = torch.clamp(
         (z - riser_height)
@@ -1606,12 +1779,10 @@ def stair_tread_support_frontier(
         0.0,
         1.0,
     )
-    value = torch.sqrt(x_progress * z_progress)
+    value = 0.40 + 0.30 * x_progress + 0.30 * z_progress
     eligible = (
         support
         & (y <= corridor_half_width)
-        & (x >= stair_face_x)
-        & (z >= riser_height)
     )
     value = torch.where(eligible, value, torch.zeros_like(value))
     return _new_frontier_delta(env, value, "_stair_tread_support_frontier")
@@ -1672,6 +1843,10 @@ def stair_first_tread_secured(
     max_angular_speed: float = 2.5,
     hold_time_s: float = 0.12,
     support_sensor_name: str = "robot_ground_contact",
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.36,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Pay once when any mechanically settled pose is secured on tread one.
@@ -1684,10 +1859,15 @@ def stair_first_tread_secured(
     x, z, _ = _stair_local_state(env, asset_cfg)
     linear_speed = torch.linalg.vector_norm(asset.data.root_link_lin_vel_w, dim=-1)
     angular_speed = torch.linalg.vector_norm(asset.data.root_link_ang_vel_w, dim=-1)
-    support = torch.zeros_like(x, dtype=torch.bool)
-    if support_sensor_name in env.scene.sensors:
-        found = env.scene.sensors[support_sensor_name].data.found
-        support = (found.view(found.shape[0], -1) > 0).any(dim=-1)
+    _, tread_contact, _ = _standard_stair_contact_masks(
+        env,
+        support_sensor_name,
+        stair_face_x=stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    support = tread_contact.any(dim=-1)
     candidate = (
         (x >= min_x)
         & (x <= max_x)
