@@ -67,6 +67,24 @@ from .microduck_roulade_env_cfg import (
     make_microduck_roulade_env_cfg,
     MicroduckRouladeRlCfg,
 )
+from .microduck_stairs_env_cfg import (
+    make_microduck_stairs_env_cfg,
+    MicroduckStairsRlCfg,
+)
+from .microduck_standard_stairs_env_cfg import (
+    make_microduck_route_stairs_env_cfg,
+    make_microduck_standard_stairs_env_cfg,
+    MicroduckRouteStairsRlCfg,
+    MicroduckStandardStairsRlCfg,
+)
+from .microduck_headstand_env_cfg import (
+    make_microduck_headstand_env_cfg,
+    MicroduckHeadstandRlCfg,
+)
+from .microduck_backflip_env_cfg import (
+    make_microduck_backflip_env_cfg,
+    MicroduckBackflipRlCfg,
+)
 from .backlash import make_backlash_variant
 
 # Standard velocity task
@@ -222,6 +240,49 @@ register_mjlab_task(
     env_cfg=make_microduck_roulade_env_cfg(),
     play_env_cfg=make_microduck_roulade_env_cfg(play=True),
     rl_cfg=MicroduckRouladeRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Experimental stair and acrobatics tasks.  They keep the shared observation
+# contract, but are intentionally separate policies with task-specific resets
+# and rewards.
+register_mjlab_task(
+    task_id="Mjlab-Stairs-MicroDuck",
+    env_cfg=make_microduck_stairs_env_cfg(),
+    play_env_cfg=make_microduck_stairs_env_cfg(play=True),
+    rl_cfg=MicroduckStairsRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Standard-MicroDuck",
+    env_cfg=make_microduck_standard_stairs_env_cfg(),
+    play_env_cfg=make_microduck_standard_stairs_env_cfg(play=True),
+    rl_cfg=MicroduckStandardStairsRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Route-MicroDuck",
+    env_cfg=make_microduck_route_stairs_env_cfg(),
+    play_env_cfg=make_microduck_route_stairs_env_cfg(play=True),
+    rl_cfg=MicroduckRouteStairsRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Headstand-Flat-MicroDuck",
+    env_cfg=make_microduck_headstand_env_cfg(),
+    play_env_cfg=make_microduck_headstand_env_cfg(play=True),
+    rl_cfg=MicroduckHeadstandRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Backflip-Flat-MicroDuck",
+    env_cfg=make_microduck_backflip_env_cfg(),
+    play_env_cfg=make_microduck_backflip_env_cfg(play=True),
+    rl_cfg=MicroduckBackflipRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 

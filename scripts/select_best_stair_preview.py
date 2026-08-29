@@ -35,6 +35,10 @@ METRIC_TAGS: dict[str, tuple[str, ...]] = {
         "Episode_Metrics/stair_top_goal",
         "Episode_Metrics/full_stair_success",
     ),
+    "first_riser_clearance": (
+        "Episode_Reward/stair_first_riser_clearance",
+        "Episode_Metrics/stair_first_riser_clearance",
+    ),
     "top_approach": (
         "Episode_Reward/stair_top_approach",
         "Episode_Metrics/stair_top_approach",
@@ -56,6 +60,7 @@ METRIC_TAGS: dict[str, tuple[str, ...]] = {
 
 HARD_SCORE_FIELDS = (
     "full_stair_success",
+    "first_riser_clearance",
     "top_approach",
     "terrain_max",
     "terrain_mean",

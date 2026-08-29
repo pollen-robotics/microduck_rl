@@ -13,6 +13,7 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.reward_manager import RewardManager as _RewardManager
 from mjlab.entity import Entity
 from mjlab.tasks.velocity.mdp.velocity_command import UniformVelocityCommand, UniformVelocityCommandCfg
+from mjlab.tasks.velocity.mdp import rewards as _velocity_rewards
 from mjlab.tasks.velocity.mdp import observations as _velocity_obs
 from mjlab.managers.command_manager import CommandTerm
 from mjlab.managers import CommandTermCfg
@@ -599,6 +600,608 @@ def height_progress(
     delta = pot - env._height_potential_prev
     env._height_potential_prev = pot.clone()
     return delta
+
+
+def _stair_local_state(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return root x/z and upright score in the local terrain frame."""
+    asset: Entity = env.scene[asset_cfg.name]
+    terrain = env.scene.terrain
+    x = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 0] - terrain.env_origins[:, 0], nan=0.0
+    )
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - terrain.env_origins[:, 2], nan=0.0
+    )
+    quat = asset.data.root_link_quat_w
+    upright = torch.clamp(
+        torch.nan_to_num(
+            1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2), nan=0.0
+        ),
+        min=0.0,
+        max=1.0,
+    )
+    return x, z, upright
+
+
+def _stair_approach_gate(
+    env: ManagerBasedRlEnv,
+    stair_start_distance: float,
+    fade_distance: float,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    x, _, _ = _stair_local_state(env, asset_cfg)
+    return torch.sigmoid(
+        (stair_start_distance - x) / max(fade_distance, 1e-6)
+    )
+
+
+def _stair_corridor_gate(
+    env: ManagerBasedRlEnv,
+    corridor_half_width: float | None,
+    corridor_fade: float,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    if corridor_half_width is None:
+        return torch.ones(env.num_envs, device=env.device)
+    asset: Entity = env.scene[asset_cfg.name]
+    y = torch.abs(
+        torch.nan_to_num(
+            asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1],
+            nan=0.0,
+        )
+    )
+    return torch.sigmoid(
+        (corridor_half_width - y) / max(corridor_fade, 1e-6)
+    )
+
+
+def stair_approach_upright(
+    env: ManagerBasedRlEnv,
+    std: float,
+    stair_start_distance: float,
+    fade_distance: float = 0.20,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Preserve the transferred walk posture only on the flat runway."""
+    _, _, upright = _stair_local_state(env, asset_cfg)
+    sin_tilt_squared = torch.clamp(1.0 - upright.square(), min=0.0, max=1.0)
+    score = torch.exp(-sin_tilt_squared / max(std**2, 1e-6))
+    return score * _stair_approach_gate(
+        env, stair_start_distance, fade_distance, asset_cfg
+    )
+
+
+def stair_approach_linear_tracking(
+    env: ManagerBasedRlEnv,
+    std: float,
+    command_name: str,
+    stair_start_distance: float,
+    fade_distance: float = 0.20,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Track the normal walking command until the first stair, then fade it."""
+    tracking = _velocity_rewards.track_linear_velocity(
+        env, std=std, command_name=command_name, asset_cfg=asset_cfg
+    )
+    return tracking * _stair_approach_gate(
+        env, stair_start_distance, fade_distance, asset_cfg
+    )
+
+
+def stair_approach_angular_tracking(
+    env: ManagerBasedRlEnv,
+    std: float,
+    command_name: str,
+    stair_start_distance: float,
+    fade_distance: float = 0.20,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Fade turn tracking at the first riser so the climb can self-organize."""
+    tracking = _velocity_rewards.track_angular_velocity(
+        env, std=std, command_name=command_name, asset_cfg=asset_cfg
+    )
+    return tracking * _stair_approach_gate(
+        env, stair_start_distance, fade_distance, asset_cfg
+    )
+
+
+def configure_stair_viewer_grid(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None = None,
+    terrain_levels: tuple[int, ...] = (0, 1, 0, 1),
+    terrain_types: tuple[int, ...] = (0, 0, 1, 1),
+) -> None:
+    """Place four play environments on four distinct 2x2 stair patches."""
+    del env_ids
+    terrain = env.scene.terrain
+    if terrain.terrain_origins is None:
+        return
+    if env.num_envs < len(terrain_levels) or len(terrain_levels) != len(terrain_types):
+        raise ValueError("The stair viewer grid requires four matching environment origins.")
+    levels = torch.tensor(terrain_levels, device=env.device, dtype=torch.long)
+    types = torch.tensor(terrain_types, device=env.device, dtype=torch.long)
+    rows, cols = terrain.terrain_origins.shape[:2]
+    if int(levels.max()) >= rows or int(types.max()) >= cols:
+        raise ValueError("Stair viewer grid indices exceed the generated terrain grid.")
+    terrain.terrain_levels[: len(levels)] = levels
+    terrain.terrain_types[: len(types)] = types
+    terrain.env_origins[: len(levels)] = terrain.terrain_origins[levels, types]
+
+
+def seed_route_challenge_levels(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    standard_fraction: float = 0.125,
+) -> None:
+    """Keep part of each batch on the full-height stair from the beginning."""
+    terrain = env.scene.terrain
+    if terrain.terrain_origins is None or len(env_ids) == 0:
+        return
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    if not hasattr(env, "_route_challenge_mask"):
+        env._route_challenge_mask = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    env._route_challenge_mask[env_ids] = False
+    if len(env_ids) == env.num_envs:
+        challenge_count = min(
+            len(env_ids), max(1, int(round(len(env_ids) * standard_fraction)))
+        )
+        selected_ids = env_ids[
+            torch.randperm(len(env_ids), device=env.device)[:challenge_count]
+        ]
+    else:
+        selected_ids = env_ids[
+            torch.rand(len(env_ids), device=env.device) < standard_fraction
+        ]
+    if len(selected_ids) == 0:
+        return
+    env._route_challenge_mask[selected_ids] = True
+    max_level = terrain.terrain_origins.shape[0] - 1
+    terrain.terrain_levels[selected_ids] = max_level
+    terrain.env_origins[selected_ids] = terrain.terrain_origins[
+        terrain.terrain_levels[selected_ids], terrain.terrain_types[selected_ids]
+    ]
+
+
+def stair_route_cues(
+    env: ManagerBasedRlEnv,
+    stair_start_distance: float,
+    goal_distance: float,
+    min_riser_height: float,
+    max_riser_height: float,
+    num_terrain_levels: int,
+    tread_depth: float,
+    num_steps: int,
+    head_sensor_name: str = "head_ground_contact",
+    trunk_sensor_name: str = "trunk_ground_contact",
+    cue_distance: float = 0.18,
+    cue_width: float = 0.025,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Six real-sensor-compatible route cues in the dormant body-command slot.
+
+    The physical robot can derive the first-riser distance and obstacle height
+    from its head ToF/camera. Keeping the cue zero on the runway preserves the
+    manufacturer gait, then gives the fine-tuned feed-forward actor an explicit
+    signal that it is time to switch into a contact-rich maneuver.
+    """
+    x, _, _ = _stair_local_state(env, asset_cfg)
+    passed_faces = torch.where(
+        x >= stair_start_distance,
+        torch.floor((x - stair_start_distance) / max(tread_depth, 1e-6)).long()
+        + 1,
+        torch.zeros_like(x, dtype=torch.long),
+    )
+    next_face_index = torch.clamp(passed_faces, min=0, max=max(num_steps - 1, 0))
+    next_face = stair_start_distance + next_face_index.to(x.dtype) * tread_depth
+    distance = next_face - x
+    mode = torch.sigmoid((cue_distance - distance) / max(cue_width, 1e-6))
+    signed_distance = torch.clamp(
+        distance / max(cue_distance, 1e-6), min=-1.0, max=1.0
+    )
+    route_progress = torch.clamp(x / max(goal_distance, 1e-6), 0.0, 1.0)
+    levels = env.scene.terrain.terrain_levels.to(dtype=x.dtype)
+    level_fraction = torch.clamp(
+        levels / max(num_terrain_levels - 1, 1), 0.0, 1.0
+    )
+    riser_height = min_riser_height + level_fraction * (
+        max_riser_height - min_riser_height
+    )
+    height_fraction = riser_height / max(max_riser_height, 1e-6)
+    def contact_bit(sensor_name: str) -> torch.Tensor:
+        if sensor_name not in env.scene.sensors:
+            return torch.zeros_like(x)
+        found = env.scene.sensors[sensor_name].data.found
+        return (found.view(found.shape[0], -1) > 0).any(dim=-1).to(x.dtype)
+
+    return torch.stack(
+        (
+            mode,
+            mode * signed_distance,
+            mode * height_fraction,
+            mode * route_progress,
+            contact_bit(head_sensor_name),
+            contact_bit(trunk_sensor_name),
+        ),
+        dim=-1,
+    )
+
+
+def stair_first_riser_clearance(
+    env: ManagerBasedRlEnv,
+    stair_start_distance: float,
+    min_riser_height: float,
+    max_riser_height: float,
+    num_terrain_levels: int,
+    corridor_half_width: float,
+    x_margin: float = 0.04,
+    z_margin: float = 0.025,
+    max_vertical_speed: float = 0.35,
+    hold_time_s: float = 0.15,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay once for durable physical clearance of the first riser.
+
+    No posture or contact type is prescribed. A jump, roll, shell mantle, or
+    head-supported lever all qualify if the root crosses the lip, stays above
+    it with bounded vertical speed, and remains inside the stair corridor.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    levels = env.scene.terrain.terrain_levels.to(dtype=x.dtype)
+    level_fraction = torch.clamp(
+        levels / max(num_terrain_levels - 1, 1), min=0.0, max=1.0
+    )
+    riser = min_riser_height + level_fraction * (
+        max_riser_height - min_riser_height
+    )
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    vertical_speed = torch.abs(
+        torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=torch.inf)
+    )
+    candidate = (
+        (x >= stair_start_distance + x_margin)
+        & (z >= riser + z_margin)
+        & (y <= corridor_half_width)
+        & (vertical_speed <= max_vertical_speed)
+    )
+    skip_clearance = getattr(env, "_stair_skip_first_clearance", None)
+    if skip_clearance is not None:
+        candidate &= ~skip_clearance
+    if not hasattr(env, "_stair_first_riser_hold_steps"):
+        env._stair_first_riser_hold_steps = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+    if not hasattr(env, "_stair_first_riser_latched"):
+        env._stair_first_riser_latched = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    fresh = env.episode_length_buf <= 1
+    env._stair_first_riser_hold_steps[fresh] = 0
+    env._stair_first_riser_latched[fresh] = False
+    env._stair_first_riser_hold_steps = torch.where(
+        candidate,
+        env._stair_first_riser_hold_steps + 1,
+        torch.zeros_like(env._stair_first_riser_hold_steps),
+    )
+    required_steps = max(1, int(round(hold_time_s / env.step_dt)))
+    newly_cleared = (
+        env._stair_first_riser_hold_steps >= required_steps
+    ) & ~env._stair_first_riser_latched
+    env._stair_first_riser_latched |= newly_cleared
+    return newly_cleared.float()
+
+
+def reset_route_learning_states(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    stair_start_distance: float,
+    min_riser_height: float,
+    max_riser_height: float,
+    num_terrain_levels: int,
+    tread_depth: float,
+    num_steps: int,
+    standing_root_height: float,
+    near_face_fraction: float = 0.25,
+    partial_mantle_fraction: float = 0.25,
+    on_tread_fraction: float = 0.15,
+) -> None:
+    """Reverse curriculum for discovering contact and recovery subskills.
+
+    Normal runway starts remain the majority. Other episodes begin immediately
+    before the face or upright on a random tread, allowing PPO to learn the
+    obstacle reaction and later landing/recovery phases before it can execute
+    the entire sequence from the approach.
+    """
+    if env_ids is None or len(env_ids) == 0:
+        return
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    if not hasattr(env, "_stair_skip_first_clearance"):
+        env._stair_skip_first_clearance = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    env._stair_skip_first_clearance[env_ids] = False
+    terrain = env.scene.terrain
+    levels = terrain.terrain_levels[env_ids].to(dtype=torch.float32)
+    level_fraction = torch.clamp(
+        levels / max(num_terrain_levels - 1, 1), 0.0, 1.0
+    )
+    riser = min_riser_height + level_fraction * (
+        max_riser_height - min_riser_height
+    )
+    draw = torch.rand(len(env_ids), device=env.device)
+    near_mask = draw < near_face_fraction
+    mantle_mask = (draw >= near_face_fraction) & (
+        draw < near_face_fraction + partial_mantle_fraction
+    )
+    tread_mask = (draw >= near_face_fraction + partial_mantle_fraction) & (
+        draw
+        < near_face_fraction + partial_mantle_fraction + on_tread_fraction
+    )
+
+    near_ids = env_ids[near_mask]
+    if len(near_ids) > 0:
+        jitter = (torch.rand(len(near_ids), device=env.device) - 0.5) * 0.04
+        env.sim.data.qpos[near_ids, 0] = (
+            terrain.env_origins[near_ids, 0]
+            + stair_start_distance
+            - 0.07
+            + jitter
+        )
+        env.sim.data.qpos[near_ids, 1] = terrain.env_origins[near_ids, 1]
+        env.sim.data.qvel[near_ids, :6] = 0.0
+        env.sim.data.qvel[near_ids, 0] = 0.10 + 0.20 * torch.rand(
+            len(near_ids), device=env.device
+        )
+        pitch = torch.deg2rad(
+            10.0 + 15.0 * torch.rand(len(near_ids), device=env.device)
+        )
+        env.sim.data.qpos[near_ids, 3] = torch.cos(0.5 * pitch)
+        env.sim.data.qpos[near_ids, 4] = 0.0
+        env.sim.data.qpos[near_ids, 5] = torch.sin(0.5 * pitch)
+        env.sim.data.qpos[near_ids, 6] = 0.0
+
+    mantle_ids = env_ids[mantle_mask]
+    if len(mantle_ids) > 0:
+        # Begin just before the clearance boundary, pitched so head or shell
+        # contact can finish the transition. The policy must still move the
+        # root forward and hold above the lip, so reset itself earns nothing.
+        env.sim.data.qpos[mantle_ids, 0] = (
+            terrain.env_origins[mantle_ids, 0]
+            + stair_start_distance
+            - 0.015
+            + (torch.rand(len(mantle_ids), device=env.device) - 0.5) * 0.02
+        )
+        env.sim.data.qpos[mantle_ids, 1] = terrain.env_origins[mantle_ids, 1]
+        env.sim.data.qpos[mantle_ids, 2] = (
+            terrain.env_origins[mantle_ids, 2]
+            + riser[mantle_mask]
+            + 0.060
+        )
+        pitch = torch.deg2rad(
+            55.0 + 25.0 * torch.rand(len(mantle_ids), device=env.device)
+        )
+        env.sim.data.qpos[mantle_ids, 3] = torch.cos(0.5 * pitch)
+        env.sim.data.qpos[mantle_ids, 4] = 0.0
+        env.sim.data.qpos[mantle_ids, 5] = torch.sin(0.5 * pitch)
+        env.sim.data.qpos[mantle_ids, 6] = 0.0
+        env.sim.data.qvel[mantle_ids, :6] = 0.0
+        env.sim.data.qvel[mantle_ids, 0] = 0.08 * torch.rand(
+            len(mantle_ids), device=env.device
+        )
+
+    tread_ids = env_ids[tread_mask]
+    if len(tread_ids) > 0:
+        # These episodes teach tread recovery, not first-riser traversal. They
+        # must never claim the clearance latch merely because reset placed the
+        # robot beyond the first face.
+        env._stair_skip_first_clearance[tread_ids] = True
+        step_index = torch.randint(
+            1, num_steps + 1, (len(tread_ids),), device=env.device
+        )
+        tread_center = stair_start_distance + (step_index.float() - 0.5) * tread_depth
+        env.sim.data.qpos[tread_ids, 0] = (
+            terrain.env_origins[tread_ids, 0] + tread_center
+        )
+        env.sim.data.qpos[tread_ids, 1] = terrain.env_origins[tread_ids, 1]
+        env.sim.data.qpos[tread_ids, 2] = (
+            terrain.env_origins[tread_ids, 2]
+            + standing_root_height
+            + step_index.float() * riser[tread_mask]
+        )
+        env.sim.data.qvel[tread_ids, :6] = 0.0
+
+
+def stair_goal_progress(
+    env: ManagerBasedRlEnv,
+    goal_distance: float,
+    corridor_half_width: float | None = None,
+    corridor_fade: float = 0.08,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Potential-based forward progress toward the stair top.
+
+    The robot receives the change in clamped route progress, not a per-step
+    reward for merely remaining near the destination.  Backward motion is
+    charged, holding position is zero, and episode resets clear the potential.
+    This gives the policy a useful walking signal while avoiding a goal-state
+    jackpot that could reward thrashing in place.
+    """
+    x, _, _ = _stair_local_state(env, asset_cfg)
+    progress = torch.clamp(x / max(goal_distance, 1e-6), min=0.0, max=1.0)
+    progress = progress * _stair_corridor_gate(
+        env, corridor_half_width, corridor_fade, asset_cfg
+    )
+    if not hasattr(env, "_stair_progress_prev"):
+        env._stair_progress_prev = progress.clone()
+    fresh = env.episode_length_buf <= 1
+    env._stair_progress_prev[fresh] = progress[fresh]
+    delta = progress - env._stair_progress_prev
+    env._stair_progress_prev = progress.clone()
+    return torch.clamp(delta / env.step_dt, min=-5.0, max=5.0)
+
+
+def stair_top_approach(
+    env: ManagerBasedRlEnv,
+    goal_distance: float,
+    goal_height: float | None = None,
+    goal_height_range: tuple[float, float] | None = None,
+    num_terrain_levels: int | None = None,
+    start_height: float = 0.115,
+    route_gate_start: float = 0.20,
+    route_gate_width: float = 0.08,
+    upright_power: float = 1.0,
+    corridor_half_width: float | None = None,
+    corridor_fade: float = 0.08,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Potential-based shaping for climbing after entering the staircase.
+
+    Progress along the route gates a normalized height potential.  This gives
+    the robot a learnable signal for getting onto higher treads, while the
+    separate one-shot goal term below remains the definition of success.
+    """
+    x, z, upright = _stair_local_state(env, asset_cfg)
+    progress = torch.clamp(x / max(goal_distance, 1e-6), min=0.0, max=1.0)
+    route_gate = torch.sigmoid((progress - route_gate_start) / route_gate_width)
+    target_height = _stair_target_height(
+        env, goal_height, goal_height_range, num_terrain_levels, z
+    )
+    height = torch.clamp(
+        (z - start_height) / torch.clamp(target_height - start_height, min=1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    posture_gate = (
+        torch.ones_like(upright)
+        if upright_power == 0.0
+        else torch.pow(upright, upright_power)
+    )
+    corridor_gate = _stair_corridor_gate(
+        env, corridor_half_width, corridor_fade, asset_cfg
+    )
+    potential = route_gate * height * posture_gate * corridor_gate
+    if not hasattr(env, "_stair_top_potential_prev"):
+        env._stair_top_potential_prev = potential.clone()
+    fresh = env.episode_length_buf <= 1
+    env._stair_top_potential_prev[fresh] = potential[fresh]
+    delta = potential - env._stair_top_potential_prev
+    env._stair_top_potential_prev = potential.clone()
+    return torch.clamp(delta / env.step_dt, min=-5.0, max=5.0)
+
+
+def stair_top_goal(
+    env: ManagerBasedRlEnv,
+    goal_distance: float,
+    goal_height: float | None = None,
+    goal_height_range: tuple[float, float] | None = None,
+    num_terrain_levels: int | None = None,
+    x_tolerance: float = 0.20,
+    z_tolerance: float = 0.13,
+    upright_threshold: float = 0.78,
+    corridor_half_width: float | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """One-shot success signal for arriving upright on the top landing.
+
+    The success state requires the route endpoint, the expected top-level
+    height, and a non-inverted trunk.  A per-episode latch makes the reward
+    one-shot, so standing on the landing cannot be farmed indefinitely.
+    """
+    x, z, upright = _stair_local_state(env, asset_cfg)
+    # The goal is the top landing, not one exact pixel on its far edge.  Once
+    # the robot has crossed the near goal boundary, any further position on
+    # the landing remains valid.
+    x_ok = x >= goal_distance - x_tolerance
+    target_height = _stair_target_height(
+        env, goal_height, goal_height_range, num_terrain_levels, z
+    )
+    z_ok = torch.abs(z - target_height) <= z_tolerance
+    asset: Entity = env.scene[asset_cfg.name]
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    y_ok = (
+        torch.ones_like(x_ok)
+        if corridor_half_width is None
+        else y <= corridor_half_width
+    )
+    success = (x >= goal_distance - x_tolerance) & x_ok & y_ok & z_ok & (
+        upright >= upright_threshold
+    )
+    if not hasattr(env, "_stair_goal_latched"):
+        env._stair_goal_latched = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    fresh = env.episode_length_buf <= 1
+    env._stair_goal_latched[fresh] = False
+    newly_reached = success & ~env._stair_goal_latched
+    env._stair_goal_latched |= success
+    return newly_reached.float()
+
+
+def _stair_target_height(
+    env: ManagerBasedRlEnv,
+    goal_height: float | None,
+    goal_height_range: tuple[float, float] | None,
+    num_terrain_levels: int | None,
+    reference: torch.Tensor,
+) -> torch.Tensor:
+    """Resolve fixed or terrain-level-dependent stair landing height."""
+    if goal_height_range is None:
+        if goal_height is None:
+            raise ValueError("A fixed goal_height or goal_height_range is required.")
+        return torch.full_like(reference, goal_height)
+    low, high = goal_height_range
+    terrain = env.scene.terrain
+    levels = terrain.terrain_levels.to(dtype=reference.dtype)
+    level_count = num_terrain_levels
+    if level_count is None and terrain.terrain_origins is not None:
+        level_count = terrain.terrain_origins.shape[0]
+    denominator = max((level_count or 1) - 1, 1)
+    fraction = torch.clamp(levels / denominator, min=0.0, max=1.0)
+    return low + fraction * (high - low)
+
+
+def route_terrain_levels(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Promote only after latched top-landing success, never mere distance."""
+    terrain = env.scene.terrain
+    if terrain.terrain_origins is None:
+        zero = torch.tensor(0.0, device=env.device)
+        return {"mean": zero, "max": zero}
+    goal_latched = getattr(env, "_stair_goal_latched", None)
+    first_riser_latched = getattr(env, "_stair_first_riser_latched", None)
+    if goal_latched is None and first_riser_latched is None:
+        success = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
+    else:
+        success = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
+        if goal_latched is not None:
+            success |= goal_latched[env_ids]
+        if first_riser_latched is not None:
+            success |= first_riser_latched[env_ids]
+    challenge_mask = getattr(env, "_route_challenge_mask", None)
+    protected = (
+        torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
+        if challenge_mask is None
+        else challenge_mask[env_ids]
+    )
+    move_down = ~success & ~protected & (terrain.terrain_levels[env_ids] > 0)
+    terrain.update_env_origins(env_ids, success, move_down)
+    levels = terrain.terrain_levels.float()
+    return {
+        "mean": torch.mean(levels),
+        "max": torch.max(levels),
+        "route_stairs": torch.mean(levels),
+    }
 
 
 def fallen_state_penalty(
@@ -6697,6 +7300,227 @@ def _head_top_down(env: ManagerBasedRlEnv, asset: Entity) -> torch.Tensor:
         2.0 * (x * z - w * y) * a + 2.0 * (y * z + w * x) * b + (1.0 - 2.0 * (x * x + y * y)) * c
     )
     return axis_world_z < -_HEAD_TOP_DOWN_MIN
+
+
+def headstand_contact(
+    env: ManagerBasedRlEnv,
+    head_sensor_name: str = "head_ground_contact",
+    feet_sensor_name: str = "feet_ground_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Return a binary head-supported pose gate.
+
+    A valid MicroDuck headstand is intentionally defined as a controlled
+    head-supported freeze: the flat top of ``jaw_soft`` points down, the head
+    touches the terrain, and neither foot is touching.  Keeping this contact
+    definition explicit prevents the policy from collecting credit for a
+    face-plant or a three-point crouch.
+    """
+    asset = env.scene[asset_cfg.name]
+    head_contact = _sensor_any_contact(env, head_sensor_name)
+    feet_contact = _sensor_any_contact(env, feet_sensor_name)
+    if head_contact is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    if feet_contact is None:
+        feet_contact = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    return (
+        head_contact
+        & ~feet_contact
+        & _head_top_down(env, asset)
+    ).float()
+
+
+def headstand_hold(
+    env: ManagerBasedRlEnv,
+    head_sensor_name: str = "head_ground_contact",
+    feet_sensor_name: str = "feet_ground_contact",
+    lin_vel_std: float = 0.04,
+    ang_vel_std: float = 0.45,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward quiet head-supported balance, not merely making contact."""
+    asset = env.scene[asset_cfg.name]
+    gate = headstand_contact(
+        env,
+        head_sensor_name=head_sensor_name,
+        feet_sensor_name=feet_sensor_name,
+        asset_cfg=asset_cfg,
+    )
+    lin_vel = torch.nan_to_num(asset.data.root_link_lin_vel_w, nan=0.0).norm(dim=-1)
+    ang_vel = torch.nan_to_num(asset.data.root_link_ang_vel_b, nan=0.0).norm(dim=-1)
+    still = torch.exp(-((lin_vel / lin_vel_std) ** 2) - ((ang_vel / ang_vel_std) ** 2))
+    return gate * still
+
+
+def headstand_height(
+    env: ManagerBasedRlEnv,
+    target_height: float,
+    std: float = 0.02,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Shape the head-supported pose toward its measured root height."""
+    asset = env.scene[asset_cfg.name]
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    return headstand_contact(env, asset_cfg=asset_cfg) * torch.exp(-((z - target_height) / std) ** 2)
+
+
+def _backflip_state(env: ManagerBasedRlEnv) -> tuple:
+    if not hasattr(env, "_backflip_accum"):
+        z = torch.zeros(env.num_envs, device=env.device)
+        env._backflip_accum = z.clone()
+        env._backflip_max = z.clone()
+        env._backflip_paid = z.clone()
+        env._backflip_foot_latch = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._backflip_last_update_step = -1
+    return env._backflip_accum, env._backflip_max, env._backflip_paid
+
+
+def _update_backflip_accum(env: ManagerBasedRlEnv, asset: Entity) -> None:
+    """Integrate backward body rotation during the aerial part of a flip."""
+    accum, max_accum, _ = _backflip_state(env)
+    step = int(env.common_step_counter)
+    if step == env._backflip_last_update_step:
+        return
+
+    # Backward rotation is -body-y for the MicroDuck convention. Allow feet to
+    # remain in contact during takeoff/landing, but never count a head/trunk
+    # supported roll as aerial rotation.
+    omega_back = torch.nan_to_num(-asset.data.root_link_ang_vel_b[:, 1], nan=0.0)
+    support = _sensor_any_contact(env, "robot_ground_contact")
+    feet = _sensor_any_contact(env, "feet_ground_contact")
+    if support is None or feet is None:
+        aerial_or_feet = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    else:
+        aerial_or_feet = ~support | feet
+    delta = torch.clamp(omega_back, min=0.0) * env.step_dt * aerial_or_feet.float()
+    env._backflip_accum = accum + delta
+    env._backflip_max = torch.maximum(max_accum, env._backflip_accum)
+
+    if feet is not None:
+        completion = env._backflip_max > math.radians(300.0)
+        env._backflip_foot_latch = env._backflip_foot_latch | (feet & completion)
+    env._backflip_last_update_step = step
+
+
+def reset_backflip_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    late_spawn_prob: float = 0.25,
+    late_angle_range: tuple = (math.radians(25.0), math.radians(320.0)),
+    late_height_range: tuple = (0.10, 0.18),
+    late_omega_range: tuple = (0.0, 4.0),
+    standing_height_range: tuple = (0.11, 0.12),
+    tuck_overrides: Optional[dict] = None,
+    joint_noise_std: float = 0.02,
+) -> None:
+    """Reset standing or late-phase backward-flip states.
+
+    The late-phase bucket is a reverse curriculum, not a claim that a pure
+    from-stand PPO run will discover an aerial 360-degree flip immediately.
+    It gives the landing controller on-policy data while the takeoff policy is
+    still being learned.
+    """
+    if env_ids is None or len(env_ids) == 0:
+        return
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    asset = env.scene[asset_cfg.name]
+    accum, max_accum, paid = _backflip_state(env)
+    num = len(env_ids)
+    late = torch.rand(num, device=env.device) < late_spawn_prob
+
+    yaw = torch.rand(num, device=env.device) * 2 * np.pi - np.pi
+    angle = torch.rand(num, device=env.device) * (late_angle_range[1] - late_angle_range[0]) + late_angle_range[0]
+    angle = torch.where(late, angle, torch.zeros_like(angle))
+    pitch = -angle
+    roll = (torch.rand(num, device=env.device) * 2 - 1) * math.radians(3.0)
+    cy, sy = torch.cos(yaw * 0.5), torch.sin(yaw * 0.5)
+    cp, sp = torch.cos(pitch * 0.5), torch.sin(pitch * 0.5)
+    cr, sr = torch.cos(roll * 0.5), torch.sin(roll * 0.5)
+    quat = torch.stack(
+        [
+            cr * cp * cy + sr * sp * sy,
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
+        ],
+        dim=1,
+    )
+
+    standing_z = torch.rand(num, device=env.device) * (standing_height_range[1] - standing_height_range[0]) + standing_height_range[0]
+    late_z = torch.rand(num, device=env.device) * (late_height_range[1] - late_height_range[0]) + late_height_range[0]
+    env.sim.data.qpos[env_ids, 2] = torch.where(late, late_z, standing_z)
+    env.sim.data.qpos[env_ids, 3:7] = quat
+    env.sim.data.qvel[env_ids, :6] = 0.0
+
+    servo_ids = _servo_joint_ids(env, asset)
+    late_ids = env_ids[late]
+    if len(late_ids) > 0 and tuck_overrides:
+        for joint_index, target in tuck_overrides.items():
+            col = 7 + servo_ids[joint_index]
+            env.sim.data.qpos[late_ids, col] = target
+    if len(late_ids) > 0 and joint_noise_std > 0.0:
+        cols = torch.tensor([7 + j for j in servo_ids], device=env.device, dtype=torch.long)
+        noise = torch.randn(len(late_ids), len(cols), device=env.device) * joint_noise_std
+        env.sim.data.qpos[late_ids.unsqueeze(1), cols.unsqueeze(0)] += noise
+    if len(late_ids) > 0:
+        omega = torch.rand(len(late_ids), device=env.device) * (late_omega_range[1] - late_omega_range[0]) + late_omega_range[0]
+        env.sim.data.qvel[late_ids, 4] = -omega
+
+    accum[env_ids] = angle
+    max_accum[env_ids] = angle
+    paid[env_ids] = angle
+    env._backflip_foot_latch[env_ids] = False
+
+
+def backflip_progress(
+    env: ManagerBasedRlEnv,
+    target_angle: float = 2 * math.pi,
+    max_paid_rate: float = 10.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay only new backward-rotation frontier, with an aerial support gate."""
+    asset = env.scene[asset_cfg.name]
+    _update_backflip_accum(env, asset)
+    _, max_accum, paid = _backflip_state(env)
+    new_paid = torch.clamp(max_accum, max=target_angle)
+    delta = torch.clamp(new_paid - torch.clamp(paid, max=target_angle), min=0.0)
+    delta = torch.clamp(delta, max=max_paid_rate * env.step_dt)
+    env._backflip_paid = torch.maximum(paid, new_paid)
+    return delta / (env.step_dt * target_angle)
+
+
+def backflip_landing(
+    env: ManagerBasedRlEnv,
+    target_height: float,
+    height_std: float = 0.04,
+    upright_std: float = 0.4,
+    pose_std: float = 0.4,
+    joint_indices: list = None,
+    gate_lo: float = math.radians(300.0),
+    gate_hi: float = math.radians(355.0),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward a real feet-first landing after a near-complete backflip."""
+    asset = env.scene[asset_cfg.name]
+    _update_backflip_accum(env, asset)
+    _, max_accum, _ = _backflip_state(env)
+    t = torch.clamp((max_accum - gate_lo) / max(gate_hi - gate_lo, 1e-6), 0.0, 1.0)
+    gate = t * t * (3.0 - 2.0 * t) * env._backflip_foot_latch.float()
+    score = standing_composite_score(
+        env,
+        target_height=target_height,
+        height_std=height_std,
+        upright_std=upright_std,
+        pose_std=pose_std,
+        joint_indices=joint_indices or list(range(14)),
+        asset_cfg=asset_cfg,
+    )
+    return score * gate
 
 
 def _sensor_any_contact(env: ManagerBasedRlEnv, name: str) -> torch.Tensor | None:

@@ -243,3 +243,30 @@ Never launch a long run without one.
   robot, with the correct command-slot writes (a posture flag lives in the
   twist vx slot; feeding all-zeros means "stand", which looks like "policy
   ignores the button").
+
+## Current staircase challenge
+
+- `Mjlab-Stairs-MicroDuck` is the progression task: learn 5 mm, 10 mm, then
+  15 mm risers before attempting the full-size route.
+- `Mjlab-Stairs-Standard-MicroDuck` is the visible challenge: five 170 mm
+  risers, 280 mm treads, a 1.2 m approach, and a flat top landing. These are
+  representative simulation dimensions, not a building-code claim.
+- The standard task keeps the 61D actor interface, sets forward commands to
+  `0.10..0.30 m/s`, fixes the initial yaw and lateral offset, and uses
+  potential-based route and height shaping plus a one-shot upright top-goal
+  latch. Do not replace those with an always-on landing jackpot.
+- The standard task is intentionally difficult for a 25 cm robot. Keep the
+  low-rise checkpoint and the full-size challenge visually distinct in the
+  dashboard and describe short runs as diagnostics, not learned success.
+- For the local native viewer, use four environments to match the current GPU
+  budget and record the result with `--video True`. The dashboard is served by
+  `scripts/serve_dashboard.py` on port 9999 and reads the local `logs/` and
+  capture folders only.
+- The official MuJoCo samples are low-level single-model reference programs:
+  `basic.cc` advances and renders one interactive model, while `record.cc`
+  renders offscreen frames and reads pixels. Keep the four-robot tile in the
+  mjlab vectorized viewer, where each environment has its own terrain origin.
+- For the walking-to-stairs handoff, use
+  `scripts/train_stair_from_walking.py` with a local flat-walking PPO
+  checkpoint. Do not treat an ONNX playback file as a PPO fine-tuning
+  checkpoint because it has no optimizer or critic state.

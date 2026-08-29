@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101419">
+    <title>MicroDuck / training monitor</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to dashboard</a>
+    <header class="topbar">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true">M</div>
+        <div>
+          <p class="eyebrow">MicroDuck / lab monitor</p>
+          <h1>Training room</h1>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span id="connection-status" class="connection-status" aria-live="polite">Connecting</span>
+        <button id="refresh-button" class="button button-quiet" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <main id="main-content" class="page-shell">
+      <section class="hero-panel" aria-labelledby="overview-title">
+        <div>
+          <p class="eyebrow accent">Live overview</p>
+          <h2 id="overview-title">Small robot, big motion.</h2>
+          <p class="hero-copy">A quiet window into MicroDuck’s experiments, checkpoints, and captured rollouts.</p>
+        </div>
+        <div class="hero-pulse" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+      </section>
+
+      <section class="stat-grid" aria-label="Training summary">
+        <article class="stat-card"><span class="stat-label">Runs tracked</span><strong id="stat-runs">—</strong><span class="stat-foot">in rsl_rl logs</span></article>
+        <article class="stat-card stat-card-active"><span class="stat-label">Active now</span><strong id="stat-active">—</strong><span class="stat-foot">updated in the last 90s</span></article>
+        <article class="stat-card"><span class="stat-label">Checkpoints</span><strong id="stat-checkpoints">—</strong><span class="stat-foot">weights and exports</span></article>
+        <article class="stat-card"><span class="stat-label">Media assets</span><strong id="stat-media">—</strong><span class="stat-foot">screenshots and videos</span></article>
+      </section>
+
+      <div id="error-banner" class="notice notice-error" hidden role="alert"></div>
+
+      <div class="content-grid">
+        <section class="panel runs-panel" aria-labelledby="runs-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Experiments</p><h2 id="runs-title">Learning runs</h2></div>
+            <span id="run-count" class="section-count">—</span>
+          </div>
+          <div id="run-grid" class="run-grid" aria-live="polite"></div>
+          <div id="runs-empty" class="empty-state" hidden>No training runs have been found yet.</div>
+        </section>
+
+        <section class="panel metrics-panel" aria-labelledby="metrics-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">TensorBoard scalars</p><h2 id="metrics-title">Latest metrics</h2></div>
+            <label class="visually-hidden" for="run-select">Metric run</label>
+            <select id="run-select" class="select-control"></select>
+          </div>
+          <div id="metric-list" class="metric-list" aria-live="polite"></div>
+          <div id="metrics-empty" class="empty-state" hidden>Scalar event data will appear here when a run writes TensorBoard events.</div>
+        </section>
+      </div>
+
+      <section class="panel media-panel" aria-labelledby="media-title">
+        <div class="section-heading media-heading">
+          <div><p class="eyebrow">Captured rollouts</p><h2 id="media-title">Screenshots &amp; video</h2></div>
+          <div class="filter-group" role="group" aria-label="Media filter">
+            <button class="filter-button is-selected" data-filter="all" type="button">All</button>
+            <button class="filter-button" data-filter="image" type="button">Images</button>
+            <button class="filter-button" data-filter="video" type="button">Video</button>
+          </div>
+        </div>
+        <div id="media-grid" class="media-grid" aria-live="polite"></div>
+        <div id="media-empty" class="empty-state" hidden>Recordings from <code>logs/rsl_rl</code> and captures in <code>output/playwright</code>, <code>artifacts</code>, or <code>dashboard/media</code> appear here.</div>
+      </section>
+    </main>
+
+    <footer class="footer"><span>MicroDuck RL</span><span id="last-updated">Waiting for first update</span></footer>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

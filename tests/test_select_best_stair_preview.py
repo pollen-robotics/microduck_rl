@@ -31,6 +31,7 @@ def _checkpoints(tmp_path: Path, *iterations: int) -> list[Path]:
 def _scalars(**series: list[tuple[int, float]]):
     tags = {
         "success": "Episode_Reward/stair_top_goal",
+        "clearance": "Episode_Reward/stair_first_riser_clearance",
         "approach": "Episode_Reward/stair_top_approach",
         "terrain_max": "Curriculum/terrain_levels/max",
         "terrain_mean": "Curriculum/terrain_levels/mean",
@@ -124,6 +125,7 @@ def test_approach_then_terrain_then_progress_define_lexicographic_order(tmp_path
     assert tuple(
         result.selected.metrics[field].value for field in HARD_SCORE_FIELDS
     ) == (
+        0.0,
         0.0,
         0.2,
         3.0,
