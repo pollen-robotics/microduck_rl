@@ -22,6 +22,7 @@ import mimetypes
 import os
 import re
 import struct
+from threading import Lock, Thread
 import time
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -50,6 +51,11 @@ MEDIA_EXTENSIONS = {
 CHECKPOINT_EXTENSIONS = {".pt", ".pth", ".onnx", ".ckpt"}
 MAX_EVENT_BYTES = 64 * 1024 * 1024
 MAX_SERIES_POINTS = 180
+_STATE_LOCK = Lock()
+_STATE_CACHE: dict[str, Any] | None = None
+_STATE_REFRESHING = False
+_STATE_LAST_REFRESH = 0.0
+_STATE_REFRESH_INTERVAL = 15.0
 
 
 def _read_varint(data: bytes, offset: int) -> tuple[int, int]:
@@ -218,7 +224,7 @@ def _run_id(path: Path) -> str:
         return path.name
 
 
-def _discover_runs() -> list[dict[str, Any]]:
+def _discover_runs(*, include_metrics: bool = True) -> list[dict[str, Any]]:
     if not LOG_ROOT.is_dir():
         return []
     candidates: set[Path] = set()
@@ -249,12 +255,13 @@ def _discover_runs() -> list[dict[str, Any]]:
         ]
         checkpoints.sort(key=lambda item: item["modified"], reverse=True)
         metrics: dict[str, list[list[float | int]]] = {}
-        for event_file in sorted(event_files, key=lambda item: item.stat().st_mtime):
-            for tag, points in _event_scalars(event_file).items():
-                metrics.setdefault(tag, []).extend(points)
-        for points in metrics.values():
-            points.sort(key=lambda point: point[0])
-            del points[:-MAX_SERIES_POINTS]
+        if include_metrics:
+            for event_file in sorted(event_files, key=lambda item: item.stat().st_mtime):
+                for tag, points in _event_scalars(event_file).items():
+                    metrics.setdefault(tag, []).extend(points)
+            for points in metrics.values():
+                points.sort(key=lambda point: point[0])
+                del points[:-MAX_SERIES_POINTS]
         env_params = path / "params" / "env.yaml"
         agent_params = path / "params" / "agent.yaml"
         task = _read_text_value(env_params, ("task", "task_id")) or path.name
@@ -361,8 +368,8 @@ def _discover_media() -> list[dict[str, Any]]:
     return media[:160]
 
 
-def dashboard_state() -> dict[str, Any]:
-    runs = _discover_runs()
+def dashboard_state(*, include_metrics: bool = True) -> dict[str, Any]:
+    runs = _discover_runs(include_metrics=include_metrics)
     media = _discover_media()
     checkpoints = sum(len(run["checkpoints"]) for run in runs)
     return {
@@ -379,6 +386,36 @@ def dashboard_state() -> dict[str, Any]:
     }
 
 
+def _refresh_state_in_background() -> None:
+    global _STATE_CACHE, _STATE_REFRESHING, _STATE_LAST_REFRESH
+    try:
+        snapshot = dashboard_state()
+        with _STATE_LOCK:
+            _STATE_CACHE = snapshot
+    finally:
+        with _STATE_LOCK:
+            _STATE_REFRESHING = False
+            _STATE_LAST_REFRESH = time.monotonic()
+
+
+def cached_dashboard_state() -> dict[str, Any]:
+    """Return quickly, then refresh expensive TensorBoard metrics off-thread."""
+
+    global _STATE_CACHE, _STATE_REFRESHING
+    with _STATE_LOCK:
+        if _STATE_CACHE is None:
+            _STATE_CACHE = dashboard_state(include_metrics=False)
+        refresh_due = time.monotonic() - _STATE_LAST_REFRESH >= _STATE_REFRESH_INTERVAL
+        if not _STATE_REFRESHING and refresh_due:
+            _STATE_REFRESHING = True
+            Thread(
+                target=_refresh_state_in_background,
+                name="dashboard-state-refresh",
+                daemon=True,
+            ).start()
+        return _STATE_CACHE
+
+
 class DashboardHandler(SimpleHTTPRequestHandler):
     """Static files plus a read-only dashboard API."""
 
@@ -387,7 +424,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802, inherited HTTP API
         route = urlparse(self.path).path
         if route == "/api/state":
-            self._send_json(dashboard_state())
+            self._send_json(cached_dashboard_state())
             return
         if route.startswith("/media/"):
             self._serve_media(route)
@@ -406,7 +443,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def _serve_media(self, route: str) -> None:
         parts = unquote(route).split("/")
