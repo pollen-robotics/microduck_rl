@@ -122,6 +122,24 @@ def test_strict_score_never_combines_independent_trajectory_maxima() -> None:
     assert same_state.score >= SEARCH.StrictScoreConfig().secured_tread_bonus
 
 
+def test_valid_step_mask_can_exclude_a_frozen_prefix_peak() -> None:
+    roots = np.array([[0.71, 0.0, 0.205], [0.61, 0.0, 0.13]])
+    corners = _shell_corners(0.67, 0.18, steps=2)
+    corners[1, :, 0] = 0.59
+    corners[1, :, 2] = 0.11
+    secured = np.array([True, False])
+
+    all_steps = SEARCH.score_strict_trajectory(roots, corners, secured)
+    tail_only = SEARCH.score_strict_trajectory(
+        roots, corners, secured, valid_steps=np.array([False, True])
+    )
+
+    assert all_steps.success
+    assert not tail_only.success
+    assert tail_only.best_step == 1
+    assert tail_only.score < all_steps.score
+
+
 def test_one_low_shell_corner_blocks_exact_clearance_and_success() -> None:
     roots = np.array([[0.71, 0.0, 0.205]])
     corners = _shell_corners(0.67, 0.18, steps=1)

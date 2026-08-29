@@ -354,6 +354,12 @@ def _parse_args() -> argparse.Namespace:
         default=0,
         help="Keep this many warm-start knots exact and search only the continuation.",
     )
+    parser.add_argument(
+        "--score-start-step",
+        type=int,
+        default=0,
+        help="Ignore earlier states so a frozen launch cannot dominate tail selection.",
+    )
     parser.add_argument("--max-wall-seconds", type=float, default=900.0)
     parser.add_argument(
         "--gpu-headroom-gb",
@@ -388,6 +394,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--freeze-prefix-knots must be in [0, knots)")
     if args.freeze_prefix_knots and args.initial_npz is None:
         raise SystemExit("--freeze-prefix-knots requires --initial-npz")
+    if not 0 <= args.score_start_step < args.horizon_steps:
+        raise SystemExit("--score-start-step must be in [0, horizon-steps)")
     for name in ("residual_std", "residual_limit", "action_limit", "min_std"):
         if getattr(args, name) <= 0.0:
             raise SystemExit(f"--{name.replace('_', '-')} must be positive")
@@ -533,6 +541,7 @@ def _evaluate_candidates(
     action_limit: float,
     score_config: StrictScoreConfig,
     sagittal_symmetry: bool,
+    score_start_step: int,
     deadline: float,
     gpu_headroom_gb: float,
     torch: Any,
@@ -612,6 +621,8 @@ def _evaluate_candidates(
         shell_trajectories = torch.stack(corners_by_step, dim=1).cpu().numpy()
         secured_trajectories = torch.stack(secured_by_step, dim=1).cpu().numpy()
         valid_trajectories = torch.stack(valid_by_step, dim=1).cpu().numpy()
+        if score_start_step:
+            valid_trajectories[:, :score_start_step] = False
         for index in range(count):
             results.append(
                 score_strict_trajectory(
@@ -706,6 +717,7 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
                     action_limit=args.action_limit,
                     score_config=score_config,
                     sagittal_symmetry=args.sagittal_symmetry,
+                    score_start_step=args.score_start_step,
                     deadline=deadline,
                     gpu_headroom_gb=args.gpu_headroom_gb,
                     torch=torch,
@@ -785,6 +797,7 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
                     else None
                 ),
                 "freeze_prefix_knots": args.freeze_prefix_knots,
+                "score_start_step": args.score_start_step,
                 "gpu_headroom_gb": args.gpu_headroom_gb,
                 "max_wall_seconds": args.max_wall_seconds,
                 "elapsed_seconds": elapsed,
