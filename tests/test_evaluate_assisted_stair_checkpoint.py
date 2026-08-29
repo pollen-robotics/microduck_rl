@@ -5,7 +5,6 @@ from pathlib import Path
 
 import torch
 
-
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[1]
     / "scripts"

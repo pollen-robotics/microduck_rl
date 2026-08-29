@@ -8,11 +8,11 @@ strict full-route promotion remains in evaluate_stair_checkpoint.py.
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 import hashlib
 import json
 import os
 import re
+from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -23,6 +23,7 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
+
 from mjlab_microduck.tasks.mdp import classify_standard_stair_contacts
 
 TASK_IDS = (
