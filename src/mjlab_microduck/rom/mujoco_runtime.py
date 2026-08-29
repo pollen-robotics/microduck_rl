@@ -44,7 +44,12 @@ from .observation import (
     project_gravity_wxyz,
 )
 from .onnx_policy import inspect_normalized_actor
-from .runtime import RuntimeEvidence, RuntimeHandle, RuntimeSample
+from .runtime import (
+    RuntimeEvidence,
+    RuntimeHandle,
+    RuntimeSample,
+    canonical_tracking_mean,
+)
 
 _CONTROL_PERIOD_S = 0.02
 _CONTINUOUS_ACTIONS = {
@@ -1183,6 +1188,20 @@ class MicroduckMujocoRuntime:
             self._settled_joint_speed_max_radps, joint_speed
         )
 
+    def _tracking_metrics_locked(self) -> dict[str, int | float]:
+        tracking_error_sum = round(self._tracking_error_sum, 6)
+        metrics: dict[str, int | float] = {
+            "trackingErrorSum": tracking_error_sum,
+            "trackingErrorMax": round(self._tracking_error_max, 6),
+            "trackingErrorSamples": self._tracking_error_samples,
+        }
+        if self._tracking_error_samples > 0:
+            metrics["trackingError"] = canonical_tracking_mean(
+                tracking_error_sum,
+                self._tracking_error_samples,
+            )
+        return metrics
+
     def _action_metrics_locked(self) -> dict[str, int | float | bool | str]:
         assert self._active_action is not None
         base_position = self._base_position()
@@ -1212,13 +1231,7 @@ class MicroduckMujocoRuntime:
             "ROLLER_VELOCITY",
             "SWIZZLE",
         }:
-            metrics["trackingError"] = round(
-                self._tracking_error_sum / max(self._tracking_error_samples, 1),
-                6,
-            )
-            metrics["trackingErrorSum"] = round(self._tracking_error_sum, 6)
-            metrics["trackingErrorMax"] = round(self._tracking_error_max, 6)
-            metrics["trackingErrorSamples"] = self._tracking_error_samples
+            metrics.update(self._tracking_metrics_locked())
         if self._active_action.actionCode == "VELSTAND_VELOCITY":
             metrics["uprightSteps"] = self._upright_steps
             metrics["standFraction"] = round(
@@ -1237,12 +1250,7 @@ class MicroduckMujocoRuntime:
             ):
                 metrics.pop(redundant_key)
             metrics["standPoseError"] = round(self._stand_pose_error_locked(), 6)
-            metrics["trackingError"] = round(
-                self._tracking_error_sum / max(self._tracking_error_samples, 1), 6
-            )
-            metrics["trackingErrorSum"] = round(self._tracking_error_sum, 6)
-            metrics["trackingErrorMax"] = round(self._tracking_error_max, 6)
-            metrics["trackingErrorSamples"] = self._tracking_error_samples
+            metrics.update(self._tracking_metrics_locked())
             metrics["standSettledSteps"] = self._settled_steps
             if self._settled_steps:
                 metrics["settledPoseErrorMax"] = round(self._settled_pose_error_max, 6)

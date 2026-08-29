@@ -119,8 +119,11 @@ Raw rollout domains are code-owned. `rollRotationRad`, `slopeProgressM`, and
 in `[0, 1]`. Every other declared action metric is nonnegative. Tracking error,
 its sum and maximum, distance, energy, and maximum absolute action are also
 nonnegative and finite. Each rollout carries one tracking sample per completed
-control step plus the accumulated sum, so startup can reproduce the reported
-mean instead of trusting a terminal snapshot.
+control step plus the accumulated sum. The runtime serializes the sum to six
+decimal places and defines the canonical tracking mean as that serialized sum
+divided by a positive sample count, rounded to six decimal places. Startup
+recomputes this value rather than trusting a terminal snapshot; zero or invalid
+sample counts fail qualification.
 
 Action-metric values are never an independent authority. Startup derives
 `trackingError` from the verified tracking sum/sample mean, `baseTravelM` from
@@ -128,7 +131,9 @@ Action-metric values are never an independent authority. Startup derives
 its explicit yaw accumulator, and `standPoseError` from the final STAND pose
 field. The carried `actionMetricValue` must equal that code-owned derivation
 exactly, and aggregates, thresholds, and promotion status use the derived
-value. A metric key without an installed derivation fails closed.
+value. The carried `trackingError` duplicate must likewise equal the canonical
+sum/sample mean exactly; no trust-boundary tolerance may cross a threshold. A
+metric key without an installed derivation fails closed.
 
 Governed STAND completion requires ten consecutive samples that each satisfy
 the same shared runtime limits: pose error at most 0.08 rad, trunk height in

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import time
 import zipfile
 from datetime import UTC, datetime
@@ -39,6 +40,7 @@ from mjlab_microduck.rom.qualification import (
     ReleaseConfiguration,
     qualify_and_promote,
 )
+from mjlab_microduck.rom.runtime import canonical_tracking_mean
 from mjlab_microduck.rom.service import SimulatorTaskService
 from mjlab_microduck.rom.store import SqliteTaskStore
 
@@ -1087,6 +1089,41 @@ def test_runtime_executes_real_onnx_at_50hz_and_maps_actions_by_joint_name(
     assert runtime.status().activeTaskId is None
 
 
+@pytest.mark.parametrize(
+    ("tracking_error_sum", "sample_count", "expected"),
+    [
+        pytest.param(10.0, 100, 0.1, id="exact-decimal"),
+        pytest.param(0.1 + 0.2, 3, 0.1, id="ordinary-floating-sum"),
+        pytest.param(1.23456789, 3, 0.411523, id="six-decimal-rounding"),
+    ],
+)
+def test_tracking_mean_has_one_deterministic_runtime_serialization_rule(
+    tracking_error_sum: float, sample_count: int, expected: float
+) -> None:
+    """Changing runtime precision would break genuine qualification round trips."""
+    assert canonical_tracking_mean(tracking_error_sum, sample_count) == expected
+
+
+@pytest.mark.parametrize(
+    ("tracking_error_sum", "sample_count"),
+    [
+        pytest.param(0.0, 0, id="zero-count"),
+        pytest.param(1.0, -1, id="negative-count"),
+        pytest.param(1.0, True, id="boolean-count"),
+        pytest.param(1.0, 1.5, id="fractional-count"),
+        pytest.param(math.nan, 1, id="nan-sum"),
+        pytest.param(math.inf, 1, id="infinite-sum"),
+        pytest.param(-1.0, 1, id="negative-sum"),
+    ],
+)
+def test_tracking_mean_rejects_invalid_canonical_evidence(
+    tracking_error_sum: float, sample_count: object
+) -> None:
+    """A missing denominator or invalid sum cannot define trusted tracking evidence."""
+    with pytest.raises(ValueError, match="tracking"):
+        canonical_tracking_mean(tracking_error_sum, sample_count)  # type: ignore[arg-type]
+
+
 def test_runtime_accumulates_tracking_and_distinguishes_clamp_from_joint_limit(
     tmp_path: Path,
 ) -> None:
@@ -1107,6 +1144,9 @@ def test_runtime_accumulates_tracking_and_distinguishes_clamp_from_joint_limit(
     clamped = clamped_runtime.safe_stop(handle, "TEST_COMPLETE").metrics
 
     assert clamped["trackingErrorSamples"] == 2
+    assert clamped["trackingError"] == canonical_tracking_mean(
+        clamped["trackingErrorSum"], clamped["trackingErrorSamples"]
+    )
     assert clamped["trackingError"] <= clamped["trackingErrorMax"]
     assert clamped["actuatorClampSteps"] == 2
     assert clamped["physicalJointLimitViolations"] == 0

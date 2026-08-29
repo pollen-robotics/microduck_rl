@@ -14,6 +14,30 @@ _MAX_METRICS = 32
 _MAX_METRIC_KEY_LENGTH = 64
 _MAX_METRIC_STRING_LENGTH = 128
 _MAX_METRICS_ENCODED_BYTES = 1_024
+_TRACKING_MEAN_DECIMAL_PLACES = 6
+
+
+def canonical_tracking_mean(
+    tracking_error_sum: float, tracking_sample_count: int
+) -> float:
+    """Serialize one finite tracking sum/sample mean at runtime precision."""
+    if (
+        not isinstance(tracking_error_sum, int | float)
+        or isinstance(tracking_error_sum, bool)
+        or not math.isfinite(float(tracking_error_sum))
+        or tracking_error_sum < 0.0
+    ):
+        raise ValueError("tracking error sum must be a finite nonnegative number")
+    if (
+        not isinstance(tracking_sample_count, int)
+        or isinstance(tracking_sample_count, bool)
+        or tracking_sample_count <= 0
+    ):
+        raise ValueError("tracking sample count must be a positive integer")
+    return round(
+        float(tracking_error_sum) / tracking_sample_count,
+        _TRACKING_MEAN_DECIMAL_PLACES,
+    )
 
 
 def _bounded_metrics(metrics: Mapping[str, RuntimeMetric]) -> dict[str, RuntimeMetric]:

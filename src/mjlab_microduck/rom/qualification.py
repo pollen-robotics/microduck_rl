@@ -26,6 +26,7 @@ from .contracts import (
 )
 from .main import load_verified_bundle
 from .mujoco_runtime import MicroduckMujocoRuntime
+from .runtime import canonical_tracking_mean
 from .runtime_identity import runtime_revision
 
 QUALIFICATION_REPORT_PATH = "qualification/qualification-v1.json"
@@ -265,8 +266,11 @@ def _derive_action_metric_value(rollout: QualificationRollout) -> float:
     derivation = _ACTION_METRIC_DERIVATIONS.get(rollout.actionMetric)
     if derivation == "DISTANCE":
         return rollout.distanceM
-    if derivation == "TRACKING_MEAN" and rollout.trackingError is not None:
-        return rollout.trackingError
+    if derivation == "TRACKING_MEAN" and rollout.trackingErrorSum is not None:
+        return canonical_tracking_mean(
+            rollout.trackingErrorSum,
+            rollout.trackingSampleCount,
+        )
     if derivation == "UPRIGHT_FRACTION":
         return round(rollout.uprightSteps / rollout.steps, 6)
     if derivation == "YAW_ACCUMULATOR" and rollout.yawRotationRad is not None:
@@ -438,7 +442,7 @@ def _validate_rollout_semantics(
     definition: ActionDefinition,
     rollout: QualificationRollout,
     installed_runtime_revision: str,
-) -> float:
+) -> tuple[float, float]:
     spec = ACTION_RUNTIME_SPECS[declaration.actionCode]
     policy = next(
         item for item in bundle.policies if item.policyRef == definition.policyRef
@@ -541,15 +545,15 @@ def _validate_rollout_semantics(
     assert rollout.trackingError is not None
     assert rollout.trackingErrorSum is not None
     assert rollout.trackingErrorMax is not None
+    if rollout.trackingSampleCount != rollout.steps:
+        raise ValueError("qualification rollout tracking evidence is incomplete")
+    derived_tracking_mean = canonical_tracking_mean(
+        rollout.trackingErrorSum,
+        rollout.trackingSampleCount,
+    )
     if (
-        rollout.trackingSampleCount != rollout.steps
-        or not math.isclose(
-            rollout.trackingError,
-            rollout.trackingErrorSum / rollout.trackingSampleCount,
-            rel_tol=0.0,
-            abs_tol=1e-6,
-        )
-        or rollout.trackingErrorMax + 1e-6 < rollout.trackingError
+        rollout.trackingError != derived_tracking_mean
+        or rollout.trackingErrorMax + 1e-6 < derived_tracking_mean
     ):
         raise ValueError("qualification rollout tracking evidence is incomplete")
 
@@ -561,10 +565,10 @@ def _validate_rollout_semantics(
     if rollout.actionMetricValue != derived_action_metric:
         raise ValueError("qualification rollout action metric evidence is inconsistent")
     metric_domain = dict(spec.qualification_metric_domains).get(rollout.actionMetric)
-    if metric_domain == "NONNEGATIVE" and rollout.actionMetricValue < 0.0:
+    if metric_domain == "NONNEGATIVE" and derived_action_metric < 0.0:
         raise ValueError("qualification rollout action metric must be nonnegative")
     if metric_domain == "UNIT_INTERVAL" and not (
-        0.0 <= rollout.actionMetricValue <= 1.0
+        0.0 <= derived_action_metric <= 1.0
     ):
         raise ValueError("qualification rollout action metric must be a fraction")
     if metric_domain not in {"NONNEGATIVE", "SIGNED", "UNIT_INTERVAL"}:
@@ -651,7 +655,7 @@ def _validate_rollout_semantics(
             or (rollout.stopReason == "FALLEN") != rollout.fallen
         ):
             raise ValueError("qualification continuous terminal evidence is invalid")
-        return derived_action_metric
+        return derived_tracking_mean, derived_action_metric
 
     if rollout.terminalState == "SUCCEEDED":
         completion_valid = (
@@ -678,7 +682,7 @@ def _validate_rollout_semantics(
         or (rollout.stopReason == "FALLEN") != rollout.fallen
     ):
         raise ValueError("qualification discrete failure evidence is invalid")
-    return derived_action_metric
+    return derived_tracking_mean, derived_action_metric
 
 
 def recompute_action_qualification(
@@ -707,25 +711,23 @@ def recompute_action_qualification(
         rollout_seeds
     ):
         raise ValueError("qualification rollouts do not cover exact unique seeds")
+    tracking_values = []
     action_values = []
     for rollout in rollouts:
-        action_values.append(
-            _validate_rollout_semantics(
-                bundle,
-                declaration,
-                definition,
-                rollout,
-                installed_runtime_revision,
-            )
+        derived_tracking_mean, derived_action_metric = _validate_rollout_semantics(
+            bundle,
+            declaration,
+            definition,
+            rollout,
+            installed_runtime_revision,
         )
+        tracking_values.append(derived_tracking_mean)
+        action_values.append(derived_action_metric)
 
     success_rate = _mean([1.0 if item.success else 0.0 for item in rollouts])
     fall_rate = _mean([1.0 if item.fallen else 0.0 for item in rollouts])
-    tracking_values = [
-        item.trackingError for item in rollouts if item.trackingError is not None
-    ]
-    mean_tracking = _mean(tracking_values) if tracking_values else None
-    action_mean = _mean(action_values) if len(action_values) == len(rollouts) else None
+    mean_tracking = _mean(tracking_values)
+    action_mean = _mean(action_values)
     mean_distance = _mean([item.distanceM for item in rollouts])
     mean_energy = _mean([item.energyProxy for item in rollouts])
     actuator_clamp_steps = sum(item.actuatorClampSteps for item in rollouts)

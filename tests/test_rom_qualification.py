@@ -821,9 +821,104 @@ def test_runtime_loader_rejects_resigned_optional_walk_metric_only_forgery(
         load_qualified_bundle(installed)
 
 
+def test_runtime_loader_rejects_tracking_duplicate_that_crosses_threshold(
+    tmp_path: Path,
+) -> None:
+    """Tracking sum/count, not a close duplicate, must decide the threshold."""
+    candidate_root = tmp_path / "candidate"
+    _write_verified_bundle(candidate_root)
+    base = _config(mandatory=False).actions[0]
+    configuration = ReleaseConfiguration(
+        release="1.0.1",
+        createdAt=NOW,
+        actions=(
+            base.model_copy(
+                update={
+                    "thresholds": base.thresholds.model_copy(
+                        update={"actionMetricThreshold": 0.0999995}
+                    )
+                }
+            ),
+        ),
+    )
+    promoted = qualify_and_promote(
+        candidate_root,
+        tmp_path / "qualified.zip",
+        configuration,
+        timestamp=lambda: NOW,
+    )
+    result = promoted.report.actions[0]
+    assert result.status == "FAILED"
+    assert promoted.manifest.actions[0].availability == "UNAVAILABLE"
+    installed = tmp_path / "installed"
+    with zipfile.ZipFile(promoted.output_zip) as archive:
+        archive.extractall(installed)
+
+    def normalize_canonical_tracking_evidence(report: dict[str, object]) -> None:
+        normalized_result = report["actions"][0]
+        normalized_result.update(
+            {
+                "meanTrackingError": 0.10000000000000002,
+                "actionMetricMean": 0.10000000000000002,
+            }
+        )
+        for rollout in normalized_result["rollouts"]:
+            rollout["trackingErrorSum"] = 10.0
+            rollout["trackingSampleCount"] = 100
+            rollout["trackingError"] = 0.1
+            rollout["actionMetricValue"] = 0.1
+
+    _resign_mutated_promoted_bundle(
+        installed,
+        mutate_report=normalize_canonical_tracking_evidence,
+    )
+    baseline = load_qualified_bundle(installed)
+    assert baseline.actions[0].availability == "UNAVAILABLE"
+
+    def forge_tracking_duplicate(report: dict[str, object]) -> None:
+        forged_result = report["actions"][0]
+        forged_result.update(
+            {
+                "status": "PASSED",
+                "meanTrackingError": 0.0999994,
+                "actionMetricMean": 0.0999994,
+            }
+        )
+        forged_result.pop("unavailableReason", None)
+        for rollout in forged_result["rollouts"]:
+            assert rollout["trackingErrorSum"] == 10.0
+            assert rollout["trackingSampleCount"] == 100
+            rollout["trackingError"] = 0.0999994
+            rollout["actionMetricValue"] = 0.0999994
+
+    def restore_available_action(manifest: dict[str, object]) -> None:
+        action = manifest["actions"][0]
+        action["availability"] = "AVAILABLE"
+        action.pop("unavailableReason", None)
+
+    _resign_mutated_promoted_bundle(
+        installed,
+        mutate_report=forge_tracking_duplicate,
+        mutate_manifest=restore_available_action,
+    )
+
+    with pytest.raises(ValueError, match="qualification"):
+        load_qualified_bundle(installed)
+
+
 @pytest.mark.parametrize(
     ("metric", "evidence", "expected"),
     [
+        pytest.param(
+            "trackingError",
+            {
+                "trackingErrorSum": 0.1 + 0.2,
+                "trackingSampleCount": 3,
+                "trackingError": 0.0999994,
+            },
+            0.1,
+            id="tracking-sum-count",
+        ),
         pytest.param("baseTravelM", {"distanceM": 1.75}, 1.75, id="distance"),
         pytest.param(
             "standFraction",
@@ -880,6 +975,10 @@ def test_rollout_semantics_reject_invalid_numeric_domains_before_aggregation(
         {"energyProxy": -0.1},
         {"actuatorClampSteps": -1},
         {"physicalJointLimitViolations": -1},
+        {"trackingSampleCount": 0},
+        {"trackingSampleCount": -1},
+        {"trackingSampleCount": False},
+        {"trackingSampleCount": 1.5},
         {"maxAbsAction": -0.1},
         {"actionMetricValue": -0.1},
         {"trackingError": math.nan},
