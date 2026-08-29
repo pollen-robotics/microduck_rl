@@ -399,6 +399,28 @@ def phase_balanced_row_buckets(
     return buckets
 
 
+def phase_aligned_local_x(
+    source_steps: torch.Tensor,
+    *,
+    source_episode_step_range: tuple[int, int],
+    local_x_range: tuple[float, float],
+) -> torch.Tensor:
+    """Map reference time monotonically onto the stair approach corridor."""
+
+    step_low, step_high = source_episode_step_range
+    x_low, x_high = local_x_range
+    if step_high <= step_low:
+        raise ValueError("Phase-aligned replay requires an ascending step range")
+    if x_high <= x_low:
+        raise ValueError("Phase-aligned replay requires an ascending x range")
+    phase = torch.clamp(
+        (source_steps.to(torch.float32) - step_low) / (step_high - step_low),
+        min=0.0,
+        max=1.0,
+    )
+    return x_low + phase * (x_high - x_low)
+
+
 class WalkerStateBankReset:
     """Replace assisted mode 3 with a real frozen-walker handoff state."""
 
@@ -413,14 +435,23 @@ class WalkerStateBankReset:
         )
         self._local_x_range = cfg.params.get("local_x_range")
         self._local_y_range = cfg.params.get("local_y_range")
+        self._phase_aligned_local_x_range = cfg.params.get(
+            "phase_aligned_local_x_range"
+        )
+        self._phase_aligned_x_jitter = float(
+            cfg.params.get("phase_aligned_x_jitter", 0.0)
+        )
         self._zero_missing_pose_commands = bool(
             cfg.params.get("zero_missing_pose_commands", False)
         )
         self._phase_balanced = bool(cfg.params.get("phase_balanced", False))
         self._phase_bucket_count = int(cfg.params.get("phase_bucket_count", 4))
+        self._source_episode_step_range = cfg.params.get(
+            "source_episode_step_range"
+        )
         self._eligible_rows = eligible_walk_state_rows(
             self._states,
-            source_episode_step_range=cfg.params.get("source_episode_step_range"),
+            source_episode_step_range=self._source_episode_step_range,
             min_forward_speed=cfg.params.get("min_forward_speed"),
             min_vertical_speed=cfg.params.get("min_vertical_speed"),
             min_root_height=cfg.params.get("min_root_height"),
@@ -432,7 +463,7 @@ class WalkerStateBankReset:
         )
         self._phase_rows: tuple[torch.Tensor, ...] | None = None
         if self._phase_balanced:
-            source_range = cfg.params.get("source_episode_step_range")
+            source_range = self._source_episode_step_range
             if source_range is None:
                 raise ValueError(
                     "Phase-balanced walker replay requires source_episode_step_range"
@@ -443,6 +474,17 @@ class WalkerStateBankReset:
                 source_episode_step_range=source_range,
                 bucket_count=self._phase_bucket_count,
             )
+        if self._phase_aligned_local_x_range is not None:
+            if self._local_x_range is not None:
+                raise ValueError(
+                    "Use local_x_range or phase_aligned_local_x_range, not both"
+                )
+            if self._source_episode_step_range is None:
+                raise ValueError(
+                    "Phase-aligned replay requires source_episode_step_range"
+                )
+            if self._phase_aligned_x_jitter < 0.0:
+                raise ValueError("Phase-aligned x jitter must be nonnegative")
 
         robot = env.scene["robot"]
         saved_joint_names = self._bank["metadata"].get("joint_names")
@@ -469,6 +511,8 @@ class WalkerStateBankReset:
         max_abs_yaw_rate: float | None = None,
         phase_balanced: bool = False,
         phase_bucket_count: int = 4,
+        phase_aligned_local_x_range: tuple[float, float] | None = None,
+        phase_aligned_x_jitter: float = 0.0,
     ) -> None:
         del (
             bank_path,
@@ -487,6 +531,8 @@ class WalkerStateBankReset:
             max_abs_yaw_rate,
             phase_balanced,
             phase_bucket_count,
+            phase_aligned_local_x_range,
+            phase_aligned_x_jitter,
         )
         mode = getattr(env, "_stair_assisted_reset_mode", None)
         if mode is None:
@@ -544,7 +590,23 @@ class WalkerStateBankReset:
         root_qvel = saved["root_qvel"].clone()
         if self._canonicalize_heading:
             root_qpos, root_qvel = _canonicalize_root_heading(root_qpos, root_qvel)
-        if self._local_x_range is not None:
+        if self._phase_aligned_local_x_range is not None:
+            source_range = self._source_episode_step_range
+            assert source_range is not None
+            source_steps = self._states["source_episode_step"][rows.cpu()].to(
+                env.device
+            )
+            root_qpos[:, 0] = phase_aligned_local_x(
+                source_steps,
+                source_episode_step_range=tuple(source_range),
+                local_x_range=tuple(self._phase_aligned_local_x_range),
+            ).to(root_qpos.dtype)
+            if self._phase_aligned_x_jitter > 0.0:
+                root_qpos[:, 0] += torch.empty_like(root_qpos[:, 0]).uniform_(
+                    -self._phase_aligned_x_jitter,
+                    self._phase_aligned_x_jitter,
+                )
+        elif self._local_x_range is not None:
             low, high = self._local_x_range
             root_qpos[:, 0].uniform_(low, high)
         if self._local_y_range is not None:

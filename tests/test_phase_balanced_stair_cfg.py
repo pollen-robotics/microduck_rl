@@ -1,5 +1,10 @@
 from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
+    MicroduckStairCurriculumRsiRlCfg,
     MicroduckStairPhaseBalancedRsiRlCfg,
+    STAIR_MECHANISM_CURRICULUM_LEVELS,
+    STAIR_MECHANISM_MIN_RISER_HEIGHT,
+    STANDARD_RISER_HEIGHT,
+    make_microduck_stair_curriculum_rsi_env_cfg,
     make_microduck_stair_phase_balanced_rsi_env_cfg,
 )
 
@@ -16,3 +21,52 @@ def test_phase_balanced_rsi_replays_four_roll_phases():
     assert cfg.rewards["stair_first_tread_secured"].weight == 400.0
     assert MicroduckStairPhaseBalancedRsiRlCfg.max_iterations == 400
     assert MicroduckStairPhaseBalancedRsiRlCfg.save_interval == 25
+
+
+def test_curriculum_rsi_preserves_actor_contract_and_real_stair_challenge():
+    baseline = make_microduck_stair_phase_balanced_rsi_env_cfg()
+    cfg = make_microduck_stair_curriculum_rsi_env_cfg()
+    terrain = next(iter(cfg.scene.terrain.terrain_generator.sub_terrains.values()))
+    bank = cfg.events["walker_state_bank"].params
+
+    assert cfg.scene.terrain.terrain_generator.num_rows == (
+        STAIR_MECHANISM_CURRICULUM_LEVELS
+    )
+    assert terrain.riser_height_range == (
+        STAIR_MECHANISM_MIN_RISER_HEIGHT,
+        STANDARD_RISER_HEIGHT,
+    )
+    assert terrain.difficulty_levels == STAIR_MECHANISM_CURRICULUM_LEVELS
+    assert cfg.scene.terrain.max_init_terrain_level == 2
+    assert cfg.events["route_challenge_levels"].params["standard_fraction"] == 0.25
+    assert cfg.curriculum["terrain_levels"].func.__name__ == "route_terrain_levels"
+
+    assert "local_x_range" not in bank
+    assert bank["phase_aligned_local_x_range"] == (0.46, 0.62)
+    assert bank["phase_aligned_x_jitter"] == 0.01
+    assert tuple(cfg.observations["actor"].terms) == tuple(
+        baseline.observations["actor"].terms
+    )
+    assert "stair_privileged_state" not in cfg.observations["actor"].terms
+    assert "stair_privileged_state" in cfg.observations["critic"].terms
+
+    fixed_proxies = (
+        "stair_apex_or_mantle_frontier",
+        "stair_riser_face_contact",
+        "stair_first_tread_contact",
+        "stair_assisted_lift",
+        "stair_assisted_crossing",
+        "stair_tread_support_frontier",
+        "stair_first_tread_secured",
+        "stair_first_tread_settle_quality",
+    )
+    assert all(cfg.rewards[name].weight == 0.0 for name in fixed_proxies)
+    assert cfg.rewards["stair_curriculum_mantle_frontier"].weight == 12.0
+    clearance = cfg.rewards["stair_first_riser_clearance"]
+    assert clearance.weight == 500.0
+    assert "riser_height" not in clearance.params
+    assert clearance.params["min_riser_height"] == STAIR_MECHANISM_MIN_RISER_HEIGHT
+    assert clearance.params["max_riser_height"] == STANDARD_RISER_HEIGHT
+    assert clearance.params["num_terrain_levels"] == STAIR_MECHANISM_CURRICULUM_LEVELS
+    assert MicroduckStairCurriculumRsiRlCfg.max_iterations == 600
+    assert MicroduckStairCurriculumRsiRlCfg.save_interval == 25

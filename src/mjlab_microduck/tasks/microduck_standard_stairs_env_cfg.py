@@ -13,7 +13,12 @@ from dataclasses import dataclass
 import mujoco
 import numpy as np
 from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.managers import EventTermCfg, RewardTermCfg
+from mjlab.managers import (
+    CurriculumTermCfg,
+    EventTermCfg,
+    ObservationTermCfg,
+    RewardTermCfg,
+)
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.terrains.terrain_generator import (
@@ -55,6 +60,8 @@ STANDARD_TOP_ROOT_HEIGHT = (
 )
 ROUTE_MIN_RISER_HEIGHT = 0.010
 ROUTE_CURRICULUM_LEVELS = 16
+STAIR_MECHANISM_MIN_RISER_HEIGHT = 0.10
+STAIR_MECHANISM_CURRICULUM_LEVELS = 8
 
 
 @dataclass(kw_only=True)
@@ -971,6 +978,137 @@ def make_microduck_stair_phase_balanced_rsi_env_cfg(
     return cfg
 
 
+def make_microduck_stair_curriculum_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A20: adapt aligned manufacturer roll phases from 100 to 170 mm."""
+
+    cfg = make_microduck_stair_phase_balanced_rsi_env_cfg(play=False)
+    cfg.episode_length_s = 6.0
+
+    # Eight discrete heights teach the contact mechanism without changing the
+    # final objective. A standing quarter of each training batch is pinned to
+    # the literal 170 mm home stair, while successful lower rows advance only
+    # after a durable first-riser clearance.
+    terrain_generator = cfg.scene.terrain.terrain_generator
+    terrain_generator.num_rows = STAIR_MECHANISM_CURRICULUM_LEVELS
+    for terrain_cfg in terrain_generator.sub_terrains.values():
+        terrain_cfg.riser_height_range = (
+            STAIR_MECHANISM_MIN_RISER_HEIGHT,
+            STANDARD_RISER_HEIGHT,
+        )
+        terrain_cfg.difficulty_levels = STAIR_MECHANISM_CURRICULUM_LEVELS
+    cfg.scene.terrain.max_init_terrain_level = (
+        STAIR_MECHANISM_CURRICULUM_LEVELS - 1 if play else 2
+    )
+    challenge_event = EventTermCfg(
+        func=microduck_mdp.seed_route_challenge_levels,
+        mode="reset",
+        params={"standard_fraction": 1.0 if play else 0.25},
+    )
+    cfg.events = {"route_challenge_levels": challenge_event, **cfg.events}
+    if play:
+        cfg.curriculum.pop("terrain_levels", None)
+    else:
+        cfg.curriculum["terrain_levels"] = CurriculumTermCfg(
+            func=microduck_mdp.route_terrain_levels,
+            params={},
+        )
+
+    # Keep each reference phase at the spatial point where it can perform its
+    # intended job. The old uniform 0.48-0.58 m override placed preload,
+    # contact, apex, and release in the same band and erased roll timing.
+    bank = cfg.events["walker_state_bank"].params
+    bank.pop("local_x_range", None)
+    bank.update(
+        {
+            "phase_aligned_local_x_range": (0.46, 0.62),
+            "phase_aligned_x_jitter": 0.01,
+        }
+    )
+    cfg.events["walker_state_bank"] = EventTermCfg(
+        func=WalkerStateBankReset,
+        mode="reset",
+        params=bank,
+    )
+
+    route_cue_params = {
+        "stair_start_distance": STANDARD_STAIR_START_DISTANCE,
+        "goal_distance": STANDARD_GOAL_DISTANCE,
+        "min_riser_height": STAIR_MECHANISM_MIN_RISER_HEIGHT,
+        "max_riser_height": STANDARD_RISER_HEIGHT,
+        "num_terrain_levels": STAIR_MECHANISM_CURRICULUM_LEVELS,
+        "tread_depth": STANDARD_TREAD_DEPTH,
+        "num_steps": STANDARD_NUM_STEPS,
+        "cue_distance": 0.30,
+    }
+    for observation_group in ("actor", "critic"):
+        cfg.observations[observation_group].terms["body_command"].params = (
+            route_cue_params
+        )
+    # The actor remains the manufacturer's 61D deployment contract. Only the
+    # critic sees exact obstacle, contact, curriculum, and reference-phase
+    # state, matching the asymmetric training pattern used by parkour systems.
+    cfg.observations["critic"].terms["stair_privileged_state"] = (
+        ObservationTermCfg(
+            func=microduck_mdp.stair_critic_privileged_state,
+            params={
+                "stair_start_distance": STANDARD_STAIR_START_DISTANCE,
+                "min_riser_height": STAIR_MECHANISM_MIN_RISER_HEIGHT,
+                "max_riser_height": STANDARD_RISER_HEIGHT,
+                "num_terrain_levels": STAIR_MECHANISM_CURRICULUM_LEVELS,
+                "source_episode_step_range": (15, 60),
+                "corridor_half_width": STANDARD_STAIR_WIDTH * 0.40,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+    )
+
+    # Fixed-170 mm contact proxies are invalid on lower rows. Retain only a
+    # terrain-aware, non-farmable frontier and the same durable clearance gate
+    # at every row. Full-height promotion is evaluated separately and strictly.
+    for reward_name in (
+        "stair_apex_or_mantle_frontier",
+        "stair_riser_face_contact",
+        "stair_first_tread_contact",
+        "stair_assisted_lift",
+        "stair_assisted_crossing",
+        "stair_tread_support_frontier",
+        "stair_first_tread_secured",
+        "stair_first_tread_settle_quality",
+    ):
+        cfg.rewards[reward_name].weight = 0.0
+    cfg.rewards["stair_curriculum_mantle_frontier"] = RewardTermCfg(
+        func=microduck_mdp.stair_curriculum_mantle_frontier,
+        weight=12.0,
+        params={
+            "stair_start_distance": STANDARD_STAIR_START_DISTANCE,
+            "min_riser_height": STAIR_MECHANISM_MIN_RISER_HEIGHT,
+            "max_riser_height": STANDARD_RISER_HEIGHT,
+            "num_terrain_levels": STAIR_MECHANISM_CURRICULUM_LEVELS,
+            "standing_root_height": STANDARD_STANDING_ROOT_HEIGHT,
+            "x_margin": 0.04,
+            "z_margin": 0.025,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    clearance = cfg.rewards["stair_first_riser_clearance"]
+    clearance.weight = 500.0
+    clearance.params.pop("riser_height", None)
+    clearance.params.update(
+        {
+            "min_riser_height": STAIR_MECHANISM_MIN_RISER_HEIGHT,
+            "max_riser_height": STANDARD_RISER_HEIGHT,
+            "num_terrain_levels": STAIR_MECHANISM_CURRICULUM_LEVELS,
+            "x_margin": 0.04,
+            "z_margin": 0.025,
+            "max_vertical_speed": 0.45,
+            "hold_time_s": 0.10,
+        }
+    )
+    return cfg
+
+
 def make_microduck_stair_tread_contact_bank_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -1224,6 +1362,18 @@ MicroduckStairPhaseBalancedRsiRlCfg.max_iterations = 400
 MicroduckStairPhaseBalancedRsiRlCfg.save_interval = 25
 MicroduckStairPhaseBalancedRsiRlCfg.actor.distribution_cfg["init_std"] = 0.30
 MicroduckStairPhaseBalancedRsiRlCfg.algorithm.learning_rate = 2.0e-5
+
+MicroduckStairCurriculumRsiRlCfg = deepcopy(MicroduckStairPhaseBalancedRsiRlCfg)
+MicroduckStairCurriculumRsiRlCfg.experiment_name = (
+    "microduck_stair_curriculum_rsi_specialist"
+)
+MicroduckStairCurriculumRsiRlCfg.run_name = (
+    "microduck_stair_curriculum_rsi_specialist"
+)
+MicroduckStairCurriculumRsiRlCfg.max_iterations = 600
+MicroduckStairCurriculumRsiRlCfg.save_interval = 25
+MicroduckStairCurriculumRsiRlCfg.actor.distribution_cfg["init_std"] = 0.30
+MicroduckStairCurriculumRsiRlCfg.algorithm.learning_rate = 2.0e-5
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)
 MicroduckStairTreadContactBankRlCfg.experiment_name = (

@@ -24,6 +24,7 @@ from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 
 from mjlab_microduck.policies import HardStairHandoffPolicy, load_actor_pair
+from mjlab_microduck.tasks import mdp as microduck_mdp
 
 TASK_ID = "Mjlab-Stairs-Route-MicroDuck"
 STANDARD_RISER_HEIGHT_M = 0.170
@@ -150,6 +151,18 @@ def main() -> int:
     max_upright = torch.zeros(args.num_envs, device=device)
     success_count = torch.zeros(args.num_envs, dtype=torch.long, device=device)
     previous_latch = torch.zeros(args.num_envs, dtype=torch.bool, device=device)
+    first_riser_count = torch.zeros(
+        args.num_envs, dtype=torch.long, device=device
+    )
+    previous_first_riser = torch.zeros(
+        args.num_envs, dtype=torch.bool, device=device
+    )
+    secured_tread_count = torch.zeros(
+        args.num_envs, dtype=torch.long, device=device
+    )
+    previous_secured_tread = torch.zeros(
+        args.num_envs, dtype=torch.bool, device=device
+    )
 
     try:
         for _ in range(args.steps):
@@ -188,12 +201,39 @@ def main() -> int:
             latch = getattr(base_env, "_stair_goal_latched", previous_latch)
             success_count += (latch & ~previous_latch).to(torch.long)
             previous_latch = latch.clone()
+            first_riser = getattr(
+                base_env,
+                "_stair_first_riser_latched",
+                previous_first_riser,
+            )
+            first_riser_count += (
+                first_riser & ~previous_first_riser
+            ).to(torch.long)
+            previous_first_riser = first_riser.clone()
+
+            # The route task does not reward tread-one settlement, so compute
+            # the exact physical gate only in this frozen evaluation. This is
+            # the first promotion slice before attempting the full staircase.
+            microduck_mdp.stair_first_tread_secured(base_env)
+            secured_tread = getattr(
+                base_env,
+                "_stair_first_tread_secured_latched",
+                previous_secured_tread,
+            )
+            secured_tread_count += (
+                secured_tread & ~previous_secured_tread
+            ).to(torch.long)
+            previous_secured_tread = secured_tread.clone()
             fresh = base_env.episode_length_buf <= 1
             previous_latch[fresh] = False
+            previous_first_riser[fresh] = False
+            previous_secured_tread[fresh] = False
     finally:
         env.close()
 
     successes = int(success_count.sum().item())
+    first_riser_clearances = int(first_riser_count.sum().item())
+    secured_first_treads = int(secured_tread_count.sum().item())
     report: dict[str, object] = {
         "schema_version": 3,
         "task": TASK_ID,
@@ -224,6 +264,10 @@ def main() -> int:
         "steps": args.steps,
         "successes": successes,
         "success_rate": successes / args.num_envs,
+        "first_riser_clearances": first_riser_clearances,
+        "first_riser_clearance_rate": first_riser_clearances / args.num_envs,
+        "secured_first_treads": secured_first_treads,
+        "secured_first_tread_rate": secured_first_treads / args.num_envs,
         "mean_max_route_x_m": float(max_x.mean().item()),
         "best_route_x_m": float(max_x.max().item()),
         "mean_max_corridor_route_x_m": float(max_x.mean().item()),
@@ -235,6 +279,7 @@ def main() -> int:
         "maximum_abs_lateral_offset_m": float(max_abs_y.max().item()),
         "mean_max_upright": float(max_upright.mean().item()),
         "verified_full_route": successes > 0,
+        "verified_first_riser": secured_first_treads > 0,
     }
     output = args.output or checkpoint.with_suffix(".stair-eval.json")
     _write_json_atomic(output.resolve(), report)

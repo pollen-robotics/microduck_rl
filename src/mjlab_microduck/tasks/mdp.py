@@ -952,6 +952,121 @@ def stair_first_riser_frontier(
     return delta / env.step_dt
 
 
+def stair_curriculum_mantle_frontier(
+    env: ManagerBasedRlEnv,
+    stair_start_distance: float,
+    min_riser_height: float,
+    max_riser_height: float,
+    num_terrain_levels: int,
+    standing_root_height: float,
+    approach_distance: float = 0.18,
+    preload_distance: float = 0.08,
+    x_margin: float = 0.04,
+    z_margin: float = 0.025,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Mechanism-agnostic first-riser frontier for a height curriculum."""
+
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    levels = env.scene.terrain.terrain_levels.to(dtype=x.dtype)
+    level_fraction = torch.clamp(
+        levels / max(num_terrain_levels - 1, 1), min=0.0, max=1.0
+    )
+    riser_height = min_riser_height + level_fraction * (
+        max_riser_height - min_riser_height
+    )
+    approach = torch.clamp(
+        (x - (stair_start_distance - approach_distance))
+        / max(approach_distance - 0.02, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    preload_gate = torch.sigmoid(
+        (x - (stair_start_distance - preload_distance)) / 0.02
+    )
+    lip_height = riser_height + z_margin
+    lift = torch.clamp(
+        (z - standing_root_height)
+        / torch.clamp(lip_height - standing_root_height, min=1e-6),
+        min=0.0,
+        max=1.0,
+    ) * preload_gate
+    crossing = torch.clamp(
+        (x - (stair_start_distance - 0.02)) / max(x_margin + 0.02, 1e-6),
+        min=0.0,
+        max=1.0,
+    ) * lift
+    frontier = (approach + lift + crossing) / 3.0
+    return _new_frontier_delta(env, frontier, "_stair_curriculum_mantle_frontier")
+
+
+def stair_critic_privileged_state(
+    env: ManagerBasedRlEnv,
+    stair_start_distance: float,
+    min_riser_height: float,
+    max_riser_height: float,
+    num_terrain_levels: int,
+    source_episode_step_range: tuple[int, int] = (15, 60),
+    corridor_half_width: float = 0.36,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Critic-only obstacle, contact, and reference-phase information."""
+
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, upright = _stair_local_state(env, asset_cfg)
+    y = asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    levels = env.scene.terrain.terrain_levels.to(dtype=x.dtype)
+    level_fraction = torch.clamp(
+        levels / max(num_terrain_levels - 1, 1), min=0.0, max=1.0
+    )
+    riser_height = min_riser_height + level_fraction * (
+        max_riser_height - min_riser_height
+    )
+    linear_velocity = torch.nan_to_num(asset.data.root_link_lin_vel_w, nan=0.0)
+    angular_velocity = torch.nan_to_num(asset.data.root_link_ang_vel_w, nan=0.0)
+    source_step = getattr(env, "_stair_walker_bank_source_step", None)
+    if source_step is None:
+        phase = torch.zeros_like(x)
+    else:
+        step_low, step_high = source_episode_step_range
+        phase = torch.clamp(
+            (source_step.to(x.dtype) - step_low) / max(step_high - step_low, 1),
+            min=0.0,
+            max=1.0,
+        )
+
+    def contact_bit(sensor_name: str) -> torch.Tensor:
+        if sensor_name not in env.scene.sensors:
+            return torch.zeros_like(x)
+        found = env.scene.sensors[sensor_name].data.found
+        return (found.view(found.shape[0], -1) > 0).any(dim=-1).to(x.dtype)
+
+    clearance = getattr(env, "_stair_first_riser_latched", None)
+    if clearance is None:
+        clearance_bit = torch.zeros_like(x)
+    else:
+        clearance_bit = clearance.to(x.dtype)
+    return torch.stack(
+        (
+            torch.clamp((stair_start_distance - x) / 0.25, -1.0, 1.0),
+            torch.clamp(y / max(corridor_half_width, 1e-6), -1.0, 1.0),
+            torch.clamp((z - riser_height) / max_riser_height, -1.0, 1.0),
+            upright,
+            torch.clamp(linear_velocity[:, 0], -2.0, 2.0),
+            torch.clamp(linear_velocity[:, 2], -2.0, 2.0),
+            torch.clamp(angular_velocity[:, 1] / 8.0, -2.0, 2.0),
+            level_fraction,
+            phase,
+            contact_bit("head_ground_contact"),
+            contact_bit("trunk_ground_contact"),
+            contact_bit("legs_ground_contact"),
+            contact_bit("feet_stair_contact"),
+            clearance_bit,
+        ),
+        dim=-1,
+    )
+
+
 def reset_route_learning_states(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,

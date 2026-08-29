@@ -8,6 +8,7 @@ from mjlab_microduck.tasks.stair_walk_state_bank import (
     _restore_circular_rows,
     concatenate_walk_state_rows,
     eligible_walk_state_rows,
+    phase_aligned_local_x,
     phase_balanced_row_buckets,
 )
 
@@ -169,3 +170,28 @@ def test_phase_balanced_buckets_cover_sparse_late_reference_motion():
     )
 
     assert [bucket.tolist() for bucket in buckets] == [[0, 1], [2, 3], [4, 5], [6]]
+
+
+def test_phase_aligned_local_x_preserves_reference_order():
+    positions = phase_aligned_local_x(
+        torch.tensor([15, 37.5, 60]),
+        source_episode_step_range=(15, 60),
+        local_x_range=(0.46, 0.62),
+    )
+
+    assert torch.allclose(positions, torch.tensor([0.46, 0.54, 0.62]))
+
+
+def test_phase_aligned_local_x_rejects_degenerate_ranges():
+    with __import__("pytest").raises(ValueError, match="ascending step"):
+        phase_aligned_local_x(
+            torch.tensor([15]),
+            source_episode_step_range=(15, 15),
+            local_x_range=(0.46, 0.62),
+        )
+    with __import__("pytest").raises(ValueError, match="ascending x"):
+        phase_aligned_local_x(
+            torch.tensor([15]),
+            source_episode_step_range=(15, 60),
+            local_x_range=(0.62, 0.46),
+        )
