@@ -14,7 +14,7 @@ from typing import Any, Literal
 import mujoco
 from pydantic import Field, model_validator
 
-from .action_specs import ACTION_RUNTIME_SPECS
+from .action_specs import ACTION_RUNTIME_SPECS, STAND_SETTLEMENT_LIMITS
 from .contracts import (
     ActionDefinition,
     ContractModel,
@@ -32,9 +32,7 @@ QUALIFICATION_REPORT_PATH = "qualification/qualification-v1.json"
 RELEASE_CONFIGURATION_PATH = "qualification/release-v1.json"
 SUBJECT_MANIFEST_PATH = "qualification/subject-manifest-v1.json"
 _REPORT_BINDING = "VERIFIED_INPUT_BUNDLE_DIGEST_V1"
-_RUNTIME_IDENTIFIER = (
-    "mjlab_microduck.rom.mujoco_runtime.MicroduckMujocoRuntime"
-)
+_RUNTIME_IDENTIFIER = "mjlab_microduck.rom.mujoco_runtime.MicroduckMujocoRuntime"
 
 
 class QualificationFailed(RuntimeError):
@@ -76,9 +74,7 @@ class ActionQualificationConfig(ContractModel):
     def validate_seeds(self) -> ActionQualificationConfig:
         if len(self.seeds) != len(set(self.seeds)):
             raise ValueError("qualification seeds must be unique")
-        if any(
-            isinstance(seed, bool) or not 0 <= seed < 2**32 for seed in self.seeds
-        ):
+        if any(isinstance(seed, bool) or not 0 <= seed < 2**32 for seed in self.seeds):
             raise ValueError("qualification seeds must be unsigned 32-bit integers")
         return self
 
@@ -142,9 +138,17 @@ class QualificationRollout(ContractModel):
     actuatorClampSteps: int
     physicalJointLimitViolations: int
     settledSteps: int
+    uprightSteps: int
     maxAbsAction: float
     actionMetric: str
     actionMetricValue: float | None
+    yawRotationRad: float | None = None
+    standPoseError: float | None = None
+    settledPoseErrorMax: float | None = None
+    settledTrunkHeightMinM: float | None = None
+    settledTrunkHeightMaxM: float | None = None
+    settledTrunkTiltMaxRad: float | None = None
+    settledJointSpeedMaxRadps: float | None = None
     stopReason: str
 
 
@@ -248,6 +252,30 @@ def _task_id(bundle_digest: str, action_code: str, seed: int) -> str:
     ).hexdigest()[:32]
 
 
+_ACTION_METRIC_DERIVATIONS = {
+    "baseTravelM": "DISTANCE",
+    "trackingError": "TRACKING_MEAN",
+    "standFraction": "UPRIGHT_FRACTION",
+    "yawRotationRad": "YAW_ACCUMULATOR",
+    "standPoseError": "STAND_FINAL_POSE_ERROR",
+}
+
+
+def _derive_action_metric_value(rollout: QualificationRollout) -> float:
+    derivation = _ACTION_METRIC_DERIVATIONS.get(rollout.actionMetric)
+    if derivation == "DISTANCE":
+        return rollout.distanceM
+    if derivation == "TRACKING_MEAN" and rollout.trackingError is not None:
+        return rollout.trackingError
+    if derivation == "UPRIGHT_FRACTION":
+        return round(rollout.uprightSteps / rollout.steps, 6)
+    if derivation == "YAW_ACCUMULATOR" and rollout.yawRotationRad is not None:
+        return rollout.yawRotationRad
+    if derivation == "STAND_FINAL_POSE_ERROR" and rollout.standPoseError is not None:
+        return rollout.standPoseError
+    raise ValueError("qualification rollout action metric derivation is undefined")
+
+
 def validate_release_configuration(
     bundle: PolicyBundle, configuration: ReleaseConfiguration
 ) -> None:
@@ -273,7 +301,9 @@ def validate_release_configuration(
                 f"mandatory action {code} is not supported by candidate capabilities"
             )
         if spec is None:
-            raise ReleaseConfigurationError(f"action {code} has no code-owned runtime spec")
+            raise ReleaseConfigurationError(
+                f"action {code} has no code-owned runtime spec"
+            )
         if declaration.resetProfile != spec.reset_profile:
             raise ReleaseConfigurationError(
                 f"action {code} reset profile does not match code-owned semantics"
@@ -286,14 +316,18 @@ def validate_release_configuration(
             raise ReleaseConfigurationError(
                 f"action {code} command does not match code-owned qualification"
             )
-        if not spec.qualification_min_seeds <= len(
-            declaration.seeds
-        ) <= spec.qualification_max_seeds:
+        if (
+            not spec.qualification_min_seeds
+            <= len(declaration.seeds)
+            <= spec.qualification_max_seeds
+        ):
             raise ReleaseConfigurationError(
                 f"action {code} seed count does not match code-owned bounds"
             )
-        if not spec.qualification_min_steps <= declaration.maxSteps <= (
-            spec.qualification_max_steps
+        if (
+            not spec.qualification_min_steps
+            <= declaration.maxSteps
+            <= (spec.qualification_max_steps)
         ):
             raise ReleaseConfigurationError(
                 f"action {code} step count does not match code-owned bounds"
@@ -306,6 +340,13 @@ def validate_release_configuration(
         ):
             raise ReleaseConfigurationError(
                 f"action {code} metric does not match code-owned qualification"
+            )
+        if (
+            definition.availability == "AVAILABLE"
+            and declaration.thresholds.actionMetric not in _ACTION_METRIC_DERIVATIONS
+        ):
+            raise ReleaseConfigurationError(
+                f"action {code} metric has no code-owned evidence derivation"
             )
         if declaration.terrain != bundle.qualification.get("modelTerrain"):
             raise ReleaseConfigurationError(
@@ -397,7 +438,7 @@ def _validate_rollout_semantics(
     definition: ActionDefinition,
     rollout: QualificationRollout,
     installed_runtime_revision: str,
-) -> None:
+) -> float:
     spec = ACTION_RUNTIME_SPECS[declaration.actionCode]
     policy = next(
         item for item in bundle.policies if item.policyRef == definition.policyRef
@@ -435,6 +476,7 @@ def _validate_rollout_semantics(
         rollout.actuatorClampSteps,
         rollout.physicalJointLimitViolations,
         rollout.settledSteps,
+        rollout.uprightSteps,
     )
     numeric_values = (
         rollout.trackingError,
@@ -444,6 +486,13 @@ def _validate_rollout_semantics(
         rollout.energyProxy,
         rollout.maxAbsAction,
         rollout.actionMetricValue,
+        rollout.yawRotationRad,
+        rollout.standPoseError,
+        rollout.settledPoseErrorMax,
+        rollout.settledTrunkHeightMinM,
+        rollout.settledTrunkHeightMaxM,
+        rollout.settledTrunkTiltMaxRad,
+        rollout.settledJointSpeedMaxRadps,
     )
     if any(
         value is not None and not math.isfinite(float(value))
@@ -461,6 +510,7 @@ def _validate_rollout_semantics(
         or rollout.physicalJointLimitViolations
         > rollout.steps * bundle.actionContract.dimension
         or rollout.settledSteps > rollout.steps
+        or rollout.uprightSteps > rollout.steps
     ):
         raise ValueError("qualification rollout counts exceed step bounds")
     nonnegative_values = (
@@ -470,9 +520,27 @@ def _validate_rollout_semantics(
         rollout.distanceM,
         rollout.energyProxy,
         rollout.maxAbsAction,
+        rollout.standPoseError,
+        rollout.settledPoseErrorMax,
+        rollout.settledTrunkHeightMinM,
+        rollout.settledTrunkHeightMaxM,
+        rollout.settledTrunkTiltMaxRad,
+        rollout.settledJointSpeedMaxRadps,
     )
-    if any(value is None or value < 0.0 for value in nonnegative_values):
+    if any(value is not None and value < 0.0 for value in nonnegative_values):
         raise ValueError("qualification rollout norm evidence must be nonnegative")
+    if any(
+        value is None
+        for value in (
+            rollout.trackingError,
+            rollout.trackingErrorSum,
+            rollout.trackingErrorMax,
+        )
+    ):
+        raise ValueError("qualification rollout tracking evidence is incomplete")
+    assert rollout.trackingError is not None
+    assert rollout.trackingErrorSum is not None
+    assert rollout.trackingErrorMax is not None
     if (
         rollout.trackingSampleCount != rollout.steps
         or not math.isclose(
@@ -489,9 +557,10 @@ def _validate_rollout_semantics(
         raise ValueError("qualification rollout action metric identity is invalid")
     if rollout.actionMetricValue is None:
         raise ValueError("qualification rollout action metric is missing")
-    metric_domain = dict(spec.qualification_metric_domains).get(
-        rollout.actionMetric
-    )
+    derived_action_metric = _derive_action_metric_value(rollout)
+    if rollout.actionMetricValue != derived_action_metric:
+        raise ValueError("qualification rollout action metric evidence is inconsistent")
+    metric_domain = dict(spec.qualification_metric_domains).get(rollout.actionMetric)
     if metric_domain == "NONNEGATIVE" and rollout.actionMetricValue < 0.0:
         raise ValueError("qualification rollout action metric must be nonnegative")
     if metric_domain == "UNIT_INTERVAL" and not (
@@ -500,6 +569,59 @@ def _validate_rollout_semantics(
         raise ValueError("qualification rollout action metric must be a fraction")
     if metric_domain not in {"NONNEGATIVE", "SIGNED", "UNIT_INTERVAL"}:
         raise ValueError("qualification rollout action metric domain is undefined")
+
+    stand_fields = (
+        rollout.standPoseError,
+        rollout.settledPoseErrorMax,
+        rollout.settledTrunkHeightMinM,
+        rollout.settledTrunkHeightMaxM,
+        rollout.settledTrunkTiltMaxRad,
+        rollout.settledJointSpeedMaxRadps,
+    )
+    if declaration.actionCode != "VELSTAND_VELOCITY" and rollout.uprightSteps:
+        raise ValueError("qualification rollout upright accumulator is invalid")
+    if declaration.actionCode != "SWIZZLE" and rollout.yawRotationRad is not None:
+        raise ValueError("qualification rollout yaw accumulator is invalid")
+    if declaration.actionCode != "STAND":
+        if rollout.settledSteps or any(value is not None for value in stand_fields):
+            raise ValueError("qualification rollout settled evidence is invalid")
+    else:
+        if rollout.standPoseError is None:
+            raise ValueError("qualification rollout settled pose evidence is missing")
+        settled_window = stand_fields[1:]
+        if rollout.settledSteps == 0:
+            if any(value is not None for value in settled_window):
+                raise ValueError("qualification rollout settled evidence is invalid")
+        else:
+            if any(value is None for value in settled_window):
+                raise ValueError("qualification rollout settled evidence is incomplete")
+            assert rollout.settledPoseErrorMax is not None
+            assert rollout.settledTrunkHeightMinM is not None
+            assert rollout.settledTrunkHeightMaxM is not None
+            assert rollout.settledTrunkTiltMaxRad is not None
+            assert rollout.settledJointSpeedMaxRadps is not None
+            limits = STAND_SETTLEMENT_LIMITS
+            if (
+                rollout.settledSteps > limits.required_consecutive_steps
+                or rollout.settledPoseErrorMax > limits.pose_error_max_rad
+                or rollout.settledTrunkHeightMinM < limits.trunk_height_min_m
+                or rollout.settledTrunkHeightMaxM > limits.trunk_height_max_m
+                or rollout.settledTrunkHeightMinM > rollout.settledTrunkHeightMaxM
+                or rollout.settledTrunkTiltMaxRad > limits.trunk_tilt_max_rad
+                or rollout.settledJointSpeedMaxRadps > limits.joint_speed_max_radps
+                or rollout.standPoseError > rollout.settledPoseErrorMax + 1e-6
+                or rollout.settledPoseErrorMax > rollout.trackingErrorMax + 1e-6
+                or (
+                    rollout.settledSteps == rollout.trackingSampleCount
+                    and not math.isclose(
+                        rollout.settledPoseErrorMax,
+                        rollout.trackingErrorMax,
+                        rel_tol=0.0,
+                        abs_tol=1e-6,
+                    )
+                )
+            ):
+                raise ValueError("qualification rollout settled evidence is invalid")
 
     if (
         rollout.startedAt.tzinfo is None
@@ -529,7 +651,7 @@ def _validate_rollout_semantics(
             or (rollout.stopReason == "FALLEN") != rollout.fallen
         ):
             raise ValueError("qualification continuous terminal evidence is invalid")
-        return
+        return derived_action_metric
 
     if rollout.terminalState == "SUCCEEDED":
         completion_valid = (
@@ -537,8 +659,7 @@ def _validate_rollout_semantics(
             and rollout.stopReason == spec.qualification_success_stop_reason
             and rollout.settledSteps == spec.qualification_min_settled_steps
             and spec.qualification_completion_metric_max is not None
-            and rollout.actionMetricValue
-            <= spec.qualification_completion_metric_max
+            and derived_action_metric <= spec.qualification_completion_metric_max
             and not rollout.fallen
         )
         if not rollout.success or not completion_valid:
@@ -557,6 +678,7 @@ def _validate_rollout_semantics(
         or (rollout.stopReason == "FALLEN") != rollout.fallen
     ):
         raise ValueError("qualification discrete failure evidence is invalid")
+    return derived_action_metric
 
 
 def recompute_action_qualification(
@@ -569,7 +691,9 @@ def recompute_action_qualification(
     """Derive the only valid result from governed configuration and raw rollouts."""
     if definition.availability != "AVAILABLE":
         if rollouts:
-            raise ValueError("unavailable action must not contain qualification rollouts")
+            raise ValueError(
+                "unavailable action must not contain qualification rollouts"
+            )
         return _unavailable_result(
             bundle, declaration, definition, installed_runtime_revision
         )
@@ -583,24 +707,22 @@ def recompute_action_qualification(
         rollout_seeds
     ):
         raise ValueError("qualification rollouts do not cover exact unique seeds")
+    action_values = []
     for rollout in rollouts:
-        _validate_rollout_semantics(
-            bundle,
-            declaration,
-            definition,
-            rollout,
-            installed_runtime_revision,
+        action_values.append(
+            _validate_rollout_semantics(
+                bundle,
+                declaration,
+                definition,
+                rollout,
+                installed_runtime_revision,
+            )
         )
 
     success_rate = _mean([1.0 if item.success else 0.0 for item in rollouts])
     fall_rate = _mean([1.0 if item.fallen else 0.0 for item in rollouts])
     tracking_values = [
         item.trackingError for item in rollouts if item.trackingError is not None
-    ]
-    action_values = [
-        item.actionMetricValue
-        for item in rollouts
-        if item.actionMetricValue is not None
     ]
     mean_tracking = _mean(tracking_values) if tracking_values else None
     action_mean = _mean(action_values) if len(action_values) == len(rollouts) else None
@@ -722,14 +844,11 @@ def _qualify_action(
         steps = _integer(metrics, "steps")
         fallen = bool(metrics.get("fallen", False))
         terminal_failed = sample is not None and sample.terminalState == "FAILED"
-        terminal_succeeded = (
-            sample is not None and sample.terminalState == "SUCCEEDED"
-        )
+        terminal_succeeded = sample is not None and sample.terminalState == "SUCCEEDED"
         succeeded = (
             terminal_succeeded
             if spec.execution_mode == "DISCRETE"
-            else steps == declaration.maxSteps
-            and not terminal_failed
+            else steps == declaration.maxSteps and not terminal_failed
         )
         action_metric_value = _number(metrics, declaration.thresholds.actionMetric)
         rollouts.append(
@@ -772,9 +891,17 @@ def _qualify_action(
                     metrics, "physicalJointLimitViolations"
                 ),
                 settledSteps=_integer(metrics, "standSettledSteps"),
+                uprightSteps=_integer(metrics, "uprightSteps"),
                 maxAbsAction=_number(metrics, "maxAbsAction") or 0.0,
                 actionMetric=declaration.thresholds.actionMetric,
                 actionMetricValue=action_metric_value,
+                yawRotationRad=_number(metrics, "yawRotationRad"),
+                standPoseError=_number(metrics, "standPoseError"),
+                settledPoseErrorMax=_number(metrics, "settledPoseErrorMax"),
+                settledTrunkHeightMinM=_number(metrics, "settledHeightMinM"),
+                settledTrunkHeightMaxM=_number(metrics, "settledHeightMaxM"),
+                settledTrunkTiltMaxRad=_number(metrics, "settledTiltMaxRad"),
+                settledJointSpeedMaxRadps=_number(metrics, "settledJointSpeedMaxRadps"),
                 stopReason=sample.stopReason
                 if sample is not None and sample.stopReason
                 else "MAX_STEPS_REACHED",
@@ -845,7 +972,10 @@ def qualify_bundle(
 def _declared_artifacts(bundle: PolicyBundle) -> list[ModelArtifact]:
     artifacts = [
         bundle.model,
-        *(ModelArtifact(path=item.path, digest=item.digest) for item in bundle.policies),
+        *(
+            ModelArtifact(path=item.path, digest=item.digest)
+            for item in bundle.policies
+        ),
     ]
     for container, key in (
         (bundle.qualification, "artifacts"),
@@ -912,9 +1042,7 @@ def promoted_action_definition(
     result: ActionQualificationResult,
 ) -> ActionDefinition:
     """Reconstruct the only promoted action contract allowed by qualification."""
-    updates: dict[str, Any] = {
-        "qualificationRefs": [QUALIFICATION_REPORT_PATH]
-    }
+    updates: dict[str, Any] = {"qualificationRefs": [QUALIFICATION_REPORT_PATH]}
     if result.status == "FAILED":
         updates.update(
             {
@@ -939,9 +1067,7 @@ def _promote_qualified_bundle(
         raise FileExistsError(f"bundle output already exists: {output}")
     if output.is_relative_to(root):
         raise ValueError("promoted output must remain outside the source bundle")
-    _validate_qualification_correspondence(
-        root, configuration, bundle, report
-    )
+    _validate_qualification_correspondence(root, configuration, bundle, report)
 
     report_bytes = canonical_json(report)
     configuration_bytes = canonical_json(configuration)
@@ -1017,7 +1143,11 @@ def _promote_qualified_bundle(
             configuration_bytes,
             configuration_artifact.digest,
         ),
-        (SUBJECT_MANIFEST_PATH, subject_manifest_bytes, subject_manifest_artifact.digest),
+        (
+            SUBJECT_MANIFEST_PATH,
+            subject_manifest_bytes,
+            subject_manifest_artifact.digest,
+        ),
     )
     for artifact_path, artifact_bytes, artifact_digest in new_artifacts:
         if artifact_path in contents:
@@ -1063,6 +1193,8 @@ def qualify_and_promote(
         raise ValueError("promoted output must remain outside the source bundle")
     for protected_root in protected_source_roots:
         if output.is_relative_to(Path(protected_root).resolve()):
-            raise ValueError("promoted output must remain outside protected source roots")
+            raise ValueError(
+                "promoted output must remain outside protected source roots"
+            )
     bundle, report = qualify_bundle(root, configuration, timestamp=timestamp)
     return _promote_qualified_bundle(root, output, configuration, bundle, report)

@@ -7,12 +7,33 @@ command, safety, completion, and evidence implementation for its task family.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from typing import Literal
 
-type QualificationMetricDomain = Literal[
-    "NONNEGATIVE", "SIGNED", "UNIT_INTERVAL"
-]
+type QualificationMetricDomain = Literal["NONNEGATIVE", "SIGNED", "UNIT_INTERVAL"]
+
+
+@dataclass(frozen=True)
+class StandSettlementLimits:
+    """Code-owned predicates for every step in a governed STAND window."""
+
+    required_consecutive_steps: int
+    pose_error_max_rad: float
+    trunk_height_min_m: float
+    trunk_height_max_m: float
+    trunk_tilt_max_rad: float
+    joint_speed_max_radps: float
+
+
+STAND_SETTLEMENT_LIMITS = StandSettlementLimits(
+    required_consecutive_steps=10,
+    pose_error_max_rad=0.08,
+    trunk_height_min_m=0.09,
+    trunk_height_max_m=0.14,
+    trunk_tilt_max_rad=math.radians(15.0),
+    joint_speed_max_radps=0.5,
+)
 
 
 @dataclass(frozen=True)
@@ -38,12 +59,8 @@ class RuntimeActionSpec:
     qualification_max_seeds: int = 16
     qualification_min_steps: int = 100
     qualification_max_steps: int = 2_000
-    qualification_metric_operators: tuple[
-        tuple[str, Literal["gte", "lte"]], ...
-    ] = ()
-    qualification_metric_domains: tuple[
-        tuple[str, QualificationMetricDomain], ...
-    ] = ()
+    qualification_metric_operators: tuple[tuple[str, Literal["gte", "lte"]], ...] = ()
+    qualification_metric_domains: tuple[tuple[str, QualificationMetricDomain], ...] = ()
     qualification_success_stop_reason: str | None = None
     qualification_min_settled_steps: int = 0
     qualification_completion_metric_max: float | None = None
@@ -321,6 +338,12 @@ for _code, _spec in tuple(ACTION_RUNTIME_SPECS.items()):
         qualification_success_stop_reason=(
             "STAND_POSE_SETTLED" if _code == "STAND" else "MAX_STEPS_REACHED"
         ),
-        qualification_min_settled_steps=10 if _code == "STAND" else 0,
-        qualification_completion_metric_max=0.08 if _code == "STAND" else None,
+        qualification_min_settled_steps=(
+            STAND_SETTLEMENT_LIMITS.required_consecutive_steps
+            if _code == "STAND"
+            else 0
+        ),
+        qualification_completion_metric_max=(
+            STAND_SETTLEMENT_LIMITS.pose_error_max_rad if _code == "STAND" else None
+        ),
     )

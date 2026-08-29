@@ -122,6 +122,24 @@ nonnegative and finite. Each rollout carries one tracking sample per completed
 control step plus the accumulated sum, so startup can reproduce the reported
 mean instead of trusting a terminal snapshot.
 
+Action-metric values are never an independent authority. Startup derives
+`trackingError` from the verified tracking sum/sample mean, `baseTravelM` from
+`distanceM`, `standFraction` from `uprightSteps / steps`, `yawRotationRad` from
+its explicit yaw accumulator, and `standPoseError` from the final STAND pose
+field. The carried `actionMetricValue` must equal that code-owned derivation
+exactly, and aggregates, thresholds, and promotion status use the derived
+value. A metric key without an installed derivation fails closed.
+
+Governed STAND completion requires ten consecutive samples that each satisfy
+the same shared runtime limits: pose error at most 0.08 rad, trunk height in
+`[0.09, 0.14]` m, trunk tilt at most 15 degrees, and maximum absolute joint
+speed at most 0.5 rad/s. Raw evidence records the final consecutive count plus
+the maximum pose error, minimum/maximum trunk height, maximum tilt, and maximum
+joint speed over exactly that claimed window. Qualification checks those
+extrema against the shared limits and against the rollout tracking maximum;
+ten high-error samples cannot be relabeled as settled. Runtime task evidence
+remains bounded to 32 scalar fields and 1 KiB.
+
 ## 3. Build and run the container
 
 ```bash

@@ -261,6 +261,7 @@ def _write_model(
     trunk_conaffinity: int = 1,
     exact_foot_topology: bool = True,
     extra_passive_wheel_joint: bool = False,
+    weld_trunk: bool = False,
 ) -> None:
     mesh_vertices = (
         "-0.01 -0.01 -0.002  0.01 -0.01 -0.002  "
@@ -418,6 +419,7 @@ def _write_model(
             else ""
         }
   </worldbody>
+  {'<equality><weld body1="trunk_base"/></equality>' if weld_trunk else ""}
   <actuator>{actuators}</actuator>
   <sensor><{gyro_kind} name="imu_ang_vel" site="imu"/></sensor>
 </mujoco>
@@ -492,6 +494,7 @@ def _write_verified_bundle(
         trunk_conaffinity=trunk_conaffinity,
         exact_foot_topology=exact_foot_topology,
         extra_passive_wheel_joint=extra_passive_wheel_joint,
+        weld_trunk=action_code == "STAND",
         include_file="extra.xml" if include_dependency else None,
     )
     _write_policy(
@@ -705,8 +708,7 @@ def _rewrite_as_stand_bundle(root: Path, source: PolicyBundle) -> PolicyBundle:
         source.model.path: source.model.digest,
         policy.path: policy.digest,
         **{
-            item["path"]: item["digest"]
-            for item in source.license.get("artifacts", [])
+            item["path"]: item["digest"] for item in source.license.get("artifacts", [])
         },
     }
     rewritten = unsigned.model_copy(
@@ -749,8 +751,7 @@ def test_runtime_readiness_rejects_available_action_with_wrong_policy_task_ident
         source.model.path: source.model.digest,
         source.policies[0].path: source.policies[0].digest,
         **{
-            item["path"]: item["digest"]
-            for item in source.license.get("artifacts", [])
+            item["path"]: item["digest"] for item in source.license.get("artifacts", [])
         },
     }
     rewritten = unsigned.model_copy(
@@ -858,8 +859,7 @@ def test_runtime_readiness_rejects_action_preconditions_outside_qualification(
         source.model.path: source.model.digest,
         source.policies[0].path: source.policies[0].digest,
         **{
-            item["path"]: item["digest"]
-            for item in source.license.get("artifacts", [])
+            item["path"]: item["digest"] for item in source.license.get("artifacts", [])
         },
     }
     rewritten = unsigned.model_copy(
@@ -1097,7 +1097,9 @@ def test_runtime_accumulates_tracking_and_distinguishes_clamp_from_joint_limit(
     clamped_runtime = MicroduckMujocoRuntime(
         clamped_root, clamped_bundle, realtime=False
     )
-    request = _request().model_copy(update={"bundleDigest": clamped_bundle.bundleDigest})
+    request = _request().model_copy(
+        update={"bundleDigest": clamped_bundle.bundleDigest}
+    )
     handle = clamped_runtime.start(clamped_bundle.actions[0], request)
     clamped_runtime.sample(handle)
     clamped_runtime.sample(handle)
@@ -1125,9 +1127,7 @@ def test_runtime_accumulates_tracking_and_distinguishes_clamp_from_joint_limit(
         violated_runtime._model.jnt_range[joint_id][1] + 1.0
     )
     violated_runtime.sample(violated_handle)
-    violated = violated_runtime.safe_stop(
-        violated_handle, "TEST_COMPLETE"
-    ).metrics
+    violated = violated_runtime.safe_stop(violated_handle, "TEST_COMPLETE").metrics
 
     assert violated["physicalJointLimitViolations"] == 1
 
@@ -1574,6 +1574,12 @@ def test_stand_uses_trained_sitting_reset_fixed_goal_and_settled_completion(
     assert evidence.metrics["resetProfile"] == "TRAINED_SITTING"
     assert evidence.metrics["standPoseError"] <= 0.08
     assert evidence.metrics["trackingErrorSamples"] > 0
+    assert evidence.metrics["standSettledSteps"] == 10
+    assert evidence.metrics["settledPoseErrorMax"] <= 0.08
+    assert 0.09 <= evidence.metrics["settledHeightMinM"]
+    assert evidence.metrics["settledHeightMaxM"] <= 0.14
+    assert evidence.metrics["settledTiltMaxRad"] <= 0.262
+    assert evidence.metrics["settledJointSpeedMaxRadps"] <= 0.5
 
 
 def test_configured_app_rejects_candidate_and_composes_promoted_runtime(
@@ -1593,9 +1599,7 @@ def test_configured_app_rejects_candidate_and_composes_promoted_runtime(
             "MICRODUCK_ROM_PORT": "8000",
         }
     )
-    assert candidate_app.state.readiness_reason_codes == [
-        "QUALIFICATION_UNAVAILABLE"
-    ]
+    assert candidate_app.state.readiness_reason_codes == ["QUALIFICATION_UNAVAILABLE"]
 
     configuration = ReleaseConfiguration(
         release="1.0.1",

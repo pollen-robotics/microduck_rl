@@ -208,9 +208,7 @@ def _resign_mutated_promoted_bundle(
             "sha256:" + hashlib.sha256(configuration_path.read_bytes()).hexdigest()
         )
         report["releaseConfigurationDigest"] = configuration_digest
-        manifest["qualification"]["releaseConfigurationDigest"] = (
-            configuration_digest
-        )
+        manifest["qualification"]["releaseConfigurationDigest"] = configuration_digest
         for artifact in manifest["qualification"]["artifacts"]:
             if artifact["path"] == "qualification/release-v1.json":
                 artifact["digest"] = configuration_digest
@@ -368,8 +366,10 @@ def test_mandatory_action_must_be_supported_by_candidate_capabilities(tmp_path: 
     """Allowing mandatory unsupported actions would make the release policy impossible to satisfy."""
     source = tmp_path / "candidate"
     _candidate_with_unavailable_spin(source)
-    spin = _config(mandatory=False, include_spin=True).actions[-1].model_copy(
-        update={"mandatory": True}
+    spin = (
+        _config(mandatory=False, include_spin=True)
+        .actions[-1]
+        .model_copy(update={"mandatory": True})
     )
     config = ReleaseConfiguration(
         release="1.0.1",
@@ -417,12 +417,12 @@ def test_battery_uses_governed_runtime_and_records_bounded_exact_identity(
     assert result.scenarioProfile == "SEEDED_SERVO_RESET_V1"
     assert [rollout.seed for rollout in result.rollouts] == [7, 11, 29]
     assert all(rollout.steps <= 100 for rollout in result.rollouts)
-    assert all(rollout.startedAt == NOW == rollout.finishedAt for rollout in result.rollouts)
+    assert all(
+        rollout.startedAt == NOW == rollout.finishedAt for rollout in result.rollouts
+    )
     assert all(rollout.energyProxy >= 0.0 for rollout in result.rollouts)
     assert all(rollout.actuatorClampSteps >= 0 for rollout in result.rollouts)
-    assert all(
-        rollout.physicalJointLimitViolations == 0 for rollout in result.rollouts
-    )
+    assert all(rollout.physicalJointLimitViolations == 0 for rollout in result.rollouts)
     assert all(rollout.maxAbsAction >= 0.0 for rollout in result.rollouts)
 
 
@@ -513,7 +513,10 @@ def test_promotion_is_reproducible_refuses_overwrite_and_binds_report_artifact(
     with zipfile.ZipFile(first) as archive:
         report_bytes = archive.read(report_artifact["path"])
     assert "bundleDigest" not in json.loads(report_bytes)
-    assert report_artifact["digest"] == "sha256:" + hashlib.sha256(report_bytes).hexdigest()
+    assert (
+        report_artifact["digest"]
+        == "sha256:" + hashlib.sha256(report_bytes).hexdigest()
+    )
 
     with pytest.raises(FileExistsError, match="already exists"):
         qualify_and_promote(
@@ -596,9 +599,7 @@ def test_runtime_loader_rejects_candidate_and_accepts_exact_promoted_report(
         ),
         (
             None,
-            lambda manifest: manifest["actions"][0].update(
-                {"qualificationRefs": []}
-            ),
+            lambda manifest: manifest["actions"][0].update({"qualificationRefs": []}),
         ),
         (
             None,
@@ -636,9 +637,7 @@ def test_runtime_loader_rejects_semantically_forged_or_partial_reports(
             id="lease-max",
         ),
         pytest.param(
-            lambda action: action["lease"].update(
-                {"safeStopBehavior": "FORGED_STOP"}
-            ),
+            lambda action: action["lease"].update({"safeStopBehavior": "FORGED_STOP"}),
             id="lease-safe-stop",
         ),
         pytest.param(
@@ -751,9 +750,7 @@ def test_runtime_loader_revalidates_resigned_governed_release_configuration(
     installed, _ = _extract_promoted_bundle(tmp_path)
     _resign_mutated_promoted_bundle(
         installed,
-        mutate_configuration=lambda configuration: configuration["actions"][
-            0
-        ].update(
+        mutate_configuration=lambda configuration: configuration["actions"][0].update(
             {"parameters": {"vxMps": 0.2, "vyMps": 0.0, "yawRateRadps": 0.0}}
         ),
         mutate_report=lambda report: report["actions"][0].update(
@@ -763,6 +760,111 @@ def test_runtime_loader_revalidates_resigned_governed_release_configuration(
 
     with pytest.raises(ValueError, match="qualification"):
         load_qualified_bundle(installed)
+
+
+def test_runtime_loader_rejects_resigned_optional_walk_metric_only_forgery(
+    tmp_path: Path,
+) -> None:
+    """Changing only the duplicate action metric must not turn failed WALK evidence into a pass."""
+    candidate_root = tmp_path / "candidate"
+    _write_verified_bundle(candidate_root)
+    base = _config(mandatory=False).actions[0]
+    configuration = ReleaseConfiguration(
+        release="1.0.1",
+        createdAt=NOW,
+        actions=(
+            base.model_copy(
+                update={
+                    "thresholds": base.thresholds.model_copy(
+                        update={"actionMetricThreshold": 0.0}
+                    )
+                }
+            ),
+        ),
+    )
+    promoted = qualify_and_promote(
+        candidate_root,
+        tmp_path / "qualified.zip",
+        configuration,
+        timestamp=lambda: NOW,
+    )
+    assert promoted.report.actions[0].status == "FAILED"
+    assert promoted.manifest.actions[0].availability == "UNAVAILABLE"
+    installed = tmp_path / "installed"
+    with zipfile.ZipFile(promoted.output_zip) as archive:
+        archive.extractall(installed)
+
+    def forge_metric_only(report: dict[str, object]) -> None:
+        result = report["actions"][0]
+        result.update(
+            {
+                "status": "PASSED",
+                "actionMetricMean": 0.0,
+            }
+        )
+        result.pop("unavailableReason", None)
+        for rollout in result["rollouts"]:
+            rollout["actionMetricValue"] = 0.0
+
+    def restore_available_action(manifest: dict[str, object]) -> None:
+        action = manifest["actions"][0]
+        action["availability"] = "AVAILABLE"
+        action.pop("unavailableReason", None)
+
+    _resign_mutated_promoted_bundle(
+        installed,
+        mutate_report=forge_metric_only,
+        mutate_manifest=restore_available_action,
+    )
+
+    with pytest.raises(ValueError, match="qualification"):
+        load_qualified_bundle(installed)
+
+
+@pytest.mark.parametrize(
+    ("metric", "evidence", "expected"),
+    [
+        pytest.param("baseTravelM", {"distanceM": 1.75}, 1.75, id="distance"),
+        pytest.param(
+            "standFraction",
+            {"steps": 8, "uprightSteps": 3},
+            0.375,
+            id="upright-fraction",
+        ),
+        pytest.param(
+            "yawRotationRad",
+            {"yawRotationRad": -1.25},
+            -1.25,
+            id="yaw-accumulator",
+        ),
+    ],
+)
+def test_action_metric_is_derived_from_exact_code_owned_rollout_evidence(
+    tmp_path: Path,
+    metric: str,
+    evidence: dict[str, float | int],
+    expected: float,
+) -> None:
+    """Changing a metric source or trusting its duplicate scalar would corrupt promotion."""
+    installed, _ = _extract_promoted_bundle(tmp_path)
+    *_, result = _qualified_components(installed)
+    rollout = result.rollouts[0].model_copy(update={"actionMetric": metric, **evidence})
+
+    assert qualification_module._derive_action_metric_value(rollout) == expected
+
+
+def test_future_action_metric_without_code_owned_derivation_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """Adding a metric name to a future action spec cannot make caller evidence authoritative."""
+    installed, _ = _extract_promoted_bundle(tmp_path)
+    *_, result = _qualified_components(installed)
+    rollout = result.rollouts[0].model_copy(
+        update={"actionMetric": "futureMetric", "actionMetricValue": 0.0}
+    )
+
+    with pytest.raises(ValueError, match="derivation is undefined"):
+        qualification_module._derive_action_metric_value(rollout)
 
 
 def test_rollout_semantics_reject_invalid_numeric_domains_before_aggregation(
@@ -884,6 +986,69 @@ def test_runtime_loader_rejects_resigned_forged_stand_completion(
         load_qualified_bundle(installed)
 
 
+def test_stand_rejects_ten_claimed_settled_steps_with_high_pose_errors(
+    tmp_path: Path,
+) -> None:
+    """Ten high-error samples cannot be relabeled as the governed settled window."""
+    installed, _ = _extract_promoted_stand_bundle(tmp_path)
+    subject, declaration, definition, result = _qualified_components(installed)
+    forged_rollouts = tuple(
+        rollout.model_copy(
+            update={
+                "steps": 10,
+                "trackingError": 1.0,
+                "trackingErrorSum": 10.0,
+                "trackingErrorMax": 1.0,
+                "trackingSampleCount": 10,
+                "settledSteps": 10,
+                "standPoseError": 0.0,
+                "actionMetricValue": 0.0,
+            }
+        )
+        for rollout in result.rollouts
+    )
+
+    with pytest.raises(ValueError, match="settled"):
+        recompute_action_qualification(
+            subject,
+            declaration,
+            definition,
+            forged_rollouts,
+            result.runtimeRevision,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        pytest.param({"settledPoseErrorMax": 0.081}, id="pose-error"),
+        pytest.param({"settledTrunkHeightMinM": 0.089}, id="height-min"),
+        pytest.param({"settledTrunkHeightMaxM": 0.141}, id="height-max"),
+        pytest.param({"settledTrunkTiltMaxRad": 0.262}, id="trunk-tilt"),
+        pytest.param({"settledJointSpeedMaxRadps": 0.501}, id="joint-speed"),
+    ],
+)
+def test_stand_rejects_inconsistent_governed_settled_window_evidence(
+    tmp_path: Path, mutation: dict[str, float]
+) -> None:
+    """Every sample counted in STAND settlement must satisfy every runtime predicate."""
+    installed, _ = _extract_promoted_stand_bundle(tmp_path)
+    subject, declaration, definition, result = _qualified_components(installed)
+    forged_rollouts = (
+        result.rollouts[0].model_copy(update=mutation),
+        *result.rollouts[1:],
+    )
+
+    with pytest.raises(ValueError, match="settled"):
+        recompute_action_qualification(
+            subject,
+            declaration,
+            definition,
+            forged_rollouts,
+            result.runtimeRevision,
+        )
+
+
 @pytest.mark.parametrize("mutation", ["duplicate", "mandatory-failed", "parameters"])
 def test_private_promotion_revalidates_qualification_correspondence(
     tmp_path: Path, mutation: str
@@ -896,7 +1061,9 @@ def test_private_promotion_revalidates_qualification_correspondence(
         source, configuration, timestamp=lambda: NOW
     )
     if mutation == "duplicate":
-        forged = report.model_copy(update={"actions": (*report.actions, report.actions[0])})
+        forged = report.model_copy(
+            update={"actions": (*report.actions, report.actions[0])}
+        )
     elif mutation == "mandatory-failed":
         failed = report.actions[0].model_copy(
             update={"status": "FAILED", "unavailableReason": "QUALIFICATION_FAILED"}
@@ -924,8 +1091,10 @@ def test_release_config_must_match_code_owned_reset_and_cover_available_actions(
     """A typo or omission in release policy must not silently select another evaluator path."""
     source = tmp_path / "candidate"
     _write_verified_bundle(source)
-    walk = _config(mandatory=True).actions[0].model_copy(
-        update={"resetProfile": "TRAINING_ONLY_RESET"}
+    walk = (
+        _config(mandatory=True)
+        .actions[0]
+        .model_copy(update={"resetProfile": "TRAINING_ONLY_RESET"})
     )
 
     with pytest.raises(ReleaseConfigurationError, match="reset profile"):
@@ -945,13 +1114,9 @@ def test_release_policy_rejects_rubber_stamp_batteries_and_caller_revision() -> 
     """One-step, one-seed batteries and caller-selected code identities are not governed."""
     base = _config(mandatory=True).actions[0]
     with pytest.raises(ValidationError, match="seeds"):
-        ActionQualificationConfig.model_validate(
-            base.model_dump() | {"seeds": [7]}
-        )
+        ActionQualificationConfig.model_validate(base.model_dump() | {"seeds": [7]})
     with pytest.raises(ValidationError, match="maxSteps"):
-        ActionQualificationConfig.model_validate(
-            base.model_dump() | {"maxSteps": 1}
-        )
+        ActionQualificationConfig.model_validate(base.model_dump() | {"maxSteps": 1})
     with pytest.raises(ValidationError, match="runtimeSourceCommit"):
         ReleaseConfiguration.model_validate(
             _config(mandatory=True).model_dump(by_alias=True)
@@ -974,9 +1139,7 @@ def test_release_policy_rejects_metric_and_command_outside_action_spec(
         }
     )
     invalid_command = action.model_copy(
-        update={
-            "parameters": {"vxMps": 9.0, "vyMps": 0.0, "yawRateRadps": 0.0}
-        }
+        update={"parameters": {"vxMps": 9.0, "vyMps": 0.0, "yawRateRadps": 0.0}}
     )
 
     for declaration in (invalid_metric, invalid_command):
@@ -1095,12 +1258,16 @@ def test_qualification_cli_fails_closed_on_invalid_release_config(tmp_path: Path
 
     assert completed.returncode == 2
     assert completed.stdout == ""
-    assert completed.stderr == "qualification failed: release configuration is invalid\n"
+    assert (
+        completed.stderr == "qualification failed: release configuration is invalid\n"
+    )
     assert "do-not-print" not in completed.stderr
     assert not output.exists()
 
 
-def test_container_entrypoint_fails_before_server_when_mounts_are_invalid(tmp_path: Path):
+def test_container_entrypoint_fails_before_server_when_mounts_are_invalid(
+    tmp_path: Path,
+):
     """Starting without verified mount prerequisites would default the container to unready."""
     entrypoint = Path(__file__).parents[1] / "docker/rom-simulator/entrypoint.sh"
     completed = subprocess.run(
@@ -1118,7 +1285,10 @@ def test_container_entrypoint_fails_before_server_when_mounts_are_invalid(tmp_pa
 
     assert completed.returncode != 0
     assert completed.stdout == ""
-    assert completed.stderr == "container startup failed: /bundle must contain a readable manifest\n"
+    assert (
+        completed.stderr
+        == "container startup failed: /bundle must contain a readable manifest\n"
+    )
     assert "test-token" not in completed.stderr
 
 
