@@ -20,6 +20,7 @@ from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 
 from mjlab_microduck.policies import load_frozen_actor
+from mjlab_microduck.tasks.mdp import classify_standard_stair_contacts
 from mjlab_microduck.tasks.stair_walk_state_bank import (
     BANK_SCHEMA_VERSION,
     STANDARD_NUM_STEPS,
@@ -77,6 +78,14 @@ def _parse_args() -> argparse.Namespace:
         "--standing-only-reset",
         action="store_true",
         help="Force standing starts when the source task has a set_roulade_state event.",
+    )
+    parser.add_argument(
+        "--capture-first-tread-contact",
+        action="store_true",
+        help=(
+            "Capture only states with a position-and-normal classified contact "
+            "on the horizontal first tread."
+        ),
     )
     parser.add_argument(
         "--device", default="cuda:0" if torch.cuda.is_available() else "cpu"
@@ -172,9 +181,24 @@ def main() -> int:
                 if args.capture_every_n_steps == 0
                 else (base_env.episode_length_buf % args.capture_every_n_steps == 0)
             )
+            contact_gate = torch.ones_like(captured_this_episode)
+            if args.capture_first_tread_contact:
+                sensor = base_env.scene.sensors["robot_ground_contact"].data
+                if sensor.found is None or sensor.pos is None or sensor.normal is None:
+                    raise RuntimeError(
+                        "robot_ground_contact must expose found, pos, and normal"
+                    )
+                _, tread_contact = classify_standard_stair_contacts(
+                    sensor.found,
+                    sensor.pos,
+                    sensor.normal,
+                    origins,
+                )
+                contact_gate = tread_contact.any(dim=-1)
             eligible = (
                 unique_episode_gate
                 & cadence_gate
+                & contact_gate
                 & (dones == 0)
                 & (base_env.episode_length_buf > 2)
                 & (local[:, 0] >= args.min_local_x)
@@ -246,6 +270,7 @@ def main() -> int:
             ],
             "capture_every_n_steps": args.capture_every_n_steps,
             "standing_only_reset": args.standing_only_reset,
+            "capture_first_tread_contact": args.capture_first_tread_contact,
             "canonical_source_xy_yaw": args.standing_only_reset,
         },
         "states": states,

@@ -31,6 +31,7 @@ TASK_IDS = (
     "Mjlab-Stairs-Launch-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Apex-Mantle-Specialist-MicroDuck",
     "Mjlab-Stairs-Roulade-Bank-Specialist-MicroDuck",
+    "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
 )
 RESET_MODES = {
     0: "lip_release",
@@ -49,6 +50,12 @@ ROULADE_BANK_RESET_MODES = {
     1: "head_lever",
     2: "unused_tread",
     3: "manufacturer_roll_phase",
+}
+TREAD_CONTACT_BANK_RESET_MODES = {
+    0: "unused_launch",
+    1: "unused_head_lever",
+    2: "unused_tread",
+    3: "real_tread_contact",
 }
 
 
@@ -91,7 +98,9 @@ def main() -> int:
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
     if args.num_envs < 1 or args.episodes < 1:
         raise SystemExit("--num-envs and --episodes must be positive")
-    if args.task == "Mjlab-Stairs-Roulade-Bank-Specialist-MicroDuck":
+    if args.task == "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck":
+        reset_modes = TREAD_CONTACT_BANK_RESET_MODES
+    elif args.task == "Mjlab-Stairs-Roulade-Bank-Specialist-MicroDuck":
         reset_modes = ROULADE_BANK_RESET_MODES
     elif args.task == "Mjlab-Stairs-Apex-Mantle-Specialist-MicroDuck":
         reset_modes = APEX_MANTLE_RESET_MODES

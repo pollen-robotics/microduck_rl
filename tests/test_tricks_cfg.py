@@ -33,6 +33,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     MicroduckAssistedStairSpecialistRlCfg,
     MicroduckStairApexMantleRlCfg,
     MicroduckStairRouladeBankRlCfg,
+    MicroduckStairTreadContactBankRlCfg,
     MicroduckStairBridgeSpecialistRlCfg,
     MicroduckStairLaunchBankRlCfg,
     MicroduckStairWalkerBankRlCfg,
@@ -41,6 +42,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     make_microduck_assisted_stair_specialist_env_cfg,
     make_microduck_stair_apex_mantle_env_cfg,
     make_microduck_stair_roulade_bank_env_cfg,
+    make_microduck_stair_tread_contact_bank_env_cfg,
     make_microduck_stair_bridge_specialist_env_cfg,
     make_microduck_stair_launch_bank_env_cfg,
     make_microduck_stair_walker_bank_env_cfg,
@@ -464,6 +466,26 @@ def test_standard_stair_contacts_distinguish_face_tread_and_flat_floor():
 
     assert torch.equal(face, torch.tensor([[True, False, False]]))
     assert torch.equal(tread, torch.tensor([[False, True, False]]))
+
+
+def test_tread_contact_bank_stage_pays_only_new_pullup_progress():
+    cfg = make_microduck_stair_tread_contact_bank_env_cfg()
+    bank = cfg.events["walker_state_bank"].params
+
+    assert bank == {"bank_path": ".tmp/codex/full170-tread-contact-state-bank.pt"}
+    assert cfg.rewards["stair_riser_face_contact"].weight == 0.0
+    assert cfg.rewards["stair_first_tread_contact"].weight == 0.0
+    assert cfg.rewards["stair_tread_support_frontier"].weight == 0.0
+    pullup = cfg.rewards["stair_tread_pullup_frontier"]
+    assert pullup.weight == 20.0
+    assert pullup.params["target_x"] == 0.72
+    assert pullup.params["target_height"] == 0.205
+    assert cfg.rewards["stair_first_tread_secured"].weight == 600.0
+    assert MicroduckStairTreadContactBankRlCfg.max_iterations == 150
+    assert (
+        MicroduckStairTreadContactBankRlCfg.actor.distribution_cfg["init_std"]
+        == 0.22
+    )
 
 
 def test_headstand_has_exclusive_contact_gate_and_shared_actor_layout():

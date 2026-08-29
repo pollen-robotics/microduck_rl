@@ -1788,6 +1788,44 @@ def stair_tread_support_frontier(
     return _new_frontier_delta(env, value, "_stair_tread_support_frontier")
 
 
+def stair_tread_pullup_frontier(
+    env: ManagerBasedRlEnv,
+    start_x: float = 0.56,
+    target_x: float = 0.72,
+    start_height: float = 0.10,
+    target_height: float = 0.205,
+    corridor_half_width: float = 0.36,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward new root lift and advance after a real first-tread contact.
+
+    This is the continuation objective for contact-state reverse curriculum.
+    A limb, shell, or head may release the tread after creating leverage, but
+    progress is eligible only after the classified tread-contact latch fired.
+    """
+
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    contacted = getattr(env, "_stair_first_tread_contact_latched", None)
+    if contacted is None:
+        contacted = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    x_progress = torch.clamp(
+        (x - start_x) / max(target_x - start_x, 1e-6), 0.0, 1.0
+    )
+    height_progress = torch.clamp(
+        (z - start_height) / max(target_height - start_height, 1e-6),
+        0.0,
+        1.0,
+    )
+    value = 0.65 * x_progress + 0.35 * height_progress
+    eligible = contacted & (y <= corridor_half_width)
+    value = torch.where(eligible, value, torch.zeros_like(value))
+    return _new_frontier_delta(env, value, "_stair_tread_pullup_frontier")
+
+
 def stair_first_tread_stable(
     env: ManagerBasedRlEnv,
     min_x: float = 0.72,
