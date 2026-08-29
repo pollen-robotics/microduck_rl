@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 from dataclasses import asdict
@@ -20,6 +21,7 @@ from mjlab.utils.torch import configure_torch_backends
 from mjlab_microduck.policies import HardStairHandoffPolicy, load_actor_pair
 
 TASK_ID = "Mjlab-Stairs-Route-MicroDuck"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _parse_args() -> argparse.Namespace:
@@ -91,6 +93,9 @@ def main() -> int:
     args = _parse_args()
     checkpoint = args.checkpoint.expanduser().resolve()
     output = args.output.expanduser().resolve()
+    temporary_dir = REPO_ROOT / ".tmp" / "codex"
+    temporary_dir.mkdir(parents=True, exist_ok=True)
+    temporary_output = temporary_dir / f"stair-recording-{os.getpid()}.mp4"
     if not checkpoint.is_file():
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
     walker_checkpoint = (
@@ -152,7 +157,7 @@ def main() -> int:
             if writer is None:
                 frame_height, frame_width = frame.shape[:2]
                 writer = _ffmpeg_writer(
-                    output,
+                    temporary_output,
                     width=frame_width,
                     height=frame_height,
                     fps=float(base_env.metadata.get("render_fps", 50)),
@@ -167,8 +172,10 @@ def main() -> int:
     if writer is None:
         raise RuntimeError("No frames were recorded")
     return_code = writer.wait()
-    if return_code != 0 or not output.is_file():
+    if return_code != 0 or not temporary_output.is_file():
         raise RuntimeError(f"ffmpeg failed with exit code {return_code}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(temporary_output, output)
     print(f"[stair-video] wrote {output}")
     return 0
 
