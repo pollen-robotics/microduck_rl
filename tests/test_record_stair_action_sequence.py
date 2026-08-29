@@ -60,6 +60,10 @@ def test_video_frame_count_is_exact_and_validated() -> None:
         RECORD.video_frame_count(20.0, float("nan"))
 
 
+def test_recorder_default_action_limit_matches_a13_search() -> None:
+    assert RECORD.DEFAULT_ACTION_LIMIT == SEARCH.DEFAULT_ACTION_LIMIT == 10.0
+
+
 def test_attempt_step_indices_repeat_the_frozen_sequence() -> None:
     np.testing.assert_array_equal(
         RECORD.attempt_step_indices(10, 4),

@@ -36,6 +36,7 @@ TRUNK_SHELL_HALF_EXTENTS_M = np.array((0.034, 0.031, 0.022), dtype=np.float64)
 TRUNK_SHELL_LOCAL_CENTER_M = np.array((-0.006, 0.0, -0.006), dtype=np.float64)
 SIDE_BYPASS_PENALTY = 1_000_000.0
 SAGITTAL_ACTION_DIM = 7
+DEFAULT_ACTION_LIMIT = 10.0
 
 
 @dataclass(frozen=True)
@@ -334,7 +335,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--knots", type=int, default=5)
     parser.add_argument("--residual-std", type=float, default=0.25)
     parser.add_argument("--residual-limit", type=float, default=0.60)
-    parser.add_argument("--action-limit", type=float, default=10.0)
+    parser.add_argument("--action-limit", type=float, default=DEFAULT_ACTION_LIMIT)
     parser.add_argument(
         "--sagittal-symmetry",
         action="store_true",
@@ -774,6 +775,7 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
                 "knots": args.knots,
                 "residual_std": args.residual_std,
                 "residual_limit": args.residual_limit,
+                "action_limit": args.action_limit,
                 "cem_alpha": args.cem_alpha,
                 "min_std": args.min_std,
                 "sagittal_symmetry": args.sagittal_symmetry,

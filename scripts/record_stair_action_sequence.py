@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 from search_stair_action_sequence import (
+    DEFAULT_ACTION_LIMIT,
     DEFAULT_BASELINE_CHECKPOINT,
     TASK_ID,
     _pin_loaded_foot_bank_row,
@@ -40,6 +41,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--duration-seconds", type=float, default=20.0)
     parser.add_argument("--fps", type=float, default=50.0)
+    parser.add_argument(
+        "--action-limit",
+        type=float,
+        default=DEFAULT_ACTION_LIMIT,
+        help="Total actor-plus-residual clamp used by the source A13 search.",
+    )
     parser.add_argument("--seed", type=int, default=31)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--width", type=int, default=960)
@@ -151,6 +158,8 @@ def main() -> int:
         raise SystemExit("--bank-row must be non-negative")
     if args.width < 2 or args.height < 2:
         raise SystemExit("--width and --height must be at least 2")
+    if not np.isfinite(args.action_limit) or args.action_limit <= 0.0:
+        raise SystemExit("--action-limit must be positive and finite")
     try:
         total_frames = video_frame_count(args.duration_seconds, args.fps)
         residual = load_residual_sequence(sequence_path)
@@ -210,7 +219,9 @@ def main() -> int:
             assert observations is not None
             with torch.inference_mode():
                 actions = baseline_actor(observations) + residual_tensor[sequence_step]
-                actions = torch.clamp(actions, -1.0, 1.0)
+                actions = torch.clamp(
+                    actions, -args.action_limit, args.action_limit
+                )
                 observations, _, _, _ = env.step(actions)
             rendered = base_env.render()
             if rendered is None:
