@@ -54,6 +54,7 @@ mjlab_microduck = "mjlab_microduck.tasks"
 # Shadows mjlab's `train` entry point: identical behavior, plus a --hf-jobs
 # flag that submits the run to Hugging Face Jobs instead (see train_cli.py).
 train = "mjlab_microduck.train_cli:main"
+microduck-rom-sim = "mjlab_microduck.rom.main:main"
   
 [tool.ruff]
 src = ["src"]  # Helpful for recognizing first-party imports.
