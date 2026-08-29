@@ -35,6 +35,16 @@ dependencies = [
     # floating `>=` lets the CUDA index (which carries newer builds than the
     # PyPI pin) drag torch 2.9.1 -> 2.13.0, an unvetted bump for mjlab/rsl_rl.
     "torch==2.9.1",
+    "fastapi>=0.116,<1",
+    "uvicorn>=0.35,<1",
+    "pydantic>=2.11,<3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<9",
+    "httpx>=0.28,<1",
+    "ruff>=0.12,<1",
 ]
 
 [project.entry-points."mjlab.tasks"]

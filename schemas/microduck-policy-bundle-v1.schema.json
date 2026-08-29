@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://microduck.dev/schemas/microduck-policy-bundle-v1.schema.json",
+  "title": "MicroDuck Policy Bundle V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "bundleId", "bundleVersion", "bundleDigest", "createdAt", "sourceRepository", "sourceCommit", "robotModel", "observationContract", "actionContract", "model", "policies", "actions", "qualification", "license"],
+  "properties": {
+    "schema": {"const": "MICRODUCK_POLICY_BUNDLE_V1"},
+    "bundleId": {"type": "string", "minLength": 1},
+    "bundleVersion": {"type": "string", "minLength": 1},
+    "bundleDigest": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+    "createdAt": {"type": "string", "format": "date-time"},
+    "sourceRepository": {"type": "string", "minLength": 1},
+    "sourceCommit": {"type": "string", "minLength": 1},
+    "robotModel": {"const": "MICRODUCK"},
+    "observationContract": {"$ref": "#/$defs/ObservationContract"},
+    "actionContract": {"$ref": "#/$defs/ActionContract"},
+    "model": {"$ref": "#/$defs/ModelArtifact"},
+    "policies": {"type": "array", "items": {"$ref": "#/$defs/PolicyArtifact"}},
+    "actions": {"type": "array", "items": {"$ref": "#/$defs/ActionDefinition"}},
+    "qualification": {"type": "object"},
+    "license": {"type": "object"}
+  },
+  "$defs": {
+    "Digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "CompletionContract": {
+      "type": "object", "additionalProperties": false,
+      "required": ["terminalConditions", "maxDurationMs"],
+      "properties": {
+        "terminalConditions": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "maxDurationMs": {"type": "integer", "exclusiveMinimum": 0}
+      }
+    },
+    "LeaseContract": {
+      "type": "object", "additionalProperties": false,
+      "required": ["minLeaseMs", "defaultLeaseMs", "maxLeaseMs", "commandCadenceMs"],
+      "properties": {
+        "minLeaseMs": {"type": "integer", "exclusiveMinimum": 0},
+        "defaultLeaseMs": {"type": "integer", "exclusiveMinimum": 0},
+        "maxLeaseMs": {"type": "integer", "exclusiveMinimum": 0},
+        "commandCadenceMs": {"type": "integer", "exclusiveMinimum": 0},
+        "safeStopBehavior": {"type": "string"}
+      }
+    },
+    "ObservationContract": {
+      "type": "object", "additionalProperties": false,
+      "required": ["identifier", "dimension", "fields", "units", "normalization"],
+      "properties": {
+        "identifier": {"const": "MICRODUCK_OBS_61_V1"},
+        "dimension": {"const": 61},
+        "fields": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "units": {"type": "object", "additionalProperties": {"type": "string"}},
+        "normalization": {"enum": ["BAKED_IN_ONNX", "DECLARED"]}
+      }
+    },
+    "ActionContract": {
+      "type": "object", "additionalProperties": false,
+      "required": ["identifier", "dimension", "joints", "units", "scaling", "clipping"],
+      "properties": {
+        "identifier": {"const": "MICRODUCK_ACTION_14_V1"},
+        "dimension": {"const": 14},
+        "joints": {"type": "array", "minItems": 14, "maxItems": 14, "items": {"type": "string"}},
+        "units": {"type": "string"}, "scaling": {"type": "object"}, "clipping": {"type": "object"}
+      }
+    },
+    "ModelArtifact": {
+      "type": "object", "additionalProperties": false, "required": ["path", "digest"],
+      "properties": {"path": {"type": "string", "minLength": 1}, "digest": {"$ref": "#/$defs/Digest"}}
+    },
+    "PolicyArtifact": {
+      "type": "object", "additionalProperties": false, "required": ["policyRef", "path", "digest", "runtimeRequirements"],
+      "properties": {
+        "policyRef": {"type": "string", "minLength": 1}, "path": {"type": "string", "minLength": 1},
+        "digest": {"$ref": "#/$defs/Digest"}, "taskId": {"type": ["string", "null"]},
+        "runtimeRequirements": {"type": "object"}, "checkpoint": {"type": ["string", "null"]}, "experimentRef": {"type": ["string", "null"]}
+      }
+    },
+    "ActionDefinition": {
+      "type": "object", "additionalProperties": false,
+      "required": ["actionCode", "executionMode", "availability", "parameterSchema"],
+      "properties": {
+        "actionCode": {"type": "string", "minLength": 1}, "executionMode": {"enum": ["DISCRETE", "CONTINUOUS_LEASE"]},
+        "availability": {"enum": ["AVAILABLE", "UNAVAILABLE"]}, "policyRef": {"type": ["string", "null"]},
+        "unavailableReason": {"type": ["string", "null"]}, "parameterSchema": {"type": "object"},
+        "completion": {"anyOf": [{"$ref": "#/$defs/CompletionContract"}, {"type": "null"}]},
+        "lease": {"anyOf": [{"$ref": "#/$defs/LeaseContract"}, {"type": "null"}]},
+        "displayName": {"type": ["string", "null"]}, "description": {"type": ["string", "null"]},
+        "localizedLabels": {"type": ["object", "null"], "additionalProperties": {"type": "string"}},
+        "preconditions": {"type": ["object", "null"]}, "safety": {"type": ["object", "null"]},
+        "qualificationRefs": {"type": ["array", "null"], "items": {"type": "string"}}
+      },
+      "allOf": [
+        {"if": {"properties": {"availability": {"const": "AVAILABLE"}}, "required": ["availability"]}, "then": {"required": ["policyRef"], "properties": {"policyRef": {"type": "string", "minLength": 1}}}},
+        {"if": {"properties": {"executionMode": {"const": "CONTINUOUS_LEASE"}}, "required": ["executionMode"]}, "then": {"required": ["lease"], "properties": {"lease": {"$ref": "#/$defs/LeaseContract"}}}}
+      ]
+    },
+    "SafeJsonValue": {"anyOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}, {"type": "null"}, {"$ref": "#/$defs/SafeJsonObject"}, {"$ref": "#/$defs/SafeJsonArray"}]},
+    "SafeJsonArray": {"type": "array", "items": {"$ref": "#/$defs/SafeJsonValue"}},
+    "SafeJsonObject": {
+      "type": "object",
+      "propertyNames": {"not": {"pattern": "(?i:joint|torque|pwm|policypath|policyname)"}},
+      "additionalProperties": {"$ref": "#/$defs/SafeJsonValue"}
+    }
+  }
+}
