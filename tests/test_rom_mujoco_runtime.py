@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import threading
 import time
 import zipfile
 from datetime import UTC, datetime
@@ -696,6 +697,131 @@ def test_runtime_contract_exposes_only_controlled_servos() -> None:
     assert all(
         not name.startswith("passive_")
         for name in MicroduckMujocoRuntime.controlled_joint_names
+    )
+
+
+def test_emergency_stop_is_independent_of_the_primary_runtime_lock(
+    tmp_path: Path,
+) -> None:
+    """A wedged policy/control call must not prevent zero/disable emergency intent."""
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root)
+    runtime = MicroduckMujocoRuntime(root, bundle, realtime=False)
+    request = _request().model_copy(update={"bundleDigest": bundle.bundleDigest})
+    runtime.start(bundle.actions[0], request)
+    lock_held = threading.Event()
+    release = threading.Event()
+
+    def hold_primary_lock() -> None:
+        with runtime._lock:
+            lock_held.set()
+            release.wait()
+
+    holder = threading.Thread(target=hold_primary_lock, daemon=True)
+    holder.start()
+    assert lock_held.wait(timeout=0.2)
+    started = time.monotonic()
+    try:
+        runtime.emergency_stop("RUNTIME_UNRESPONSIVE")
+        assert time.monotonic() - started < 0.1
+        assert runtime._stop_event.is_set()
+        assert runtime._fatal_reason == "RUNTIME_UNRESPONSIVE"
+        np.testing.assert_array_equal(
+            runtime._data.ctrl[runtime._actuator_indices], np.zeros(14)
+        )
+        np.testing.assert_array_equal(
+            runtime._model.actuator_gainprm[runtime._actuator_indices],
+            np.zeros((14, 10)),
+        )
+    finally:
+        release.set()
+        holder.join(timeout=0.2)
+
+
+def test_late_blocked_command_cannot_overwrite_emergency_zero_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A command returning after emergency stop must not republish motion."""
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root)
+    runtime = MicroduckMujocoRuntime(root, bundle, realtime=False)
+    request = _request().model_copy(update={"bundleDigest": bundle.bundleDigest})
+    handle = runtime.start(bundle.actions[0], request)
+    original_command_for = runtime._command_for
+    command_started = threading.Event()
+    command_release = threading.Event()
+    outcome: dict[str, BaseException] = {}
+
+    def blocked_command_for(*args):
+        command_started.set()
+        command_release.wait()
+        return original_command_for(*args)
+
+    monkeypatch.setattr(runtime, "_command_for", blocked_command_for)
+
+    def invoke_command() -> None:
+        try:
+            runtime.command(handle, {"vxMps": 0.2, "vyMps": 0.0, "yawRateRadps": 0.0})
+        except BaseException as exc:  # noqa: BLE001 - assert the late-call outcome.
+            outcome["error"] = exc
+
+    command_thread = threading.Thread(target=invoke_command, daemon=True)
+    command_thread.start()
+    assert command_started.wait(timeout=0.2)
+    try:
+        runtime.emergency_stop("RUNTIME_UNRESPONSIVE")
+    finally:
+        command_release.set()
+        command_thread.join(timeout=0.2)
+
+    assert isinstance(outcome.get("error"), RuntimeError)
+    np.testing.assert_array_equal(runtime._requested_command.twist, np.zeros(3))
+    np.testing.assert_array_equal(runtime._command.twist, np.zeros(3))
+    np.testing.assert_array_equal(
+        runtime._data.ctrl[runtime._actuator_indices], np.zeros(14)
+    )
+
+
+def test_late_blocked_start_cannot_publish_runtime_ownership_after_emergency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A start returning after emergency stop must not revive an active handle."""
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root)
+    runtime = MicroduckMujocoRuntime(root, bundle, realtime=False)
+    request = _request().model_copy(update={"bundleDigest": bundle.bundleDigest})
+    original_reset = runtime._reset_model_locked
+    reset_started = threading.Event()
+    reset_release = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def blocked_reset(*args):
+        reset_started.set()
+        reset_release.wait()
+        return original_reset(*args)
+
+    monkeypatch.setattr(runtime, "_reset_model_locked", blocked_reset)
+
+    def invoke_start() -> None:
+        try:
+            outcome["result"] = runtime.start(bundle.actions[0], request)
+        except BaseException as exc:  # noqa: BLE001 - assert the late-call outcome.
+            outcome["error"] = exc
+
+    start_thread = threading.Thread(target=invoke_start, daemon=True)
+    start_thread.start()
+    assert reset_started.wait(timeout=0.2)
+    try:
+        runtime.emergency_stop("RUNTIME_UNRESPONSIVE")
+    finally:
+        reset_release.set()
+        start_thread.join(timeout=0.2)
+
+    assert isinstance(outcome.get("error"), RuntimeError)
+    assert "result" not in outcome
+    assert runtime._active_handle is None
+    np.testing.assert_array_equal(
+        runtime._data.ctrl[runtime._actuator_indices], np.zeros(14)
     )
 
 

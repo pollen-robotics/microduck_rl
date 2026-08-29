@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from datetime import UTC, datetime
 from math import nan
+from threading import Event, Thread
 
 import pytest
 from fastapi.testclient import TestClient
@@ -54,6 +56,169 @@ def command(
         parameters={"vxMps": vx, "vyMps": 0.0, "yawRateRadps": 0.0},
         leaseMs=lease_ms,
     )
+
+
+def _invoke_daemon(function):
+    completed = Event()
+    outcome: dict[str, object] = {}
+
+    def invoke() -> None:
+        try:
+            outcome["result"] = function()
+        except BaseException as exc:  # noqa: BLE001 - the caller inspects the outcome.
+            outcome["error"] = exc
+        finally:
+            completed.set()
+
+    thread = Thread(target=invoke, daemon=True)
+    thread.start()
+    return completed, outcome, thread
+
+
+def _wait_for_terminal(service: SimulatorTaskService, task_id: str):
+    deadline = time.monotonic() + 0.75
+    while time.monotonic() < deadline:
+        snapshot = service.get_task(task_id)
+        if snapshot.state in {"FAILED", "CANCELLED", "TIMED_OUT"}:
+            return snapshot
+        time.sleep(0.005)
+    raise AssertionError(f"task {task_id} did not terminalize")
+
+
+def _assert_unresponsive_diagnostics(
+    service: SimulatorTaskService,
+    walk_request: TaskCreateRequest,
+    runtime: FakeMicroduckRuntime,
+) -> None:
+    terminal = service.get_task(walk_request.taskId)
+    assert terminal.state == "FAILED"
+    assert terminal.stopReason == "RUNTIME_UNRESPONSIVE"
+    assert terminal.evidence is not None
+    assert terminal.evidence.metrics["safetyFailure"] == "RUNTIME_UNRESPONSIVE"
+    ready, reasons = service.motion_readiness()
+    assert ready is False
+    assert "RUNTIME_UNRESPONSIVE" in reasons
+
+    calls = [
+        lambda: service.get_task(walk_request.taskId),
+        lambda: service.events_after(walk_request.taskId, -1),
+        service.robot_status,
+        lambda: service.cancel_task(walk_request.taskId),
+    ]
+    for call in calls:
+        completed, outcome, _ = _invoke_daemon(call)
+        assert completed.wait(timeout=0.2)
+        assert "error" not in outcome
+    assert runtime.emergency_stop_calls == ["RUNTIME_UNRESPONSIVE"]
+
+    token = "runtime-stall-token"
+    with TestClient(create_app(service, token)) as client:
+        auth = {"Authorization": f"Bearer {token}"}
+        task_id = walk_request.taskId
+        ready = client.get("/v1/ready", headers=auth)
+        status = client.get("/v1/robot/status", headers=auth)
+        task = client.get(f"/v1/tasks/{task_id}", headers=auth)
+        events = client.get(f"/v1/tasks/{task_id}/events", headers=auth)
+        cancel = client.post(f"/v1/tasks/{task_id}/cancel", headers=auth)
+        create = client.post(
+            "/v1/tasks",
+            headers=auth,
+            json=walk_request.model_copy(update={"taskId": "f" * 32}).model_dump(
+                mode="json", by_alias=True
+            ),
+        )
+        renew = client.put(
+            f"/v1/tasks/{task_id}/command",
+            headers=auth,
+            json=command(sequence=99).model_dump(mode="json", by_alias=True),
+        )
+
+    assert ready.status_code == 200
+    assert ready.json()["ready"] is False
+    assert "RUNTIME_UNRESPONSIVE" in ready.json()["reasonCodes"]
+    assert status.status_code == task.status_code == events.status_code == 200
+    assert cancel.status_code == 200
+    assert create.status_code == renew.status_code == 503
+    assert create.json()["code"] == renew.json()["code"] == "NOT_READY"
+
+
+def test_blocked_sample_fails_closed_without_holding_service_ownership(
+    service, walk_request, runtime
+):
+    """A stalled sample must not defeat the lease watchdog or block diagnostics."""
+    service._runtime_call_timeout_s = 0.05
+    service.create_task(walk_request)
+    runtime.sample_release.clear()
+    tick_done, _, tick_thread = _invoke_daemon(service.tick)
+    assert runtime.sample_started.wait(timeout=0.2)
+
+    try:
+        _wait_for_terminal(service, walk_request.taskId)
+        _assert_unresponsive_diagnostics(service, walk_request, runtime)
+        assert tick_done.wait(timeout=0.2)
+        assert runtime.safe_stop_calls == []
+    finally:
+        runtime.sample_release.set()
+        tick_thread.join(timeout=0.2)
+
+    assert service.get_task(walk_request.taskId).state == "FAILED"
+    assert service._active is None
+
+
+def test_blocked_command_fails_closed_and_late_return_cannot_renew_ownership(
+    service, walk_request, runtime
+):
+    """A hung command must terminalize once and its late return must be ignored."""
+    service._runtime_call_timeout_s = 0.05
+    service.create_task(walk_request)
+    runtime.command_release.clear()
+    command_done, _, command_thread = _invoke_daemon(
+        lambda: service.command(
+            walk_request.taskId, command(sequence=1, vx=0.2, lease_ms=500)
+        )
+    )
+    assert runtime.command_started.wait(timeout=0.2)
+
+    try:
+        _wait_for_terminal(service, walk_request.taskId)
+        _assert_unresponsive_diagnostics(service, walk_request, runtime)
+        assert command_done.wait(timeout=0.2)
+        assert runtime.safe_stop_calls == []
+    finally:
+        runtime.command_release.set()
+        command_thread.join(timeout=0.2)
+
+    terminal = service.get_task(walk_request.taskId)
+    assert terminal.state == "FAILED"
+    assert terminal.stopReason == "RUNTIME_UNRESPONSIVE"
+    assert service._active is None
+
+
+def test_blocked_safe_stop_becomes_unresponsive_without_duplicate_stop_attempts(
+    service, walk_request, runtime
+):
+    """A hung safe stop must not retain the slot or trigger repeated stop attempts."""
+    service._runtime_call_timeout_s = 0.05
+    service.create_task(walk_request)
+    runtime.safe_stop_release.clear()
+    cancel_done, outcome, cancel_thread = _invoke_daemon(
+        lambda: service.cancel_task(walk_request.taskId)
+    )
+    assert runtime.safe_stop_started.wait(timeout=0.2)
+
+    try:
+        _wait_for_terminal(service, walk_request.taskId)
+        _assert_unresponsive_diagnostics(service, walk_request, runtime)
+        assert cancel_done.wait(timeout=0.2)
+        assert "error" not in outcome
+        assert len(runtime.safe_stop_calls) == 1
+    finally:
+        runtime.safe_stop_release.set()
+        cancel_thread.join(timeout=0.2)
+
+    service.watchdog_failed()
+    assert len(runtime.safe_stop_calls) == 1
+    assert runtime.emergency_stop_calls == ["RUNTIME_UNRESPONSIVE"]
 
 
 def test_expired_lease_zeros_velocity_stops_and_times_out(

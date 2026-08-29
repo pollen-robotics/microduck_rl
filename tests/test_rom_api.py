@@ -306,6 +306,32 @@ def test_request_body_limit_rejects_declared_oversize_without_entering_validatio
     }
 
 
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/v1/tasks/NOT-LOWERCASE/cancel"),
+        ("PUT", f"/v1/tasks/{'A' * 32}/command"),
+        ("PUT", "/v1/tasks/%32%32%32%32/command"),
+    ],
+)
+def test_request_body_limit_precedes_v1_path_parameter_validation(
+    client: TestClient,
+    auth: dict[str, str],
+    method: str,
+    path: str,
+):
+    """Malformed paths must not bypass the global V1 POST/PUT ingress bound."""
+    response = client.request(
+        method,
+        path,
+        headers=auth | {"Content-Type": "application/json"},
+        content=b"x" * 65_537,
+    )
+
+    assert response.status_code == 413
+    assert response.json()["code"] == "REQUEST_BODY_TOO_LARGE"
+
+
 def test_request_body_limit_stops_chunked_input_without_content_length(
     service: SimulatorTaskService, bearer_token: str
 ):
@@ -357,6 +383,57 @@ def test_request_body_limit_stops_chunked_input_without_content_length(
     }
 
 
+def test_request_body_limit_replays_a_valid_chunked_v1_request(
+    service: SimulatorTaskService,
+    bearer_token: str,
+    payload: dict[str, Any],
+):
+    """The bounded ASGI reader must replay valid chunks exactly once to FastAPI."""
+    app = create_app(service, bearer_token)
+    encoded = json.dumps(payload, separators=(",", ":")).encode()
+    split = len(encoded) // 2
+    chunks = iter(
+        [
+            {"type": "http.request", "body": encoded[:split], "more_body": True},
+            {"type": "http.request", "body": encoded[split:], "more_body": False},
+        ]
+    )
+    sent: list[dict[str, Any]] = []
+
+    async def receive():
+        return next(chunks)
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/tasks",
+        "raw_path": b"/v1/tasks",
+        "query_string": b"",
+        "headers": [
+            (b"authorization", f"Bearer {bearer_token}".encode()),
+            (b"content-type", b"application/json"),
+        ],
+        "client": ("127.0.0.1", 1),
+        "server": ("testserver", 80),
+    }
+
+    asyncio.run(app(scope, receive, send))
+
+    assert sent[0]["status"] == 202
+    response_body = b"".join(
+        message.get("body", b"")
+        for message in sent
+        if message["type"] == "http.response.body"
+    )
+    assert json.loads(response_body)["taskId"] == payload["taskId"]
+
+
 def test_event_query_defaults_before_sequence_zero_and_enforces_page_size(
     client: TestClient,
     auth: dict[str, str],
@@ -372,11 +449,22 @@ def test_event_query_defaults_before_sequence_zero_and_enforces_page_size(
     oversized = client.get(
         f"/v1/tasks/{request.taskId}/events?pageSize=101", headers=auth
     )
+    signed_max = client.get(
+        f"/v1/tasks/{request.taskId}/events?afterSequence={2**63 - 1}",
+        headers=auth,
+    )
+    signed_max_plus_one = client.get(
+        f"/v1/tasks/{request.taskId}/events?afterSequence={2**63}", headers=auth
+    )
 
     assert first.status_code == 200
     assert [event["sequence"] for event in first.json()["events"]] == [0]
     assert oversized.status_code == 400
     assert oversized.json()["code"] == "PARAMETER_INVALID"
+    assert signed_max.status_code == 200
+    assert signed_max.json() == {"events": []}
+    assert signed_max_plus_one.status_code == 400
+    assert signed_max_plus_one.json()["code"] == "PARAMETER_INVALID"
 
 
 def test_catalog_is_derived_from_the_installed_service_bundle(
@@ -415,6 +503,9 @@ def test_generated_openapi_has_exact_v1_operations_security_and_schema_identifie
         if path.startswith("/v1/")
     }
     assert actual_operations == expected_operations
+    for path_item in checked_in["paths"].values():
+        for method in {"post", "put"} & set(path_item):
+            assert "413" in path_item[method]["responses"]
 
     for path, methods in expected_operations.items():
         for method in methods:

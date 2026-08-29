@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -395,6 +396,108 @@ def test_task_parameters_evidence_and_event_payloads_are_flat_and_bounded():
                 "createdAt": "2026-08-29T00:00:00Z",
             }
         )
+    with pytest.raises(ValidationError, match="encoded wire limit"):
+        TaskEvent.model_validate(
+            {
+                "sequence": 0,
+                "eventType": "TASK_EVENT",
+                "payload": {f"field{index}": "x" * 1_024 for index in range(4)},
+                "createdAt": "2026-08-29T00:00:00Z",
+            }
+        )
+    with pytest.raises(ValidationError, match="encoded wire limit"):
+        TaskEvidence(
+            bundleDigest="sha256:" + "a" * 64,
+            policyDigest="sha256:" + "b" * 64,
+            metrics={"note": "x" * 1_024},
+        )
+
+
+def test_wire_float_and_parameter_integer_types_are_exact_and_bounded():
+    """Float coercion and arbitrary-size JSON integers are not portable wire values."""
+    with pytest.raises(ValidationError, match="wire float"):
+        RobotStatus.model_validate(valid_robot_status() | {"loopFrequencyHz": 50})
+    task = {
+        "schema": "MICRODUCK_SIM_TASK_V1",
+        "taskId": "0" * 32,
+        "actionCode": "STAND",
+        "bundleVersion": "1.0.0",
+        "bundleDigest": "sha256:" + "a" * 64,
+        "parameters": {"count": 2**63},
+        "scenario": {"terrain": "flat", "seed": 1},
+        "requestedBy": "execution-1",
+    }
+    with pytest.raises(ValidationError):
+        TaskCreateRequest.model_validate(task)
+
+
+def test_shared_portability_fixtures_match_python_semantic_validation():
+    """Python and ROM consumers must share accept/reject examples for non-schema invariants."""
+    fixture_path = (
+        Path(__file__).parents[1] / "schemas/microduck-v1-portability-fixtures.json"
+    )
+    fixture = json.loads(fixture_path.read_text())
+    models = {
+        "PolicyBundle": PolicyBundle,
+        "RobotStatus": RobotStatus,
+        "TaskCommandRequest": TaskCommandRequest,
+        "TaskCreateRequest": TaskCreateRequest,
+        "TaskEvent": TaskEvent,
+    }
+    covered = {case["covers"] for case in fixture["cases"]}
+    assert {
+        "bytes",
+        "coercion",
+        "date-time",
+        "depth",
+        "digest",
+        "raw-control",
+        "scenario",
+        "sequence",
+    } <= covered
+
+    for case in fixture["cases"]:
+        payload = deepcopy(fixture["basePayloads"][case["base"]])
+        for pointer in case.get("remove", []):
+            _remove_json_pointer(payload, pointer)
+        for pointer, value in case.get("set", {}).items():
+            _set_json_pointer(payload, pointer, value)
+        model = models[case["model"]]
+        try:
+            model.model_validate(payload)
+        except ValidationError:
+            accepted = False
+        else:
+            accepted = True
+        assert accepted is case["accepted"], case["name"]
+
+
+def _set_json_pointer(document, pointer: str, value) -> None:
+    parts = [
+        part.replace("~1", "/").replace("~0", "~") for part in pointer[1:].split("/")
+    ]
+    target = document
+    for part in parts[:-1]:
+        target = target[int(part)] if isinstance(target, list) else target[part]
+    final = parts[-1]
+    if isinstance(target, list):
+        target[int(final)] = value
+    else:
+        target[final] = value
+
+
+def _remove_json_pointer(document, pointer: str) -> None:
+    parts = [
+        part.replace("~1", "/").replace("~0", "~") for part in pointer[1:].split("/")
+    ]
+    target = document
+    for part in parts[:-1]:
+        target = target[int(part)] if isinstance(target, list) else target[part]
+    final = parts[-1]
+    if isinstance(target, list):
+        del target[int(final)]
+    else:
+        del target[final]
 
 
 def test_lease_contract_rejects_invalid_semantic_bounds():
@@ -485,6 +588,40 @@ def test_checked_in_schemas_lock_layouts_error_codes_and_portable_lease_invarian
     assert "schema" in bundle_schema["required"]
     assert "schema" in openapi["components"]["schemas"]["TaskCreateRequest"]["required"]
     assert "schema" in openapi["components"]["schemas"]["RobotStatus"]["required"]
+    assert bundle_schema["x-unergy-invariants"] == {
+        "finiteNumbers": True,
+        "maxCanonicalJsonBytes": 65_536,
+        "maxDepth": 8,
+        "semanticValidatorRequired": True,
+    }
+    parameters = openapi["components"]["schemas"]["TaskCreateRequest"]["properties"][
+        "parameters"
+    ]
+    assert parameters["x-unergy-invariants"] == {
+        "finiteScalarsOnly": True,
+        "maxCanonicalJsonBytes": 16_384,
+        "maxDepth": 1,
+        "rejectPropertyNameSubstringsCaseInsensitive": [
+            "joint",
+            "torque",
+            "pwm",
+            "policyPath",
+            "policyName",
+        ],
+    }
+    assert parameters["propertyNames"]["not"]["pattern"]
+    assert (
+        openapi["components"]["schemas"]["TaskEvent"]["properties"]["payload"][
+            "x-unergy-invariants"
+        ]["maxCanonicalJsonBytes"]
+        == 4_096
+    )
+    assert (
+        openapi["components"]["schemas"]["TaskEvidence"]["properties"]["metrics"][
+            "x-unergy-invariants"
+        ]["maxCanonicalJsonBytes"]
+        == 1_024
+    )
 
 
 def test_tracked_bundle_schema_matches_the_complete_generated_contract():

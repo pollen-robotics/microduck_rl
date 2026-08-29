@@ -130,6 +130,9 @@ class MicroduckMujocoRuntime:
         self._clock = monotonic_clock
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
+        self._emergency_event = threading.Event()
+        self._emergency_guard = threading.Lock()
+        self._emergency_invoked = False
         self._wait: Callable[[float], bool] = self._stop_event.wait
         self._thread: threading.Thread | None = None
         self._active_handle: RuntimeHandle | None = None
@@ -690,69 +693,79 @@ class MicroduckMujocoRuntime:
             self._rng = np.random.default_rng(self._applied_seed)
             spec = ACTION_RUNTIME_SPECS[action.actionCode]
             self._reset_model_locked(self._rng, spec.reset_profile)
-            self._active_handle = RuntimeHandle(taskId=request.taskId)
-            self._active_action = action
-            self._active_request = request
-            self._active_policy = next(
-                item
-                for item in self._bundle.policies
-                if item.policyRef == action.policyRef
-            )
-            self._active_session = self._sessions[self._active_policy.policyRef]
-            requested_command, command, limiting_reason = self._command_for(
-                action.actionCode, request.parameters, action
-            )
-            self._requested_command = requested_command
-            self._command = command
-            self._limiting_reason = limiting_reason
-            self._previous_action = np.zeros(14, dtype=np.float32)
-            self._policy_target = DEFAULT_JOINT_POSE.copy()
-            self._terminal_state = None
-            self._terminal_reason = None
-            self._fallen = False
-            self._limp = False
-            self._step_count = 0
-            self._start_sim_time = float(self._data.time)
-            self._min_base_height_m = float(self._base_position()[2])
-            self._max_tilt_rad = 0.0
-            self._max_abs_action = 0.0
-            self._energy_proxy = 0.0
-            self._actuator_clamp_steps = 0
-            self._physical_joint_limit_violations = 0
-            self._tracking_error_sum = 0.0
-            self._tracking_error_max = 0.0
-            self._tracking_error_samples = 0
-            self._settled_steps = 0
-            self._reset_stand_settlement_window_locked()
-            self._upright_steps = 0
-            self._last_yaw_rad = self._yaw_rad()
-            self._yaw_rotation_rad = 0.0
-            self._start_base_position = self._base_position()
-            self._last_loop_start = None
-            self._loop_frequency_hz = 50.0 if not self._realtime else 0.0
-            self._loop_overruns = 0
-            self._consecutive_overruns = 0
-            self._stop_event.clear()
-            handle = self._active_handle
-            if self._realtime:
-                self._thread = threading.Thread(
-                    target=self._governed_loop,
-                    name=f"microduck-policy-{request.taskId}",
-                    daemon=True,
+            with self._emergency_guard:
+                if self._emergency_event.is_set():
+                    self._disable_actuators_locked()
+                    raise RuntimeError("runtime requires restart after emergency stop")
+                self._active_handle = RuntimeHandle(taskId=request.taskId)
+                self._active_action = action
+                self._active_request = request
+                self._active_policy = next(
+                    item
+                    for item in self._bundle.policies
+                    if item.policyRef == action.policyRef
                 )
-                self._thread.start()
-            return handle
+                self._active_session = self._sessions[self._active_policy.policyRef]
+                requested_command, command, limiting_reason = self._command_for(
+                    action.actionCode, request.parameters, action
+                )
+                self._requested_command = requested_command
+                self._command = command
+                self._limiting_reason = limiting_reason
+                self._previous_action = np.zeros(14, dtype=np.float32)
+                self._policy_target = DEFAULT_JOINT_POSE.copy()
+                self._terminal_state = None
+                self._terminal_reason = None
+                self._fallen = False
+                self._limp = False
+                self._step_count = 0
+                self._start_sim_time = float(self._data.time)
+                self._min_base_height_m = float(self._base_position()[2])
+                self._max_tilt_rad = 0.0
+                self._max_abs_action = 0.0
+                self._energy_proxy = 0.0
+                self._actuator_clamp_steps = 0
+                self._physical_joint_limit_violations = 0
+                self._tracking_error_sum = 0.0
+                self._tracking_error_max = 0.0
+                self._tracking_error_samples = 0
+                self._settled_steps = 0
+                self._reset_stand_settlement_window_locked()
+                self._upright_steps = 0
+                self._last_yaw_rad = self._yaw_rad()
+                self._yaw_rotation_rad = 0.0
+                self._start_base_position = self._base_position()
+                self._last_loop_start = None
+                self._loop_frequency_hz = 50.0 if not self._realtime else 0.0
+                self._loop_overruns = 0
+                self._consecutive_overruns = 0
+                self._stop_event.clear()
+                handle = self._active_handle
+                if self._realtime:
+                    self._thread = threading.Thread(
+                        target=self._governed_loop,
+                        name=f"microduck-policy-{request.taskId}",
+                        daemon=True,
+                    )
+                    self._thread.start()
+                return handle
 
     def command(self, handle: RuntimeHandle, parameters: Mapping[str, object]) -> None:
         with self._lock:
+            if self._emergency_event.is_set():
+                raise RuntimeError("runtime requires restart after emergency stop")
             self._require_handle(handle)
             assert self._active_action is not None
             requested_command, command, limiting_reason = self._command_for(
                 self._active_action.actionCode, parameters, self._active_action
             )
-            self._requested_command = requested_command
-            self._command = command
-            self._limiting_reason = limiting_reason
+            with self._emergency_guard:
+                if self._emergency_event.is_set():
+                    self._disable_actuators_locked()
+                    raise RuntimeError("runtime requires restart after emergency stop")
+                self._requested_command = requested_command
+                self._command = command
+                self._limiting_reason = limiting_reason
 
     def sample(self, handle: RuntimeHandle) -> RuntimeSample:
         with self._lock:
@@ -786,6 +799,12 @@ class MicroduckMujocoRuntime:
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=1.0)
+            if thread.is_alive():
+                self.emergency_stop("RUNTIME_UNRESPONSIVE")
+                return RuntimeEvidence(
+                    metrics={"safetyFailure": "RUNTIME_UNRESPONSIVE"},
+                    stopReason=reason,
+                )
         with self._lock:
             if self._active_handle is None:
                 return RuntimeEvidence(stopReason=reason)
@@ -805,6 +824,31 @@ class MicroduckMujocoRuntime:
             self._limp = self._fatal_reason is not None
             self._stopped_evidence[stopped_task_id] = evidence
             return evidence
+
+    def emergency_stop(self, reason: str) -> None:
+        """Set fatal zero/disable intent without waiting for the primary lock."""
+        with self._emergency_guard:
+            if self._emergency_invoked:
+                return
+            self._emergency_invoked = True
+            self._emergency_event.set()
+            self._stop_event.set()
+            self._fatal_reason = reason
+            self._terminal_state = "FAILED"
+            self._terminal_reason = reason
+            self._limiting_reason = reason
+            self._limp = True
+            self._active_handle = None
+            self._active_action = None
+            self._active_request = None
+            self._active_policy = None
+            self._active_session = None
+            zero = DeploymentCommand.zero()
+            self._requested_command = zero
+            self._command = zero
+            self._data.ctrl[self._actuator_indices] = 0.0
+            self._model.actuator_gainprm[self._actuator_indices] = 0.0
+            self._model.actuator_biasprm[self._actuator_indices] = 0.0
 
     def status(self) -> RobotStatus:
         with self._lock:
@@ -871,7 +915,7 @@ class MicroduckMujocoRuntime:
             )
 
     def _governed_loop(self) -> None:
-        while not self._stop_event.is_set():
+        while not self._stop_event.is_set() and not self._emergency_event.is_set():
             started_at = self._clock()
             with self._lock:
                 if self._last_loop_start is not None:
@@ -897,7 +941,13 @@ class MicroduckMujocoRuntime:
 
     def _control_step(self) -> None:
         with self._lock:
-            if self._active_handle is None or self._terminal_state is not None:
+            if (
+                self._emergency_event.is_set()
+                or self._active_handle is None
+                or self._terminal_state is not None
+            ):
+                if self._emergency_event.is_set():
+                    self._disable_actuators_locked()
                 return
             try:
                 if self._limiting_reason == "ACTUATOR_LIMIT":
@@ -922,6 +972,9 @@ class MicroduckMujocoRuntime:
                     [actor_output.name],
                     {actor_input.name: observation.reshape(1, 61)},
                 )[0]
+                if self._emergency_event.is_set():
+                    self._disable_actuators_locked()
+                    return
                 if action.shape != (1, 14) or not np.isfinite(action).all():
                     raise FloatingPointError("NON_FINITE_POLICY_OUTPUT")
                 policy_action = action[0].astype(np.float32, copy=False)
@@ -931,9 +984,15 @@ class MicroduckMujocoRuntime:
                     self._limiting_reason = "ACTUATOR_LIMIT"
                     self._actuator_clamp_steps += 1
                 self._data.ctrl[self._actuator_indices] = target
+                if self._emergency_event.is_set():
+                    self._disable_actuators_locked()
+                    return
                 self._policy_target = target.copy()
                 self._previous_action = policy_action.copy()
                 for _ in range(self._steps_per_control):
+                    if self._emergency_event.is_set():
+                        self._disable_actuators_locked()
+                        return
                     mujoco.mj_step(self._model, self._data)
                 self._step_count += 1
                 self._update_safety_metrics_locked(policy_action)

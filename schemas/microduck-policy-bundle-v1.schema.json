@@ -86,7 +86,12 @@
             "minLength": 1
           },
           "title": "Scaling",
-          "type": "object"
+          "type": "object",
+          "x-unergy-invariants": {
+            "finiteNumbers": true,
+            "maxCanonicalJsonBytes": 65536,
+            "maxDepth": 8
+          }
         },
         "clipping": {
           "additionalProperties": {
@@ -98,7 +103,12 @@
             "minLength": 1
           },
           "title": "Clipping",
-          "type": "object"
+          "type": "object",
+          "x-unergy-invariants": {
+            "finiteNumbers": true,
+            "maxCanonicalJsonBytes": 65536,
+            "maxDepth": 8
+          }
         }
       },
       "required": [
@@ -224,7 +234,12 @@
             "minLength": 1
           },
           "title": "Parameterschema",
-          "type": "object"
+          "type": "object",
+          "x-unergy-invariants": {
+            "finiteNumbers": true,
+            "maxCanonicalJsonBytes": 65536,
+            "maxDepth": 8
+          }
         },
         "completion": {
           "anyOf": [
@@ -309,7 +324,12 @@
                 "maxLength": 128,
                 "minLength": 1
               },
-              "type": "object"
+              "type": "object",
+              "x-unergy-invariants": {
+                "finiteNumbers": true,
+                "maxCanonicalJsonBytes": 65536,
+                "maxDepth": 8
+              }
             },
             {
               "type": "null"
@@ -329,7 +349,12 @@
                 "maxLength": 128,
                 "minLength": 1
               },
-              "type": "object"
+              "type": "object",
+              "x-unergy-invariants": {
+                "finiteNumbers": true,
+                "maxCanonicalJsonBytes": 65536,
+                "maxDepth": 8
+              }
             },
             {
               "type": "null"
@@ -401,6 +426,8 @@
           "type": "string"
         },
         {
+          "maximum": 9223372036854775807,
+          "minimum": -9223372036854775808,
           "type": "integer"
         },
         {
@@ -467,6 +494,8 @@
                 "type": "string"
               },
               {
+                "maximum": 9223372036854775807,
+                "minimum": -9223372036854775808,
                 "type": "integer"
               },
               {
@@ -483,10 +512,25 @@
           "maxProperties": 16,
           "propertyNames": {
             "maxLength": 64,
-            "minLength": 1
+            "minLength": 1,
+            "not": {
+              "pattern": "[jJ][oO][iI][nN][tT]|[tT][oO][rR][qQ][uU][eE]|[pP][wW][mM]|[pP][oO][lL][iI][cC][yY][pP][aA][tT][hH]|[pP][oO][lL][iI][cC][yY][nN][aA][mM][eE]"
+            }
           },
           "title": "Zerocommand",
-          "type": "object"
+          "type": "object",
+          "x-unergy-invariants": {
+            "finiteScalarsOnly": true,
+            "maxCanonicalJsonBytes": 16384,
+            "maxDepth": 1,
+            "rejectPropertyNameSubstringsCaseInsensitive": [
+              "joint",
+              "torque",
+              "pwm",
+              "policyPath",
+              "policyName"
+            ]
+          }
         },
         "safeStopBehavior": {
           "const": "ZERO_TWIST",
@@ -817,7 +861,12 @@
             "minLength": 1
           },
           "title": "Runtimerequirements",
-          "type": "object"
+          "type": "object",
+          "x-unergy-invariants": {
+            "finiteNumbers": true,
+            "maxCanonicalJsonBytes": 65536,
+            "maxDepth": 8
+          }
         },
         "checkpoint": {
           "anyOf": [
@@ -935,7 +984,12 @@
         "minLength": 1
       },
       "title": "Qualification",
-      "type": "object"
+      "type": "object",
+      "x-unergy-invariants": {
+        "finiteNumbers": true,
+        "maxCanonicalJsonBytes": 65536,
+        "maxDepth": 8
+      }
     },
     "license": {
       "additionalProperties": {
@@ -947,7 +1001,12 @@
         "minLength": 1
       },
       "title": "License",
-      "type": "object"
+      "type": "object",
+      "x-unergy-invariants": {
+        "finiteNumbers": true,
+        "maxCanonicalJsonBytes": 65536,
+        "maxDepth": 8
+      }
     },
     "bundleDigest": {
       "pattern": "^sha256:[0-9a-f]{64}$",
@@ -973,5 +1032,11 @@
     "bundleDigest"
   ],
   "title": "PolicyBundle",
-  "type": "object"
+  "type": "object",
+  "x-unergy-invariants": {
+    "finiteNumbers": true,
+    "maxCanonicalJsonBytes": 65536,
+    "maxDepth": 8,
+    "semanticValidatorRequired": true
+  }
 }

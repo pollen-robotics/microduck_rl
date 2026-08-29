@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hmac
 import json
-import re
 from contextlib import asynccontextmanager
 from threading import Event, Thread
 from typing import Annotated, Any, Literal
@@ -48,7 +47,6 @@ from .service import (
 
 _TASK_ID_PATTERN = r"^[0-9a-f]{32}$"
 _MAX_REQUEST_BODY_BYTES = 65_536
-_COMMAND_PATH = re.compile(r"^/v1/tasks/[0-9a-f]{32}/command$")
 ErrorCode = Literal[
     "AUTH_REQUIRED",
     "NOT_READY",
@@ -168,9 +166,7 @@ def _route_has_json_body(scope: Scope) -> bool:
         return False
     method = scope.get("method")
     path = scope.get("path", "")
-    return (method == "POST" and path == "/v1/tasks") or (
-        method == "PUT" and _COMMAND_PATH.fullmatch(path) is not None
-    )
+    return method in {"POST", "PUT"} and (path == "/v1" or path.startswith("/v1/"))
 
 
 def _content_length(scope: Scope) -> int | None:
@@ -474,6 +470,7 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
             400: {"model": Error},
             401: {"model": Error},
             404: {"model": Error},
+            413: {"model": Error},
             503: {"model": Error},
         },
     )
@@ -521,7 +518,9 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
     )
     def task_events(
         task_id: Annotated[str, Path(alias="taskId", pattern=_TASK_ID_PATTERN)],
-        after_sequence: Annotated[int, Query(alias="afterSequence", ge=-1)] = -1,
+        after_sequence: Annotated[
+            int, Query(alias="afterSequence", ge=-1, le=2**63 - 1)
+        ] = -1,
         page_size: Annotated[int, Query(alias="pageSize", ge=1, le=100)] = 100,
     ) -> TaskEventPage:
         if service is None:

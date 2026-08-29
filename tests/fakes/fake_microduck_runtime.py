@@ -21,9 +21,20 @@ class FakeMicroduckRuntime:
         self.validation_release.set()
         self.started = Event()
         self.safe_stopped = Event()
+        self.sample_started = Event()
+        self.sample_release = Event()
+        self.sample_release.set()
+        self.command_started = Event()
+        self.command_release = Event()
+        self.command_release.set()
+        self.safe_stop_started = Event()
+        self.safe_stop_release = Event()
+        self.safe_stop_release.set()
+        self.emergency_stopped = Event()
         self._lock = Lock()
         self._samples: deque[RuntimeSample | BaseException] = deque()
         self.safe_stop_calls: list[tuple[RuntimeHandle | None, str]] = []
+        self.emergency_stop_calls: list[str] = []
         self.command_calls: list[dict[str, Any]] = []
         self.operation_log: list[tuple[str, Any]] = []
         self.validation_error: BaseException | None = None
@@ -62,6 +73,8 @@ class FakeMicroduckRuntime:
         return RuntimeHandle(taskId=request.taskId)
 
     def sample(self, handle: RuntimeHandle) -> RuntimeSample:
+        self.sample_started.set()
+        self.sample_release.wait()
         with self._lock:
             if self._samples:
                 next_sample = self._samples.popleft()
@@ -76,21 +89,34 @@ class FakeMicroduckRuntime:
             return self.command_calls[-1] if self.command_calls else None
 
     def command(self, handle: RuntimeHandle, parameters: Mapping[str, object]) -> None:
+        self.command_started.set()
+        self.command_release.wait()
         command = dict(parameters)
         with self._lock:
             self.command_calls.append(command)
             self.operation_log.append(("command", command))
-        if command == {"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0} and self.zero_command_error:
+        if (
+            command == {"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0}
+            and self.zero_command_error
+        ):
             raise self.zero_command_error
 
     def safe_stop(self, handle: RuntimeHandle | None, reason: str) -> RuntimeEvidence:
+        self.safe_stop_started.set()
         with self._lock:
             self.safe_stop_calls.append((handle, reason))
             self.operation_log.append(("safe_stop", reason))
+        self.safe_stop_release.wait()
         self.safe_stopped.set()
         if self.safe_stop_error is not None:
             raise self.safe_stop_error
         return RuntimeEvidence(metrics=self.safe_stop_metrics, stopReason=reason)
+
+    def emergency_stop(self, reason: str) -> None:
+        with self._lock:
+            self.emergency_stop_calls.append(reason)
+            self.operation_log.append(("emergency_stop", reason))
+        self.emergency_stopped.set()
 
     def status(self) -> RobotStatus:
         if self.status_error is not None:

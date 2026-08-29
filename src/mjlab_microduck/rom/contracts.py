@@ -13,10 +13,10 @@ from typing import Annotated, Any, Literal, get_origin
 from pydantic import (
     AfterValidator,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     StrictBool,
-    StrictInt,
     StringConstraints,
     field_validator,
     model_validator,
@@ -84,10 +84,21 @@ _MAX_MANIFEST_MAP_ITEMS = 128
 _MAX_MANIFEST_DEPTH = 8
 _MAX_MANIFEST_JSON_BYTES = 65_536
 _MAX_PARAMETER_ITEMS = 16
+_MAX_PARAMETER_JSON_BYTES = 16_384
 _MAX_EVENT_PAYLOAD_ITEMS = 16
+_MAX_EVENT_PAYLOAD_JSON_BYTES = 4_096
 _MAX_EVIDENCE_METRICS = 32
+_MAX_EVIDENCE_JSON_BYTES = 1_024
 _MAX_STATUS_MAP_ITEMS = 32
 _MAX_STATUS_JSON_BYTES = 4_096
+_SIGNED_INT_MIN = -(2**63)
+_SIGNED_INT_MAX = 2**63 - 1
+
+_RAW_CONTROL_PROPERTY_PATTERN = (
+    "[jJ][oO][iI][nN][tT]|[tT][oO][rR][qQ][uU][eE]|[pP][wW][mM]|"
+    "[pP][oO][lL][iI][cC][yY][pP][aA][tT][hH]|"
+    "[pP][oO][lL][iI][cC][yY][nN][aA][mM][eE]"
+)
 
 BoundedIdentifier = Annotated[
     str, StringConstraints(strict=True, min_length=1, max_length=_MAX_IDENTIFIER_LENGTH)
@@ -103,11 +114,28 @@ BoundedJsonKey = Annotated[
     str, StringConstraints(strict=True, min_length=1, max_length=128)
 ]
 BoundedJsonString = Annotated[str, StringConstraints(strict=True, max_length=1_024)]
-FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
-JsonScalar = BoundedJsonString | StrictInt | FiniteFloat | StrictBool | None
+
+
+def _strict_finite_float(value: Any) -> float:
+    if not isinstance(value, float):
+        raise ValueError(  # noqa: TRY004 - Pydantic wraps ValueError as wire validation.
+            "wire float values must use the JSON number representation"
+        )
+    if not math.isfinite(value):
+        raise ValueError("wire float values must be finite")
+    return value
+
+
+FiniteFloat = Annotated[
+    float, BeforeValidator(_strict_finite_float), Field(allow_inf_nan=False)
+]
+SignedJsonInteger = Annotated[
+    int, Field(strict=True, ge=_SIGNED_INT_MIN, le=_SIGNED_INT_MAX)
+]
+JsonScalar = BoundedJsonString | SignedJsonInteger | FiniteFloat | StrictBool | None
 type JsonValue = (
     BoundedJsonString
-    | StrictInt
+    | SignedJsonInteger
     | FiniteFloat
     | StrictBool
     | None
@@ -169,27 +197,129 @@ def _status_object(value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
     )
 
 
+def _reject_raw_control_keys(value: Any) -> None:
+    if isinstance(value, Mapping):
+        for key, nested_value in value.items():
+            if isinstance(key, str) and _RAW_CONTROL_KEY.search(key):
+                raise ValueError(f"raw control key is not permitted: {key}")
+            _reject_raw_control_keys(nested_value)
+    elif isinstance(value, list):
+        for nested_value in value:
+            _reject_raw_control_keys(nested_value)
+
+
+def _parameter_object(value: Mapping[str, JsonScalar]) -> Mapping[str, JsonScalar]:
+    _reject_raw_control_keys(value)
+    return _validate_bounded_json(
+        value,
+        max_items=_MAX_PARAMETER_ITEMS,
+        max_depth=1,
+        max_bytes=_MAX_PARAMETER_JSON_BYTES,
+    )
+
+
+def _event_payload(value: Mapping[str, JsonScalar]) -> Mapping[str, JsonScalar]:
+    return _validate_bounded_json(
+        value,
+        max_items=_MAX_EVENT_PAYLOAD_ITEMS,
+        max_depth=1,
+        max_bytes=_MAX_EVENT_PAYLOAD_JSON_BYTES,
+    )
+
+
+def _evidence_metrics(value: Mapping[str, JsonScalar]) -> Mapping[str, JsonScalar]:
+    return _validate_bounded_json(
+        value,
+        max_items=_MAX_EVIDENCE_METRICS,
+        max_depth=1,
+        max_bytes=_MAX_EVIDENCE_JSON_BYTES,
+    )
+
+
 ManifestObject = Annotated[
     dict[BoundedJsonKey, JsonValue],
-    Field(max_length=_MAX_MANIFEST_MAP_ITEMS),
+    Field(
+        max_length=_MAX_MANIFEST_MAP_ITEMS,
+        json_schema_extra={
+            "x-unergy-invariants": {
+                "finiteNumbers": True,
+                "maxCanonicalJsonBytes": _MAX_MANIFEST_JSON_BYTES,
+                "maxDepth": _MAX_MANIFEST_DEPTH,
+            }
+        },
+    ),
     AfterValidator(_manifest_object),
 ]
 StatusObject = Annotated[
     dict[BoundedJsonKey, JsonValue],
-    Field(max_length=_MAX_STATUS_MAP_ITEMS),
+    Field(
+        max_length=_MAX_STATUS_MAP_ITEMS,
+        json_schema_extra={
+            "x-unergy-invariants": {
+                "finiteNumbers": True,
+                "maxCanonicalJsonBytes": _MAX_STATUS_JSON_BYTES,
+                "maxDepth": 4,
+            }
+        },
+    ),
     AfterValidator(_status_object),
 ]
 ParameterKey = Annotated[
     str, StringConstraints(strict=True, min_length=1, max_length=64)
 ]
 ParameterObject = Annotated[
-    dict[ParameterKey, JsonScalar], Field(max_length=_MAX_PARAMETER_ITEMS)
+    dict[ParameterKey, JsonScalar],
+    Field(
+        max_length=_MAX_PARAMETER_ITEMS,
+        json_schema_extra={
+            "propertyNames": {
+                "maxLength": 64,
+                "minLength": 1,
+                "not": {"pattern": _RAW_CONTROL_PROPERTY_PATTERN},
+            },
+            "x-unergy-invariants": {
+                "finiteScalarsOnly": True,
+                "maxCanonicalJsonBytes": _MAX_PARAMETER_JSON_BYTES,
+                "maxDepth": 1,
+                "rejectPropertyNameSubstringsCaseInsensitive": [
+                    "joint",
+                    "torque",
+                    "pwm",
+                    "policyPath",
+                    "policyName",
+                ],
+            },
+        },
+    ),
+    AfterValidator(_parameter_object),
 ]
 EventPayload = Annotated[
-    dict[ParameterKey, JsonScalar], Field(max_length=_MAX_EVENT_PAYLOAD_ITEMS)
+    dict[ParameterKey, JsonScalar],
+    Field(
+        max_length=_MAX_EVENT_PAYLOAD_ITEMS,
+        json_schema_extra={
+            "x-unergy-invariants": {
+                "finiteScalarsOnly": True,
+                "maxCanonicalJsonBytes": _MAX_EVENT_PAYLOAD_JSON_BYTES,
+                "maxDepth": 1,
+            }
+        },
+    ),
+    AfterValidator(_event_payload),
 ]
 EvidenceMetrics = Annotated[
-    dict[ParameterKey, JsonScalar], Field(max_length=_MAX_EVIDENCE_METRICS)
+    dict[ParameterKey, JsonScalar],
+    Field(
+        max_length=_MAX_EVIDENCE_METRICS,
+        json_schema_extra={
+            "x-unergy-invariants": {
+                "finiteScalarsOnly": True,
+                "maxCanonicalJsonBytes": _MAX_EVIDENCE_JSON_BYTES,
+                "maxDepth": 1,
+            }
+        },
+    ),
+    AfterValidator(_evidence_metrics),
 ]
 
 
@@ -375,6 +505,17 @@ class ActionDefinition(ContractModel):
 class UnsignedPolicyBundleManifest(ContractModel):
     """Builder-only manifest representation which cannot be published as signed V1."""
 
+    model_config = ConfigDict(
+        json_schema_extra={
+            "x-unergy-invariants": {
+                "finiteNumbers": True,
+                "maxCanonicalJsonBytes": _MAX_MANIFEST_JSON_BYTES,
+                "maxDepth": _MAX_MANIFEST_DEPTH,
+                "semanticValidatorRequired": True,
+            }
+        }
+    )
+
     schema_: Literal["MICRODUCK_POLICY_BUNDLE_V1"] = Field(
         ..., alias="schema", serialization_alias="schema"
     )
@@ -416,6 +557,8 @@ class UnsignedPolicyBundleManifest(ContractModel):
         for action in self.actions:
             if action.policyRef and action.policyRef not in known_refs:
                 raise ValueError("action policyRef must reference a declared policy")
+        if len(canonical_json(self)) > _MAX_MANIFEST_JSON_BYTES:
+            raise ValueError("policy manifest exceeds the canonical encoded wire limit")
         return self
 
 
@@ -452,17 +595,6 @@ def publish_policy_bundle(
     return PolicyBundle.model_validate(
         unsigned.model_dump(mode="python", by_alias=True) | {"bundleDigest": digest}
     )
-
-
-def _reject_raw_control_keys(value: Any) -> None:
-    if isinstance(value, Mapping):
-        for key, nested_value in value.items():
-            if isinstance(key, str) and _RAW_CONTROL_KEY.search(key):
-                raise ValueError(f"raw control key is not permitted: {key}")
-            _reject_raw_control_keys(nested_value)
-    elif isinstance(value, list):
-        for nested_value in value:
-            _reject_raw_control_keys(nested_value)
 
 
 class Scenario(ContractModel):

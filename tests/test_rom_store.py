@@ -158,6 +158,16 @@ def test_event_pages_are_bounded_without_duplicates_or_sequence_zero_gaps(
     assert [event.sequence for event in third] == list(range(200, 205))
 
 
+def test_event_cursor_is_bounded_to_sqlite_signed_integer_range(store, task_request):
+    """SQLite cursor binding must never receive a Python integer beyond int64."""
+    store.create(task_request, REQUEST_HASH)
+    store.append_event(task_request.taskId, "TASK_OBSERVED", {})
+
+    assert store.events_after(task_request.taskId, 2**63 - 1) == []
+    with pytest.raises(ValueError, match="signed 64-bit"):
+        store.events_after(task_request.taskId, 2**63)
+
+
 def test_transition_allows_only_linear_lifecycle_and_terminal_is_immutable(
     store, task_request
 ):

@@ -216,6 +216,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
           description: Not Found
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Request Entity Too Large
         '503':
           content:
             application/json:
@@ -304,6 +310,7 @@ paths:
         required: false
         schema:
           type: integer
+          maximum: 9223372036854775807
           minimum: -1
           default: -1
           title: Aftersequence
@@ -418,6 +425,10 @@ components:
           type: object
           maxProperties: 128
           title: Parameterschema
+          x-unergy-invariants:
+            finiteNumbers: true
+            maxCanonicalJsonBytes: 65536
+            maxDepth: 8
         completion:
           anyOf:
           - $ref: '#/components/schemas/CompletionContract'
@@ -462,6 +473,10 @@ components:
               minLength: 1
             type: object
             maxProperties: 128
+            x-unergy-invariants:
+              finiteNumbers: true
+              maxCanonicalJsonBytes: 65536
+              maxDepth: 8
           - type: 'null'
           title: Preconditions
         safety:
@@ -473,6 +488,10 @@ components:
               minLength: 1
             type: object
             maxProperties: 128
+            x-unergy-invariants:
+              finiteNumbers: true
+              maxCanonicalJsonBytes: 65536
+              maxDepth: 8
           - type: 'null'
           title: Safety
         qualificationRefs:
@@ -591,6 +610,10 @@ components:
           type: object
           maxProperties: 32
           title: Details
+          x-unergy-invariants:
+            finiteNumbers: true
+            maxCanonicalJsonBytes: 4096
+            maxDepth: 4
       additionalProperties: false
       type: object
       required:
@@ -622,6 +645,8 @@ components:
       - type: string
         maxLength: 1024
       - type: integer
+        maximum: 9.223372036854776e+18
+        minimum: -9.223372036854776e+18
       - type: number
       - type: boolean
       - items:
@@ -664,15 +689,29 @@ components:
             - type: string
               maxLength: 1024
             - type: integer
+              maximum: 9.223372036854776e+18
+              minimum: -9.223372036854776e+18
             - type: number
             - type: boolean
             - type: 'null'
           propertyNames:
+            not:
+              pattern: '[jJ][oO][iI][nN][tT]|[tT][oO][rR][qQ][uU][eE]|[pP][wW][mM]|[pP][oO][lL][iI][cC][yY][pP][aA][tT][hH]|[pP][oO][lL][iI][cC][yY][nN][aA][mM][eE]'
             maxLength: 64
             minLength: 1
           type: object
           maxProperties: 16
           title: Zerocommand
+          x-unergy-invariants:
+            finiteScalarsOnly: true
+            maxCanonicalJsonBytes: 16384
+            maxDepth: 1
+            rejectPropertyNameSubstringsCaseInsensitive:
+            - joint
+            - torque
+            - pwm
+            - policyPath
+            - policyName
         safeStopBehavior:
           type: string
           const: ZERO_TWIST
@@ -835,6 +874,10 @@ components:
           type: object
           maxProperties: 32
           title: Policytarget
+          x-unergy-invariants:
+            finiteNumbers: true
+            maxCanonicalJsonBytes: 4096
+            maxDepth: 4
         requestedMotion:
           additionalProperties:
             $ref: '#/components/schemas/JsonValue'
@@ -844,6 +887,10 @@ components:
           type: object
           maxProperties: 32
           title: Requestedmotion
+          x-unergy-invariants:
+            finiteNumbers: true
+            maxCanonicalJsonBytes: 4096
+            maxDepth: 4
         appliedMotion:
           additionalProperties:
             $ref: '#/components/schemas/JsonValue'
@@ -853,6 +900,10 @@ components:
           type: object
           maxProperties: 32
           title: Appliedmotion
+          x-unergy-invariants:
+            finiteNumbers: true
+            maxCanonicalJsonBytes: 4096
+            maxDepth: 4
         limitingReason:
           anyOf:
           - type: string
@@ -903,6 +954,10 @@ components:
           type: object
           maxProperties: 32
           title: Health
+          x-unergy-invariants:
+            finiteNumbers: true
+            maxCanonicalJsonBytes: 4096
+            maxDepth: 4
       additionalProperties: false
       type: object
       required:
@@ -956,15 +1011,29 @@ components:
             - type: string
               maxLength: 1024
             - type: integer
+              maximum: 9.223372036854776e+18
+              minimum: -9.223372036854776e+18
             - type: number
             - type: boolean
             - type: 'null'
           propertyNames:
+            not:
+              pattern: '[jJ][oO][iI][nN][tT]|[tT][oO][rR][qQ][uU][eE]|[pP][wW][mM]|[pP][oO][lL][iI][cC][yY][pP][aA][tT][hH]|[pP][oO][lL][iI][cC][yY][nN][aA][mM][eE]'
             maxLength: 64
             minLength: 1
           type: object
           maxProperties: 16
           title: Parameters
+          x-unergy-invariants:
+            finiteScalarsOnly: true
+            maxCanonicalJsonBytes: 16384
+            maxDepth: 1
+            rejectPropertyNameSubstringsCaseInsensitive:
+            - joint
+            - torque
+            - pwm
+            - policyPath
+            - policyName
         leaseMs:
           type: integer
           maximum: 60000.0
@@ -1007,15 +1076,29 @@ components:
             - type: string
               maxLength: 1024
             - type: integer
+              maximum: 9.223372036854776e+18
+              minimum: -9.223372036854776e+18
             - type: number
             - type: boolean
             - type: 'null'
           propertyNames:
+            not:
+              pattern: '[jJ][oO][iI][nN][tT]|[tT][oO][rR][qQ][uU][eE]|[pP][wW][mM]|[pP][oO][lL][iI][cC][yY][pP][aA][tT][hH]|[pP][oO][lL][iI][cC][yY][nN][aA][mM][eE]'
             maxLength: 64
             minLength: 1
           type: object
           maxProperties: 16
           title: Parameters
+          x-unergy-invariants:
+            finiteScalarsOnly: true
+            maxCanonicalJsonBytes: 16384
+            maxDepth: 1
+            rejectPropertyNameSubstringsCaseInsensitive:
+            - joint
+            - torque
+            - pwm
+            - policyPath
+            - policyName
         scenario:
           $ref: '#/components/schemas/Scenario'
         leaseMs:
@@ -1060,6 +1143,8 @@ components:
             - type: string
               maxLength: 1024
             - type: integer
+              maximum: 9.223372036854776e+18
+              minimum: -9.223372036854776e+18
             - type: number
             - type: boolean
             - type: 'null'
@@ -1069,6 +1154,10 @@ components:
           type: object
           maxProperties: 16
           title: Payload
+          x-unergy-invariants:
+            finiteScalarsOnly: true
+            maxCanonicalJsonBytes: 4096
+            maxDepth: 1
         createdAt:
           type: string
           format: date-time
@@ -1115,6 +1204,8 @@ components:
             - type: string
               maxLength: 1024
             - type: integer
+              maximum: 9.223372036854776e+18
+              minimum: -9.223372036854776e+18
             - type: number
             - type: boolean
             - type: 'null'
@@ -1124,6 +1215,10 @@ components:
           type: object
           maxProperties: 32
           title: Metrics
+          x-unergy-invariants:
+            finiteScalarsOnly: true
+            maxCanonicalJsonBytes: 1024
+            maxDepth: 1
         stopReason:
           anyOf:
           - type: string

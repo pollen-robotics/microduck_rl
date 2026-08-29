@@ -230,13 +230,22 @@ BUNDLE_VERSION=$(printf '%s' "$CATALOG" | jq -r .bundleVersion)
 BUNDLE_DIGEST=$(printf '%s' "$CATALOG" | jq -r .bundleDigest)
 ```
 
-Task and command JSON bodies are limited to 65,536 bytes. The limit is enforced
-while ASGI chunks arrive even when `Content-Length` is absent; an oversized
-body receives HTTP 413 with `REQUEST_BODY_TOO_LARGE`. Contract strings,
+Every body sent with `POST` or `PUT` below `/v1` is limited to 65,536 bytes
+before route or path-parameter validation. The limit is enforced while ASGI
+chunks arrive even when `Content-Length` is absent; an oversized body receives
+HTTP 413 with `REQUEST_BODY_TOO_LARGE`. Contract strings,
 collections, parameter maps, scenarios, event payloads, and persisted canonical
 requests have smaller schema bounds. V1 accepts only the exact seeded scenario
 object `{"terrain":"flat"|"ramp","seed":<uint32>}` and rejects extra fields
 or JSON type coercion.
+
+Standard JSON Schema keywords encode types, ranges, collection counts, string
+bounds, and raw-control property-name rejection where portable keywords exist.
+Canonical UTF-8 byte limits, maximum nesting depth, finite/strict scalar rules,
+and case-insensitive semantic checks are declared as `x-unergy-invariants` and
+must also be enforced by a semantic validator; standard JSON Schema alone does
+not implement those checks. Shared Python/ROM accept-and-reject examples live in
+`schemas/microduck-v1-portability-fixtures.json`.
 
 Create a short continuous task, renew it once, then cancel it:
 
@@ -256,8 +265,9 @@ curl --fail --silent -H "$AUTH" -X POST \
 
 Task events are returned in bounded pages. `afterSequence` defaults to `-1` so
 the first request includes lifecycle sequence `0`; `pageSize` defaults to 100
-and must be from 1 through 100. Continue with the last returned sequence until
-the `events` array is empty. The exclusive cursor prevents duplicates:
+and must be from 1 through 100. The cursor range is `-1` through the signed
+64-bit maximum (`9223372036854775807`). Continue with the last returned sequence
+until the `events` array is empty. The exclusive cursor prevents duplicates:
 
 ```bash
 curl --fail --silent -H "$AUTH" \
@@ -273,6 +283,16 @@ An active continuous owner is immediately zeroed/stopped and durably becomes
 status, and event reads remain available. Catalog and robot status also
 document HTTP 503 `NOT_READY` for startup states in which their required
 installed bundle or runtime is absent.
+
+Every runtime call is supervised outside the service ownership mutex by a
+monotonic deadline. If sampling, validation, start, command, status, or safe
+stop stalls, readiness fails closed as `RUNTIME_UNRESPONSIVE`, active ownership
+is durably terminalized as `FAILED`, and one lock-independent emergency
+zero/disable attempt is made. Late runtime returns have no task authority and
+cannot republish command or ownership. Diagnostic reads and cancellation remain
+available from durable/cached state. If the underlying runtime thread cannot
+join after emergency stop, do not reuse that process: restart the
+process/container before accepting any further motion.
 
 To smoke the deadman, create a distinct continuous task with `"leaseMs":200`,
 send no renewal, wait more than 200 ms, and query it:
@@ -336,6 +356,7 @@ Stable operator signals:
 | `QUALIFICATION_UNAVAILABLE` | Candidate, missing, forged, duplicate, mismatched, or partial qualification data was rejected; mount the exact promoted output. |
 | `STATE_DB_UNAVAILABLE` | Make `/state` writable by UID/GID 10001 and verify free space. |
 | `RUNTIME_UNAVAILABLE` | Bundle verification passed but model/policy/runtime preflight failed; rebuild from exact governed artifacts. |
+| `RUNTIME_UNRESPONSIVE` | A runtime call exceeded its monotonic deadline; inspect resource/runtime failure and restart the process/container before motion. |
 | `WATCHDOG_UNHEALTHY` | Restart and investigate host scheduling/resource pressure before accepting motion. |
 | `ACTION_UNAVAILABLE` | Inspect the catalog reason; do not bypass qualification or runtime support. |
 | `BUNDLE_MISMATCH` | Refresh catalog identities and recreate the request against the installed release. |

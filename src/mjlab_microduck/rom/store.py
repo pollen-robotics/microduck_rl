@@ -251,6 +251,12 @@ class SqliteTaskStore:
     ) -> list[TaskEvent]:
         """Return task events strictly after ``sequence`` in durable sequence order."""
         if (
+            not isinstance(sequence, int)
+            or isinstance(sequence, bool)
+            or not -1 <= sequence <= 2**63 - 1
+        ):
+            raise ValueError("sequence must be a signed 64-bit cursor from -1")
+        if (
             not isinstance(page_size, int)
             or isinstance(page_size, bool)
             or not 1 <= page_size <= 100
