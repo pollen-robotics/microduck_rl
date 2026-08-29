@@ -33,6 +33,7 @@ TASK_IDS = (
     "Mjlab-Stairs-Apex-Mantle-Specialist-MicroDuck",
     "Mjlab-Stairs-Roulade-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
+    "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
 )
 RESET_MODES = {
     0: "lip_release",
@@ -105,7 +106,10 @@ def main() -> int:
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
     if args.num_envs < 1 or args.episodes < 1:
         raise SystemExit("--num-envs and --episodes must be positive")
-    if args.task == "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck":
+    if args.task in {
+        "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
+        "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
+    }:
         reset_modes = TREAD_CONTACT_BANK_RESET_MODES
     elif args.task == "Mjlab-Stairs-Roulade-Bank-Specialist-MicroDuck":
         reset_modes = ROULADE_BANK_RESET_MODES

@@ -43,6 +43,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     make_microduck_stair_apex_mantle_env_cfg,
     make_microduck_stair_roulade_bank_env_cfg,
     make_microduck_stair_tread_contact_bank_env_cfg,
+    make_microduck_stair_foot_anchor_vault_env_cfg,
     make_microduck_stair_bridge_specialist_env_cfg,
     make_microduck_stair_launch_bank_env_cfg,
     make_microduck_stair_walker_bank_env_cfg,
@@ -501,6 +502,24 @@ def test_tread_contact_bank_stage_pays_only_new_pullup_progress():
         MicroduckStairTreadContactBankRlCfg.actor.distribution_cfg["init_std"]
         == 0.22
     )
+
+
+def test_foot_anchor_vault_requires_loaded_positive_work():
+    cfg = make_microduck_stair_foot_anchor_vault_env_cfg()
+    bank = cfg.events["walker_state_bank"].params
+
+    assert bank["bank_path"].endswith("full170-loaded-foot-anchor-state-bank.pt")
+    assert bank["min_vault_momentum"] == 0.12
+    assert bank["vault_lever_arm"] == 0.06
+    assert cfg.rewards["stair_tread_pullup_frontier"].weight == 0.0
+    assert cfg.rewards["stair_assisted_lift"].weight == 0.0
+    vault = cfg.rewards["stair_foot_anchor_vault_frontier"]
+    assert vault.weight == 20.0
+    assert vault.params["support_sensor_name"] == "feet_stair_contact"
+    assert vault.params["min_normal_force"] == 0.40
+    assert vault.params["min_positive_power"] == 0.01
+    assert vault.params["target_positive_power"] == 0.25
+    assert vault.params["release_window_s"] == 0.25
 
 
 def test_headstand_has_exclusive_contact_gate_and_shared_actor_layout():

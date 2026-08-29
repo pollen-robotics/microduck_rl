@@ -68,6 +68,11 @@ STAIR_TARGETS = {
         "experiment": "microduck_stair_tread_contact_bank_specialist",
         "iterations": 150,
     },
+    "specialist-foot-anchor-vault": {
+        "task": "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
+        "experiment": "microduck_stair_foot_anchor_vault_specialist",
+        "iterations": 100,
+    },
     "low": {
         "task": "Mjlab-Stairs-MicroDuck",
         "experiment": "microduck_stairs",

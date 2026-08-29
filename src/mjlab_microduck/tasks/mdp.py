@@ -1843,6 +1843,108 @@ def stair_tread_pullup_frontier(
     return _new_frontier_delta(env, value, "_stair_tread_pullup_frontier")
 
 
+def stair_foot_anchor_vault_frontier(
+    env: ManagerBasedRlEnv,
+    start_x: float = 0.60,
+    target_x: float = 0.72,
+    start_height: float = 0.12,
+    target_height: float = 0.205,
+    min_normal_force: float = 0.40,
+    min_positive_power: float = 0.01,
+    target_positive_power: float = 0.25,
+    release_window_s: float = 0.25,
+    corridor_half_width: float = 0.36,
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    support_sensor_name: str = "feet_stair_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward a loaded foot plant that performs positive vault work.
+
+    The A9 geometry audit showed that almost every real first-tread contact is
+    a foot, not a head or shell. This continuation therefore treats the foot
+    as a temporary anchor. Root progress is eligible only after a loaded tread
+    contact produces positive sagittal mechanical power, with a short release
+    window so the foot can leave the tread during the vault.
+    """
+
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    if support_sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+    sensor_data = env.scene.sensors[support_sensor_name].data
+    if (
+        sensor_data.found is None
+        or sensor_data.force is None
+        or sensor_data.pos is None
+        or sensor_data.normal is None
+    ):
+        raise RuntimeError(
+            f"{support_sensor_name} must provide found, force, pos, and normal"
+        )
+    _, tread_contact, _ = _standard_stair_contact_masks(
+        env,
+        support_sensor_name,
+        stair_face_x=stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    normal_force = torch.abs(
+        torch.sum(sensor_data.force * sensor_data.normal, dim=-1)
+    )
+    normal_force = torch.where(
+        tread_contact, normal_force, torch.zeros_like(normal_force)
+    )
+    strongest_slot = normal_force.argmax(dim=-1, keepdim=True)
+    strongest_force = normal_force.gather(1, strongest_slot).squeeze(1)
+    slot_index = strongest_slot.unsqueeze(-1).expand(-1, -1, 3)
+    contact_pos = sensor_data.pos.gather(1, slot_index).squeeze(1)
+    contact_force = sensor_data.force.gather(1, slot_index).squeeze(1)
+    lever = contact_pos - asset.data.root_link_pos_w
+    pitch_torque = torch.cross(lever, contact_force, dim=-1)[:, 1]
+    positive_power = torch.clamp(
+        pitch_torque * asset.data.root_link_ang_vel_w[:, 1], min=0.0
+    )
+    loaded = tread_contact.any(dim=-1) & (strongest_force >= min_normal_force)
+
+    if not hasattr(env, "_stair_foot_anchor_release_steps"):
+        env._stair_foot_anchor_release_steps = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+    fresh = env.episode_length_buf <= 1
+    env._stair_foot_anchor_release_steps[fresh] = 0
+    work = loaded & (positive_power >= min_positive_power)
+    release_steps = max(1, int(round(release_window_s / env.step_dt)))
+    env._stair_foot_anchor_release_steps = torch.where(
+        work,
+        torch.full_like(env._stair_foot_anchor_release_steps, release_steps),
+        torch.clamp(env._stair_foot_anchor_release_steps - 1, min=0),
+    )
+    active_vault = env._stair_foot_anchor_release_steps > 0
+
+    power_progress = torch.clamp(
+        positive_power / max(target_positive_power, 1e-6), 0.0, 1.0
+    )
+    x_progress = torch.clamp(
+        (x - start_x) / max(target_x - start_x, 1e-6), 0.0, 1.0
+    )
+    height_progress = torch.clamp(
+        (z - start_height) / max(target_height - start_height, 1e-6),
+        0.0,
+        1.0,
+    )
+    root_progress = 0.60 * x_progress + 0.40 * height_progress
+    value = 0.25 * power_progress + 0.75 * root_progress
+    eligible = active_vault & (y <= corridor_half_width)
+    value = torch.where(eligible, value, torch.zeros_like(value))
+    return _new_frontier_delta(env, value, "_stair_foot_anchor_vault_frontier")
+
+
 def stair_first_tread_stable(
     env: ManagerBasedRlEnv,
     min_x: float = 0.72,

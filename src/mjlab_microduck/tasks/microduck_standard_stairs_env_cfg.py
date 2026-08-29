@@ -988,6 +988,50 @@ def make_microduck_stair_tread_contact_bank_env_cfg(
     return cfg
 
 
+def make_microduck_stair_foot_anchor_vault_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A11: turn a loaded first-tread foot plant into a vault."""
+
+    cfg = make_microduck_stair_tread_contact_bank_env_cfg(play=False)
+    cfg.events["walker_state_bank"] = EventTermCfg(
+        func=WalkerStateBankReset,
+        mode="reset",
+        params={
+            "bank_path": ".tmp/codex/full170-loaded-foot-anchor-state-bank.pt",
+            "min_vault_momentum": 0.12,
+            "vault_lever_arm": 0.06,
+        },
+    )
+    # Remove the A10 scalar root proxy. The new potential can advance only
+    # after a loaded foot contact performs positive sagittal mechanical work.
+    cfg.rewards["stair_tread_pullup_frontier"].weight = 0.0
+    cfg.rewards["stair_apex_or_mantle_frontier"].weight = 0.0
+    cfg.rewards["stair_assisted_lift"].weight = 0.0
+    cfg.rewards["stair_foot_anchor_vault_frontier"] = RewardTermCfg(
+        func=microduck_mdp.stair_foot_anchor_vault_frontier,
+        weight=20.0,
+        params={
+            "start_x": 0.60,
+            "target_x": STANDARD_STAIR_START_DISTANCE + 0.06,
+            "start_height": 0.12,
+            "target_height": 0.205,
+            "min_normal_force": 0.40,
+            "min_positive_power": 0.01,
+            "target_positive_power": 0.25,
+            "release_window_s": 0.25,
+            "support_sensor_name": "feet_stair_contact",
+            "corridor_half_width": STANDARD_STAIR_WIDTH * 0.40,
+            "stair_face_x": STANDARD_STAIR_START_DISTANCE,
+            "riser_height": STANDARD_RISER_HEIGHT,
+            "tread_depth": STANDARD_TREAD_DEPTH,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    del play
+    return cfg
+
+
 MicroduckStandardStairsRlCfg = deepcopy(MicroduckRlCfg)
 MicroduckStandardStairsRlCfg.experiment_name = "microduck_standard_stairs"
 MicroduckStandardStairsRlCfg.run_name = "microduck_standard_stairs"
@@ -1097,3 +1141,16 @@ MicroduckStairTreadContactBankRlCfg.save_interval = 25
 MicroduckStairTreadContactBankRlCfg.actor.distribution_cfg["init_std"] = 0.22
 MicroduckStairTreadContactBankRlCfg.algorithm.learning_rate = 1.0e-5
 MicroduckStairTreadContactBankRlCfg.algorithm.entropy_coef = 0.0001
+
+MicroduckStairFootAnchorVaultRlCfg = deepcopy(MicroduckStairTreadContactBankRlCfg)
+MicroduckStairFootAnchorVaultRlCfg.experiment_name = (
+    "microduck_stair_foot_anchor_vault_specialist"
+)
+MicroduckStairFootAnchorVaultRlCfg.run_name = (
+    "microduck_stair_foot_anchor_vault_specialist"
+)
+MicroduckStairFootAnchorVaultRlCfg.max_iterations = 100
+MicroduckStairFootAnchorVaultRlCfg.save_interval = 25
+MicroduckStairFootAnchorVaultRlCfg.actor.distribution_cfg["init_std"] = 0.24
+MicroduckStairFootAnchorVaultRlCfg.algorithm.learning_rate = 2.0e-5
+MicroduckStairFootAnchorVaultRlCfg.algorithm.entropy_coef = 0.0002
