@@ -153,14 +153,31 @@ def _resign_mutated_promoted_bundle(
     root: Path,
     *,
     mutate_report=None,
+    mutate_configuration=None,
     mutate_manifest=None,
 ) -> None:
     manifest_path = root / "microduck-policy-bundle.json"
     manifest = json.loads(manifest_path.read_text())
     report_path = root / "qualification/qualification-v1.json"
     report = json.loads(report_path.read_text())
+    configuration_path = root / "qualification/release-v1.json"
+    configuration = json.loads(configuration_path.read_text())
+    if mutate_configuration is not None:
+        mutate_configuration(configuration)
+        configuration_path.write_bytes(canonical_json(configuration))
+        configuration_digest = (
+            "sha256:" + hashlib.sha256(configuration_path.read_bytes()).hexdigest()
+        )
+        report["releaseConfigurationDigest"] = configuration_digest
+        manifest["qualification"]["releaseConfigurationDigest"] = (
+            configuration_digest
+        )
+        for artifact in manifest["qualification"]["artifacts"]:
+            if artifact["path"] == "qualification/release-v1.json":
+                artifact["digest"] = configuration_digest
     if mutate_report is not None:
         mutate_report(report)
+    if mutate_report is not None or mutate_configuration is not None:
         report_path.write_bytes(canonical_json(report))
         report_digest = "sha256:" + hashlib.sha256(report_path.read_bytes()).hexdigest()
         manifest["qualification"]["reportDigest"] = report_digest
@@ -566,6 +583,143 @@ def test_runtime_loader_rejects_semantically_forged_or_partial_reports(
         installed,
         mutate_report=mutate_report,
         mutate_manifest=mutate_manifest,
+    )
+
+    with pytest.raises(ValueError, match="qualification"):
+        load_qualified_bundle(installed)
+
+
+@pytest.mark.parametrize(
+    "mutate_action",
+    [
+        pytest.param(
+            lambda action: action["lease"].update({"maxLeaseMs": 4_999}),
+            id="lease-max",
+        ),
+        pytest.param(
+            lambda action: action["lease"].update(
+                {"safeStopBehavior": "FORGED_STOP"}
+            ),
+            id="lease-safe-stop",
+        ),
+        pytest.param(
+            lambda action: action["lease"].update({"commandCadenceMs": 25}),
+            id="lease-cadence",
+        ),
+        pytest.param(
+            lambda action: action["parameterSchema"]["properties"]["vxMps"].update(
+                {"maximum": 0.3}
+            ),
+            id="parameter-schema",
+        ),
+        pytest.param(
+            lambda action: action["preconditions"].update(
+                {"allowedTerrains": ["ramp"]}
+            ),
+            id="terrain-precondition",
+        ),
+        pytest.param(
+            lambda action: action.update(
+                {
+                    "completion": {
+                        "terminalConditions": ["TASK_COMPLETE"],
+                        "maxDurationMs": 1,
+                    }
+                }
+            ),
+            id="completion",
+        ),
+        pytest.param(
+            lambda action: action.update(
+                {"safety": {"mirroring": "FORGED", "zeroOnStop": False}}
+            ),
+            id="safety-mirroring",
+        ),
+    ],
+)
+def test_runtime_loader_rejects_resigned_promoted_action_contract_mutations(
+    tmp_path: Path, mutate_action
+) -> None:
+    """Re-signing any nested executable action field must not alter qualified behavior."""
+    installed, _ = _extract_promoted_bundle(tmp_path)
+    _resign_mutated_promoted_bundle(
+        installed,
+        mutate_manifest=lambda manifest: mutate_action(manifest["actions"][0]),
+    )
+
+    with pytest.raises(ValueError, match="qualification"):
+        load_qualified_bundle(installed)
+
+
+@pytest.mark.parametrize(
+    "mutate_result",
+    [
+        pytest.param(
+            lambda result: result.update({"successRate": 0.5}),
+            id="success-aggregate",
+        ),
+        pytest.param(
+            lambda result: result.update({"actionMetricMean": 9.0}),
+            id="action-metric-aggregate",
+        ),
+        pytest.param(
+            lambda result: [
+                rollout.update({"success": False, "fallen": True})
+                for rollout in result["rollouts"]
+            ],
+            id="failed-fallen-rollouts-labeled-passed",
+        ),
+        pytest.param(
+            lambda result: result["rollouts"][1].update(
+                {"seed": result["rollouts"][0]["seed"]}
+            ),
+            id="duplicate-seed",
+        ),
+        pytest.param(
+            lambda result: result["rollouts"].pop(),
+            id="missing-seed",
+        ),
+        pytest.param(
+            lambda result: result["rollouts"][0].update(
+                {"actionMetric": "baseTravelM"}
+            ),
+            id="wrong-rollout-metric",
+        ),
+        pytest.param(
+            lambda result: result["rollouts"][0].update({"steps": 101}),
+            id="steps-over-bound",
+        ),
+    ],
+)
+def test_runtime_loader_recomputes_resigned_qualification_results(
+    tmp_path: Path, mutate_result
+) -> None:
+    """Report status and aggregates must be derived from exact governed rollouts."""
+    installed, _ = _extract_promoted_bundle(tmp_path)
+    _resign_mutated_promoted_bundle(
+        installed,
+        mutate_report=lambda report: mutate_result(report["actions"][0]),
+    )
+
+    with pytest.raises(ValueError, match="qualification"):
+        load_qualified_bundle(installed)
+
+
+def test_runtime_loader_revalidates_resigned_governed_release_configuration(
+    tmp_path: Path,
+) -> None:
+    """A self-consistent report must not make an ungoverned embedded command valid."""
+    installed, _ = _extract_promoted_bundle(tmp_path)
+    _resign_mutated_promoted_bundle(
+        installed,
+        mutate_configuration=lambda configuration: configuration["actions"][
+            0
+        ].update(
+            {"parameters": {"vxMps": 0.2, "vyMps": 0.0, "yawRateRadps": 0.0}}
+        ),
+        mutate_report=lambda report: report["actions"][0].update(
+            {"parameters": {"vxMps": 0.2, "vyMps": 0.0, "yawRateRadps": 0.0}}
+        ),
     )
 
     with pytest.raises(ValueError, match="qualification"):

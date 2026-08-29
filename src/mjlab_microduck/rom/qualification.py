@@ -223,7 +223,7 @@ def _task_id(bundle_digest: str, action_code: str, seed: int) -> str:
     ).hexdigest()[:32]
 
 
-def _validate_release_configuration(
+def validate_release_configuration(
     bundle: PolicyBundle, configuration: ReleaseConfiguration
 ) -> None:
     if configuration.release == bundle.bundleVersion:
@@ -334,6 +334,111 @@ def _unavailable_result(
     )
 
 
+def recompute_action_qualification(
+    bundle: PolicyBundle,
+    declaration: ActionQualificationConfig,
+    definition: ActionDefinition,
+    rollouts: tuple[QualificationRollout, ...],
+    installed_runtime_revision: str,
+) -> ActionQualificationResult:
+    """Derive the only valid result from governed configuration and raw rollouts."""
+    if definition.availability != "AVAILABLE":
+        if rollouts:
+            raise ValueError("unavailable action must not contain qualification rollouts")
+        return _unavailable_result(
+            bundle, declaration, definition, installed_runtime_revision
+        )
+
+    spec = ACTION_RUNTIME_SPECS[declaration.actionCode]
+    policy = next(
+        item for item in bundle.policies if item.policyRef == definition.policyRef
+    )
+    rollout_seeds = tuple(item.seed for item in rollouts)
+    if rollout_seeds != declaration.seeds or len(set(rollout_seeds)) != len(
+        rollout_seeds
+    ):
+        raise ValueError("qualification rollouts do not cover exact unique seeds")
+    for rollout in rollouts:
+        if (
+            rollout.actionMetric != declaration.thresholds.actionMetric
+            or rollout.steps < 1
+            or rollout.steps > declaration.maxSteps
+            or rollout.startedAt.tzinfo is None
+            or rollout.finishedAt.tzinfo is None
+            or rollout.finishedAt < rollout.startedAt
+            or (rollout.success and rollout.fallen)
+        ):
+            raise ValueError("qualification rollout evidence is invalid")
+
+    success_rate = _mean([1.0 if item.success else 0.0 for item in rollouts])
+    fall_rate = _mean([1.0 if item.fallen else 0.0 for item in rollouts])
+    tracking_values = [
+        item.trackingError for item in rollouts if item.trackingError is not None
+    ]
+    action_values = [
+        item.actionMetricValue
+        for item in rollouts
+        if item.actionMetricValue is not None
+    ]
+    mean_tracking = _mean(tracking_values) if tracking_values else None
+    action_mean = _mean(action_values) if len(action_values) == len(rollouts) else None
+    mean_distance = _mean([item.distanceM for item in rollouts])
+    mean_energy = _mean([item.energyProxy for item in rollouts])
+    actuator_clamp_steps = sum(item.actuatorClampSteps for item in rollouts)
+    physical_joint_limit_violations = sum(
+        item.physicalJointLimitViolations for item in rollouts
+    )
+    thresholds = declaration.thresholds
+    action_metric_passed = action_mean is not None and (
+        action_mean >= thresholds.actionMetricThreshold
+        if thresholds.actionMetricOperator == "gte"
+        else action_mean <= thresholds.actionMetricThreshold
+    )
+    passed = (
+        success_rate >= thresholds.minSuccessRate
+        and fall_rate <= thresholds.maxFallRate
+        and mean_tracking is not None
+        and mean_tracking <= thresholds.maxMeanTrackingError
+        and mean_distance >= thresholds.minMeanDistanceM
+        and mean_energy <= thresholds.maxMeanEnergyProxy
+        and actuator_clamp_steps <= thresholds.maxActuatorClampSteps
+        and physical_joint_limit_violations
+        <= thresholds.maxPhysicalJointLimitViolations
+        and action_metric_passed
+    )
+    return ActionQualificationResult(
+        actionCode=declaration.actionCode,
+        mandatory=declaration.mandatory,
+        status="PASSED" if passed else "FAILED",
+        unavailableReason=None if passed else "QUALIFICATION_FAILED",
+        terrain=declaration.terrain,
+        resetProfile=declaration.resetProfile,
+        scenarioProfile=spec.scenario_profile,
+        seeds=declaration.seeds,
+        maxSteps=declaration.maxSteps,
+        parameters=declaration.parameters,
+        thresholds=thresholds,
+        successRate=success_rate,
+        fallRate=fall_rate,
+        meanTrackingError=mean_tracking,
+        meanDistanceM=mean_distance,
+        meanEnergyProxy=mean_energy,
+        actuatorClampSteps=actuator_clamp_steps,
+        physicalJointLimitViolations=physical_joint_limit_violations,
+        actionMetricMean=action_mean,
+        runtimeClass="MicroduckMujocoRuntime",
+        runtimeIdentifier=_RUNTIME_IDENTIFIER,
+        runtimeRevision=installed_runtime_revision,
+        simulatorVersion=mujoco.__version__,
+        policyDigest=policy.digest,
+        modelDigest=bundle.model.digest,
+        sourceCommit=bundle.sourceCommit,
+        checkpoint=policy.checkpoint,
+        runIdentity=policy.experimentRef,
+        rollouts=rollouts,
+    )
+
+
 def _qualify_action(
     root: Path,
     bundle: PolicyBundle,
@@ -428,72 +533,12 @@ def _qualify_action(
             )
         )
 
-    success_rate = _mean([1.0 if item.success else 0.0 for item in rollouts])
-    fall_rate = _mean([1.0 if item.fallen else 0.0 for item in rollouts])
-    tracking_values = [
-        item.trackingError for item in rollouts if item.trackingError is not None
-    ]
-    action_values = [
-        item.actionMetricValue
-        for item in rollouts
-        if item.actionMetricValue is not None
-    ]
-    mean_tracking = _mean(tracking_values) if tracking_values else None
-    action_mean = _mean(action_values) if len(action_values) == len(rollouts) else None
-    mean_distance = _mean([item.distanceM for item in rollouts])
-    mean_energy = _mean([item.energyProxy for item in rollouts])
-    actuator_clamp_steps = sum(item.actuatorClampSteps for item in rollouts)
-    physical_joint_limit_violations = sum(
-        item.physicalJointLimitViolations for item in rollouts
-    )
-    thresholds = declaration.thresholds
-    action_metric_passed = action_mean is not None and (
-        action_mean >= thresholds.actionMetricThreshold
-        if thresholds.actionMetricOperator == "gte"
-        else action_mean <= thresholds.actionMetricThreshold
-    )
-    passed = (
-        success_rate >= thresholds.minSuccessRate
-        and fall_rate <= thresholds.maxFallRate
-        and mean_tracking is not None
-        and mean_tracking <= thresholds.maxMeanTrackingError
-        and mean_distance >= thresholds.minMeanDistanceM
-        and mean_energy <= thresholds.maxMeanEnergyProxy
-        and actuator_clamp_steps <= thresholds.maxActuatorClampSteps
-        and physical_joint_limit_violations
-        <= thresholds.maxPhysicalJointLimitViolations
-        and action_metric_passed
-    )
-    return ActionQualificationResult(
-        actionCode=declaration.actionCode,
-        mandatory=declaration.mandatory,
-        status="PASSED" if passed else "FAILED",
-        unavailableReason=None if passed else "QUALIFICATION_FAILED",
-        terrain=declaration.terrain,
-        resetProfile=declaration.resetProfile,
-        scenarioProfile=spec.scenario_profile,
-        seeds=declaration.seeds,
-        maxSteps=declaration.maxSteps,
-        parameters=declaration.parameters,
-        thresholds=thresholds,
-        successRate=success_rate,
-        fallRate=fall_rate,
-        meanTrackingError=mean_tracking,
-        meanDistanceM=mean_distance,
-        meanEnergyProxy=mean_energy,
-        actuatorClampSteps=actuator_clamp_steps,
-        physicalJointLimitViolations=physical_joint_limit_violations,
-        actionMetricMean=action_mean,
-        runtimeClass="MicroduckMujocoRuntime",
-        runtimeIdentifier=_RUNTIME_IDENTIFIER,
-        runtimeRevision=installed_runtime_revision,
-        simulatorVersion=mujoco.__version__,
-        policyDigest=policy.digest,
-        modelDigest=bundle.model.digest,
-        sourceCommit=bundle.sourceCommit,
-        checkpoint=policy.checkpoint,
-        runIdentity=policy.experimentRef,
-        rollouts=tuple(rollouts),
+    return recompute_action_qualification(
+        bundle,
+        declaration,
+        definition,
+        tuple(rollouts),
+        installed_runtime_revision,
     )
 
 
@@ -506,7 +551,7 @@ def qualify_bundle(
     """Run bounded batteries through the exact installed runtime implementation."""
     root = Path(bundle_root).resolve()
     bundle = load_verified_bundle(root)
-    _validate_release_configuration(bundle, configuration)
+    validate_release_configuration(bundle, configuration)
     installed_runtime_revision = runtime_revision()
     definitions = {action.actionCode: action for action in bundle.actions}
     results: list[ActionQualificationResult] = []
@@ -575,7 +620,7 @@ def _validate_qualification_correspondence(
     installed = load_verified_bundle(root)
     if installed != bundle:
         raise ValueError("qualification bundle does not match installed candidate")
-    _validate_release_configuration(bundle, configuration)
+    validate_release_configuration(bundle, configuration)
     if (
         report.subjectBundleId != bundle.bundleId
         or report.subjectBundleVersion != bundle.bundleVersion
@@ -598,53 +643,38 @@ def _validate_qualification_correspondence(
         or set(declarations) != set(definitions)
     ):
         raise ValueError("qualification report action coverage is not exact")
-    policies = {item.policyRef: item for item in bundle.policies}
     for code, definition in definitions.items():
         result = results[code]
         declaration = declarations[code]
-        spec = ACTION_RUNTIME_SPECS[code]
-        policy = policies.get(definition.policyRef or "")
-        if (
-            result.mandatory != declaration.mandatory
-            or result.terrain != declaration.terrain
-            or result.resetProfile != declaration.resetProfile
-            or result.scenarioProfile != spec.scenario_profile
-            or result.seeds != declaration.seeds
-            or result.maxSteps != declaration.maxSteps
-            or result.parameters != declaration.parameters
-            or result.thresholds != declaration.thresholds
-            or result.runtimeIdentifier != _RUNTIME_IDENTIFIER
-            or result.runtimeRevision != report.runtimeRevision
-            or result.simulatorVersion != mujoco.__version__
-            or result.modelDigest != bundle.model.digest
-            or result.sourceCommit != bundle.sourceCommit
-            or result.policyDigest
-            != (policy.digest if policy is not None else None)
-            or result.checkpoint
-            != (policy.checkpoint if policy is not None else None)
-            or result.runIdentity
-            != (policy.experimentRef if policy is not None else None)
-        ):
+        expected = recompute_action_qualification(
+            bundle,
+            declaration,
+            definition,
+            result.rollouts,
+            report.runtimeRevision,
+        )
+        if canonical_json(result) != canonical_json(expected):
             raise ValueError("qualification result does not match release policy")
-        rollout_seeds = [item.seed for item in result.rollouts]
-        if definition.availability == "AVAILABLE":
-            if rollout_seeds != list(declaration.seeds):
-                raise ValueError("qualification rollouts do not cover declared seeds")
-            if declaration.mandatory and result.status != "PASSED":
-                raise ValueError("qualification mandatory action did not pass")
-            if result.status not in {"PASSED", "FAILED"}:
-                raise ValueError("qualification available action status is invalid")
-            if result.unavailableReason != (
-                None if result.status == "PASSED" else "QUALIFICATION_FAILED"
-            ):
-                raise ValueError("qualification failure reason is invalid")
-        elif (
-            result.status != "UNAVAILABLE"
-            or result.unavailableReason != definition.unavailableReason
-            or result.rollouts
-            or declaration.mandatory
-        ):
-            raise ValueError("qualification unavailable action result is invalid")
+        if declaration.mandatory and expected.status != "PASSED":
+            raise ValueError("qualification mandatory action did not pass")
+
+
+def promoted_action_definition(
+    subject_action: ActionDefinition,
+    result: ActionQualificationResult,
+) -> ActionDefinition:
+    """Reconstruct the only promoted action contract allowed by qualification."""
+    updates: dict[str, Any] = {
+        "qualificationRefs": [QUALIFICATION_REPORT_PATH]
+    }
+    if result.status == "FAILED":
+        updates.update(
+            {
+                "availability": "UNAVAILABLE",
+                "unavailableReason": "QUALIFICATION_FAILED",
+            }
+        )
+    return subject_action.model_copy(update=updates)
 
 
 def _promote_qualified_bundle(
@@ -686,22 +716,7 @@ def _promote_qualified_bundle(
         result = result_by_code.get(action.actionCode)
         if result is None:
             raise ValueError("qualification report does not cover every bundle action")
-        if result.status == "UNAVAILABLE" or result.status == "PASSED":
-            promoted_actions.append(
-                action.model_copy(
-                    update={"qualificationRefs": [QUALIFICATION_REPORT_PATH]}
-                )
-            )
-        else:
-            promoted_actions.append(
-                action.model_copy(
-                    update={
-                        "availability": "UNAVAILABLE",
-                        "unavailableReason": "QUALIFICATION_FAILED",
-                        "qualificationRefs": [QUALIFICATION_REPORT_PATH],
-                    }
-                )
-            )
+        promoted_actions.append(promoted_action_definition(action, result))
 
     existing_qualification_artifacts = bundle.qualification.get("artifacts", [])
     if not isinstance(existing_qualification_artifacts, list):

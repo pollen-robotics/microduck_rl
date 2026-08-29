@@ -169,13 +169,15 @@ def load_qualified_bundle(bundle_dir: Path) -> PolicyBundle:
     root = Path(bundle_dir).resolve()
     bundle = load_verified_bundle(root)
     try:
-        from .action_specs import ACTION_RUNTIME_SPECS
         from .qualification import (
             QUALIFICATION_REPORT_PATH,
             RELEASE_CONFIGURATION_PATH,
             SUBJECT_MANIFEST_PATH,
             QualificationReport,
             ReleaseConfiguration,
+            promoted_action_definition,
+            recompute_action_qualification,
+            validate_release_configuration,
         )
         from .runtime_identity import runtime_revision
 
@@ -272,7 +274,7 @@ def load_qualified_bundle(bundle_dir: Path) -> PolicyBundle:
             or configuration.createdAt != bundle.createdAt
         ):
             raise ValueError
-
+        validate_release_configuration(subject, configuration)
         results = {item.actionCode: item for item in report.actions}
         declarations = {item.actionCode: item for item in configuration.actions}
         installed_actions = {item.actionCode: item for item in bundle.actions}
@@ -286,61 +288,26 @@ def load_qualified_bundle(bundle_dir: Path) -> PolicyBundle:
             or set(subject_actions) != expected_codes
         ):
             raise ValueError
-        policies = {item.policyRef: item for item in subject.policies}
         for code in sorted(expected_codes):
             action = installed_actions[code]
             subject_action = subject_actions[code]
             result = results[code]
             declaration = declarations[code]
-            spec = ACTION_RUNTIME_SPECS.get(code)
-            policy = policies.get(subject_action.policyRef or "")
-            if (
-                action.qualificationRefs != [QUALIFICATION_REPORT_PATH]
-                or result.mandatory != declaration.mandatory
-                or result.terrain != declaration.terrain
-                or result.resetProfile != declaration.resetProfile
-                or result.seeds != declaration.seeds
-                or result.maxSteps != declaration.maxSteps
-                or result.parameters != declaration.parameters
-                or result.thresholds != declaration.thresholds
-                or spec is None
-                or result.scenarioProfile != spec.scenario_profile
-                or result.runtimeRevision != report.runtimeRevision
-                or result.modelDigest != subject.model.digest
-                or result.sourceCommit != subject.sourceCommit
-                or result.policyDigest
-                != (policy.digest if policy is not None else None)
-                or result.checkpoint
-                != (policy.checkpoint if policy is not None else None)
-                or result.runIdentity
-                != (policy.experimentRef if policy is not None else None)
-            ):
+            expected_result = recompute_action_qualification(
+                subject,
+                declaration,
+                subject_action,
+                result.rollouts,
+                report.runtimeRevision,
+            )
+            if canonical_json(result) != canonical_json(expected_result):
                 raise ValueError
-            if result.status == "PASSED":
-                if (
-                    subject_action.availability != "AVAILABLE"
-                    or action.availability != "AVAILABLE"
-                    or action.unavailableReason is not None
-                    or result.unavailableReason is not None
-                ):
-                    raise ValueError
-            elif result.status == "FAILED":
-                if (
-                    subject_action.availability != "AVAILABLE"
-                    or action.availability != "UNAVAILABLE"
-                    or action.unavailableReason != "QUALIFICATION_FAILED"
-                    or result.unavailableReason != "QUALIFICATION_FAILED"
-                    or declaration.mandatory
-                ):
-                    raise ValueError
-            elif (
-                result.status != "UNAVAILABLE"
-                or subject_action.availability != "UNAVAILABLE"
-                or action.availability != "UNAVAILABLE"
-                or action.unavailableReason != result.unavailableReason
-                or subject_action.unavailableReason != result.unavailableReason
-                or declaration.mandatory
-            ):
+            expected_action = promoted_action_definition(
+                subject_action, expected_result
+            )
+            if canonical_json(action) != canonical_json(expected_action):
+                raise ValueError
+            if declaration.mandatory and expected_result.status != "PASSED":
                 raise ValueError
         return bundle
     except Exception as exc:
