@@ -80,7 +80,7 @@ paths:
         '400': {$ref: '#/components/responses/ParameterInvalid'}
         '401': {$ref: '#/components/responses/AuthRequired'}
         '404': {$ref: '#/components/responses/TaskNotFound'}
-        '409': {$ref: '#/components/responses/StaleCommand'}
+        '409': {$ref: '#/components/responses/CommandConflict'}
   /v1/tasks/{taskId}/events:
     parameters: [{$ref: '#/components/parameters/TaskId'}]
     get:
@@ -117,6 +117,9 @@ components:
     StaleCommand:
       description: Command sequence is stale.
       content: {application/json: {schema: {$ref: '#/components/schemas/Error'}, example: {code: STALE_COMMAND, message: Command sequence is stale, details: {}}}}
+    CommandConflict:
+      description: Command sequence is stale or reused with different command content.
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}, examples: {staleCommand: {value: {code: STALE_COMMAND, message: Command sequence is stale, details: {}}}, sequenceConflict: {value: {code: COMMAND_SEQUENCE_CONFLICT, message: Command sequence conflicts with already accepted content, details: {}}}}}}
     TaskNotFound:
       description: Task does not exist.
       content: {application/json: {schema: {$ref: '#/components/schemas/Error'}, example: {code: TASK_NOT_FOUND, message: Task was not found, details: {}}}}
@@ -126,7 +129,7 @@ components:
       type: object
       additionalProperties: false
       required: [code, message, details]
-      properties: {code: {type: string, enum: [AUTH_REQUIRED, NOT_READY, BUNDLE_MISMATCH, ACTION_UNAVAILABLE, PARAMETER_INVALID, PRECONDITION_FAILED, ROBOT_BUSY, TASK_ID_CONFLICT, STALE_COMMAND, TASK_NOT_FOUND, INTERNAL_ERROR]}, message: {type: string}, details: {type: object}}
+      properties: {code: {type: string, enum: [AUTH_REQUIRED, NOT_READY, BUNDLE_MISMATCH, ACTION_UNAVAILABLE, PARAMETER_INVALID, PRECONDITION_FAILED, ROBOT_BUSY, TASK_ID_CONFLICT, COMMAND_SEQUENCE_CONFLICT, STALE_COMMAND, TASK_NOT_FOUND, INTERNAL_ERROR]}, message: {type: string}, details: {type: object}}
     HealthResponse:
       type: object
       additionalProperties: false

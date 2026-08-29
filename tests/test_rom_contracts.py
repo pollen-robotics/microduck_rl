@@ -293,6 +293,9 @@ def test_checked_in_schemas_lock_layouts_error_codes_and_portable_lease_invarian
     assert "TASK_NOT_FOUND" in openapi["components"]["schemas"]["Error"]["properties"][
         "code"
     ]["enum"]
+    assert "COMMAND_SEQUENCE_CONFLICT" in openapi["components"]["schemas"]["Error"][
+        "properties"
+    ]["code"]["enum"]
     assert "schema" in bundle_schema["required"]
     assert "schema" in openapi["components"]["schemas"]["TaskCreateRequest"]["required"]
     assert "schema" in openapi["components"]["schemas"]["RobotStatus"]["required"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from threading import Event, Lock
 from typing import Any
@@ -23,6 +24,8 @@ class FakeMicroduckRuntime:
         self._lock = Lock()
         self._samples: deque[RuntimeSample | BaseException] = deque()
         self.safe_stop_calls: list[tuple[RuntimeHandle | None, str]] = []
+        self.command_calls: list[dict[str, Any]] = []
+        self.operation_log: list[tuple[str, Any]] = []
         self.validation_error: BaseException | None = None
         self.start_error: BaseException | None = None
         self.status_error: BaseException | None = None
@@ -65,9 +68,21 @@ class FakeMicroduckRuntime:
                 return next_sample
         return RuntimeSample(running=True)
 
+    @property
+    def last_command(self) -> dict[str, Any] | None:
+        with self._lock:
+            return self.command_calls[-1] if self.command_calls else None
+
+    def command(self, handle: RuntimeHandle, parameters: Mapping[str, object]) -> None:
+        command = dict(parameters)
+        with self._lock:
+            self.command_calls.append(command)
+            self.operation_log.append(("command", command))
+
     def safe_stop(self, handle: RuntimeHandle | None, reason: str) -> RuntimeEvidence:
         with self._lock:
             self.safe_stop_calls.append((handle, reason))
+            self.operation_log.append(("safe_stop", reason))
         self.safe_stopped.set()
         return RuntimeEvidence(metrics=self.safe_stop_metrics, stopReason=reason)
 

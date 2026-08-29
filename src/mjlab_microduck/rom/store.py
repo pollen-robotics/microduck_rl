@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import (
+    TaskCommandRequest,
     TaskCreateRequest,
     TaskEvent,
     TaskEvidence,
@@ -33,6 +34,14 @@ class TaskIdConflict(ValueError):
 
 class IllegalTaskTransition(ValueError):
     """A requested lifecycle change does not follow the simulator task state machine."""
+
+
+class CommandSequenceConflict(ValueError):
+    """One command sequence is associated with different canonical command content."""
+
+
+class StaleCommand(ValueError):
+    """A command sequence is lower than the last durably accepted sequence."""
 
 
 class SqliteTaskStore:
@@ -136,6 +145,71 @@ class SqliteTaskStore:
             )
             connection.commit()
             return event
+
+    def record_command(
+        self,
+        task_id: str,
+        command: TaskCommandRequest,
+        command_hash: str,
+        deadline_at: float,
+    ) -> tuple[TaskSnapshot, bool]:
+        """Atomically record a newer continuous command and its lease deadline."""
+        command_content = canonical_json(command).decode("utf-8")
+        deadline = _monotonic_deadline(deadline_at)
+        timestamp = _timestamp()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task = self._get_in_connection(connection, task_id)
+            row = connection.execute(
+                "SELECT command_sequence, command_canonical_json, command_hash FROM task WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            sequence = row["command_sequence"]
+            if sequence is not None:
+                if command.commandSequence < sequence:
+                    connection.rollback()
+                    raise StaleCommand(f"command sequence is stale: {command.commandSequence}")
+                if command.commandSequence == sequence:
+                    if (
+                        row["command_canonical_json"] == command_content
+                        and row["command_hash"] == command_hash
+                    ):
+                        connection.commit()
+                        return task, False
+                    connection.rollback()
+                    raise CommandSequenceConflict(
+                        f"command sequence already exists: {command.commandSequence}"
+                    )
+            if task.state != "RUNNING":
+                connection.rollback()
+                raise IllegalTaskTransition(f"cannot command task in {task.state}")
+            connection.execute(
+                """
+                UPDATE task
+                SET command_sequence = ?, command_canonical_json = ?, command_hash = ?,
+                    lease_expires_at = ?, deadline_at = ?, updated_at = ?
+                WHERE task_id = ?
+                """,
+                (
+                    command.commandSequence,
+                    command_content,
+                    command_hash,
+                    deadline,
+                    deadline,
+                    timestamp,
+                    task_id,
+                ),
+            )
+            self._append_event_in_connection(
+                connection,
+                task_id,
+                "TASK_COMMAND_ACCEPTED",
+                {"commandSequence": command.commandSequence},
+                timestamp,
+            )
+            snapshot = self._get_in_connection(connection, task_id)
+            connection.commit()
+            return snapshot, True
 
     def events_after(self, task_id: str, sequence: int) -> list[TaskEvent]:
         """Return task events strictly after ``sequence`` in durable sequence order."""
@@ -298,3 +372,8 @@ class SqliteTaskStore:
 
 def _timestamp() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _monotonic_deadline(value: float) -> str:
+    """Store an injected monotonic-clock instant without converting it to wall time."""
+    return format(value, ".9f")
