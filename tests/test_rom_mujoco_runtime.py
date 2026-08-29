@@ -1025,6 +1025,8 @@ def test_runtime_executes_real_onnx_at_50hz_and_maps_actions_by_joint_name(
         "finalBaseHeightM": pytest.approx(0.12),
         "finalTiltRad": pytest.approx(0.0),
         "maxAbsAction": pytest.approx(0.13),
+        "energyProxy": pytest.approx(0.00182),
+        "limitViolations": 0,
         "maxTiltRad": pytest.approx(0.0),
         "minBaseHeightM": pytest.approx(0.12),
         "mjcfDigest": bundle.model.digest,

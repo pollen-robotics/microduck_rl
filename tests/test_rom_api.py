@@ -616,6 +616,18 @@ def test_configuration_rejects_unsafe_listener_values_and_runtime_placeholder_re
         runtime.validate(None, None)
 
 
+def test_configuration_allows_explicit_container_wildcard_listener_opt_in():
+    """Without an explicit opt-in, a published container cannot expose its authenticated API."""
+    configuration = read_configuration(
+        {
+            "MICRODUCK_ROM_HOST": "0.0.0.0",
+            "MICRODUCK_ROM_ALLOW_WILDCARD_BIND": "true",
+        }
+    )
+
+    assert configuration.host == "0.0.0.0"
+
+
 def test_configuration_rejects_symlinked_bundle_and_state_paths(tmp_path: Path):
     """Resolving configuration symlinks would let the API verify or persist outside its configured roots."""
     bundle = tmp_path / "bundle"

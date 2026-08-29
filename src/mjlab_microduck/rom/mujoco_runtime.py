@@ -128,6 +128,8 @@ class MicroduckMujocoRuntime:
         self._min_base_height_m = math.inf
         self._max_tilt_rad = 0.0
         self._max_abs_action = 0.0
+        self._energy_proxy = 0.0
+        self._limit_violations = 0
         self._upright_steps = 0
         self._last_yaw_rad = 0.0
         self._yaw_rotation_rad = 0.0
@@ -669,6 +671,8 @@ class MicroduckMujocoRuntime:
             self._min_base_height_m = float(self._base_position()[2])
             self._max_tilt_rad = 0.0
             self._max_abs_action = 0.0
+            self._energy_proxy = 0.0
+            self._limit_violations = 0
             self._upright_steps = 0
             self._last_yaw_rad = self._yaw_rad()
             self._yaw_rotation_rad = 0.0
@@ -874,6 +878,7 @@ class MicroduckMujocoRuntime:
                 target, actuator_limited = self._limit_targets(target)
                 if actuator_limited:
                     self._limiting_reason = "ACTUATOR_LIMIT"
+                    self._limit_violations += 1
                 self._data.ctrl[self._actuator_indices] = target
                 self._policy_target = target.copy()
                 self._previous_action = policy_action.copy()
@@ -994,6 +999,9 @@ class MicroduckMujocoRuntime:
         self._max_abs_action = max(
             self._max_abs_action, float(np.max(np.abs(action), initial=0.0))
         )
+        # Integral of squared normalized policy action. This is deliberately an
+        # energy proxy, not a claim about electrical joules or actuator torque.
+        self._energy_proxy += float(np.dot(action, action)) * _CONTROL_PERIOD_S
         if height >= 0.025 and tilt <= math.radians(75.0):
             self._upright_steps += 1
         yaw = self._yaw_rad()
@@ -1064,6 +1072,8 @@ class MicroduckMujocoRuntime:
             "finalBaseHeightM": round(float(base_position[2]), 6),
             "finalTiltRad": round(final_tilt, 6),
             "maxAbsAction": round(self._max_abs_action, 6),
+            "energyProxy": round(self._energy_proxy, 6),
+            "limitViolations": self._limit_violations,
             "maxTiltRad": round(self._max_tilt_rad, 6),
             "minBaseHeightM": round(self._min_base_height_m, 6),
             "steps": self._step_count,

@@ -1,0 +1,13 @@
+**
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!src/
+!src/**
+!docker/
+!docker/rom-simulator/
+!docker/rom-simulator/entrypoint.sh
+src/mjlab_microduck/robot/microduck/assets/**/*.stl
+src/mjlab_microduck/robot/microduck/assets/**/*.part
+**/*.part

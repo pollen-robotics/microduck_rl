@@ -183,6 +183,16 @@ uv run --with pytest pytest tests/
 CPU-only config-invariant and reward-function regression tests — they lock in
 joint-index mappings, reward sign conventions, and NaN guards.
 
+## ROM simulator releases
+
+Policy bundles can be built, qualified through the exact governed MuJoCo/ONNX
+runtime, promoted immutably, and served through the authenticated simulator API.
+The current runtime supports qualified continuous actions; discrete catalog
+entries remain explicitly unavailable until their code-owned reset and
+completion semantics exist. See [docs/rom-simulator.md](docs/rom-simulator.md)
+for the export, release-policy, Docker, curl, backup, timeout, and license
+workflow.
+
 ## Related projects
 
 - [microduck](https://github.com/pollen-robotics/microduck) — the Microduck project home, including the onboard runtime that runs the exported policies

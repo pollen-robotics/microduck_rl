@@ -866,6 +866,15 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
+rom = [
+    { name = "fastapi" },
+    { name = "mujoco" },
+    { name = "numpy" },
+    { name = "onnx" },
+    { name = "onnxruntime" },
+    { name = "pydantic" },
+    { name = "uvicorn" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -889,6 +898,15 @@ dev = [
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "pytest", specifier = ">=8,<9" },
     { name = "ruff", specifier = ">=0.12,<1" },
+]
+rom = [
+    { name = "fastapi", specifier = "==0.141.1" },
+    { name = "mujoco", specifier = "==3.10.0" },
+    { name = "numpy", specifier = "==2.4.1" },
+    { name = "onnx", specifier = "==1.22.0" },
+    { name = "onnxruntime", specifier = "==1.24.4" },
+    { name = "pydantic", specifier = "==2.12.5" },
+    { name = "uvicorn", specifier = "==0.52.4" },
 ]
 
 [[package]]

@@ -1,0 +1,5 @@
+# Defense in depth for Docker versions/builders that do not apply the
+# Dockerfile-specific docker/rom-simulator/Dockerfile.dockerignore file.
+src/mjlab_microduck/robot/microduck/assets/**/*.stl
+src/mjlab_microduck/robot/microduck/assets/**/*.part
+**/*.part

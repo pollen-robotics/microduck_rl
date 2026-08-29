@@ -30,12 +30,16 @@ class ServerConfiguration:
     port: int
 
 
-def _safe_host(value: str) -> str:
+def _safe_host(value: str, *, allow_wildcard: bool = False) -> str:
     try:
         address = ipaddress.ip_address(value)
     except ValueError as exc:
         raise ValueError("MICRODUCK_ROM_HOST must be an IP address") from exc
-    if address.is_unspecified or address.is_multicast or address.is_reserved:
+    if (
+        (address.is_unspecified and not allow_wildcard)
+        or address.is_multicast
+        or address.is_reserved
+    ):
         raise ValueError("MICRODUCK_ROM_HOST must be a routable local address")
     return str(address)
 
@@ -66,11 +70,18 @@ def read_configuration(environ: Mapping[str, str] = os.environ) -> ServerConfigu
         raise ValueError("MICRODUCK_ROM_STATE_DB must be a file path")
     state_db = state_path.resolve() if state_path is not None else None
 
+    wildcard_value = environ.get("MICRODUCK_ROM_ALLOW_WILDCARD_BIND", "false")
+    if wildcard_value not in {"true", "false"}:
+        raise ValueError("MICRODUCK_ROM_ALLOW_WILDCARD_BIND must be true or false")
+
     return ServerConfiguration(
         bundle_dir=bundle_dir,
         state_db=state_db,
         bearer_token=environ.get("MICRODUCK_ROM_BEARER_TOKEN", ""),
-        host=_safe_host(environ.get("MICRODUCK_ROM_HOST", "127.0.0.1")),
+        host=_safe_host(
+            environ.get("MICRODUCK_ROM_HOST", "127.0.0.1"),
+            allow_wildcard=wildcard_value == "true",
+        ),
         port=port,
     )
 
@@ -262,3 +273,7 @@ def main() -> None:
     uvicorn.run(
         create_configured_app(), host=configuration.host, port=configuration.port
     )
+
+
+if __name__ == "__main__":
+    main()

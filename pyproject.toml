@@ -46,6 +46,15 @@ dev = [
     "httpx>=0.28,<1",
     "ruff>=0.12,<1",
 ]
+rom = [
+    "fastapi==0.141.1",
+    "mujoco==3.10.0",
+    "numpy==2.4.1",
+    "onnx==1.22.0",
+    "onnxruntime==1.24.4",
+    "pydantic==2.12.5",
+    "uvicorn==0.52.4",
+]
 
 [project.entry-points."mjlab.tasks"]
 mjlab_microduck = "mjlab_microduck.tasks"
