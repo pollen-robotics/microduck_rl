@@ -266,6 +266,8 @@ def main() -> int:
             checkpoint = run_dir / f"{report_path.stem}.pt"
             if not checkpoint.is_file():
                 continue
+            if checkpoint.resolve() == current_checkpoint.resolve():
+                continue
             report = _load_json(report_path)
             if not _report_matches(report, checkpoint, walker_checkpoint):
                 continue
