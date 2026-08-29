@@ -124,17 +124,20 @@ exit $TRAIN_RC
 def _wandb_api_key() -> str | None:
     """Best-effort lookup of the user's wandb API key.
 
-    Order: WANDB_API_KEY env -> ~/.netrc (machine api.wandb.ai).
+    Order: WANDB_API_KEY env -> ~/.netrc -> ~/_netrc (machine api.wandb.ai).
+    wandb's CLI writes ~/_netrc on Windows; Python's netrc module doesn't
+    look there on its own, so both names are tried explicitly.
     """
     if k := os.environ.get("WANDB_API_KEY"):
         return k
-    try:
-        n = netrc(str(Path.home() / ".netrc"))
-        auth = n.authenticators("api.wandb.ai")
-        if auth and auth[2]:
-            return auth[2]
-    except (FileNotFoundError, OSError):
-        pass
+    for name in (".netrc", "_netrc"):
+        try:
+            n = netrc(str(Path.home() / name))
+            auth = n.authenticators("api.wandb.ai")
+            if auth and auth[2]:
+                return auth[2]
+        except (FileNotFoundError, OSError):
+            pass
     return None
 
 

@@ -26,6 +26,15 @@ dependencies = [
     # to declare it — without this line a fresh `uv sync` (e.g. on HF jobs)
     # can't even `import mjlab_microduck` (found 2026-07-21).
     "scipy>=1.16",
+    # Direct dep ONLY so [tool.uv.sources] can bind torch to the CUDA index on
+    # aarch64 (see the torch source below) — uv applies sources to DIRECT
+    # dependencies only, so as a purely transitive dep (mjlab, rsl_rl) the
+    # source entry is silently ignored.
+    # Pinned to the exact version uv.lock already resolved from PyPI so this
+    # changes only the SOURCE of the wheel on aarch64, not the version: a
+    # floating `>=` lets the CUDA index (which carries newer builds than the
+    # PyPI pin) drag torch 2.9.1 -> 2.13.0, an unvetted bump for mjlab/rsl_rl.
+    "torch==2.9.1",
 ]
 
 [project.entry-points."mjlab.tasks"]
@@ -71,3 +80,21 @@ override-dependencies = [
 better-actuator-models = { git = "https://github.com/Rhoban/bam.git", branch = "mjlab_frictionloss" }
 # For local BAM development, comment the line above and use:
 # better-actuator-models = { path = "/home/antoine/Rhoban/bam", editable = true }
+# On linux-aarch64 (DGX Spark / GB10) PyPI's torch wheel is CPU-ONLY:
+# torch.__version__ == "2.9.1+cpu", torch.version.cuda is None, so
+# torch.cuda.device_count() == 0 and mjlab's select_gpus() indexes an empty
+# list -> `IndexError: list index out of range` before training even starts
+# (mjlab/utils/gpu.py:70). Route torch to PyTorch's CUDA index there.
+# cu129 (not cu130) matches the CUDA toolkit warp 1.12.0 bundles, so the
+# zero-copy warp<->torch interop stays on one runtime major version.
+# The marker keeps x86_64 (HF Jobs) on PyPI, where the wheel already bundles
+# CUDA via its nvidia-*-cu12 deps — that resolution is unchanged.
+torch = [
+  { index = "pytorch-cu129", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+# explicit: only packages that name this index resolve from it.
+explicit = true
