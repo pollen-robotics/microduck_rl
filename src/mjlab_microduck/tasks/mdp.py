@@ -1846,6 +1846,167 @@ def stair_first_tread_contact(
     return _stair_contact_event(env, tread, "_stair_first_tread_contact_latched")
 
 
+def stair_contact_loaded_release(
+    env: ManagerBasedRlEnv,
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.20,
+    arm_hold_steps: int = 2,
+    release_window_steps: int = 8,
+    min_forward_speed: float = 0.05,
+    min_vertical_speed: float = 0.08,
+    target_forward_delta: float = 0.040,
+    target_vertical_delta: float = 0.025,
+    sensor_names: tuple[str, ...] = (
+        "robot_ground_contact",
+        "head_ground_contact",
+        "legs_ground_contact",
+        "trunk_ground_contact",
+    ),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay once for an upward-forward release after stable stair contact.
+
+    Contact itself pays nothing. Two consecutive classified face or tread
+    contact frames arm a short release window and snapshot the root pose. A
+    payout is possible only after the contact releases, or a face contact
+    shifts onto the tread, while the root has positive forward and vertical
+    velocity. Progress is measured from the arm snapshot, so reset placement,
+    persistent bracing, and repeated bumps cannot create a jackpot.
+    """
+
+    if arm_hold_steps < 1 or release_window_steps < 1:
+        raise ValueError("arm_hold_steps and release_window_steps must be positive")
+
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    face_contact = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    tread_contact = torch.zeros_like(face_contact)
+    for sensor_name in sensor_names:
+        if sensor_name not in env.scene.sensors:
+            raise RuntimeError(f"Missing required contact sensor: {sensor_name}")
+        face, tread, _ = _standard_stair_contact_masks(
+            env,
+            sensor_name,
+            stair_face_x=stair_face_x,
+            riser_height=riser_height,
+            tread_depth=tread_depth,
+            corridor_half_width=corridor_half_width,
+        )
+        face_contact |= face.any(dim=-1)
+        tread_contact |= tread.any(dim=-1)
+    contact = face_contact | tread_contact
+
+    state_names = (
+        "_stair_contact_release_streak",
+        "_stair_contact_release_armed",
+        "_stair_contact_release_paid",
+        "_stair_contact_release_window",
+        "_stair_contact_release_arm_x",
+        "_stair_contact_release_arm_z",
+        "_stair_contact_release_arm_face",
+        "_stair_contact_loaded_release_latched",
+    )
+    if not hasattr(env, state_names[0]):
+        env._stair_contact_release_streak = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+        env._stair_contact_release_armed = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._stair_contact_release_paid = torch.zeros_like(
+            env._stair_contact_release_armed
+        )
+        env._stair_contact_release_window = torch.zeros_like(
+            env._stair_contact_release_streak
+        )
+        env._stair_contact_release_arm_x = torch.zeros_like(x)
+        env._stair_contact_release_arm_z = torch.zeros_like(z)
+        env._stair_contact_release_arm_face = torch.zeros_like(
+            env._stair_contact_release_armed
+        )
+        env._stair_contact_loaded_release_latched = torch.zeros_like(
+            env._stair_contact_release_armed
+        )
+
+    fresh = env.episode_length_buf <= 1
+    env._stair_contact_release_streak[fresh] = 0
+    env._stair_contact_release_armed[fresh] = False
+    env._stair_contact_release_paid[fresh] = False
+    env._stair_contact_release_window[fresh] = 0
+    env._stair_contact_release_arm_x[fresh] = 0.0
+    env._stair_contact_release_arm_z[fresh] = 0.0
+    env._stair_contact_release_arm_face[fresh] = False
+    env._stair_contact_loaded_release_latched[fresh] = False
+
+    cleared = getattr(env, "_stair_first_riser_latched", None)
+    if cleared is None:
+        cleared = torch.zeros_like(env._stair_contact_release_armed)
+    arm_candidate = (
+        (env.episode_length_buf >= 3)
+        & (y <= corridor_half_width)
+        & contact
+        & ~cleared
+        & ((x < 0.665) | (z < 0.175))
+        & ~env._stair_contact_release_armed
+    )
+    env._stair_contact_release_streak = torch.where(
+        arm_candidate,
+        env._stair_contact_release_streak + 1,
+        torch.zeros_like(env._stair_contact_release_streak),
+    )
+    newly_armed = (
+        env._stair_contact_release_streak >= arm_hold_steps
+    ) & ~env._stair_contact_release_armed
+    env._stair_contact_release_armed |= newly_armed
+    env._stair_contact_release_arm_x[newly_armed] = x[newly_armed]
+    env._stair_contact_release_arm_z[newly_armed] = z[newly_armed]
+    env._stair_contact_release_arm_face[newly_armed] = face_contact[newly_armed]
+    env._stair_contact_release_window = torch.where(
+        newly_armed,
+        torch.full_like(
+            env._stair_contact_release_window, release_window_steps
+        ),
+        torch.clamp(env._stair_contact_release_window - 1, min=0),
+    )
+
+    linear_velocity = torch.nan_to_num(asset.data.root_link_lin_vel_w, nan=0.0)
+    contact_transition = (~contact) | (
+        env._stair_contact_release_arm_face & tread_contact
+    )
+    release = (
+        env._stair_contact_release_armed
+        & ~newly_armed
+        & ~env._stair_contact_release_paid
+        & (env._stair_contact_release_window > 0)
+        & contact_transition
+        & (linear_velocity[:, 0] > min_forward_speed)
+        & (linear_velocity[:, 2] > min_vertical_speed)
+        & (y <= corridor_half_width)
+    )
+    forward_progress = torch.clamp(
+        (x - env._stair_contact_release_arm_x)
+        / max(target_forward_delta, 1e-6),
+        0.0,
+        1.0,
+    )
+    vertical_progress = torch.clamp(
+        (z - env._stair_contact_release_arm_z)
+        / max(target_vertical_delta, 1e-6),
+        0.0,
+        1.0,
+    )
+    progress = 0.60 * forward_progress + 0.40 * vertical_progress
+    payout = torch.where(release, progress, torch.zeros_like(progress))
+    env._stair_contact_release_paid |= release
+    env._stair_contact_loaded_release_latched |= release
+    return payout
+
+
 def stair_apex_or_mantle_frontier(
     env: ManagerBasedRlEnv,
     approach_start_x: float = 0.40,

@@ -83,6 +83,11 @@ STAIR_TARGETS = {
         "experiment": "microduck_stair_medium_dynamics_rsi_specialist",
         "iterations": 200,
     },
+    "specialist-contact-release-rsi": {
+        "task": "Mjlab-Stairs-Contact-Release-RSI-Specialist-MicroDuck",
+        "experiment": "microduck_stair_contact_release_rsi_specialist",
+        "iterations": 75,
+    },
     "specialist-tread-contact-bank": {
         "task": "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
         "experiment": "microduck_stair_tread_contact_bank_specialist",

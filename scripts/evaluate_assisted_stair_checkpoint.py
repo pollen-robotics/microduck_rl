@@ -37,6 +37,7 @@ TASK_IDS = (
     "Mjlab-Stairs-Contact-Mantle-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Soft-Dynamics-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Medium-Dynamics-RSI-Specialist-MicroDuck",
+    "Mjlab-Stairs-Contact-Release-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
     "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
@@ -260,6 +261,7 @@ def main() -> int:
         "Mjlab-Stairs-Contact-Mantle-RSI-Specialist-MicroDuck",
         "Mjlab-Stairs-Soft-Dynamics-RSI-Specialist-MicroDuck",
         "Mjlab-Stairs-Medium-Dynamics-RSI-Specialist-MicroDuck",
+        "Mjlab-Stairs-Contact-Release-RSI-Specialist-MicroDuck",
     }:
         reset_modes = ROULADE_BANK_RESET_MODES
     elif args.task == "Mjlab-Stairs-Apex-Mantle-Specialist-MicroDuck":
@@ -292,15 +294,18 @@ def main() -> int:
     )
     previous_stable = torch.zeros_like(previous_clearance)
     previous_secured = torch.zeros_like(previous_clearance)
+    previous_contact_release = torch.zeros_like(previous_clearance)
     mode_trials = {name: 0 for name in reset_modes.values()}
     mode_clearance = {name: 0 for name in reset_modes.values()}
     mode_stable = {name: 0 for name in reset_modes.values()}
     mode_secured = {name: 0 for name in reset_modes.values()}
     mode_face_contact = {name: 0 for name in reset_modes.values()}
     mode_tread_contact = {name: 0 for name in reset_modes.values()}
+    mode_contact_release = {name: 0 for name in reset_modes.values()}
     secured_events = 0
     face_contact_events = 0
     tread_contact_events = 0
+    contact_release_events = 0
     tread_contact_source_steps: list[int] = []
     face_contact_metrics = ContactTrajectoryMetrics(args.num_envs, args.device)
     tread_contact_metrics = ContactTrajectoryMetrics(args.num_envs, args.device)
@@ -364,6 +369,11 @@ def main() -> int:
             secured = getattr(
                 base_env, "_stair_first_tread_secured_latched", previous_secured
             )
+            contact_release = getattr(
+                base_env,
+                "_stair_contact_loaded_release_latched",
+                previous_contact_release,
+            )
             global_contact = base_env.scene.sensors["robot_ground_contact"].data
             if (
                 global_contact.found is None
@@ -382,6 +392,7 @@ def main() -> int:
             new_clearance = clearance & ~previous_clearance
             new_stable = stable & ~previous_stable
             new_secured = secured & ~previous_secured
+            new_contact_release = contact_release & ~previous_contact_release
             new_face_contact = face_contact_metrics.observe(
                 raw_face.any(dim=-1), base_env.episode_length_buf
             )
@@ -391,6 +402,7 @@ def main() -> int:
             clearance_events += int(new_clearance.sum().item())
             stable_events += int(new_stable.sum().item())
             secured_events += int(new_secured.sum().item())
+            contact_release_events += int(new_contact_release.sum().item())
             face_contact_events += int(new_face_contact.sum().item())
             tread_contact_events += int(new_tread_contact.sum().item())
             source_steps = getattr(base_env, "_stair_walker_bank_source_step", None)
@@ -492,12 +504,17 @@ def main() -> int:
                 mode_tread_contact[name] += int(
                     (new_tread_contact & mode_mask).sum().item()
                 )
+                mode_contact_release[name] += int(
+                    (new_contact_release & mode_mask).sum().item()
+                )
             previous_clearance = clearance.clone()
             previous_stable = stable.clone()
             previous_secured = secured.clone()
+            previous_contact_release = contact_release.clone()
             previous_clearance[done_mask] = False
             previous_stable[done_mask] = False
             previous_secured[done_mask] = False
+            previous_contact_release[done_mask] = False
             face_contact_metrics.reset(done_mask)
             tread_contact_metrics.reset(done_mask)
             for metrics in body_part_tread_metrics.values():
@@ -548,6 +565,9 @@ def main() -> int:
             "riser_face_contact_rate": mode_face_contact[name] / max(trials, 1),
             "first_tread_contact_events": mode_tread_contact[name],
             "first_tread_contact_rate": mode_tread_contact[name] / max(trials, 1),
+            "contact_loaded_release_events": mode_contact_release[name],
+            "contact_loaded_release_rate": mode_contact_release[name]
+            / max(trials, 1),
             "root_center_over_lip_events": mode_a12_event_counts[name][
                 "root_center_over_lip"
             ],
@@ -626,6 +646,8 @@ def main() -> int:
         "riser_face_contact_rate": face_contact_events / denominator,
         "first_tread_contact_events": tread_contact_events,
         "first_tread_contact_rate": tread_contact_events / denominator,
+        "contact_loaded_release_events": contact_release_events,
+        "contact_loaded_release_rate": contact_release_events / denominator,
         "body_part_tread_contact_events": body_part_tread_events,
         "body_part_tread_contact_rates": {
             name: events / denominator

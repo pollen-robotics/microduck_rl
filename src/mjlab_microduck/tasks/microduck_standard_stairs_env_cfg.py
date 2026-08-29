@@ -1221,12 +1221,54 @@ def make_microduck_stair_soft_dynamics_rsi_env_cfg(
 def make_microduck_stair_medium_dynamics_rsi_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
-    """Stage A23: retain the crossing while hardening stair contacts."""
+    """Bridge stage: retain a crossing while hardening stair contacts."""
 
     return _make_microduck_stair_contact_continuation_env_cfg(
         play=play,
         spec_fn=_medium_stair_bridge_contacts,
     )
+
+
+def make_microduck_stair_contact_release_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A23: turn stable stair contact into a loaded upward release."""
+
+    cfg = _make_microduck_stair_contact_continuation_env_cfg(
+        play=play,
+        spec_fn=_soften_terrain_contacts,
+    )
+    # A22 proved that a large contact jackpot learns persistent bracing. Keep
+    # the learned contact behavior through initialization, but remove both
+    # contact-only payouts. The new term snapshots the root after two stable
+    # contact frames and pays once for a real upward-forward release.
+    cfg.rewards["stair_first_tread_contact"].weight = 0.0
+    cfg.rewards["stair_tread_support_frontier"].weight = 0.0
+    cfg.rewards["stair_curriculum_contact_mantle_frontier"].weight = 0.0
+    cfg.rewards["stair_contact_loaded_release"] = RewardTermCfg(
+        func=microduck_mdp.stair_contact_loaded_release,
+        weight=50.0,
+        params={
+            "stair_face_x": STANDARD_STAIR_START_DISTANCE,
+            "riser_height": STANDARD_RISER_HEIGHT,
+            "tread_depth": STANDARD_TREAD_DEPTH,
+            "corridor_half_width": 0.20,
+            "arm_hold_steps": 2,
+            "release_window_steps": 8,
+            "min_forward_speed": 0.05,
+            "min_vertical_speed": 0.08,
+            "target_forward_delta": 0.040,
+            "target_vertical_delta": 0.025,
+            "sensor_names": (
+                "robot_ground_contact",
+                "head_ground_contact",
+                "legs_ground_contact",
+                "trunk_ground_contact",
+            ),
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    return cfg
 
 
 def make_microduck_stair_tread_contact_bank_env_cfg(
@@ -1527,6 +1569,20 @@ MicroduckStairMediumDynamicsRsiRlCfg.run_name = (
 MicroduckStairMediumDynamicsRsiRlCfg.max_iterations = 200
 MicroduckStairMediumDynamicsRsiRlCfg.actor.distribution_cfg["init_std"] = 0.22
 MicroduckStairMediumDynamicsRsiRlCfg.algorithm.learning_rate = 1.0e-5
+
+MicroduckStairContactReleaseRsiRlCfg = deepcopy(
+    MicroduckStairMediumDynamicsRsiRlCfg
+)
+MicroduckStairContactReleaseRsiRlCfg.experiment_name = (
+    "microduck_stair_contact_release_rsi_specialist"
+)
+MicroduckStairContactReleaseRsiRlCfg.run_name = (
+    "microduck_stair_contact_release_rsi_specialist"
+)
+MicroduckStairContactReleaseRsiRlCfg.max_iterations = 75
+MicroduckStairContactReleaseRsiRlCfg.save_interval = 25
+MicroduckStairContactReleaseRsiRlCfg.actor.distribution_cfg["init_std"] = 0.22
+MicroduckStairContactReleaseRsiRlCfg.algorithm.learning_rate = 1.0e-5
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)
 MicroduckStairTreadContactBankRlCfg.experiment_name = (

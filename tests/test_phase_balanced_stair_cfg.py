@@ -1,6 +1,7 @@
 from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     MicroduckStairCurriculumRsiRlCfg,
     MicroduckStairContactMantleRsiRlCfg,
+    MicroduckStairContactReleaseRsiRlCfg,
     MicroduckStairMediumDynamicsRsiRlCfg,
     MicroduckStairPhaseBalancedRsiRlCfg,
     MicroduckStairSoftDynamicsRsiRlCfg,
@@ -11,6 +12,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     STANDARD_RISER_HEIGHT,
     make_microduck_stair_curriculum_rsi_env_cfg,
     make_microduck_stair_contact_mantle_rsi_env_cfg,
+    make_microduck_stair_contact_release_rsi_env_cfg,
     make_microduck_stair_medium_dynamics_rsi_env_cfg,
     make_microduck_stair_phase_balanced_rsi_env_cfg,
     make_microduck_stair_soft_dynamics_rsi_env_cfg,
@@ -124,3 +126,31 @@ def test_contact_continuation_uses_only_full_height_challenge_rows():
     assert medium.scene.spec_fn.__name__ == "_medium_stair_bridge_contacts"
     assert MicroduckStairSoftDynamicsRsiRlCfg.max_iterations == 200
     assert MicroduckStairMediumDynamicsRsiRlCfg.max_iterations == 200
+
+
+def test_contact_release_replaces_contact_jackpots_with_one_transition_gate():
+    baseline = make_microduck_stair_contact_mantle_rsi_env_cfg()
+    cfg = make_microduck_stair_contact_release_rsi_env_cfg()
+    release = cfg.rewards["stair_contact_loaded_release"]
+
+    assert tuple(cfg.observations["actor"].terms) == tuple(
+        baseline.observations["actor"].terms
+    )
+    assert cfg.scene.terrain.max_init_terrain_level == (
+        STAIR_MECHANISM_CURRICULUM_LEVELS - 1
+    )
+    assert cfg.events["route_challenge_levels"].params["standard_fraction"] == 1.0
+    assert "terrain_levels" not in cfg.curriculum
+    assert cfg.rewards["stair_first_tread_contact"].weight == 0.0
+    assert cfg.rewards["stair_tread_support_frontier"].weight == 0.0
+    assert cfg.rewards["stair_curriculum_contact_mantle_frontier"].weight == 0.0
+    assert release.weight == 50.0
+    assert release.params["arm_hold_steps"] == 2
+    assert release.params["release_window_steps"] == 8
+    assert release.params["min_forward_speed"] == 0.05
+    assert release.params["min_vertical_speed"] == 0.08
+    assert release.params["target_forward_delta"] == 0.040
+    assert release.params["target_vertical_delta"] == 0.025
+    assert cfg.rewards["stair_first_tread_secured"].weight == 600.0
+    assert MicroduckStairContactReleaseRsiRlCfg.max_iterations == 75
+    assert MicroduckStairContactReleaseRsiRlCfg.save_interval == 25
