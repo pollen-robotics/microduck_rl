@@ -138,13 +138,19 @@ def _metadata(model: onnx.ModelProto) -> dict[str, str]:
     return {item.key: item.value for item in model.metadata_props}
 
 
-def _validate_official_metadata(metadata: dict[str, str]) -> None:
+def _validate_official_metadata(
+    metadata: dict[str, str], *, allow_episodic_zero_command: bool = False
+) -> None:
     missing = [key for key in CONTRACT_KEYS if key not in metadata]
     if missing:
         _fail(f"ONNX metadata is missing deployment contract keys: {missing}")
     if tuple(metadata["observation_names"].split(",")) != EXPECTED_OBSERVATIONS:
         _fail("ONNX observation order does not match the MicroDuck 61D actor contract")
-    if tuple(metadata["command_names"].split(",")) != EXPECTED_COMMANDS:
+    command_names = tuple(metadata["command_names"].split(","))
+    episodic_command_contract = allow_episodic_zero_command and command_names == (
+        "twist",
+    )
+    if command_names != EXPECTED_COMMANDS and not episodic_command_contract:
         _fail("ONNX command order does not match twist, head_pose, body_pose")
     if tuple(metadata["joint_names"].split(",")) != EXPECTED_JOINTS:
         _fail("ONNX joint order does not match the 14-servo MicroDuck contract")
@@ -156,7 +162,9 @@ def _validate_official_metadata(metadata: dict[str, str]) -> None:
         _fail(f"ONNX action_scale must be 1.0, got {action_scale}")
 
 
-def inspect_onnx_policy(path: Path) -> OnnxPolicy:
+def inspect_onnx_policy(
+    path: Path, *, allow_episodic_zero_command: bool = False
+) -> OnnxPolicy:
     """Load and strictly validate the direct-map ONNX architecture."""
     path = path.resolve()
     if not path.is_file():
@@ -198,8 +206,9 @@ def inspect_onnx_policy(path: Path) -> OnnxPolicy:
         _fail("normalizer mean and divisor must both have shape [1, 61]")
     if not np.isfinite(mean).all() or not np.isfinite(divisor).all():
         _fail("normalizer contains non-finite values")
-    if not np.all(divisor > NORMALIZER_EPS):
-        _fail("effective divisor must be greater than rsl_rl normalizer epsilon 0.01")
+    divisor_tolerance = np.finfo(np.float32).eps
+    if not np.all(divisor >= NORMALIZER_EPS - divisor_tolerance):
+        _fail("effective divisor must be at least rsl_rl normalizer epsilon 0.01")
 
     actor_tensors: dict[str, np.ndarray] = {}
     previous_output = div.output[0]
@@ -244,7 +253,9 @@ def inspect_onnx_policy(path: Path) -> OnnxPolicy:
         _fail(f"unexpected ONNX initializer set; extras={sorted(extras)}, missing={sorted(missing)}")
 
     metadata = _metadata(model)
-    _validate_official_metadata(metadata)
+    _validate_official_metadata(
+        metadata, allow_episodic_zero_command=allow_episodic_zero_command
+    )
     return OnnxPolicy(path, mean.copy(), divisor.copy(), actor_tensors, metadata)
 
 
@@ -326,6 +337,7 @@ def validate_target_run(
     source: OnnxPolicy,
     *,
     target_contract_onnx: Path | None = None,
+    allow_episodic_zero_command: bool = False,
 ) -> Path:
     """Prove architecture and semantic observation compatibility from run sidecars."""
     run_dir = checkpoint_path.resolve().parent
@@ -352,6 +364,13 @@ def validate_target_run(
     if input_shape != (1, OBS_DIM) or output_shape != (1, ACTION_DIM):
         _fail(f"target contract ONNX has incompatible shapes {input_shape} -> {output_shape}")
     for key in CONTRACT_KEYS:
+        if (
+            key == "command_names"
+            and allow_episodic_zero_command
+            and source.metadata.get(key) == "twist"
+            and tuple(metadata.get(key, "").split(",")) == EXPECTED_COMMANDS
+        ):
+            continue
         if metadata.get(key) != source.metadata.get(key):
             _fail(f"target deployment metadata differs from source for {key!r}")
     return target_contract_onnx
@@ -377,7 +396,7 @@ def bootstrap_checkpoint(
         actor[key] = torch.as_tensor(value.copy(), dtype=target.dtype, device=target.device)
 
     assign("obs_normalizer._mean", source.mean)
-    raw_std = source.effective_divisor - NORMALIZER_EPS
+    raw_std = np.maximum(source.effective_divisor - NORMALIZER_EPS, 0.0)
     assign("obs_normalizer._std", raw_std)
     assign("obs_normalizer._var", np.square(raw_std))
     if normalizer_count is not None:
@@ -488,6 +507,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output", type=Path, help="new checkpoint path; required unless --validate-only")
     parser.add_argument("--target-contract-onnx", type=Path)
+    parser.add_argument(
+        "--allow-episodic-zero-command",
+        action="store_true",
+        help=(
+            "accept a manufacturer episodic policy whose metadata lists only "
+            "twist while its 61D observation keeps zero-padded head/body slots"
+        ),
+    )
     parser.add_argument("--normalizer-count", type=int, help="override count; default preserves target checkpoint count")
     parser.add_argument("--samples", type=int, default=512)
     parser.add_argument("--seed", type=int, default=20260829)
@@ -516,13 +543,17 @@ def main(argv: list[str] | None = None) -> int:
         if output_path.exists():
             _fail(f"refusing to overwrite existing output: {output_path}")
 
-    source = inspect_onnx_policy(args.onnx)
+    source = inspect_onnx_policy(
+        args.onnx,
+        allow_episodic_zero_command=args.allow_episodic_zero_command,
+    )
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     validate_checkpoint_state(checkpoint)
     contract_path = validate_target_run(
         checkpoint_path,
         source,
         target_contract_onnx=args.target_contract_onnx,
+        allow_episodic_zero_command=args.allow_episodic_zero_command,
     )
     bootstrapped = bootstrap_checkpoint(
         checkpoint,
@@ -552,6 +583,7 @@ def main(argv: list[str] | None = None) -> int:
         "normalizer_count": int(actor["obs_normalizer.count"].item()),
         "exploration_std": "preserved_from_target_checkpoint",
         "optimizer_state_reset": not args.keep_optimizer_state,
+        "episodic_zero_command_contract": args.allow_episodic_zero_command,
         "parity_samples": parity.samples,
         "parity_max_abs_error": parity.max_abs_error,
         "parity_mean_abs_error": parity.mean_abs_error,

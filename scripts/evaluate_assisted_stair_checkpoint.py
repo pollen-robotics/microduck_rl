@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from dataclasses import asdict
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -188,11 +189,14 @@ def main() -> int:
             "secured_tread_events": mode_secured[name],
             "secured_tread_rate": mode_secured[name] / max(trials, 1),
         }
+    iteration_match = re.search(r"model_(\d+)$", checkpoint.stem)
     report: dict[str, object] = {
         "schema_version": 2,
         "task": args.task,
         "checkpoint": str(checkpoint),
-        "checkpoint_iteration": int(checkpoint.stem.rsplit("_", 1)[-1]),
+        "checkpoint_iteration": (
+            int(iteration_match.group(1)) if iteration_match is not None else None
+        ),
         "checkpoint_sha256": _sha256(checkpoint),
         "standard_riser_height_m": 0.17,
         "standard_tread_depth_m": 0.28,

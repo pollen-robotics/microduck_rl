@@ -45,10 +45,18 @@ def _metadata() -> dict[str, str]:
     }
 
 
-def _write_policy(path: Path, *, activation: str = "Elu") -> dict[str, np.ndarray]:
+def _write_policy(
+    path: Path,
+    *,
+    activation: str = "Elu",
+    zero_variance_channel: bool = False,
+    episodic_zero_command: bool = False,
+) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(7)
     mean = rng.normal(0.0, 0.1, (1, OBS_DIM)).astype(np.float32)
     raw_std = rng.uniform(0.05, 2.0, (1, OBS_DIM)).astype(np.float32)
+    if zero_variance_channel:
+        raw_std[0, 0] = 0.0
     divisor = raw_std + NORMALIZER_EPS
     tensors: dict[str, np.ndarray] = {
         "obs_normalizer._mean": mean,
@@ -101,7 +109,10 @@ def _write_policy(path: Path, *, activation: str = "Elu") -> dict[str, np.ndarra
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
     model.ir_version = 8
-    helper.set_model_props(model, _metadata())
+    metadata = _metadata()
+    if episodic_zero_command:
+        metadata["command_names"] = "twist"
+    helper.set_model_props(model, metadata)
     onnx.save(model, path)
     return tensors
 
@@ -163,6 +174,27 @@ def test_bootstrap_does_not_mutate_input_and_can_override_count(tmp_path: Path):
         target["actor_state_dict"]["mlp.0.weight"], original["actor_state_dict"]["mlp.0.weight"]
     )
     assert target["optimizer_state_dict"]["state"].keys() == original["optimizer_state_dict"]["state"].keys()
+
+
+def test_bootstrap_accepts_exact_epsilon_for_zero_variance_channel(tmp_path: Path):
+    onnx_path = tmp_path / "zero_variance.onnx"
+    _write_policy(onnx_path, zero_variance_channel=True)
+    source = inspect_onnx_policy(onnx_path)
+
+    output = bootstrap_checkpoint(_checkpoint(), source)
+    assert output["actor_state_dict"]["obs_normalizer._std"][0, 0] == 0.0
+    report = validate_output_parity(source, output, samples=64, seed=13)
+    assert report.max_abs_error < 2e-5
+
+
+def test_episodic_zero_command_metadata_requires_explicit_opt_in(tmp_path: Path):
+    onnx_path = tmp_path / "episodic.onnx"
+    _write_policy(onnx_path, episodic_zero_command=True)
+
+    with pytest.raises(BootstrapCompatibilityError, match="command order"):
+        inspect_onnx_policy(onnx_path)
+    source = inspect_onnx_policy(onnx_path, allow_episodic_zero_command=True)
+    assert source.metadata["command_names"] == "twist"
 
 
 def test_refuses_non_elu_graph_instead_of_guessing(tmp_path: Path):
