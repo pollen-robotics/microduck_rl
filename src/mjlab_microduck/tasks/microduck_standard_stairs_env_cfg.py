@@ -1074,10 +1074,13 @@ def make_microduck_stair_curriculum_rsi_env_cfg(
         "stair_assisted_lift",
         "stair_assisted_crossing",
         "stair_tread_support_frontier",
-        "stair_first_tread_secured",
         "stair_first_tread_settle_quality",
     ):
         cfg.rewards[reward_name].weight = 0.0
+    # This term keeps its literal 170 mm contact geometry. It is intentionally
+    # impossible to collect from the lower curriculum rows and provides the
+    # exact supported-tread acceptance target to the full-height challenge set.
+    cfg.rewards["stair_first_tread_secured"].weight = 600.0
     cfg.rewards["stair_curriculum_mantle_frontier"] = RewardTermCfg(
         func=microduck_mdp.stair_curriculum_mantle_frontier,
         weight=12.0,

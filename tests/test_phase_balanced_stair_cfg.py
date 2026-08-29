@@ -57,10 +57,10 @@ def test_curriculum_rsi_preserves_actor_contract_and_real_stair_challenge():
         "stair_assisted_lift",
         "stair_assisted_crossing",
         "stair_tread_support_frontier",
-        "stair_first_tread_secured",
         "stair_first_tread_settle_quality",
     )
     assert all(cfg.rewards[name].weight == 0.0 for name in fixed_proxies)
+    assert cfg.rewards["stair_first_tread_secured"].weight == 600.0
     assert cfg.rewards["stair_curriculum_mantle_frontier"].weight == 12.0
     clearance = cfg.rewards["stair_first_riser_clearance"]
     assert clearance.weight == 500.0
