@@ -121,3 +121,34 @@ def test_vault_momentum_accepts_forward_upward_or_pivot_motion():
     )
 
     assert torch.equal(rows, torch.tensor([0, 1, 2]))
+
+
+def test_vault_filter_rejects_sideways_offset_and_yawing_rows():
+    states = {
+        "root_qpos_local": torch.tensor(
+            [
+                [0.60, 0.02, 0.12, 1.0, 0.0, 0.0, 0.0],
+                [0.60, 0.12, 0.12, 1.0, 0.0, 0.0, 0.0],
+                [0.60, 0.02, 0.12, 1.0, 0.0, 0.0, 0.0],
+                [0.60, 0.02, 0.12, 1.0, 0.0, 0.0, 0.0],
+            ]
+        ),
+        "root_qvel": torch.tensor(
+            [
+                [0.20, 0.05, 0.10, 0.0, 0.0, 1.0],
+                [0.20, 0.05, 0.10, 0.0, 0.0, 1.0],
+                [0.20, 0.30, 0.10, 0.0, 0.0, 1.0],
+                [0.20, 0.05, 0.10, 0.0, 0.0, 5.0],
+            ]
+        ),
+    }
+
+    rows = eligible_walk_state_rows(
+        states,
+        min_vault_momentum=0.12,
+        max_abs_local_y=0.08,
+        max_abs_lateral_speed=0.20,
+        max_abs_yaw_rate=4.0,
+    )
+
+    assert torch.equal(rows, torch.tensor([0]))

@@ -1032,6 +1032,67 @@ def make_microduck_stair_foot_anchor_vault_env_cfg(
     return cfg
 
 
+def make_microduck_stair_ordered_vault_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A12: require loaded work, new lift, then height-gated crossing."""
+
+    cfg = make_microduck_stair_foot_anchor_vault_env_cfg(play=False)
+    cfg.episode_length_s = 2.5
+    cfg.events["walker_state_bank"] = EventTermCfg(
+        func=WalkerStateBankReset,
+        mode="reset",
+        params={
+            "bank_path": ".tmp/codex/full170-loaded-foot-anchor-state-bank.pt",
+            "min_vertical_speed": -0.35,
+            "min_root_height": 0.09,
+            "min_vault_momentum": 0.12,
+            "vault_lever_arm": 0.06,
+            "max_abs_local_y": 0.08,
+            "max_abs_lateral_speed": 0.20,
+            "max_abs_yaw_rate": 4.0,
+        },
+    )
+    # Positive contact power is now an unrewarded eligibility event. A static
+    # anchor receives zero: only root motion after the arm event can advance
+    # the ordered frontier, and crossing remains gated by absolute lip height.
+    cfg.rewards["stair_foot_anchor_vault_frontier"].weight = 0.0
+    cfg.rewards["stair_ordered_foot_vault_frontier"] = RewardTermCfg(
+        func=microduck_mdp.stair_ordered_foot_vault_frontier,
+        weight=25.0,
+        params={
+            "target_x": STANDARD_STAIR_START_DISTANCE + 0.06,
+            "target_height": 0.205,
+            "required_lift": 0.04,
+            "lip_gate_height": 0.165,
+            "min_normal_force": 0.40,
+            "min_positive_power": 0.02,
+            "min_positive_work_j": 0.004,
+            "min_control_steps": 3,
+            "support_sensor_name": "feet_stair_contact",
+            "corridor_half_width": 0.20,
+            "stair_face_x": STANDARD_STAIR_START_DISTANCE,
+            "riser_height": STANDARD_RISER_HEIGHT,
+            "tread_depth": STANDARD_TREAD_DEPTH,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["stair_assisted_crossing"].weight = 10.0
+    cfg.rewards["stair_assisted_crossing"].params.update(
+        {"clearance_height": 0.198, "hard_height_gate": True}
+    )
+    cfg.rewards["stair_first_riser_clearance"].weight = 400.0
+    cfg.rewards["stair_first_riser_clearance"].params.update(
+        {"z_margin": 0.028, "hold_time_s": 0.08}
+    )
+    cfg.rewards["stair_first_tread_secured"].weight = 600.0
+    cfg.rewards["stair_first_tread_secured"].params["min_height"] = 0.198
+    cfg.rewards["stair_first_tread_settle_quality"].weight = 0.0
+    cfg.rewards["action_rate_l2"].weight = 0.0
+    del play
+    return cfg
+
+
 MicroduckStandardStairsRlCfg = deepcopy(MicroduckRlCfg)
 MicroduckStandardStairsRlCfg.experiment_name = "microduck_standard_stairs"
 MicroduckStandardStairsRlCfg.run_name = "microduck_standard_stairs"
@@ -1154,3 +1215,14 @@ MicroduckStairFootAnchorVaultRlCfg.save_interval = 25
 MicroduckStairFootAnchorVaultRlCfg.actor.distribution_cfg["init_std"] = 0.24
 MicroduckStairFootAnchorVaultRlCfg.algorithm.learning_rate = 2.0e-5
 MicroduckStairFootAnchorVaultRlCfg.algorithm.entropy_coef = 0.0002
+
+MicroduckStairOrderedVaultRlCfg = deepcopy(MicroduckStairFootAnchorVaultRlCfg)
+MicroduckStairOrderedVaultRlCfg.experiment_name = (
+    "microduck_stair_ordered_vault_specialist"
+)
+MicroduckStairOrderedVaultRlCfg.run_name = "microduck_stair_ordered_vault_specialist"
+MicroduckStairOrderedVaultRlCfg.max_iterations = 100
+MicroduckStairOrderedVaultRlCfg.save_interval = 25
+MicroduckStairOrderedVaultRlCfg.actor.distribution_cfg["init_std"] = 0.28
+MicroduckStairOrderedVaultRlCfg.algorithm.learning_rate = 2.0e-5
+MicroduckStairOrderedVaultRlCfg.algorithm.entropy_coef = 0.0002

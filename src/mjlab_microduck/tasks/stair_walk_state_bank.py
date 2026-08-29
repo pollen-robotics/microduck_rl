@@ -308,6 +308,9 @@ def eligible_walk_state_rows(
     min_root_height: float | None = None,
     min_vault_momentum: float | None = None,
     vault_lever_arm: float = 0.06,
+    max_abs_local_y: float | None = None,
+    max_abs_lateral_speed: float | None = None,
+    max_abs_yaw_rate: float | None = None,
 ) -> torch.Tensor:
     """Return source rows that contain useful dynamic handoff phases."""
 
@@ -338,6 +341,12 @@ def eligible_walk_state_rows(
             + vault_lever_arm * torch.clamp(velocity[:, 4], min=0.0)
         )
         eligible &= vault_momentum >= min_vault_momentum
+    if max_abs_local_y is not None:
+        eligible &= torch.abs(states["root_qpos_local"][:, 1]) <= max_abs_local_y
+    if max_abs_lateral_speed is not None:
+        eligible &= torch.abs(states["root_qvel"][:, 1]) <= max_abs_lateral_speed
+    if max_abs_yaw_rate is not None:
+        eligible &= torch.abs(states["root_qvel"][:, 5]) <= max_abs_yaw_rate
     rows = torch.nonzero(eligible, as_tuple=False).squeeze(-1)
     if len(rows) == 0:
         raise ValueError("Walker-state phase filters rejected every bank row")
@@ -369,6 +378,9 @@ class WalkerStateBankReset:
             min_root_height=cfg.params.get("min_root_height"),
             min_vault_momentum=cfg.params.get("min_vault_momentum"),
             vault_lever_arm=cfg.params.get("vault_lever_arm", 0.06),
+            max_abs_local_y=cfg.params.get("max_abs_local_y"),
+            max_abs_lateral_speed=cfg.params.get("max_abs_lateral_speed"),
+            max_abs_yaw_rate=cfg.params.get("max_abs_yaw_rate"),
         )
 
         robot = env.scene["robot"]
@@ -391,6 +403,9 @@ class WalkerStateBankReset:
         min_root_height: float | None = None,
         min_vault_momentum: float | None = None,
         vault_lever_arm: float = 0.06,
+        max_abs_local_y: float | None = None,
+        max_abs_lateral_speed: float | None = None,
+        max_abs_yaw_rate: float | None = None,
     ) -> None:
         del (
             bank_path,
@@ -404,6 +419,9 @@ class WalkerStateBankReset:
             min_root_height,
             min_vault_momentum,
             vault_lever_arm,
+            max_abs_local_y,
+            max_abs_lateral_speed,
+            max_abs_yaw_rate,
         )
         mode = getattr(env, "_stair_assisted_reset_mode", None)
         if mode is None:

@@ -65,6 +65,114 @@ BODY_PART_CONTACT_SENSORS = {
     "legs": "legs_ground_contact",
     "feet": "feet_stair_contact",
 }
+A12_IGNORE_INITIAL_CONTROL_STEPS = 3
+A12_ROOT_CENTER_OVER_LIP_MIN_X_M = 0.665
+A12_ROOT_CENTER_OVER_LIP_MIN_Z_M = 0.175
+A12_ROOT_CENTER_OVER_LIP_MAX_ABS_Y_M = 0.20
+A12_ROOT_CENTER_OVER_LIP_HOLD_STEPS = 2
+A12_FULL_SHELL_CLEAR_MIN_X_M = 0.700
+A12_FULL_SHELL_CLEAR_MIN_Z_M = 0.198
+A12_FULL_SHELL_CLEAR_MAX_ABS_Y_M = 0.20
+A12_FULL_SHELL_CLEAR_HOLD_STEPS = 4
+A12_SIDE_BYPASS_MIN_X_M = 0.660
+A12_SIDE_BYPASS_MIN_ABS_Y_M = 0.36
+
+
+class A12TrajectoryMetrics:
+    """Latch strict stair evidence without mixing states across trajectories."""
+
+    def __init__(self, num_envs: int, device: torch.device | str):
+        self._root_center_hold_steps = torch.zeros(
+            num_envs, dtype=torch.long, device=device
+        )
+        self._full_shell_hold_steps = torch.zeros_like(
+            self._root_center_hold_steps
+        )
+        self.root_center_over_lip_latched = torch.zeros(
+            num_envs, dtype=torch.bool, device=device
+        )
+        self.full_shell_clear_latched = torch.zeros_like(
+            self.root_center_over_lip_latched
+        )
+        self.side_bypass_latched = torch.zeros_like(
+            self.root_center_over_lip_latched
+        )
+
+    def observe(
+        self,
+        local_root_pos: torch.Tensor,
+        episode_steps: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Observe a pre-step state and return newly latched event masks."""
+        if local_root_pos.shape != (self._root_center_hold_steps.numel(), 3):
+            raise ValueError("local_root_pos must have shape (num_envs, 3)")
+        if episode_steps.shape != self._root_center_hold_steps.shape:
+            raise ValueError("episode_steps must have shape (num_envs,)")
+
+        x = local_root_pos[:, 0]
+        abs_y = torch.abs(local_root_pos[:, 1])
+        z = local_root_pos[:, 2]
+        eligible = episode_steps >= A12_IGNORE_INITIAL_CONTROL_STEPS
+        finite = torch.isfinite(local_root_pos).all(dim=-1)
+
+        root_center_candidate = (
+            eligible
+            & finite
+            & (x >= A12_ROOT_CENTER_OVER_LIP_MIN_X_M)
+            & (z >= A12_ROOT_CENTER_OVER_LIP_MIN_Z_M)
+            & (abs_y <= A12_ROOT_CENTER_OVER_LIP_MAX_ABS_Y_M)
+        )
+        self._root_center_hold_steps = torch.where(
+            root_center_candidate,
+            self._root_center_hold_steps + 1,
+            torch.zeros_like(self._root_center_hold_steps),
+        )
+        new_root_center_over_lip = (
+            self._root_center_hold_steps >= A12_ROOT_CENTER_OVER_LIP_HOLD_STEPS
+        ) & ~self.root_center_over_lip_latched
+        self.root_center_over_lip_latched |= new_root_center_over_lip
+
+        full_shell_candidate = (
+            eligible
+            & finite
+            & (x >= A12_FULL_SHELL_CLEAR_MIN_X_M)
+            & (z >= A12_FULL_SHELL_CLEAR_MIN_Z_M)
+            & (abs_y <= A12_FULL_SHELL_CLEAR_MAX_ABS_Y_M)
+        )
+        self._full_shell_hold_steps = torch.where(
+            full_shell_candidate,
+            self._full_shell_hold_steps + 1,
+            torch.zeros_like(self._full_shell_hold_steps),
+        )
+        new_full_shell_clear = (
+            self._full_shell_hold_steps >= A12_FULL_SHELL_CLEAR_HOLD_STEPS
+        ) & ~self.full_shell_clear_latched
+        self.full_shell_clear_latched |= new_full_shell_clear
+
+        side_bypass_candidate = (
+            eligible
+            & finite
+            & (x >= A12_SIDE_BYPASS_MIN_X_M)
+            & (abs_y > A12_SIDE_BYPASS_MIN_ABS_Y_M)
+            & ~self.full_shell_clear_latched
+        )
+        new_side_bypass = side_bypass_candidate & ~self.side_bypass_latched
+        self.side_bypass_latched |= new_side_bypass
+
+        return {
+            "root_center_over_lip": new_root_center_over_lip,
+            "full_shell_clear": new_full_shell_clear,
+            "side_bypass": new_side_bypass,
+        }
+
+    def reset(self, dones: torch.Tensor) -> None:
+        """Clear all trajectory-local streaks and latches for completed envs."""
+        done_mask = dones.bool()
+        self._root_center_hold_steps[done_mask] = 0
+        self._full_shell_hold_steps[done_mask] = 0
+        self.root_center_over_lip_latched[done_mask] = False
+        self.full_shell_clear_latched[done_mask] = False
+        self.side_bypass_latched[done_mask] = False
 
 
 def _parse_args() -> argparse.Namespace:
@@ -171,6 +279,16 @@ def main() -> int:
     }
     body_part_trial_forces = {name: [] for name in body_part_tread_latched}
     body_part_trial_powers = {name: [] for name in body_part_tread_latched}
+    a12_metrics = A12TrajectoryMetrics(args.num_envs, args.device)
+    a12_event_counts = {
+        "root_center_over_lip": 0,
+        "full_shell_clear": 0,
+        "side_bypass": 0,
+    }
+    mode_a12_event_counts = {
+        name: {metric: 0 for metric in a12_event_counts}
+        for name in reset_modes.values()
+    }
     max_x = torch.full((args.num_envs,), -torch.inf, device=args.device)
     max_z = torch.full_like(max_x, -torch.inf)
     steps = base_env.max_episode_length * args.episodes
@@ -180,6 +298,19 @@ def main() -> int:
             if reset_mode is None:
                 raise RuntimeError("Assisted stair reset mode tracking is unavailable")
             episode_mode = reset_mode.clone()
+            robot = base_env.scene["robot"]
+            origins = base_env.scene.terrain.env_origins
+            local_pre_step = robot.data.root_link_pos_w - origins
+            a12_events = a12_metrics.observe(
+                local_pre_step,
+                base_env.episode_length_buf,
+            )
+            for metric, event_mask in a12_events.items():
+                a12_event_counts[metric] += int(event_mask.sum().item())
+                for code, name in reset_modes.items():
+                    mode_a12_event_counts[name][metric] += int(
+                        (event_mask & (episode_mode == code)).sum().item()
+                    )
             with torch.inference_mode():
                 observations = env.get_observations()
                 actions = policy(observations)
@@ -317,8 +448,8 @@ def main() -> int:
             previous_tread_contact[done_mask] = False
             for latch in body_part_tread_latched.values():
                 latch[done_mask] = False
+            a12_metrics.reset(done_mask)
 
-            robot = base_env.scene["robot"]
             local = robot.data.root_link_pos_w - origins
             max_x = torch.maximum(max_x, torch.nan_to_num(local[:, 0], nan=-torch.inf))
             max_z = torch.maximum(max_z, torch.nan_to_num(local[:, 2], nan=-torch.inf))
@@ -363,10 +494,27 @@ def main() -> int:
             "riser_face_contact_rate": mode_face_contact[name] / max(trials, 1),
             "first_tread_contact_events": mode_tread_contact[name],
             "first_tread_contact_rate": mode_tread_contact[name] / max(trials, 1),
+            "root_center_over_lip_events": mode_a12_event_counts[name][
+                "root_center_over_lip"
+            ],
+            "root_center_over_lip_rate": mode_a12_event_counts[name][
+                "root_center_over_lip"
+            ]
+            / max(trials, 1),
+            "full_shell_clear_events": mode_a12_event_counts[name][
+                "full_shell_clear"
+            ],
+            "full_shell_clear_rate": mode_a12_event_counts[name][
+                "full_shell_clear"
+            ]
+            / max(trials, 1),
+            "side_bypass_events": mode_a12_event_counts[name]["side_bypass"],
+            "side_bypass_rate": mode_a12_event_counts[name]["side_bypass"]
+            / max(trials, 1),
         }
     iteration_match = re.search(r"model_(\d+)$", checkpoint.stem)
     report: dict[str, object] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "task": args.task,
         "checkpoint": str(checkpoint),
         "checkpoint_iteration": (
@@ -386,6 +534,40 @@ def main() -> int:
         "stable_tread_rate": stable_events / denominator,
         "secured_tread_events": secured_events,
         "secured_tread_rate": secured_events / denominator,
+        "root_center_over_lip_events": a12_event_counts[
+            "root_center_over_lip"
+        ],
+        "root_center_over_lip_rate": a12_event_counts[
+            "root_center_over_lip"
+        ]
+        / denominator,
+        "full_shell_clear_events": a12_event_counts["full_shell_clear"],
+        "full_shell_clear_rate": a12_event_counts["full_shell_clear"]
+        / denominator,
+        "side_bypass_events": a12_event_counts["side_bypass"],
+        "side_bypass_rate": a12_event_counts["side_bypass"] / denominator,
+        "a12_metric_definitions": {
+            "ignored_initial_control_steps": A12_IGNORE_INITIAL_CONTROL_STEPS,
+            "sampling": "pre_step_reset_safe",
+            "root_center_over_lip": {
+                "min_x_m": A12_ROOT_CENTER_OVER_LIP_MIN_X_M,
+                "min_z_m": A12_ROOT_CENTER_OVER_LIP_MIN_Z_M,
+                "max_abs_y_m": A12_ROOT_CENTER_OVER_LIP_MAX_ABS_Y_M,
+                "hold_control_steps": A12_ROOT_CENTER_OVER_LIP_HOLD_STEPS,
+            },
+            "full_shell_clear": {
+                "min_x_m": A12_FULL_SHELL_CLEAR_MIN_X_M,
+                "min_z_m": A12_FULL_SHELL_CLEAR_MIN_Z_M,
+                "max_abs_y_m": A12_FULL_SHELL_CLEAR_MAX_ABS_Y_M,
+                "hold_control_steps": A12_FULL_SHELL_CLEAR_HOLD_STEPS,
+            },
+            "side_bypass": {
+                "min_x_m": A12_SIDE_BYPASS_MIN_X_M,
+                "min_abs_y_exclusive_m": A12_SIDE_BYPASS_MIN_ABS_Y_M,
+                "must_occur_before": "full_shell_clear",
+            },
+            "secured_tread": "existing_strict_environment_latch",
+        },
         "riser_face_contact_events": face_contact_events,
         "riser_face_contact_rate": face_contact_events / denominator,
         "first_tread_contact_events": tread_contact_events,

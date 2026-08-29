@@ -34,6 +34,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     MicroduckStairApexMantleRlCfg,
     MicroduckStairRouladeBankRlCfg,
     MicroduckStairTreadContactBankRlCfg,
+    MicroduckStairOrderedVaultRlCfg,
     MicroduckStairBridgeSpecialistRlCfg,
     MicroduckStairLaunchBankRlCfg,
     MicroduckStairWalkerBankRlCfg,
@@ -44,6 +45,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     make_microduck_stair_roulade_bank_env_cfg,
     make_microduck_stair_tread_contact_bank_env_cfg,
     make_microduck_stair_foot_anchor_vault_env_cfg,
+    make_microduck_stair_ordered_vault_env_cfg,
     make_microduck_stair_bridge_specialist_env_cfg,
     make_microduck_stair_launch_bank_env_cfg,
     make_microduck_stair_walker_bank_env_cfg,
@@ -520,6 +522,27 @@ def test_foot_anchor_vault_requires_loaded_positive_work():
     assert vault.params["min_positive_power"] == 0.01
     assert vault.params["target_positive_power"] == 0.25
     assert vault.params["release_window_s"] == 0.25
+
+
+def test_ordered_vault_removes_static_anchor_payout():
+    cfg = make_microduck_stair_ordered_vault_env_cfg()
+    bank = cfg.events["walker_state_bank"].params
+
+    assert cfg.episode_length_s == 2.5
+    assert bank["max_abs_local_y"] == 0.08
+    assert bank["max_abs_lateral_speed"] == 0.20
+    assert bank["max_abs_yaw_rate"] == 4.0
+    assert cfg.rewards["stair_foot_anchor_vault_frontier"].weight == 0.0
+    ordered = cfg.rewards["stair_ordered_foot_vault_frontier"]
+    assert ordered.weight == 25.0
+    assert ordered.params["min_positive_work_j"] == 0.004
+    assert ordered.params["min_control_steps"] == 3
+    assert ordered.params["lip_gate_height"] == 0.165
+    assert cfg.rewards["stair_assisted_crossing"].params["clearance_height"] == 0.198
+    assert cfg.rewards["stair_first_riser_clearance"].params["z_margin"] == 0.028
+    assert cfg.rewards["stair_first_tread_secured"].params["min_height"] == 0.198
+    assert cfg.rewards["action_rate_l2"].weight == 0.0
+    assert MicroduckStairOrderedVaultRlCfg.actor.distribution_cfg["init_std"] == 0.28
 
 
 def test_headstand_has_exclusive_contact_gate_and_shared_actor_layout():
