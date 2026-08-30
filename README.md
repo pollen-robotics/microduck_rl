@@ -3,11 +3,11 @@
 <img width="2215" height="884" alt="image" src="https://github.com/user-attachments/assets/5db7cc83-b3ce-4f7c-83f0-0572a63baed7" />
 
 
-RL training environments for [Microduck](https://github.com/pollen-robotics/microduck) —
+RL training environments for [Microduck](https://github.com/unergybot/microduck) —
 a ~800 g, ~25 cm tall bipedal robot — built on
 [mjlab](https://github.com/mujocolab/mjlab) (MuJoCo Warp) with PPO.
 Policies are trained here at 50 Hz, exported to ONNX, and deployed on the real
-robot by the runtime in [pollen-robotics/microduck](https://github.com/pollen-robotics/microduck).
+robot by the runtime in [unergybot/microduck](https://github.com/unergybot/microduck).
 
 <!-- HERO VIDEO — real robot montage: walking, standup, roulade, roller skating.
      Keep it short (~30 s) and real-robot-first: this is the "why should I care" shot. -->
@@ -28,7 +28,7 @@ Requires a CUDA GPU (training runs through MuJoCo Warp) and [uv](https://docs.as
 > Export `UV_HTTP_TIMEOUT=600` for the first sync. 
 
 ```bash
-git clone https://github.com/pollen-robotics/microduck_rl
+git clone https://github.com/unergybot/microduck_rl.git
 cd microduck_rl
 
 # train the walking policy (uses your GPU; ~1-2 h for a usable gait at 4096 envs)
