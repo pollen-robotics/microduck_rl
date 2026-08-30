@@ -125,31 +125,43 @@ def test_race_camera_is_close_and_keeps_all_lanes_centered() -> None:
     assert MODULE.RACE_CAMERA_ELEVATION == -45.0
 
 
-def test_follow_camera_advances_smoothly_without_retreating() -> None:
+def test_follow_camera_advances_and_retreats_smoothly() -> None:
     first = MODULE._camera_follow_x(0.60, 1.00)
     second = MODULE._camera_follow_x(first, 1.50)
 
     assert 0.60 < first <= 0.60 + MODULE.RACE_CAMERA_MAX_STEP_M
     assert first < second <= first + MODULE.RACE_CAMERA_MAX_STEP_M
-    assert MODULE._camera_follow_x(second, -5.0) == second
+    assert MODULE._camera_follow_x(second, -5.0) == pytest.approx(
+        second - MODULE.RACE_CAMERA_MAX_STEP_M
+    )
     assert MODULE._camera_follow_x(second, float("nan")) == second
 
 
-def test_follow_camera_uses_fresh_reward_position() -> None:
+def test_camera_follows_furthest_forward_robot_that_remains_in_lane() -> None:
     camera = SimpleNamespace(lookat=MODULE.np.zeros(3))
     env = SimpleNamespace(
         _offline_renderer=SimpleNamespace(_cam=camera),
-        _roll_sprint_forward_position=torch.tensor([3.0, 0.0, 0.0, 0.0]),
-        _roll_sprint_lateral_displacement=torch.tensor([1.0, 0.0, 0.0, 0.0]),
+        _roll_sprint_forward_position=torch.tensor([8.0, 3.0, 2.0, 1.0]),
+        _roll_sprint_lateral_displacement=torch.tensor([0.20, 0.10, 0.0, 0.0]),
         scene=SimpleNamespace(
-            terrain=SimpleNamespace(env_origins=torch.tensor([[0.0, -0.42, 0.0]]))
+            terrain=SimpleNamespace(
+                env_origins=torch.tensor(
+                    [
+                        [0.0, -0.42, 0.0],
+                        [0.0, -0.14, 0.0],
+                        [0.0, 0.14, 0.0],
+                        [0.0, 0.42, 0.0],
+                    ]
+                )
+            )
         ),
     )
 
-    next_x, next_y = MODULE._follow_first_robot(env, 0.60, 0.0)
+    next_x, next_y, leader_index = MODULE._follow_lane_leader(env, 0.60, 0.0)
 
+    assert leader_index == 1
     assert next_x == pytest.approx(0.60 + MODULE.RACE_CAMERA_MAX_STEP_M)
-    assert next_y == pytest.approx(MODULE.RACE_CAMERA_MAX_STEP_M)
+    assert next_y == pytest.approx(-0.01)
     assert camera.lookat.tolist() == pytest.approx(
         [next_x, next_y, MODULE.RACE_CAMERA_LOOKAT[2]]
     )

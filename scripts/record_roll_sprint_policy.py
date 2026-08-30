@@ -332,20 +332,20 @@ def _project_world_points(
 
 
 def _camera_follow_x(previous_x_m: float, robot_x_m: float) -> float:
-    """Advance a smooth, non-retreating camera target behind robot 1."""
+    """Smoothly follow the lane leader longitudinally in either direction."""
     if not np.isfinite(robot_x_m):
         return previous_x_m
     target_x_m = float(
         np.clip(
             robot_x_m + RACE_CAMERA_LEAD_M,
-            RACE_CAMERA_LOOKAT[0],
+            -RACE_CAMERA_LEAD_M,
             TARGET_DISTANCE_M,
         )
     )
     step_m = float(
         np.clip(
             (target_x_m - previous_x_m) * RACE_CAMERA_FOLLOW_ALPHA,
-            0.0,
+            -RACE_CAMERA_MAX_STEP_M,
             RACE_CAMERA_MAX_STEP_M,
         )
     )
@@ -366,32 +366,52 @@ def _camera_follow_y(previous_y_m: float, robot_y_m: float) -> float:
     return previous_y_m + step_m
 
 
-def _follow_first_robot(
+def _select_in_lane_leader(base_env: ManagerBasedRlEnv) -> int:
+    """Return the furthest-forward robot that remains inside its race lane."""
+    forward_position = base_env._roll_sprint_forward_position
+    lateral_displacement = base_env._roll_sprint_lateral_displacement
+    in_lane = (
+        torch.isfinite(forward_position)
+        & torch.isfinite(lateral_displacement)
+        & (lateral_displacement.abs() <= 0.5 * RACE_LANE_SPACING)
+    )
+    if torch.any(in_lane):
+        scores = torch.where(
+            in_lane,
+            forward_position,
+            torch.full_like(forward_position, -torch.inf),
+        )
+        return int(torch.argmax(scores).item())
+    return int(torch.argmin(lateral_displacement.abs()).item())
+
+
+def _follow_lane_leader(
     base_env: ManagerBasedRlEnv,
     previous_x_m: float,
     previous_y_m: float,
-) -> tuple[float, float]:
-    """Travel with robot 1 in both axes so it cannot leave the camera."""
+) -> tuple[float, float, int]:
+    """Travel with the current furthest-forward in-lane robot."""
     renderer = base_env._offline_renderer
     if renderer is None:
         raise RuntimeError("Offline renderer is not initialized")
     # Use the reward-side position cache. The asset root position exposed by
-    # the offscreen backend can lag the physics state and let R1 leave frame.
-    first_robot_x_m = float(base_env._roll_sprint_forward_position[0].item())
-    first_robot_y_m = float(
+    # the offscreen backend can lag the physics state and let the leader leave.
+    leader_index = _select_in_lane_leader(base_env)
+    leader_x_m = float(base_env._roll_sprint_forward_position[leader_index].item())
+    leader_y_m = float(
         (
-            base_env.scene.terrain.env_origins[0, 1]
-            + base_env._roll_sprint_lateral_displacement[0]
+            base_env.scene.terrain.env_origins[leader_index, 1]
+            + base_env._roll_sprint_lateral_displacement[leader_index]
         ).item()
     )
-    camera_x_m = _camera_follow_x(previous_x_m, first_robot_x_m)
-    camera_y_m = _camera_follow_y(previous_y_m, first_robot_y_m)
+    camera_x_m = _camera_follow_x(previous_x_m, leader_x_m)
+    camera_y_m = _camera_follow_y(previous_y_m, leader_y_m)
     renderer._cam.lookat[:] = (
         camera_x_m,
         camera_y_m,
         RACE_CAMERA_LOOKAT[2],
     )
-    return camera_x_m, camera_y_m
+    return camera_x_m, camera_y_m, leader_index
 
 
 def _overlay_race_labels(
@@ -401,6 +421,7 @@ def _overlay_race_labels(
     max_speeds_mps: torch.Tensor,
     valid_distances_m: torch.Tensor,
     elapsed_s: float,
+    leader_index: int,
 ) -> np.ndarray:
     """Draw per-robot metrics at the rendered screen position of each robot."""
     renderer = base_env._offline_renderer
@@ -430,7 +451,8 @@ def _overlay_race_labels(
         header_font = ImageFont.load_default(size=20)
 
     header = (
-        f"20 m ROLL RACE  |  t {elapsed_s:05.1f} s / 40.0 s  |  camera follows R1"
+        f"20 m ROLL RACE  |  t {elapsed_s:05.1f} s / 40.0 s"
+        f"  |  camera follows in-lane leader R{leader_index + 1}"
     )
     header_box = draw.textbbox((0, 0), header, font=header_font)
     header_width = header_box[2] - header_box[0]
@@ -553,6 +575,7 @@ def main() -> int:
     )
     camera_x_m = RACE_CAMERA_LOOKAT[0]
     camera_y_m = RACE_CAMERA_LOOKAT[1]
+    leader_index = 0
 
     writer: subprocess.Popen[bytes] | None = None
     try:
@@ -582,7 +605,7 @@ def main() -> int:
                     base_env._roll_sprint_forward_frontier
                     - base_env._roll_sprint_forward_origin
                 ).clamp_min(0.0)
-            camera_x_m, camera_y_m = _follow_first_robot(
+            camera_x_m, camera_y_m, leader_index = _follow_lane_leader(
                 base_env,
                 camera_x_m,
                 camera_y_m,
@@ -599,6 +622,7 @@ def main() -> int:
                 max_speeds_mps=max_speeds_mps,
                 valid_distances_m=valid_distances_m,
                 elapsed_s=(step + 1) * policy_dt,
+                leader_index=leader_index,
             )
             if writer is None:
                 frame_height, frame_width = frame.shape[:2]
