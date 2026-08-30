@@ -9,7 +9,8 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from mjlab_microduck.robot.microduck_constants import MICRODUCK_WALK_XML
+
+MICRODUCK_WALK_XML = Path(__file__).parent / "robot/microduck/robot_walk.xml"
 
 
 REQUIRED_KEYS = {
