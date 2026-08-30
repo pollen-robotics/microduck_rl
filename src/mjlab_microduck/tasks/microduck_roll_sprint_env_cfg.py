@@ -169,6 +169,10 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     # even though the visible command remains zero-padded for deployment parity.
     command = cfg.commands["twist"]
     command.resampling_time_range = (EPISODE_LENGTH_S, EPISODE_LENGTH_S * 2)
+    for group in ("actor", "critic"):
+        command_obs = cfg.observations[group].terms["command"]
+        command_obs.func = microduck_mdp.roll_sprint_reposition_command
+        command_obs.params = {"command_name": "twist"}
 
     # The A35 bootstrap has a 90D privileged critic: its final 16D block is
     # stair-specific state. Keep the critic contract shape-compatible so its
@@ -193,6 +197,14 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     )
     cfg.metrics["roll_sprint_mean_recovery_latency_s"] = MetricsTermCfg(
         func=microduck_mdp.roll_sprint_mean_recovery_latency,
+        reduce="last",
+    )
+    cfg.metrics["roll_sprint_reposition_count"] = MetricsTermCfg(
+        func=microduck_mdp.roll_sprint_reposition_count,
+        reduce="last",
+    )
+    cfg.metrics["roll_sprint_mean_reposition_latency_s"] = MetricsTermCfg(
+        func=microduck_mdp.roll_sprint_mean_reposition_latency,
         reduce="last",
     )
 

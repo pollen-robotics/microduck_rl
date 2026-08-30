@@ -101,27 +101,51 @@ def test_auditor_releases_only_rotation_capped_distance_on_valid_cycle() -> None
     assert auditor.linked_distance.item() == pytest.approx(expected_cap)
 
 
-def test_auditor_rejects_forward_cycle_that_leaves_lane() -> None:
+def test_auditor_requires_lane_reposition_before_roll_restart() -> None:
     auditor = _auditor()
     _observe(
         auditor,
         omega=1.0,
-        lateral_position=MODULE.LANE_HALF_WIDTH_M + 0.01,
+        lateral_position=MODULE.REPOSITION_TRIGGER_M + 0.01,
     )
+    assert auditor.awaiting_reposition.item()
+
     auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
     auditor.head_latch[:] = True
-
     _observe(
         auditor,
         omega=1.0,
         forward_position=0.35,
-        lateral_position=0.0,
+        lateral_position=MODULE.REPOSITION_TRIGGER_M + 0.01,
     )
 
     assert auditor.valid_count.item() == 0
-    assert auditor.invalid_count.item() == 1
+    assert auditor.invalid_count.item() == 0
     assert auditor.linked_distance.item() == 0.0
     assert auditor.forward_frontier.item() == 0.0
+
+    for _ in range(MODULE.RECOVERY_HOLD_STEPS):
+        _observe(
+            auditor,
+            omega=0.0,
+            forward_position=0.35,
+            lateral_position=MODULE.REPOSITION_REARM_M + 0.01,
+        )
+    assert auditor.awaiting_reposition.item()
+
+    _recover(auditor, forward_position=0.35)
+    assert not auditor.awaiting_reposition.item()
+    assert auditor.reposition_count.item() == 1
+    assert auditor.recovery_count.item() == 0
+
+    auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
+    auditor.head_latch[:] = True
+    _observe(auditor, omega=1.0, forward_position=0.55)
+    assert auditor.valid_count.item() == 1
+    assert auditor.linked_distance.item() == pytest.approx(0.20)
+    report = auditor.summary(6.0)
+    assert report["mean_lane_reposition_count"] == pytest.approx(1.0)
+    assert report["mean_lane_reposition_latency_s"] == pytest.approx(0.10)
 
 
 def test_auditor_uses_net_cycle_advance_and_global_frontier() -> None:

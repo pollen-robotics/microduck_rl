@@ -35,6 +35,8 @@ RECOVERY_MAX_FORWARD_RATE = microduck_mdp._ROLL_SPRINT_RECOVERY_MAX_FORWARD_RATE
 RECOVERY_UPRIGHT_COS = microduck_mdp._ROLL_SPRINT_RECOVERY_UPRIGHT_COS
 RECOVERY_LATERAL_Z = microduck_mdp._ROLL_SPRINT_RECOVERY_LATERAL_Z
 RECOVERY_HOLD_STEPS = microduck_mdp._ROLL_SPRINT_RECOVERY_HOLD_STEPS
+REPOSITION_TRIGGER_M = microduck_mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M
+REPOSITION_REARM_M = microduck_mdp._ROLL_SPRINT_REPOSITION_REARM_M
 RACE_LANE_SPACING = 0.28
 TARGET_DISTANCE_M = 20.0
 STRAIGHT_LANE_MAX_DRIFT_M = 0.08
@@ -132,6 +134,7 @@ class RollCycleAuditor:
         self.valid_count = torch.zeros(count, dtype=torch.long, device=device)
         self.invalid_count = torch.zeros(count, dtype=torch.long, device=device)
         self.awaiting_recovery = false.clone()
+        self.awaiting_reposition = false.clone()
         self.recovery_hold_steps = torch.zeros(count, dtype=torch.long, device=device)
         self.recovery_latency_steps = torch.zeros(
             count, dtype=torch.long, device=device
@@ -140,6 +143,13 @@ class RollCycleAuditor:
             count, dtype=torch.long, device=device
         )
         self.recovery_count = torch.zeros(count, dtype=torch.long, device=device)
+        self.reposition_latency_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.reposition_latency_total_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.reposition_count = torch.zeros(count, dtype=torch.long, device=device)
         self.recovered_cycle_armed = false.clone()
         self.recovered_and_rerolled_count = torch.zeros(
             count, dtype=torch.long, device=device
@@ -212,13 +222,36 @@ class RollCycleAuditor:
         flatness = flat_u.square() * (3.0 - 2.0 * flat_u)
         omega = angular_velocity_b[:, 1]
         upright_cos = 1.0 - 2.0 * (root_quat[:, 1].square() + root_quat[:, 2].square())
+        displacement = position_xy - self.start_position
+        forward_position = (displacement * self.heading).sum(dim=-1)
+        lateral_position = (displacement * self.lateral).sum(dim=-1)
         awaiting_before = self.awaiting_recovery
+        reposition_before = self.awaiting_reposition
+        reposition_triggered = (
+            active
+            & ~reposition_before
+            & (lateral_position.abs() > REPOSITION_TRIGGER_M)
+        )
+        waiting_before = awaiting_before | reposition_before
+        locked_before = waiting_before | reposition_triggered
         awaiting_active = active & awaiting_before
         foot_release = awaiting_active & foot_support & ~head_contact
         upright_ready = foot_release & (upright_cos >= RECOVERY_UPRIGHT_COS)
         sagittal_ready = upright_ready & (lateral_z <= RECOVERY_LATERAL_Z)
         rate_ready = sagittal_ready & (omega <= RECOVERY_MAX_FORWARD_RATE)
-        recovery_candidate = rate_ready
+        recovery_candidate = rate_ready & (lateral_position.abs() <= REPOSITION_REARM_M)
+        transition_foot_release = active & waiting_before & foot_support & ~head_contact
+        transition_upright = transition_foot_release & (
+            upright_cos >= RECOVERY_UPRIGHT_COS
+        )
+        transition_sagittal = transition_upright & (
+            lateral_z <= RECOVERY_LATERAL_Z
+        )
+        transition_candidate = (
+            transition_sagittal
+            & (omega <= RECOVERY_MAX_FORWARD_RATE)
+            & (lateral_position.abs() <= REPOSITION_REARM_M)
+        )
         self.awaiting_recovery_steps += awaiting_active.to(torch.long)
         self.recovery_foot_release_steps += foot_release.to(torch.long)
         self.recovery_upright_steps += upright_ready.to(torch.long)
@@ -227,7 +260,7 @@ class RollCycleAuditor:
         self.recovery_candidate_steps += recovery_candidate.to(torch.long)
         old_recovery_hold = self.recovery_hold_steps
         recovery_hold = torch.where(
-            recovery_candidate,
+            transition_candidate,
             old_recovery_hold + 1,
             torch.zeros_like(old_recovery_hold),
         )
@@ -235,11 +268,13 @@ class RollCycleAuditor:
             self.max_recovery_candidate_streak,
             recovery_hold,
         )
-        recovered = (
-            recovery_candidate
+        transitioned = (
+            transition_candidate
             & (old_recovery_hold < RECOVERY_HOLD_STEPS)
             & (recovery_hold >= RECOVERY_HOLD_STEPS)
         )
+        recovered = transitioned & awaiting_before
+        repositioned = transitioned & reposition_before
         recovery_latency = torch.where(
             active & awaiting_before,
             self.recovery_latency_steps + 1,
@@ -251,12 +286,23 @@ class RollCycleAuditor:
             torch.zeros_like(recovery_latency),
         )
         self.recovery_count += recovered.to(torch.long)
+        reposition_latency = torch.where(
+            active & reposition_before,
+            self.reposition_latency_steps + 1,
+            self.reposition_latency_steps,
+        )
+        self.reposition_latency_total_steps += torch.where(
+            repositioned,
+            reposition_latency,
+            torch.zeros_like(reposition_latency),
+        )
+        self.reposition_count += repositioned.to(torch.long)
 
         valid_rotation = support.float() * flatness
-        rotation_eligible = active & ~awaiting_before & ~recovered
+        rotation_eligible = active & ~locked_before & ~transitioned
         signed_delta = omega * self.step_dt * valid_rotation * rotation_eligible.float()
         old_accum = torch.where(
-            awaiting_before | recovered,
+            locked_before | transitioned,
             torch.zeros_like(self.accum),
             self.accum,
         )
@@ -269,33 +315,32 @@ class RollCycleAuditor:
         )
         self.head_top_contact_count += (top_contact & ~self.head_latch).to(torch.long)
         old_head_latch = torch.where(
-            recovered, torch.zeros_like(self.head_latch), self.head_latch
+            transitioned | reposition_triggered,
+            torch.zeros_like(self.head_latch),
+            self.head_latch,
         )
-        new_head_latch = old_head_latch | top_contact
-        displacement = position_xy - self.start_position
-        forward_position = (displacement * self.heading).sum(dim=-1)
-        lateral_position = (displacement * self.lateral).sum(dim=-1)
+        new_head_latch = old_head_latch | (top_contact & ~locked_before)
         orientation_violation = (
             active
-            & ~awaiting_before
+            & ~locked_before
             & support
             & (omega >= MIN_FORWARD_RATE)
             & (lateral_z > FLAT_ZERO)
         )
         corridor_violation = (
             active
-            & ~awaiting_before
+            & ~locked_before
             & (lateral_position.abs() > LANE_HALF_WIDTH_M)
         )
         lateral_violation = orientation_violation | corridor_violation
         old_lateral_invalid = torch.where(
-            recovered,
+            transitioned | reposition_triggered,
             torch.zeros_like(self.lateral_invalid),
             self.lateral_invalid,
         )
         new_lateral_invalid = old_lateral_invalid | lateral_violation
 
-        completed = active & ~awaiting_before & (new_accum >= TARGET_ANGLE)
+        completed = active & ~locked_before & (new_accum >= TARGET_ANGLE)
         valid = completed & new_head_latch & ~new_lateral_invalid
         invalid = completed & ~valid
         rotation_budget = MAX_DISTANCE_PER_RAD * torch.clamp(
@@ -323,28 +368,44 @@ class RollCycleAuditor:
             torch.maximum(self.forward_frontier, forward_position),
             self.forward_frontier,
         )
+        state_reset = completed | transitioned | reposition_triggered
         self.cycle_start_forward = torch.where(
-            completed | recovered, forward_position, self.cycle_start_forward
+            completed | transitioned | reposition_triggered,
+            forward_position,
+            self.cycle_start_forward,
         )
         self.accum = torch.where(
-            completed | recovered,
+            state_reset,
             torch.zeros_like(new_accum),
             new_accum,
         )
         self.head_latch = torch.where(
-            completed | recovered,
+            state_reset,
             torch.zeros_like(new_head_latch),
             new_head_latch,
         )
         self.lateral_invalid = torch.where(
-            completed | recovered,
+            state_reset,
             torch.zeros_like(new_lateral_invalid),
             new_lateral_invalid,
         )
         self.awaiting_recovery = torch.where(
             valid,
             torch.ones_like(awaiting_before),
-            torch.where(recovered, torch.zeros_like(awaiting_before), awaiting_before),
+            torch.where(
+                transitioned,
+                torch.zeros_like(awaiting_before),
+                awaiting_before,
+            ),
+        )
+        self.awaiting_reposition = torch.where(
+            reposition_triggered,
+            torch.ones_like(reposition_before),
+            torch.where(
+                transitioned,
+                torch.zeros_like(reposition_before),
+                reposition_before,
+            ),
         )
         self.recovered_cycle_armed = torch.where(
             valid,
@@ -355,7 +416,7 @@ class RollCycleAuditor:
                 self.recovered_cycle_armed,
             ),
         )
-        reset_recovery_clock = recovered | valid
+        reset_recovery_clock = transitioned | valid | reposition_triggered
         self.recovery_hold_steps = torch.where(
             reset_recovery_clock,
             torch.zeros_like(recovery_hold),
@@ -365,6 +426,11 @@ class RollCycleAuditor:
             reset_recovery_clock,
             torch.zeros_like(recovery_latency),
             recovery_latency,
+        )
+        self.reposition_latency_steps = torch.where(
+            transitioned | reposition_triggered,
+            torch.zeros_like(reposition_latency),
+            reposition_latency,
         )
 
         lateral_drift = (displacement * self.lateral).sum(dim=-1).abs()
@@ -422,6 +488,7 @@ class RollCycleAuditor:
         )
         repeated = self.recovered_and_rerolled_count >= 1
         total_recoveries = int(self.recovery_count.sum().item())
+        total_repositions = int(self.reposition_count.sum().item())
         awaiting_steps = int(self.awaiting_recovery_steps.sum().item())
         foot_release_steps = int(self.recovery_foot_release_steps.sum().item())
         upright_steps = int(self.recovery_upright_steps.sum().item())
@@ -431,6 +498,11 @@ class RollCycleAuditor:
             float(self.recovery_latency_total_steps.sum().item())
             * self.step_dt
             / max(total_recoveries, 1)
+        )
+        mean_reposition_latency = (
+            float(self.reposition_latency_total_steps.sum().item())
+            * self.step_dt
+            / max(total_repositions, 1)
         )
         max_heading_deviation_deg = torch.rad2deg(self.max_heading_deviation)
         straight_lane_pass = (
@@ -451,6 +523,7 @@ class RollCycleAuditor:
                 "valid_roll_recover_reroll_count": int(
                     self.recovered_and_rerolled_count[index].item()
                 ),
+                "lane_reposition_count": int(self.reposition_count[index].item()),
                 "maximum_forward_speed_mps": float(
                     self.max_forward_speed[index].item()
                 ),
@@ -489,6 +562,11 @@ class RollCycleAuditor:
                 self.recovered_and_rerolled_count.sum().item()
             ),
             "mean_recovery_latency_s": mean_recovery_latency,
+            "mean_lane_reposition_count": float(
+                self.reposition_count.float().mean().item()
+            ),
+            "total_lane_reposition_count": total_repositions,
+            "mean_lane_reposition_latency_s": mean_reposition_latency,
             "recovery_gate_diagnostics": {
                 "awaiting_steps": awaiting_steps,
                 "foot_supported_head_released_steps": foot_release_steps,

@@ -11503,6 +11503,12 @@ _ROLL_SPRINT_RECOVERY_MAX_FORWARD_RATE = 6.0
 _ROLL_SPRINT_RECOVERY_UPRIGHT_COS = math.cos(math.radians(50.0))
 _ROLL_SPRINT_RECOVERY_LATERAL_Z = math.sin(math.radians(35.0))
 _ROLL_SPRINT_RECOVERY_HOLD_STEPS = 2
+# Leaving a 28 cm-wide lane aborts the active roll. The policy must return well
+# inside the lane before phase zero is rearmed. Hysteresis prevents a noisy
+# boundary contact from rapidly toggling the state.
+_ROLL_SPRINT_REPOSITION_TRIGGER_M = _ROLL_SPRINT_LANE_HALF_WIDTH
+_ROLL_SPRINT_REPOSITION_REARM_M = 0.07
+_ROLL_SPRINT_REPOSITION_LATERAL_COMMAND_MPS = 0.20
 
 
 def _roll_sprint_state(env: ManagerBasedRlEnv) -> None:
@@ -11522,6 +11528,14 @@ def _roll_sprint_state(env: ManagerBasedRlEnv) -> None:
     env._roll_sprint_awaiting_recovery = torch.zeros(
         env.num_envs, dtype=torch.bool, device=env.device
     )
+    env._roll_sprint_awaiting_reposition = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_reposition_latency_steps = torch.zeros(
+        env.num_envs, dtype=torch.long, device=env.device
+    )
+    env._roll_sprint_reposition_latency_total_steps = z.clone()
+    env._roll_sprint_reposition_count = z.clone()
     env._roll_sprint_recovery_hold_steps = torch.zeros(
         env.num_envs, dtype=torch.long, device=env.device
     )
@@ -11535,6 +11549,9 @@ def _roll_sprint_state(env: ManagerBasedRlEnv) -> None:
     )
     env._roll_sprint_recovered_and_rerolled = z.clone()
     env._roll_sprint_recovered_now = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_repositioned_now = torch.zeros(
         env.num_envs, dtype=torch.bool, device=env.device
     )
     env._roll_sprint_recovered_rerolled_now = torch.zeros(
@@ -11691,9 +11708,17 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
     quat = torch.nan_to_num(asset.data.root_link_quat_w, nan=0.0)
     upright_cos = 1.0 - 2.0 * (quat[:, 1].square() + quat[:, 2].square())
     awaiting_before = env._roll_sprint_awaiting_recovery
-    recovery_candidate = (
+    reposition_before = env._roll_sprint_awaiting_reposition
+    reposition_triggered = (
         active
-        & awaiting_before
+        & ~reposition_before
+        & (lateral_displacement.abs() > _ROLL_SPRINT_REPOSITION_TRIGGER_M)
+    )
+    waiting_before = awaiting_before | reposition_before
+    transition_candidate = (
+        active
+        & waiting_before
+        & (lateral_displacement.abs() <= _ROLL_SPRINT_REPOSITION_REARM_M)
         & foot_support
         & ~head_contact
         & (upright_cos >= _ROLL_SPRINT_RECOVERY_UPRIGHT_COS)
@@ -11702,15 +11727,17 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
     )
     old_recovery_hold = env._roll_sprint_recovery_hold_steps
     recovery_hold = torch.where(
-        recovery_candidate,
+        transition_candidate,
         old_recovery_hold + 1,
         torch.zeros_like(old_recovery_hold),
     )
-    recovered_now = (
-        recovery_candidate
+    transitioned_now = (
+        transition_candidate
         & (old_recovery_hold < _ROLL_SPRINT_RECOVERY_HOLD_STEPS)
         & (recovery_hold >= _ROLL_SPRINT_RECOVERY_HOLD_STEPS)
     )
+    recovered_now = transitioned_now & awaiting_before
+    repositioned_now = transitioned_now & reposition_before
     recovery_latency_steps = torch.where(
         active & awaiting_before,
         env._roll_sprint_recovery_latency_steps + 1,
@@ -11722,22 +11749,42 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
         torch.zeros_like(env._roll_sprint_recovery_latency_total_steps),
     )
     env._roll_sprint_recovery_count += recovered_now.float()
+    reposition_latency_steps = torch.where(
+        active & reposition_before,
+        env._roll_sprint_reposition_latency_steps + 1,
+        env._roll_sprint_reposition_latency_steps,
+    )
+    env._roll_sprint_reposition_latency_total_steps += torch.where(
+        repositioned_now,
+        reposition_latency_steps.float(),
+        torch.zeros_like(env._roll_sprint_reposition_latency_total_steps),
+    )
+    env._roll_sprint_reposition_count += repositioned_now.float()
     env._roll_sprint_recovered_now = torch.where(
         active, recovered_now, env._roll_sprint_recovered_now
+    )
+    env._roll_sprint_repositioned_now = torch.where(
+        active, repositioned_now, env._roll_sprint_repositioned_now
     )
     env._roll_sprint_recovery_hold_steps = torch.where(
         active, recovery_hold, env._roll_sprint_recovery_hold_steps
     )
     env._roll_sprint_recovery_latency_steps = torch.where(
-        recovered_now,
+        transitioned_now,
         torch.zeros_like(recovery_latency_steps),
         recovery_latency_steps,
     )
+    env._roll_sprint_reposition_latency_steps = torch.where(
+        transitioned_now,
+        torch.zeros_like(reposition_latency_steps),
+        reposition_latency_steps,
+    )
 
-    # Awaiting recovery blocks all angular progress. The exact recovery edge
-    # rearms a new cycle from phase zero, but it cannot also rotate that cycle
-    # on the same simulation step.
-    rotation_eligible = active & ~awaiting_before & ~recovered_now
+    # Recovery and lane reposition both block angular progress. Returning to a
+    # launch-ready pose inside the lane rearms phase zero, but that transition
+    # cannot also rotate the new cycle on the same simulation step.
+    locked_before = waiting_before | reposition_triggered
+    rotation_eligible = active & ~locked_before & ~transitioned_now
     supported = support.float()
     valid_rotation = supported * flatness
     signed_rotation_delta = (
@@ -11745,7 +11792,7 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
     )
 
     old_accum = torch.where(
-        awaiting_before | recovered_now,
+        locked_before | transitioned_now,
         torch.zeros_like(env._roll_sprint_accum),
         env._roll_sprint_accum,
     )
@@ -11764,13 +11811,13 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
 
     in_head_window = (new_accum > _HEAD_LATCH_LO) & (new_accum < _HEAD_LATCH_HI)
     old_head_latch = torch.where(
-        recovered_now,
+        transitioned_now | reposition_triggered,
         torch.zeros_like(env._roll_sprint_head_latch),
         env._roll_sprint_head_latch,
     )
     new_head_latch = old_head_latch | (
         active
-        & ~awaiting_before
+        & ~locked_before
         & head_contact
         & support
         & in_head_window
@@ -11779,26 +11826,26 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
 
     orientation_violation = (
         active
-        & ~awaiting_before
+        & ~locked_before
         & support
         & (positive_rate >= _ROLL_SPRINT_MIN_FORWARD_RATE)
         & (lateral_z > _ROLL_SPRINT_LATERAL_INVALID_Z)
     )
     corridor_violation = (
         active
-        & ~awaiting_before
+        & ~locked_before
         & (lateral_displacement.abs() > env._roll_sprint_lane_half_width_m)
     )
     lateral_violation = orientation_violation | corridor_violation
     old_lateral_invalid = torch.where(
-        recovered_now,
+        transitioned_now | reposition_triggered,
         torch.zeros_like(env._roll_sprint_lateral_invalid),
         env._roll_sprint_lateral_invalid,
     )
     new_lateral_invalid = old_lateral_invalid | lateral_violation
 
-    cycle_eligible = env._roll_sprint_cycle_eligible | recovered_now
-    completed = active & ~awaiting_before & (new_accum >= _ROLL_SPRINT_TARGET_ANGLE)
+    cycle_eligible = env._roll_sprint_cycle_eligible | transitioned_now
+    completed = active & ~locked_before & (new_accum >= _ROLL_SPRINT_TARGET_ANGLE)
     bootstrap_completion = completed & ~cycle_eligible
     valid_completion = (
         completed & cycle_eligible & new_head_latch & ~new_lateral_invalid
@@ -11843,16 +11890,18 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
         env._roll_sprint_recovered_rerolled_now,
     )
 
-    # Every valid or bootstrap completion enters a recovery-required state and
-    # discards overshoot. An invalid eligible cycle may retry from phase zero.
+    # Every valid or bootstrap completion enters a recovery-required state.
+    # Excess lane drift aborts the current attempt and holds phase zero until
+    # the robot has returned to a launch-ready pose near the lane center.
+    state_reset = any_completion | transitioned_now | reposition_triggered
     next_accum = torch.where(
-        any_completion | recovered_now,
+        state_reset,
         torch.zeros_like(new_accum),
         new_accum,
     )
     env._roll_sprint_accum = next_accum
     env._roll_sprint_phase_frontier = torch.where(
-        any_completion | recovered_now,
+        state_reset,
         torch.zeros_like(new_phase_frontier),
         new_phase_frontier,
     )
@@ -11862,7 +11911,7 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
         torch.where(active, forward_frontier, env._roll_sprint_forward_frontier),
     )
     env._roll_sprint_cycle_start_position = torch.where(
-        active & (invalid_completion | recovered_now),
+        active & (invalid_completion | transitioned_now | reposition_triggered),
         position,
         torch.where(
             active,
@@ -11874,24 +11923,37 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
         active, lateral_origin, env._roll_sprint_lateral_origin
     )
     env._roll_sprint_head_latch = torch.where(
-        any_completion | recovered_now,
+        state_reset,
         torch.zeros_like(new_head_latch),
         new_head_latch,
     )
     env._roll_sprint_lateral_invalid = torch.where(
-        any_completion | recovered_now,
+        state_reset,
         torch.zeros_like(new_lateral_invalid),
         new_lateral_invalid,
     )
     env._roll_sprint_cycle_eligible = torch.where(
         valid_completion | bootstrap_completion,
         torch.zeros_like(cycle_eligible),
-        torch.where(recovered_now, torch.ones_like(cycle_eligible), cycle_eligible),
+        torch.where(transitioned_now, torch.ones_like(cycle_eligible), cycle_eligible),
     )
     env._roll_sprint_awaiting_recovery = torch.where(
         valid_completion | bootstrap_completion,
         torch.ones_like(awaiting_before),
-        torch.where(recovered_now, torch.zeros_like(awaiting_before), awaiting_before),
+        torch.where(
+            transitioned_now,
+            torch.zeros_like(awaiting_before),
+            awaiting_before,
+        ),
+    )
+    env._roll_sprint_awaiting_reposition = torch.where(
+        reposition_triggered,
+        torch.ones_like(reposition_before),
+        torch.where(
+            transitioned_now,
+            torch.zeros_like(reposition_before),
+            reposition_before,
+        ),
     )
     env._roll_sprint_recovered_cycle_armed = torch.where(
         valid_completion | bootstrap_completion,
@@ -11902,7 +11964,12 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
             env._roll_sprint_recovered_cycle_armed,
         ),
     )
-    reset_recovery_clock = recovered_now | valid_completion | bootstrap_completion
+    reset_recovery_clock = (
+        transitioned_now
+        | valid_completion
+        | bootstrap_completion
+        | reposition_triggered
+    )
     env._roll_sprint_recovery_hold_steps = torch.where(
         reset_recovery_clock,
         torch.zeros_like(env._roll_sprint_recovery_hold_steps),
@@ -11912,6 +11979,11 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
         reset_recovery_clock,
         torch.zeros_like(env._roll_sprint_recovery_latency_steps),
         env._roll_sprint_recovery_latency_steps,
+    )
+    env._roll_sprint_reposition_latency_steps = torch.where(
+        transitioned_now | reposition_triggered,
+        torch.zeros_like(env._roll_sprint_reposition_latency_steps),
+        env._roll_sprint_reposition_latency_steps,
     )
     env._roll_sprint_last_update_step = torch.where(
         active,
@@ -12041,6 +12113,10 @@ def _reset_roll_sprint_buffers(
     env._roll_sprint_head_latch[env_ids] = spawn_head_latch
     env._roll_sprint_cycle_eligible[env_ids] = spawn_cycle_eligible
     env._roll_sprint_awaiting_recovery[env_ids] = spawn_awaiting_recovery
+    env._roll_sprint_awaiting_reposition[env_ids] = False
+    env._roll_sprint_reposition_latency_steps[env_ids] = 0
+    env._roll_sprint_reposition_latency_total_steps[env_ids] = 0.0
+    env._roll_sprint_reposition_count[env_ids] = 0.0
     env._roll_sprint_recovery_hold_steps[env_ids] = 0
     env._roll_sprint_recovery_latency_steps[env_ids] = 0
     env._roll_sprint_recovery_latency_total_steps[env_ids] = 0.0
@@ -12048,6 +12124,7 @@ def _reset_roll_sprint_buffers(
     env._roll_sprint_recovered_cycle_armed[env_ids] = False
     env._roll_sprint_recovered_and_rerolled[env_ids] = 0.0
     env._roll_sprint_recovered_now[env_ids] = False
+    env._roll_sprint_repositioned_now[env_ids] = False
     env._roll_sprint_recovered_rerolled_now[env_ids] = False
     env._roll_sprint_lateral_invalid[env_ids] = False
     env._roll_sprint_completed[env_ids] = 0.0
@@ -12201,6 +12278,35 @@ def roll_sprint_lane_centering_progress(
     return env._roll_sprint_lane_centering_delta / env.step_dt
 
 
+def roll_sprint_reposition_command(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    lateral_speed: float = _ROLL_SPRINT_REPOSITION_LATERAL_COMMAND_MPS,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Expose a signed lane-return cue through the existing 3D command slot.
+
+    The 61D actor layout stays unchanged. While recovery or reposition is
+    blocked outside the rearm band, forward and yaw commands are zeroed and the
+    lateral command points toward the reset-heading lane center.
+    """
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    command = env.command_manager.get_command(command_name).clone()
+    needs_return = (
+        (env._roll_sprint_awaiting_recovery | env._roll_sprint_awaiting_reposition)
+        & (
+            env._roll_sprint_lateral_displacement.abs()
+            > _ROLL_SPRINT_REPOSITION_REARM_M
+        )
+    )
+    lateral_return = -torch.sign(env._roll_sprint_lateral_displacement) * lateral_speed
+    command[:, 0] = torch.where(needs_return, torch.zeros_like(command[:, 0]), command[:, 0])
+    command[:, 1] = torch.where(needs_return, lateral_return, command[:, 1])
+    command[:, 2] = torch.where(needs_return, torch.zeros_like(command[:, 2]), command[:, 2])
+    return command
+
+
 def roll_sprint_lane_half_width_curriculum(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
@@ -12276,6 +12382,27 @@ def roll_sprint_mean_recovery_latency(
     _update_roll_sprint_state(env, asset)
     count = env._roll_sprint_recovery_count.clamp_min(1.0)
     return env._roll_sprint_recovery_latency_total_steps * env.step_dt / count
+
+
+def roll_sprint_reposition_count(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Cumulative completed lane-reposition transitions."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_reposition_count
+
+
+def roll_sprint_mean_reposition_latency(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Mean seconds from excessive drift to launch-ready lane return."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    count = env._roll_sprint_reposition_count.clamp_min(1.0)
+    return env._roll_sprint_reposition_latency_total_steps * env.step_dt / count
 
 
 def roll_sprint_invalid_cycle_rate(

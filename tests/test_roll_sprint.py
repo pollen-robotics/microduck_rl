@@ -107,9 +107,20 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert TARGET_DISTANCE_M == 20.0
     assert mdp._ROLL_SPRINT_RECOVERY_MAX_FORWARD_RATE == 6.0
     assert mdp._ROLL_SPRINT_RECOVERY_HOLD_STEPS == 2
+    assert mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M == 0.14
+    assert mdp._ROLL_SPRINT_REPOSITION_REARM_M == 0.07
+    assert mdp._ROLL_SPRINT_REPOSITION_LATERAL_COMMAND_MPS == 0.20
     assert cfg.scene.terrain.terrain_type == "plane"
     assert list(cfg.observations["actor"].terms) == list(
         roulade.observations["actor"].terms
+    )
+    assert (
+        cfg.observations["actor"].terms["command"].func
+        is mdp.roll_sprint_reposition_command
+    )
+    assert (
+        cfg.observations["critic"].terms["command"].func
+        is mdp.roll_sprint_reposition_command
     )
     assert (
         cfg.observations["critic"].terms["roll_sprint_critic_padding"].params["dim"]
@@ -238,6 +249,8 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
         "roll_sprint_recovery_count",
         "roll_sprint_recovered_reroll_count",
         "roll_sprint_mean_recovery_latency_s",
+        "roll_sprint_reposition_count",
+        "roll_sprint_mean_reposition_latency_s",
     }.issubset(cfg.metrics)
 
 
@@ -261,6 +274,8 @@ def test_roll_sprint_buffer_reset_is_per_environment():
     env._roll_sprint_head_latch[:] = True
     env._roll_sprint_cycle_eligible[:] = True
     env._roll_sprint_awaiting_recovery[:] = True
+    env._roll_sprint_awaiting_reposition[:] = True
+    env._roll_sprint_reposition_count[:] = 2.0
     env._roll_sprint_recovery_count[:] = 2.0
     env._roll_sprint_lateral_invalid[:] = True
 
@@ -286,6 +301,10 @@ def test_roll_sprint_buffer_reset_is_per_environment():
     assert torch.equal(
         env._roll_sprint_awaiting_recovery, torch.tensor([True, False, True])
     )
+    assert torch.equal(
+        env._roll_sprint_awaiting_reposition, torch.tensor([True, False, True])
+    )
+    assert torch.equal(env._roll_sprint_reposition_count, torch.tensor([2.0, 0.0, 2.0]))
     assert torch.equal(env._roll_sprint_recovery_count, torch.tensor([2.0, 0.0, 2.0]))
 
 
@@ -683,29 +702,101 @@ def test_roll_sprint_lateral_displacement_has_no_credit_and_costs_straightness(
     assert mdp.roll_sprint_straightness_penalty(env, deadband=0.01)[0] == 0.0
 
 
-def test_roll_sprint_forward_cycle_outside_lane_cannot_credit_frontier(monkeypatch):
+def test_roll_sprint_excessive_drift_requires_reposition_before_restart(monkeypatch):
     env, asset = _fake_env(1)
     _enable_flat_valid_roll(monkeypatch, env)
     _prime_roll_heading(env, asset)
 
-    asset.data.root_link_pos_w[:, 1] = mdp._ROLL_SPRINT_LANE_HALF_WIDTH + 0.01
-    asset.data.root_link_ang_vel_b[:, 1] = 1.0
+    asset.data.root_link_pos_w[:, 1] = mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M + 0.01
+    asset.data.root_link_ang_vel_b[:, 1] = 5.0
     mdp._update_roll_sprint_state(env, asset)
 
+    assert env._roll_sprint_awaiting_reposition[0]
+    assert env._roll_sprint_accum[0] == 0.0
+    assert env._roll_sprint_progress_delta[0] == 0.0
+
+    # Even a nominally complete roll is locked out before the lane return.
     env.common_step_counter += 1
-    asset.data.root_link_pos_w[:, 0] = 0.35
-    asset.data.root_link_pos_w[:, 1] = 0.0
-    asset.data.root_link_ang_vel_b[:, 1] = 1.0
-    env._roll_sprint_accum[:] = 2.0 * torch.pi - 0.01
-    env._roll_sprint_phase_frontier[:] = env._roll_sprint_accum
-    env._roll_sprint_head_latch[:] = True
-    mdp._update_roll_sprint_state(env, asset)
+    _complete_valid_roll(
+        env,
+        asset,
+        forward=0.35,
+        lateral=mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M + 0.01,
+    )
 
-    assert env._roll_sprint_invalid_now[0]
     assert not env._roll_sprint_completed_now[0]
     assert env._roll_sprint_completed[0] == 0.0
     assert env._roll_sprint_completed_distance[0] == 0.0
     assert env._roll_sprint_forward_frontier[0] == 0.0
+
+    # Crossing back below the trigger is insufficient. The robot must return
+    # inside the tighter rearm band and hold a launch-ready feet-supported pose.
+    asset.data.root_link_pos_w[:, 1] = mdp._ROLL_SPRINT_REPOSITION_REARM_M + 0.01
+    _recover(env, asset)
+    assert env._roll_sprint_awaiting_reposition[0]
+
+    asset.data.root_link_pos_w[:, 1] = 0.0
+    _recover(env, asset)
+    assert env._roll_sprint_repositioned_now[0]
+    assert not env._roll_sprint_awaiting_reposition[0]
+    assert env._roll_sprint_reposition_count[0] == 1.0
+    assert env._roll_sprint_recovery_count[0] == 0.0
+    assert env._roll_sprint_cycle_eligible[0]
+
+    env.common_step_counter += 1
+    _complete_valid_roll(env, asset, forward=0.45)
+    assert env._roll_sprint_completed_now[0]
+    assert env._roll_sprint_completed_distance[0] == pytest.approx(0.10)
+    assert env._roll_sprint_forward_frontier[0] == pytest.approx(0.45)
+
+
+def test_roll_sprint_reposition_command_points_back_to_lane_center(monkeypatch):
+    env, asset = _fake_env(3)
+    _enable_flat_valid_roll(monkeypatch, env)
+    base_command = torch.tensor(
+        [[0.01, 0.02, 0.03], [0.01, 0.02, 0.03], [0.01, 0.02, 0.03]]
+    )
+    env.command_manager = SimpleNamespace(
+        get_command=lambda command_name: base_command,
+    )
+    _prime_roll_heading(env, asset)
+    asset.data.root_link_pos_w[:, 1] = torch.tensor([0.15, -0.15, 0.02])
+
+    command = mdp.roll_sprint_reposition_command(env)
+
+    assert torch.allclose(command[0], torch.tensor([0.0, -0.20, 0.0]))
+    assert torch.allclose(command[1], torch.tensor([0.0, 0.20, 0.0]))
+    assert torch.allclose(command[2], base_command[2])
+
+
+def test_roll_recovery_waits_for_lane_reposition_before_reroll(monkeypatch):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    _prime_roll_heading(env, asset)
+    _complete_valid_roll(env, asset, forward=0.20)
+
+    env.common_step_counter += 1
+    asset.data.root_link_pos_w[:, 1] = mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M + 0.01
+    mdp._update_roll_sprint_state(env, asset)
+    assert env._roll_sprint_awaiting_recovery[0]
+    assert env._roll_sprint_awaiting_reposition[0]
+
+    _recover(env, asset)
+    assert env._roll_sprint_awaiting_recovery[0]
+    assert env._roll_sprint_recovery_count[0] == 0.0
+
+    asset.data.root_link_pos_w[:, 1] = 0.0
+    _recover(env, asset)
+    assert env._roll_sprint_recovered_now[0]
+    assert env._roll_sprint_repositioned_now[0]
+    assert env._roll_sprint_recovery_count[0] == 1.0
+    assert env._roll_sprint_reposition_count[0] == 1.0
+    assert env._roll_sprint_forward_frontier[0] == pytest.approx(0.20)
+
+    env.common_step_counter += 1
+    _complete_valid_roll(env, asset, forward=0.45)
+    assert env._roll_sprint_completed[0] == 2.0
+    assert env._roll_sprint_recovered_and_rerolled[0] == 1.0
 
 
 def test_roll_sprint_training_lane_gate_tightens_to_canonical_width():
