@@ -138,6 +138,11 @@ STAIR_TARGETS = {
         "experiment": "microduck_stair_stage2_reverse_rsi_specialist",
         "iterations": 75,
     },
+    "specialist-near-shell-reverse-rsi": {
+        "task": "Mjlab-Stairs-Near-Shell-Reverse-RSI-Specialist-MicroDuck",
+        "experiment": "microduck_stair_near_shell_reverse_rsi_specialist",
+        "iterations": 75,
+    },
     "specialist-tread-contact-bank": {
         "task": "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
         "experiment": "microduck_stair_tread_contact_bank_specialist",

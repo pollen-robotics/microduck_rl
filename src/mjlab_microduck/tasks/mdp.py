@@ -731,6 +731,26 @@ def configure_stair_viewer_grid(
     terrain.env_origins[: len(levels)] = terrain.terrain_origins[levels, types]
 
 
+def force_stair_terrain_level(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None = None,
+    terrain_level: int = 2,
+    terrain_type: int = 0,
+) -> None:
+    """Place every vectorized environment on one exact stair geometry."""
+
+    del env_ids
+    terrain = env.scene.terrain
+    if terrain.terrain_origins is None:
+        return
+    rows, cols = terrain.terrain_origins.shape[:2]
+    if not 0 <= terrain_level < rows or not 0 <= terrain_type < cols:
+        raise ValueError("Forced stair terrain index exceeds the generated grid")
+    terrain.terrain_levels[:] = terrain_level
+    terrain.terrain_types[:] = terrain_type
+    terrain.env_origins[:] = terrain.terrain_origins[terrain_level, terrain_type]
+
+
 def seed_route_challenge_levels(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
@@ -2558,6 +2578,49 @@ def stair_true_shell_clearance_candidate(
     )
 
 
+def stair_true_shell_clearance_frontier_value(
+    env: ManagerBasedRlEnv,
+    start_x: float = 0.625,
+    target_x: float = 0.660,
+    start_height: float = 0.150,
+    target_height: float = 0.170,
+    corridor_half_width: float = 0.20,
+    required_latch_name: str | None = (
+        "_stair_contact_transfer_stage15_policy_achieved"
+    ),
+    shell_half_extents: tuple[float, float, float] = (0.034, 0.031, 0.022),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Return bounded worst-corner progress toward true shell clearance."""
+
+    if target_x <= start_x or target_height <= start_height:
+        raise ValueError("Shell frontier targets must exceed their starts")
+    corners, root_y = _stair_shell_corner_state(
+        env, shell_half_extents, asset_cfg
+    )
+    min_x = corners[..., 0].amin(dim=(-1, -2))
+    min_z = corners[..., 2].amin(dim=(-1, -2))
+    x_progress = torch.clamp(
+        (min_x - start_x) / (target_x - start_x), min=0.0, max=1.0
+    )
+    z_progress = torch.clamp(
+        (min_z - start_height) / (target_height - start_height),
+        min=0.0,
+        max=1.0,
+    )
+    value = torch.minimum(x_progress, z_progress)
+    required = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    if required_latch_name is not None:
+        required = getattr(env, required_latch_name, None)
+        if required is None:
+            required = torch.zeros(
+                env.num_envs, dtype=torch.bool, device=env.device
+            )
+    finite = torch.isfinite(corners).all(dim=(-1, -2, -3))
+    eligible = required & finite & (root_y <= corridor_half_width)
+    return torch.where(eligible, value, torch.zeros_like(value))
+
+
 def stair_true_shell_clearance_frontier(
     env: ManagerBasedRlEnv,
     start_x: float = 0.625,
@@ -2576,28 +2639,17 @@ def stair_true_shell_clearance_frontier(
     Holding or oscillating around a previously reached margin cannot be farmed.
     """
 
-    if target_x <= start_x or target_height <= start_height:
-        raise ValueError("Shell frontier targets must exceed their starts")
-    corners, root_y = _stair_shell_corner_state(
-        env, shell_half_extents, asset_cfg
+    value = stair_true_shell_clearance_frontier_value(
+        env=env,
+        start_x=start_x,
+        target_x=target_x,
+        start_height=start_height,
+        target_height=target_height,
+        corridor_half_width=corridor_half_width,
+        required_latch_name=required_latch_name,
+        shell_half_extents=shell_half_extents,
+        asset_cfg=asset_cfg,
     )
-    min_x = corners[..., 0].amin(dim=(-1, -2))
-    min_z = corners[..., 2].amin(dim=(-1, -2))
-    x_progress = torch.clamp(
-        (min_x - start_x) / (target_x - start_x), min=0.0, max=1.0
-    )
-    z_progress = torch.clamp(
-        (min_z - start_height) / (target_height - start_height),
-        min=0.0,
-        max=1.0,
-    )
-    value = torch.minimum(x_progress, z_progress)
-    required = getattr(env, required_latch_name, None)
-    if required is None:
-        required = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-    finite = torch.isfinite(corners).all(dim=(-1, -2, -3))
-    eligible = required & finite & (root_y <= corridor_half_width)
-    value = torch.where(eligible, value, torch.zeros_like(value))
     state_name = "_stair_true_shell_clearance_frontier_best"
     previous_best = getattr(env, state_name, None)
     if previous_best is None:

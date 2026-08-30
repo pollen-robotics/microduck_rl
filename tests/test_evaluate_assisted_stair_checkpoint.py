@@ -23,6 +23,11 @@ JointFrontierTrajectoryMetrics = MODULE.JointFrontierTrajectoryMetrics
 TerminalPositionTrajectoryMetrics = MODULE.TerminalPositionTrajectoryMetrics
 
 
+def test_a34_inherits_stage2_seed_and_order_semantics() -> None:
+    assert MODULE.A33_TASK_ID in MODULE.STAGE2_SEEDED_TASK_IDS
+    assert MODULE.A34_TASK_ID in MODULE.STAGE2_SEEDED_TASK_IDS
+
+
 def _observe(
     metrics: A12TrajectoryMetrics,
     position: tuple[float, float, float],

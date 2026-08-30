@@ -13,6 +13,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     VIRTUAL_LIP_MAX_FACE_OFFSET,
     BoxStandardStaircaseTerrainCfg,
     make_microduck_stair_contact_stage_rsi_env_cfg,
+    make_microduck_stair_near_shell_reverse_rsi_env_cfg,
     make_microduck_stair_stage15_reverse_rsi_env_cfg,
     make_microduck_stair_stage2_reverse_rsi_env_cfg,
     make_microduck_stair_forward_propagation_rsi_env_cfg,
@@ -836,3 +837,26 @@ def test_a33_adds_exact_stage2_family_and_bounded_shell_frontier():
         "terrain_levels": (2,),
         "terrain_types": (0,),
     }
+
+
+def test_a34_changes_only_the_stage2_bank_to_dynamic_near_shell_states():
+    a33 = make_microduck_stair_stage2_reverse_rsi_env_cfg()
+    a34 = make_microduck_stair_near_shell_reverse_rsi_env_cfg()
+
+    assert a34.events["state_bank_family"].params["family_weights"] == (2, 1, 1)
+    assert a34.events["stage2_reverse_state_bank"].params["bank_path"].endswith(
+        "full170-a34-near-shell-negative-state-bank.pt"
+    )
+    assert a34.events["stage2_reverse_context"].params == {
+        "stage15_families": (1, 2),
+        "stage2_family": 2,
+    }
+    assert a34.events["a34_hard_terrain"].func is microduck_mdp.force_stair_terrain_level
+    assert a34.events["a34_hard_terrain"].params == {
+        "terrain_level": 2,
+        "terrain_type": 0,
+    }
+    assert tuple(a34.rewards) == tuple(a33.rewards)
+    for name in a33.rewards:
+        assert a34.rewards[name].weight == a33.rewards[name].weight
+        assert a34.rewards[name].params == a33.rewards[name].params

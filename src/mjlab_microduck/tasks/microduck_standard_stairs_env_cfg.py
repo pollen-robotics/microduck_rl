@@ -1884,6 +1884,23 @@ def make_microduck_stair_stage2_reverse_rsi_env_cfg(
     return cfg
 
 
+def make_microduck_stair_near_shell_reverse_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A34: replace only family 2 with dynamic near-shell failures."""
+
+    cfg = make_microduck_stair_stage2_reverse_rsi_env_cfg(play=play)
+    cfg.events["stage2_reverse_state_bank"].params["bank_path"] = (
+        ".tmp/codex/full170-a34-near-shell-negative-state-bank.pt"
+    )
+    cfg.events["a34_hard_terrain"] = EventTermCfg(
+        func=microduck_mdp.force_stair_terrain_level,
+        mode="startup",
+        params={"terrain_level": 2, "terrain_type": 0},
+    )
+    return cfg
+
+
 def make_microduck_stair_tread_contact_bank_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -2331,6 +2348,16 @@ MicroduckStairStage2ReverseRsiRlCfg.experiment_name = (
 )
 MicroduckStairStage2ReverseRsiRlCfg.run_name = (
     "microduck_stair_stage2_reverse_rsi_specialist"
+)
+
+MicroduckStairNearShellReverseRsiRlCfg = deepcopy(
+    MicroduckStairStage2ReverseRsiRlCfg
+)
+MicroduckStairNearShellReverseRsiRlCfg.experiment_name = (
+    "microduck_stair_near_shell_reverse_rsi_specialist"
+)
+MicroduckStairNearShellReverseRsiRlCfg.run_name = (
+    "microduck_stair_near_shell_reverse_rsi_specialist"
 )
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)

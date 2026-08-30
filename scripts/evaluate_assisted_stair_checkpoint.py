@@ -30,8 +30,16 @@ A30_TASK_ID = "Mjlab-Stairs-Virtual-Lip-Transfer-RSI-Specialist-MicroDuck"
 A31_TASK_ID = "Mjlab-Stairs-Contact-Stage-RSI-Specialist-MicroDuck"
 A32_TASK_ID = "Mjlab-Stairs-Stage15-Reverse-RSI-Specialist-MicroDuck"
 A33_TASK_ID = "Mjlab-Stairs-Stage2-Reverse-RSI-Specialist-MicroDuck"
-CONTACT_TRANSFER_TASK_IDS = (A30_TASK_ID, A31_TASK_ID, A32_TASK_ID, A33_TASK_ID)
-STAGE15_TASK_IDS = (A31_TASK_ID, A32_TASK_ID, A33_TASK_ID)
+A34_TASK_ID = "Mjlab-Stairs-Near-Shell-Reverse-RSI-Specialist-MicroDuck"
+STAGE2_SEEDED_TASK_IDS = (A33_TASK_ID, A34_TASK_ID)
+CONTACT_TRANSFER_TASK_IDS = (
+    A30_TASK_ID,
+    A31_TASK_ID,
+    A32_TASK_ID,
+    A33_TASK_ID,
+    A34_TASK_ID,
+)
+STAGE15_TASK_IDS = (A31_TASK_ID, A32_TASK_ID, A33_TASK_ID, A34_TASK_ID)
 TASK_IDS = (
     "Mjlab-Stairs-Assisted-Specialist-MicroDuck",
     "Mjlab-Stairs-Bridge-Specialist-MicroDuck",
@@ -54,6 +62,7 @@ TASK_IDS = (
     A31_TASK_ID,
     A32_TASK_ID,
     A33_TASK_ID,
+    A34_TASK_ID,
     "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
     "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
@@ -112,6 +121,17 @@ A33_RESET_FAMILY_OVERRIDES = {
     "face-no-tread": 0,
     "stage15-reverse": 1,
     "stage2-reverse": 2,
+}
+A34_RESET_MODES = {
+    0: "face_no_tread_bank",
+    1: "stage15_reverse_bank",
+    2: "near_shell_reverse_bank",
+}
+A34_RESET_FAMILY_OVERRIDES = {
+    "mixed": None,
+    "face-no-tread": 0,
+    "stage15-reverse": 1,
+    "near-shell-reverse": 2,
 }
 BODY_PART_CONTACT_SENSORS = {
     "head": "head_ground_contact",
@@ -436,6 +456,7 @@ def _parse_args() -> argparse.Namespace:
                     *A30_RESET_FAMILY_OVERRIDES,
                     *A32_RESET_FAMILY_OVERRIDES,
                     *A33_RESET_FAMILY_OVERRIDES,
+                    *A34_RESET_FAMILY_OVERRIDES,
                 )
             )
         ),
@@ -470,6 +491,8 @@ def main() -> int:
     is_stage15_task = args.task in STAGE15_TASK_IDS
     is_a32 = args.task == A32_TASK_ID
     is_a33 = args.task == A33_TASK_ID
+    is_a34 = args.task == A34_TASK_ID
+    uses_stage2_seed_semantics = args.task in STAGE2_SEEDED_TASK_IDS
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_file():
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
@@ -487,7 +510,9 @@ def main() -> int:
         raise SystemExit(
             "--reset-family is supported only for contact-transfer tasks"
         )
-    if is_a33:
+    if is_a34:
+        reset_family_overrides = A34_RESET_FAMILY_OVERRIDES
+    elif is_a33:
         reset_family_overrides = A33_RESET_FAMILY_OVERRIDES
     elif is_a32:
         reset_family_overrides = A32_RESET_FAMILY_OVERRIDES
@@ -497,7 +522,9 @@ def main() -> int:
         raise SystemExit(
             f"--reset-family {args.reset_family!r} is invalid for {args.task}"
         )
-    if is_a33:
+    if is_a34:
+        reset_modes = A34_RESET_MODES
+    elif is_a33:
         reset_modes = A33_RESET_MODES
     elif is_a32:
         reset_modes = A32_RESET_MODES
@@ -952,7 +979,7 @@ def main() -> int:
                 live_prefix_edge = episode_control_steps >= 2
                 new_stage1_policy &= live_prefix_edge
                 new_stage15_policy &= live_prefix_edge
-            elif is_a33:
+            elif uses_stage2_seed_semantics:
                 # Families 1 and 2 seed the Stage 1/1.5 prefix. Family 2 also
                 # seeds Stage 2. Suppress only those reset-created edges during
                 # the first two policy steps; family 0 remains fully live.
@@ -1006,7 +1033,7 @@ def main() -> int:
             episode_event_flags["stage2_without_stage15"] |= (
                 stage2_without_stage15
             )
-            if is_a33:
+            if uses_stage2_seed_semantics:
                 episode_event_flags["shell_before_stage2"] |= (
                     shell_before_stage2
                 )
@@ -1448,7 +1475,7 @@ def main() -> int:
                     ),
                 }
             )
-        if is_a33:
+        if uses_stage2_seed_semantics:
             mode_report[name]["shell_before_stage2_event_violations"] = (
                 mode_shell_before_stage2[name]
             )
@@ -1667,7 +1694,7 @@ def main() -> int:
         )
     if is_a32:
         report["schema_version"] = 13
-    if is_a33:
+    if uses_stage2_seed_semantics:
         report.update(
             {
                 "schema_version": 14,

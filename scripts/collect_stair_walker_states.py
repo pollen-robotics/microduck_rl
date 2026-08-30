@@ -25,6 +25,7 @@ from mjlab_microduck.tasks.mdp import (
     _virtual_lip_stair_contact_masks,
     classify_standard_stair_contacts,
     stair_true_shell_clearance_candidate,
+    stair_true_shell_clearance_frontier_value,
 )
 from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     STANDARD_RISER_HEIGHT,
@@ -501,6 +502,27 @@ def _raw_hard_shell_candidate(env: ManagerBasedRlEnv) -> torch.Tensor:
         corridor_half_width=params["corridor_half_width"],
         shell_half_extents=tuple(params["shell_half_extents"]),
         asset_cfg=params["asset_cfg"],
+    )
+
+
+def _raw_shell_frontier_value(
+    env: ManagerBasedRlEnv,
+    required_latch_name: str | None = (
+        "_stair_contact_transfer_stage15_policy_achieved"
+    ),
+) -> torch.Tensor:
+    shell_cfg = env.reward_manager.get_term_cfg("stair_true_shell_clearance")
+    shell_params = shell_cfg.params
+    return stair_true_shell_clearance_frontier_value(
+        env=env,
+        start_x=0.625,
+        target_x=STANDARD_STAIR_START_DISTANCE,
+        start_height=0.150,
+        target_height=STANDARD_RISER_HEIGHT,
+        corridor_half_width=0.20,
+        required_latch_name=required_latch_name,
+        shell_half_extents=tuple(shell_params["shell_half_extents"]),
+        asset_cfg=shell_params["asset_cfg"],
     )
 
 
