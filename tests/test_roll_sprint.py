@@ -125,6 +125,7 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert cfg.rewards["roll_sprint_flatness"].weight == -0.25
     assert cfg.rewards["roll_sprint_lateral_vel"].weight == -0.35
     assert cfg.rewards["roll_sprint_straightness"].weight == -3.0
+    assert cfg.rewards["roll_sprint_lane_centering"].weight == 4.0
     for name in (
         "roll_sprint_overspeed",
         "roll_sprint_impact",
@@ -614,6 +615,32 @@ def test_roll_progress_reward_fades_to_zero_at_lane_edge_without_idle_annuity():
             lane_half_width=0.14,
         ),
         torch.zeros(4),
+    )
+
+
+def test_lane_centering_progress_penalizes_departure_rewards_correction_and_not_idle(
+    monkeypatch,
+):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    mdp._update_roll_sprint_state(env, asset)
+
+    env.common_step_counter += 1
+    asset.data.root_link_pos_w[:, 1] = 0.10
+    departure = mdp.roll_sprint_lane_centering_progress(env)
+
+    env.common_step_counter += 1
+    asset.data.root_link_pos_w[:, 1] = 0.04
+    correction = mdp.roll_sprint_lane_centering_progress(env)
+
+    env.common_step_counter += 1
+    idle = mdp.roll_sprint_lane_centering_progress(env)
+
+    assert departure[0] == pytest.approx(-0.10 / env.step_dt)
+    assert correction[0] == pytest.approx(0.06 / env.step_dt)
+    assert idle[0] == 0.0
+    assert env.step_dt * (departure[0] + correction[0] + idle[0]) == pytest.approx(
+        -0.04
     )
 
 

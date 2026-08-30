@@ -109,6 +109,10 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         weight=-3.0,
         params={"deadband": 0.01},
     )
+    cfg.rewards["roll_sprint_lane_centering"] = RewardTermCfg(
+        func=microduck_mdp.roll_sprint_lane_centering_progress,
+        weight=4.0,
+    )
     cfg.rewards["roll_sprint_flatness"] = RewardTermCfg(
         func=microduck_mdp.roulade_flatness_penalty,
         weight=-0.25,

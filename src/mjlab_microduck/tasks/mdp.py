@@ -11542,6 +11542,7 @@ def _roll_sprint_state(env: ManagerBasedRlEnv) -> None:
     env._roll_sprint_forward_frontier = z.clone()
     env._roll_sprint_lateral_origin = z.clone()
     env._roll_sprint_lateral_displacement = z.clone()
+    env._roll_sprint_lane_centering_delta = z.clone()
     env._roll_sprint_heading_w = torch.zeros((env.num_envs, 2), device=env.device)
     env._roll_sprint_heading_ready = torch.zeros(
         env.num_envs, dtype=torch.bool, device=env.device
@@ -11645,9 +11646,16 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
     env._roll_sprint_forward_position = torch.where(
         active, position, env._roll_sprint_forward_position
     )
+    lateral_displacement = lateral_position - lateral_origin
+    env._roll_sprint_lane_centering_delta = torch.where(
+        active,
+        env._roll_sprint_lateral_displacement.abs()
+        - lateral_displacement.abs(),
+        env._roll_sprint_lane_centering_delta,
+    )
     env._roll_sprint_lateral_displacement = torch.where(
         active,
-        lateral_position - lateral_origin,
+        lateral_displacement,
         env._roll_sprint_lateral_displacement,
     )
 
@@ -12035,6 +12043,7 @@ def _reset_roll_sprint_buffers(
     env._roll_sprint_forward_frontier[env_ids] = 0.0
     env._roll_sprint_lateral_origin[env_ids] = 0.0
     env._roll_sprint_lateral_displacement[env_ids] = 0.0
+    env._roll_sprint_lane_centering_delta[env_ids] = 0.0
     env._roll_sprint_heading_w[env_ids] = 0.0
     env._roll_sprint_heading_ready[env_ids] = False
     env._roll_sprint_progress_delta[env_ids] = 0.0
@@ -12087,6 +12096,7 @@ def arrange_roll_sprint_race_start(
     env._roll_sprint_forward_frontier.copy_(forward_position)
     env._roll_sprint_lateral_origin.copy_(lateral_position)
     env._roll_sprint_lateral_displacement.zero_()
+    env._roll_sprint_lane_centering_delta.zero_()
     return origins
 
 
@@ -12140,6 +12150,16 @@ def roll_sprint_straightness_penalty(
         max=1.0,
     )
     return lane_offset * roll_activity
+
+
+def roll_sprint_lane_centering_progress(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Potential-based reward for reducing lane offset, with no idle annuity."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_lane_centering_delta / env.step_dt
 
 
 def roll_sprint_cycle_rate(
