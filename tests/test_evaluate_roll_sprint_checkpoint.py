@@ -20,12 +20,13 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-def _auditor() -> object:
+def _auditor(initial_course_y: float = 0.0) -> object:
     return MODULE.RollCycleAuditor(
-        initial_position_xy=torch.zeros(1, 2),
+        initial_position_xy=torch.tensor([[0.0, initial_course_y]]),
         initial_root_quat=torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
         initial_vertical_velocity=torch.zeros(1),
         step_dt=0.02,
+        course_center_xy=torch.zeros(2),
     )
 
 
@@ -78,6 +79,14 @@ def _pitched_yaw_quat(degrees: float) -> tuple[float, float, float, float]:
     return (cy * cp, -sy * sp, cy * sp, sy * cp)
 
 
+def test_shared_road_thresholds_match_canonical_geometry() -> None:
+    assert MODULE.ROAD_HALF_WIDTH_M == pytest.approx(0.56)
+    assert MODULE.ROAD_SAFE_FULL_REWARD_HALF_WIDTH_M == pytest.approx(0.42)
+    assert MODULE.ROAD_REPOSITION_TRIGGER_M == pytest.approx(0.50)
+    assert MODULE.ROAD_REPOSITION_REARM_M == pytest.approx(0.46)
+    assert MODULE.ROAD_MAX_YAW_DEVIATION_DEG == pytest.approx(20.0)
+
+
 def test_auditor_backward_rocking_cannot_complete_or_repay_angle() -> None:
     auditor = _auditor()
 
@@ -114,12 +123,12 @@ def test_auditor_releases_only_rotation_capped_distance_on_valid_cycle() -> None
     assert auditor.linked_distance.item() == pytest.approx(expected_cap)
 
 
-def test_auditor_requires_lane_reposition_before_roll_restart() -> None:
+def test_auditor_requires_shared_road_reposition_before_roll_restart() -> None:
     auditor = _auditor()
     _observe(
         auditor,
         omega=1.0,
-        lateral_position=MODULE.REPOSITION_TRIGGER_M + 0.01,
+        lateral_position=MODULE.ROAD_REPOSITION_TRIGGER_M + 0.01,
     )
     assert auditor.awaiting_reposition.item()
 
@@ -129,7 +138,7 @@ def test_auditor_requires_lane_reposition_before_roll_restart() -> None:
         auditor,
         omega=1.0,
         forward_position=0.35,
-        lateral_position=MODULE.REPOSITION_TRIGGER_M + 0.01,
+        lateral_position=MODULE.ROAD_REPOSITION_TRIGGER_M + 0.01,
     )
 
     assert auditor.valid_count.item() == 0
@@ -142,7 +151,7 @@ def test_auditor_requires_lane_reposition_before_roll_restart() -> None:
             auditor,
             omega=0.0,
             forward_position=0.35,
-            lateral_position=MODULE.REPOSITION_REARM_M + 0.01,
+            lateral_position=MODULE.ROAD_REPOSITION_REARM_M + 0.01,
         )
     assert auditor.awaiting_reposition.item()
 
@@ -161,6 +170,48 @@ def test_auditor_requires_lane_reposition_before_roll_restart() -> None:
     assert report["mean_lane_reposition_latency_s"] == pytest.approx(
         (2 * MODULE.RECOVERY_HOLD_STEPS + 1) * 0.02
     )
+
+
+def test_auditor_allows_crossing_original_lanes_inside_shared_road() -> None:
+    auditor = _auditor(initial_course_y=-0.42)
+    auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
+    auditor.head_latch[:] = True
+
+    _observe(
+        auditor,
+        omega=1.0,
+        forward_position=0.30,
+        lateral_position=0.42,
+    )
+
+    assert auditor.valid_count.item() == 1
+    assert auditor.invalid_count.item() == 0
+    assert auditor.linked_distance.item() == pytest.approx(0.30)
+    assert auditor.max_abs_course_lateral.item() == pytest.approx(0.42)
+    assert auditor.max_road_boundary_overshoot.item() == 0.0
+
+
+def test_auditor_shared_road_boundary_is_inclusive_and_outer_exit_fails() -> None:
+    boundary = _auditor()
+    _observe(
+        boundary,
+        omega=1.0,
+        lateral_position=MODULE.ROAD_HALF_WIDTH_M,
+    )
+    assert not boundary.lateral_invalid.item()
+    assert boundary.road_exit_steps.item() == 0
+
+    outside = _auditor()
+    _observe(
+        outside,
+        omega=1.0,
+        lateral_position=(
+            MODULE.ROAD_HALF_WIDTH_M + MODULE.ROAD_BOUNDARY_TOLERANCE_M + 1.0e-4
+        ),
+    )
+    assert outside.awaiting_reposition.item()
+    assert outside.road_exit_steps.item() == 1
+    assert outside.max_road_boundary_overshoot.item() > 0.0
 
 
 def test_auditor_requires_heading_reposition_before_roll_restart() -> None:
@@ -281,18 +332,107 @@ def test_auditor_requires_recovery_before_second_credited_roll() -> None:
     assert report["target_distance_reach_rate"] == pytest.approx(0.0)
     assert not report["four_robot_batch_target_20m_pass"]
     assert report["recovery_gate_diagnostics"] == {
-            "awaiting_steps": MODULE.RECOVERY_HOLD_STEPS,
-            "foot_supported_head_released_steps": MODULE.RECOVERY_HOLD_STEPS,
-            "upright_ready_steps": MODULE.RECOVERY_HOLD_STEPS,
-            "sagittal_ready_steps": MODULE.RECOVERY_HOLD_STEPS,
-            "rate_ready_steps": MODULE.RECOVERY_HOLD_STEPS,
-            "candidate_steps": MODULE.RECOVERY_HOLD_STEPS,
-            "max_consecutive_candidate_steps": MODULE.RECOVERY_HOLD_STEPS,
+        "awaiting_steps": MODULE.RECOVERY_HOLD_STEPS,
+        "foot_supported_head_released_steps": MODULE.RECOVERY_HOLD_STEPS,
+        "upright_ready_steps": MODULE.RECOVERY_HOLD_STEPS,
+        "sagittal_ready_steps": MODULE.RECOVERY_HOLD_STEPS,
+        "rate_ready_steps": MODULE.RECOVERY_HOLD_STEPS,
+        "candidate_steps": MODULE.RECOVERY_HOLD_STEPS,
+        "max_consecutive_candidate_steps": MODULE.RECOVERY_HOLD_STEPS,
         "foot_release_fraction": 1.0,
         "upright_given_foot_release_fraction": 1.0,
         "sagittal_given_upright_fraction": 1.0,
         "rate_given_sagittal_fraction": 1.0,
     }
+
+
+def test_auditor_stalled_fall_discards_partial_cycle_before_full_reroll() -> None:
+    auditor = _auditor()
+    auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
+    auditor.head_latch[:] = True
+    _observe(auditor, omega=1.0, forward_position=0.10)
+    _recover(auditor, forward_position=0.10)
+
+    for index in range(5):
+        _observe(
+            auditor,
+            omega=5.0,
+            forward_position=0.10 + 0.04 * (index + 1),
+        )
+    assert auditor.accum.item() == pytest.approx(0.50)
+    assert auditor.phase_frontier.item() == pytest.approx(0.50)
+
+    fallen_quat = (math.sqrt(0.5), 0.0, math.sqrt(0.5), 0.0)
+    stall_steps = max(
+        1,
+        round(MODULE.SELF_RIGHT_STALL_SECONDS / auditor.step_dt),
+    )
+    for _ in range(stall_steps):
+        _observe(
+            auditor,
+            omega=0.0,
+            forward_position=0.30,
+            support=True,
+            foot_support=False,
+            root_quat=fallen_quat,
+        )
+
+    assert auditor.self_righting.item()
+    assert auditor.awaiting_recovery.item()
+    assert auditor.accum.item() == 0.0
+    assert auditor.phase_frontier.item() == 0.0
+    assert auditor.forward_frontier.item() == pytest.approx(0.10)
+    assert auditor.linked_distance.item() == pytest.approx(0.10)
+
+    _observe(
+        auditor,
+        omega=5.0,
+        forward_position=0.45,
+        support=True,
+        foot_support=False,
+        head_contact=True,
+        root_quat=fallen_quat,
+    )
+    assert auditor.accum.item() == 0.0
+    assert auditor.phase_frontier.item() == 0.0
+    assert auditor.valid_count.item() == 1
+    assert auditor.forward_frontier.item() == pytest.approx(0.10)
+
+    _recover(auditor, forward_position=0.45)
+    assert not auditor.self_righting.item()
+    assert not auditor.awaiting_recovery.item()
+    assert auditor.recovery_count.item() == 2
+    assert auditor.cycle_start_forward.item() == pytest.approx(0.45)
+
+    auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
+    auditor.phase_frontier[:] = auditor.accum
+    auditor.head_latch[:] = True
+    _observe(auditor, omega=1.0, forward_position=0.75)
+
+    assert auditor.valid_count.item() == 2
+    assert auditor.recovered_and_rerolled_count.item() == 1
+    assert auditor.linked_distance.item() == pytest.approx(0.40)
+    assert auditor.forward_frontier.item() == pytest.approx(0.75)
+
+
+def test_evaluator_ranks_standing_on_road_robot_by_credited_frontier() -> None:
+    auditor = MODULE.RollCycleAuditor(
+        initial_position_xy=torch.tensor([[0.0, -0.14], [0.0, 0.14]]),
+        initial_root_quat=torch.tensor([[1.0, 0.0, 0.0, 0.0]] * 2),
+        initial_vertical_velocity=torch.zeros(2),
+        step_dt=0.02,
+        course_center_xy=torch.zeros(2),
+    )
+    auditor.last_position[:] = torch.tensor([[5.0, -0.10], [10.0, 0.10]])
+    auditor.final_course_lateral[:] = torch.tensor([-0.10, 0.10])
+    auditor.linked_distance[:] = torch.tensor([4.0, 3.0])
+    auditor.launch_ready[:] = True
+
+    report = auditor.summary(20.0)
+
+    assert report["standing_on_road_winner_robot_index"] == 0
+    assert report["per_robot"][0]["standing_on_road_rank"] == 1
+    assert report["per_robot"][1]["standing_on_road_rank"] == 2
 
 
 def test_heading_uses_lateral_axis_at_vertical_pitch() -> None:
@@ -308,6 +448,7 @@ def test_heading_uses_lateral_axis_at_vertical_pitch() -> None:
 def test_absolute_race_goal_requires_every_gate() -> None:
     report = {
         **MODULE.PROMOTION,
+        "road_exit_env_count": 0,
         "nan_env_count": 0,
         "out_of_bounds_env_count": 0,
     }
@@ -316,7 +457,7 @@ def test_absolute_race_goal_requires_every_gate() -> None:
     for key in MODULE.PROMOTION:
         failing = dict(report)
         if key in {
-            "p95_lateral_drift_m",
+            "maximum_road_boundary_overshoot_m",
             "mean_uncredited_positive_displacement_m",
         }:
             failing[key] = float(report[key]) + 0.001
@@ -324,7 +465,7 @@ def test_absolute_race_goal_requires_every_gate() -> None:
             failing[key] = float(report[key]) - 0.001
         assert not MODULE.absolute_race_goal_pass(failing), key
 
-    for key in ("nan_env_count", "out_of_bounds_env_count"):
+    for key in ("road_exit_env_count", "nan_env_count", "out_of_bounds_env_count"):
         failing = dict(report)
         failing[key] = 1
         assert not MODULE.absolute_race_goal_pass(failing), key
@@ -348,6 +489,8 @@ def _recovery_case(
         "lane_reposition_count": 1,
         "lane_reposition_latency_s": 0.4,
         "maximum_lateral_drift_m": 0.10,
+        "maximum_road_boundary_overshoot_m": 0.0,
+        "road_exit_steps": 0,
         "nan_seen": False,
         "out_of_bounds": False,
     }
@@ -356,7 +499,7 @@ def _recovery_case(
 def _race_report() -> dict[str, object]:
     return {
         "mean_credited_forward_frontier_m": 10.0,
-        "p95_lateral_drift_m": 0.30,
+        "four_robot_batch_road_corridor_pass": True,
         "nan_env_count": 0,
         "out_of_bounds_env_count": 0,
     }
@@ -383,6 +526,8 @@ def test_recovery_battery_reports_sixteen_orientation_seed_cases() -> None:
     assert report["frontier_after_recovery_m"] == pytest.approx(4.0)
     assert report["lane_reposition_count"] == 16
     assert report["lane_reposition_latency_mean_s"] == pytest.approx(0.4)
+    assert report["road_exit_case_count"] == 0
+    assert report["maximum_road_boundary_overshoot_m"] == 0.0
     assert report["race_frontier_ratio_to_parent"] == pytest.approx(10 / 9.5)
     assert report["race_frontier_delta_to_parent_m"] == pytest.approx(0.5)
     assert report["race_frontier_improved_over_parent"]
@@ -418,6 +563,26 @@ def test_recovery_battery_fails_weak_orientation_and_parent_regression() -> None
     assert not report["by_orientation"]["left"]["pass"]
     assert not report["race_frontier_at_least_90pct_parent"]
     assert not report["race_frontier_improved_over_parent"]
+    assert not report["overall_pass"]
+
+
+def test_recovery_battery_rejects_any_shared_road_exit() -> None:
+    cases = [
+        _recovery_case(orientation, seed)
+        for orientation in MODULE.RECOVERY_ORIENTATIONS
+        for seed in MODULE.RECOVERY_SEEDS
+    ]
+    cases[0]["maximum_road_boundary_overshoot_m"] = 0.01
+    cases[0]["road_exit_steps"] = 1
+
+    report = MODULE.summarize_recovery_battery(
+        cases,
+        race_report=_race_report(),
+        parent_frontier_m=9.5,
+    )
+
+    assert report["road_exit_case_count"] == 1
+    assert report["maximum_road_boundary_overshoot_m"] == pytest.approx(0.01)
     assert not report["overall_pass"]
 
 

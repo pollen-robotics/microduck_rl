@@ -133,9 +133,11 @@ def test_dashboard_normalizes_latest_self_righting_evaluation(tmp_path, monkeypa
                 "promotion_pass": True,
                 "race_frontier_improvement_pass": True,
                 "race_frontier_retention_pass": True,
-                "straight_lane_batch_pass": True,
+                "four_robot_batch_road_corridor_pass": True,
                 "four_robot_batch_target_20m_pass": False,
-                "p95_lateral_drift_pass": True,
+                "standing_on_road_target_reach_rate": 0.75,
+                "road_exit_env_count": 0,
+                "maximum_road_boundary_overshoot_m": 0.0,
                 "nan_env_count": 0,
                 "out_of_bounds_env_count": 0,
             }
@@ -159,8 +161,11 @@ def test_dashboard_normalizes_latest_self_righting_evaluation(tmp_path, monkeypa
     assert evaluation["selfRightThenRerollCount"] == 11
     assert evaluation["selfRightThenRerollRate"] == 0.6875
     assert evaluation["frontierAfterRecoveryM"] == 8.25
-    assert evaluation["laneRepositionCount"] == 3
-    assert evaluation["laneRepositionLatencyMeanS"] == 0.8
+    assert evaluation["roadReturnCount"] == 3
+    assert evaluation["roadReturnLatencyMeanS"] == 0.8
+    assert evaluation["roadExitEnvCount"] == 0
+    assert evaluation["maximumRoadOvershootM"] == 0.0
+    assert evaluation["standingOnRoadTargetRate"] == 0.75
     assert [item["id"] for item in evaluation["orientations"]] == [
         "face_down",
         "right_side",
@@ -171,9 +176,8 @@ def test_dashboard_normalizes_latest_self_righting_evaluation(tmp_path, monkeypa
         "recovery": True,
         "reroll": True,
         "raceFrontier": True,
-        "straightLane": True,
-        "target20m": False,
-        "lateralDrift": True,
+        "sharedRoad": True,
+        "target20m": True,
         "finite": True,
     }
 

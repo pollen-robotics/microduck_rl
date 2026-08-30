@@ -30,25 +30,28 @@ FLAT_FULL = 0.5
 FLAT_ZERO = math.sin(math.radians(60.0))
 MIN_FORWARD_RATE = 0.5
 MAX_DISTANCE_PER_RAD = 0.12
-LANE_HALF_WIDTH_M = 0.14
+ROAD_HALF_WIDTH_M = microduck_mdp._ROLL_SPRINT_ROAD_HALF_WIDTH
+ROAD_SAFE_FULL_REWARD_HALF_WIDTH_M = (
+    microduck_mdp._ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH
+)
+ROAD_REPOSITION_TRIGGER_M = microduck_mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M
+ROAD_REPOSITION_REARM_M = microduck_mdp._ROLL_SPRINT_REPOSITION_REARM_M
+ROAD_BOUNDARY_TOLERANCE_M = 1.0e-6
 RECOVERY_MAX_FORWARD_RATE = microduck_mdp._ROLL_SPRINT_RECOVERY_MAX_FORWARD_RATE
 RECOVERY_UPRIGHT_COS = microduck_mdp._ROLL_SPRINT_RECOVERY_UPRIGHT_COS
 RECOVERY_LATERAL_Z = microduck_mdp._ROLL_SPRINT_RECOVERY_LATERAL_Z
 RECOVERY_MIN_HEIGHT_M = microduck_mdp._ROLL_SPRINT_RECOVERY_MIN_HEIGHT_M
 RECOVERY_HOLD_STEPS = microduck_mdp._ROLL_SPRINT_RECOVERY_HOLD_STEPS
-REPOSITION_TRIGGER_M = microduck_mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M
-REPOSITION_REARM_M = microduck_mdp._ROLL_SPRINT_REPOSITION_REARM_M
 REPOSITION_HEADING_TRIGGER_RAD = (
     microduck_mdp._ROLL_SPRINT_REPOSITION_HEADING_TRIGGER_RAD
 )
-REPOSITION_HEADING_REARM_RAD = (
-    microduck_mdp._ROLL_SPRINT_REPOSITION_HEADING_REARM_RAD
-)
+REPOSITION_HEADING_REARM_RAD = microduck_mdp._ROLL_SPRINT_REPOSITION_HEADING_REARM_RAD
 SELF_RIGHT_TILT_COS = microduck_mdp._ROLL_SPRINT_SELF_RIGHT_TILT_COS
+SELF_RIGHT_STALL_RATE = microduck_mdp._ROLL_SPRINT_SELF_RIGHT_STALL_RATE
+SELF_RIGHT_STALL_SECONDS = microduck_mdp._ROLL_SPRINT_SELF_RIGHT_STALL_SECONDS
 RACE_LANE_SPACING = 0.28
 TARGET_DISTANCE_M = 20.0
-STRAIGHT_LANE_MAX_DRIFT_M = 0.08
-STRAIGHT_LANE_MAX_YAW_DEVIATION_DEG = 20.0
+ROAD_MAX_YAW_DEVIATION_DEG = 20.0
 PROMOTION = {
     "repeated_roll_rate": 0.75,
     "mean_valid_roll_count": 27.0,
@@ -56,7 +59,8 @@ PROMOTION = {
     "mean_roll_linked_distance_m": TARGET_DISTANCE_M,
     "mean_roll_linked_speed_mps": 0.5,
     "target_distance_reach_rate": 0.75,
-    "p95_lateral_drift_m": 0.40,
+    "standing_on_road_target_reach_rate": 0.75,
+    "maximum_road_boundary_overshoot_m": 0.0,
     "mean_uncredited_positive_displacement_m": 0.08,
 }
 RECOVERY_ORIENTATIONS = ("face_down", "face_up", "left", "right")
@@ -129,18 +133,31 @@ class RollCycleAuditor:
         initial_root_quat: torch.Tensor,
         initial_vertical_velocity: torch.Tensor,
         step_dt: float,
+        course_center_xy: torch.Tensor | None = None,
     ) -> None:
         self.step_dt = step_dt
         self.heading = heading_from_quat(initial_root_quat)
         self.lateral = torch.stack((-self.heading[:, 1], self.heading[:, 0]), dim=-1)
         self.start_position = initial_position_xy.clone()
         self.last_position = initial_position_xy.clone()
+        if course_center_xy is None:
+            course_center_xy = torch.zeros(
+                2,
+                device=initial_position_xy.device,
+                dtype=initial_position_xy.dtype,
+            )
+        self.course_center_xy = course_center_xy.reshape(1, 2).clone()
+        self.initial_course_lateral = (
+            (initial_position_xy - self.course_center_xy) * self.lateral
+        ).sum(dim=-1)
+        self.final_course_lateral = self.initial_course_lateral.clone()
         self.previous_vertical_velocity = initial_vertical_velocity.clone()
         count = initial_position_xy.shape[0]
         device = initial_position_xy.device
         zero = torch.zeros(count, device=device)
         false = torch.zeros(count, dtype=torch.bool, device=device)
         self.accum = zero.clone()
+        self.phase_frontier = zero.clone()
         self.head_latch = false.clone()
         self.lateral_invalid = false.clone()
         self.cycle_start_forward = zero.clone()
@@ -150,6 +167,13 @@ class RollCycleAuditor:
         self.invalid_count = torch.zeros(count, dtype=torch.long, device=device)
         self.awaiting_recovery = false.clone()
         self.awaiting_reposition = false.clone()
+        self.self_righting = false.clone()
+        self.self_right_hold_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.self_right_stall_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
         self.recovery_hold_steps = torch.zeros(count, dtype=torch.long, device=device)
         self.recovery_latency_steps = torch.zeros(
             count, dtype=torch.long, device=device
@@ -181,9 +205,7 @@ class RollCycleAuditor:
         self.recovery_sagittal_steps = torch.zeros(
             count, dtype=torch.long, device=device
         )
-        self.recovery_rate_steps = torch.zeros(
-            count, dtype=torch.long, device=device
-        )
+        self.recovery_rate_steps = torch.zeros(count, dtype=torch.long, device=device)
         self.recovery_candidate_steps = torch.zeros(
             count, dtype=torch.long, device=device
         )
@@ -194,7 +216,21 @@ class RollCycleAuditor:
             count, dtype=torch.long, device=device
         )
         self.max_lateral_drift = zero.clone()
+        self.max_abs_course_lateral = self.initial_course_lateral.abs()
+        self.max_safe_band_excursion = torch.clamp(
+            self.max_abs_course_lateral - ROAD_SAFE_FULL_REWARD_HALF_WIDTH_M,
+            min=0.0,
+        )
+        self.max_road_boundary_overshoot = torch.clamp(
+            self.max_abs_course_lateral
+            - (ROAD_HALF_WIDTH_M + ROAD_BOUNDARY_TOLERANCE_M),
+            min=0.0,
+        )
+        self.road_exit_steps = torch.zeros(count, dtype=torch.long, device=device)
+        self.active_steps = torch.zeros(count, dtype=torch.long, device=device)
         self.max_heading_deviation = zero.clone()
+        self.final_heading_deviation = zero.clone()
+        self.launch_ready = false.clone()
         self.max_forward_speed = zero.clone()
         self.peak_angular_speed = zero.clone()
         self.peak_impact_acceleration = zero.clone()
@@ -243,7 +279,8 @@ class RollCycleAuditor:
         upright_cos = 1.0 - 2.0 * (root_quat[:, 1].square() + root_quat[:, 2].square())
         displacement = position_xy - self.start_position
         forward_position = (displacement * self.heading).sum(dim=-1)
-        lateral_position = (displacement * self.lateral).sum(dim=-1)
+        lateral_displacement = (displacement * self.lateral).sum(dim=-1)
+        course_lateral = self.initial_course_lateral + lateral_displacement
         current_heading = heading_from_quat(root_quat)
         heading_dot = (current_heading * self.heading).sum(dim=-1).clamp(-1.0, 1.0)
         heading_cross = (
@@ -254,17 +291,18 @@ class RollCycleAuditor:
         heading_error_abs = heading_error.abs()
         awaiting_before = self.awaiting_recovery
         reposition_before = self.awaiting_reposition
+        self_right_before = self.self_righting
         reposition_triggered = (
             active
+            & ~self_right_before
             & ~reposition_before
             & (upright_cos > SELF_RIGHT_TILT_COS)
             & (
-                (lateral_position.abs() > REPOSITION_TRIGGER_M)
+                (course_lateral.abs() > ROAD_REPOSITION_TRIGGER_M)
                 | (heading_error_abs > REPOSITION_HEADING_TRIGGER_RAD)
             )
         )
-        waiting_before = awaiting_before | reposition_before
-        locked_before = waiting_before | reposition_triggered
+        waiting_before = awaiting_before | reposition_before | self_right_before
         awaiting_active = active & awaiting_before
         launch_ready = (
             foot_support
@@ -281,22 +319,28 @@ class RollCycleAuditor:
         rate_ready = height_ready & (omega.abs() <= RECOVERY_MAX_FORWARD_RATE)
         recovery_candidate = (
             rate_ready
-            & (lateral_position.abs() <= REPOSITION_REARM_M)
+            & (course_lateral.abs() <= ROAD_REPOSITION_REARM_M)
             & (heading_error_abs <= REPOSITION_HEADING_REARM_RAD)
         )
-        transition_foot_release = active & waiting_before & foot_support & ~head_contact
-        transition_upright = transition_foot_release & (
-            upright_cos >= RECOVERY_UPRIGHT_COS
+        self_right_candidate = active & self_right_before & launch_ready
+        old_self_right_hold = self.self_right_hold_steps
+        self_right_hold = torch.where(
+            self_right_candidate,
+            old_self_right_hold + 1,
+            torch.zeros_like(old_self_right_hold),
         )
-        transition_sagittal = transition_upright & (
-            lateral_z <= RECOVERY_LATERAL_Z
+        self_righted_now = (
+            self_right_candidate
+            & (old_self_right_hold < RECOVERY_HOLD_STEPS)
+            & (self_right_hold >= RECOVERY_HOLD_STEPS)
         )
-        transition_candidate = (
-            transition_sagittal
-            & (root_height >= RECOVERY_MIN_HEIGHT_M)
-            & (omega.abs() <= RECOVERY_MAX_FORWARD_RATE)
-            & (lateral_position.abs() <= REPOSITION_REARM_M)
+        regular_transition_candidate = (
+            active
+            & ~self_right_before
+            & (awaiting_before | reposition_before)
+            & (course_lateral.abs() <= ROAD_REPOSITION_REARM_M)
             & (heading_error_abs <= REPOSITION_HEADING_REARM_RAD)
+            & launch_ready
         )
         self.awaiting_recovery_steps += awaiting_active.to(torch.long)
         self.recovery_foot_release_steps += foot_release.to(torch.long)
@@ -306,7 +350,7 @@ class RollCycleAuditor:
         self.recovery_candidate_steps += recovery_candidate.to(torch.long)
         old_recovery_hold = self.recovery_hold_steps
         recovery_hold = torch.where(
-            transition_candidate,
+            regular_transition_candidate,
             old_recovery_hold + 1,
             torch.zeros_like(old_recovery_hold),
         )
@@ -314,11 +358,17 @@ class RollCycleAuditor:
             self.max_recovery_candidate_streak,
             recovery_hold,
         )
-        transitioned = (
-            transition_candidate
+        regular_transitioned = (
+            regular_transition_candidate
             & (old_recovery_hold < RECOVERY_HOLD_STEPS)
             & (recovery_hold >= RECOVERY_HOLD_STEPS)
         )
+        self_right_rearmed = (
+            self_righted_now
+            & (course_lateral.abs() <= ROAD_REPOSITION_REARM_M)
+            & (heading_error_abs <= REPOSITION_HEADING_REARM_RAD)
+        )
+        transitioned = regular_transitioned | self_right_rearmed
         recovered = transitioned & awaiting_before
         repositioned = transitioned & reposition_before
         recovery_latency = torch.where(
@@ -344,6 +394,7 @@ class RollCycleAuditor:
         )
         self.reposition_count += repositioned.to(torch.long)
 
+        locked_before = waiting_before | reposition_triggered
         valid_rotation = support.float() * flatness
         rotation_eligible = active & ~locked_before & ~transitioned
         signed_delta = omega * self.step_dt * valid_rotation * rotation_eligible.float()
@@ -354,6 +405,40 @@ class RollCycleAuditor:
         )
         candidate_accum = torch.clamp(old_accum + signed_delta, min=0.0)
         new_accum = torch.where(active, candidate_accum, self.accum)
+        old_phase_frontier = self.phase_frontier
+        new_phase_frontier = torch.where(
+            active,
+            torch.maximum(old_phase_frontier, new_accum),
+            old_phase_frontier,
+        )
+        progress_delta = torch.clamp(
+            new_phase_frontier - old_phase_frontier,
+            min=0.0,
+        )
+        stalled_fall_candidate = (
+            active
+            & ~waiting_before
+            & ~reposition_triggered
+            & support
+            & (upright_cos <= SELF_RIGHT_TILT_COS)
+            & (omega.abs() < SELF_RIGHT_STALL_RATE)
+            & (progress_delta <= 1.0e-8)
+        )
+        old_stall_steps = self.self_right_stall_steps
+        stall_steps = torch.where(
+            stalled_fall_candidate,
+            old_stall_steps + 1,
+            torch.zeros_like(old_stall_steps),
+        )
+        stall_threshold_steps = max(
+            1,
+            round(SELF_RIGHT_STALL_SECONDS / self.step_dt),
+        )
+        stalled_fall_now = (
+            stalled_fall_candidate
+            & (old_stall_steps < stall_threshold_steps)
+            & (stall_steps >= stall_threshold_steps)
+        )
 
         in_head_window = (new_accum > HEAD_WINDOW[0]) & (new_accum < HEAD_WINDOW[1])
         top_contact = (
@@ -376,7 +461,7 @@ class RollCycleAuditor:
         corridor_violation = (
             active
             & ~locked_before
-            & (lateral_position.abs() > LANE_HALF_WIDTH_M)
+            & (course_lateral.abs() > ROAD_HALF_WIDTH_M + ROAD_BOUNDARY_TOLERANCE_M)
         )
         heading_violation = (
             active
@@ -396,15 +481,27 @@ class RollCycleAuditor:
         completed = active & ~locked_before & (new_accum >= TARGET_ANGLE)
         valid = completed & new_head_latch & ~new_lateral_invalid
         invalid = completed & ~valid
+        completion_needs_self_right = valid & ~launch_ready
+        begin_self_right = (
+            (completion_needs_self_right | stalled_fall_now) & ~self_right_before
+        )
+        post_self_right_reposition = self_righted_now & (
+            (course_lateral.abs() > ROAD_REPOSITION_REARM_M)
+            | (heading_error_abs > REPOSITION_HEADING_REARM_RAD)
+        )
         completion_reposition = (
             valid
             & launch_ready
             & (
-                (lateral_position.abs() > REPOSITION_REARM_M)
+                (course_lateral.abs() > ROAD_REPOSITION_REARM_M)
                 | (heading_error_abs > REPOSITION_HEADING_REARM_RAD)
             )
         )
-        reposition_started = reposition_triggered | completion_reposition
+        reposition_started = (
+            reposition_triggered
+            | post_self_right_reposition
+            | completion_reposition
+        )
         rotation_budget = MAX_DISTANCE_PER_RAD * torch.clamp(
             new_accum, min=0.0, max=TARGET_ANGLE
         )
@@ -430,9 +527,11 @@ class RollCycleAuditor:
             torch.maximum(self.forward_frontier, forward_position),
             self.forward_frontier,
         )
-        state_reset = completed | transitioned | reposition_triggered
+        state_reset = (
+            completed | transitioned | reposition_started | begin_self_right
+        )
         self.cycle_start_forward = torch.where(
-            completed | transitioned | reposition_triggered,
+            invalid | transitioned,
             forward_position,
             self.cycle_start_forward,
         )
@@ -440,6 +539,11 @@ class RollCycleAuditor:
             state_reset,
             torch.zeros_like(new_accum),
             new_accum,
+        )
+        self.phase_frontier = torch.where(
+            state_reset,
+            torch.zeros_like(new_phase_frontier),
+            new_phase_frontier,
         )
         self.head_latch = torch.where(
             state_reset,
@@ -452,7 +556,7 @@ class RollCycleAuditor:
             new_lateral_invalid,
         )
         self.awaiting_recovery = torch.where(
-            valid,
+            valid | stalled_fall_now,
             torch.ones_like(awaiting_before),
             torch.where(
                 transitioned,
@@ -470,7 +574,7 @@ class RollCycleAuditor:
             ),
         )
         self.recovered_cycle_armed = torch.where(
-            valid,
+            valid | stalled_fall_now,
             torch.zeros_like(self.recovered_cycle_armed),
             torch.where(
                 recovered,
@@ -478,7 +582,34 @@ class RollCycleAuditor:
                 self.recovered_cycle_armed,
             ),
         )
-        reset_recovery_clock = transitioned | valid | reposition_started
+        next_self_righting = (
+            (self_right_before | begin_self_right) & ~self_righted_now
+        )
+        self.self_righting = torch.where(
+            active,
+            next_self_righting,
+            self.self_righting,
+        )
+        self.self_right_stall_steps = torch.where(
+            active,
+            torch.where(
+                begin_self_right,
+                torch.zeros_like(stall_steps),
+                stall_steps,
+            ),
+            self.self_right_stall_steps,
+        )
+        updated_self_right_hold = torch.where(
+            active,
+            self_right_hold,
+            self.self_right_hold_steps,
+        )
+        self.self_right_hold_steps = torch.where(
+            begin_self_right | self_righted_now,
+            torch.zeros_like(updated_self_right_hold),
+            updated_self_right_hold,
+        )
+        reset_recovery_clock = transitioned | valid | stalled_fall_now
         self.recovery_hold_steps = torch.where(
             reset_recovery_clock,
             torch.zeros_like(recovery_hold),
@@ -495,12 +626,45 @@ class RollCycleAuditor:
             reposition_latency,
         )
 
-        lateral_drift = (displacement * self.lateral).sum(dim=-1).abs()
+        lateral_drift = lateral_displacement.abs()
         self.max_lateral_drift = torch.where(
             active,
             torch.maximum(self.max_lateral_drift, lateral_drift),
             self.max_lateral_drift,
         )
+        abs_course_lateral = course_lateral.abs()
+        road_overshoot = torch.clamp(
+            abs_course_lateral - (ROAD_HALF_WIDTH_M + ROAD_BOUNDARY_TOLERANCE_M),
+            min=0.0,
+        )
+        safe_band_excursion = torch.clamp(
+            abs_course_lateral - ROAD_SAFE_FULL_REWARD_HALF_WIDTH_M,
+            min=0.0,
+        )
+        self.max_abs_course_lateral = torch.where(
+            active,
+            torch.maximum(self.max_abs_course_lateral, abs_course_lateral),
+            self.max_abs_course_lateral,
+        )
+        self.max_safe_band_excursion = torch.where(
+            active,
+            torch.maximum(self.max_safe_band_excursion, safe_band_excursion),
+            self.max_safe_band_excursion,
+        )
+        self.max_road_boundary_overshoot = torch.where(
+            active,
+            torch.maximum(self.max_road_boundary_overshoot, road_overshoot),
+            self.max_road_boundary_overshoot,
+        )
+        self.road_exit_steps += (active & (road_overshoot > 0.0)).to(torch.long)
+        self.active_steps += active.to(torch.long)
+        self.final_course_lateral = torch.where(
+            active, course_lateral, self.final_course_lateral
+        )
+        self.final_heading_deviation = torch.where(
+            active, heading_error_abs, self.final_heading_deviation
+        )
+        self.launch_ready = torch.where(active, launch_ready, self.launch_ready)
         forward_speed = (linear_velocity_w[:, :2] * self.heading).sum(dim=-1)
         self.max_forward_speed = torch.where(
             active,
@@ -535,7 +699,7 @@ class RollCycleAuditor:
             active.unsqueeze(-1), position_xy, self.last_position
         )
 
-    def summary(self, duration_s: float) -> dict[str, float | int]:
+    def summary(self, duration_s: float) -> dict[str, object]:
         displacement = self.last_position - self.start_position
         raw_forward = (displacement * self.heading).sum(dim=-1)
         uncredited = torch.clamp(
@@ -561,20 +725,79 @@ class RollCycleAuditor:
             / max(total_repositions, 1)
         )
         max_heading_deviation_deg = torch.rad2deg(self.max_heading_deviation)
-        straight_lane_pass = (
-            (self.max_lateral_drift <= STRAIGHT_LANE_MAX_DRIFT_M)
-            & (max_heading_deviation_deg <= STRAIGHT_LANE_MAX_YAW_DEVIATION_DEG)
+        final_heading_deviation_deg = torch.rad2deg(self.final_heading_deviation)
+        road_corridor_pass = (
+            (self.max_road_boundary_overshoot <= 0.0)
+            & (max_heading_deviation_deg <= ROAD_MAX_YAW_DEVIATION_DEG)
             & (self.recovered_and_rerolled_count >= 1)
             & ~self.nan_seen
         )
         target_distance_pass = self.linked_distance >= TARGET_DISTANCE_M
+        final_on_road = (
+            self.final_course_lateral.abs()
+            <= ROAD_HALF_WIDTH_M + ROAD_BOUNDARY_TOLERANCE_M
+        )
+        final_standing_on_road = (
+            self.launch_ready
+            & final_on_road
+            & (final_heading_deviation_deg <= ROAD_MAX_YAW_DEVIATION_DEG)
+            & ~self.nan_seen
+        )
+        standing_on_road_target_pass = final_standing_on_road & target_distance_pass
+        ranking = sorted(
+            (
+                index
+                for index in range(len(raw_forward))
+                if bool(final_standing_on_road[index].item())
+            ),
+            key=lambda index: (
+                -float(self.linked_distance[index].item()),
+                -float(raw_forward[index].item()),
+                index,
+            ),
+        )
+        rank_by_robot: list[int | None] = [None] * len(raw_forward)
+        for rank, index in enumerate(ranking, start=1):
+            rank_by_robot[index] = rank
+        winner_index = ranking[0] if ranking else None
         per_robot = [
             {
                 "robot_index": index,
                 "net_forward_distance_m": float(raw_forward[index].item()),
+                "credited_forward_frontier_m": float(
+                    self.linked_distance[index].item()
+                ),
                 "maximum_lateral_drift_m": float(self.max_lateral_drift[index].item()),
+                "initial_course_lateral_m": float(
+                    self.initial_course_lateral[index].item()
+                ),
+                "final_course_lateral_m": float(
+                    self.final_course_lateral[index].item()
+                ),
+                "maximum_abs_course_lateral_m": float(
+                    self.max_abs_course_lateral[index].item()
+                ),
+                "minimum_road_margin_m": float(
+                    (ROAD_HALF_WIDTH_M - self.max_abs_course_lateral[index]).item()
+                ),
+                "maximum_safe_band_excursion_m": float(
+                    self.max_safe_band_excursion[index].item()
+                ),
+                "maximum_road_boundary_overshoot_m": float(
+                    self.max_road_boundary_overshoot[index].item()
+                ),
+                "road_exit_steps": int(self.road_exit_steps[index].item()),
+                "road_exit_fraction": float(
+                    (
+                        self.road_exit_steps[index].float()
+                        / self.active_steps[index].clamp_min(1).float()
+                    ).item()
+                ),
                 "maximum_heading_yaw_deviation_deg": float(
                     max_heading_deviation_deg[index].item()
+                ),
+                "final_heading_yaw_deviation_deg": float(
+                    final_heading_deviation_deg[index].item()
                 ),
                 "valid_roll_recover_reroll_count": int(
                     self.recovered_and_rerolled_count[index].item()
@@ -587,7 +810,13 @@ class RollCycleAuditor:
                     (raw_forward[index] / duration_s).item()
                 ),
                 "target_20m_pass": bool(target_distance_pass[index].item()),
-                "straight_lane_pass": bool(straight_lane_pass[index].item()),
+                "road_corridor_pass": bool(road_corridor_pass[index].item()),
+                "final_launch_ready": bool(self.launch_ready[index].item()),
+                "final_standing_on_road": bool(final_standing_on_road[index].item()),
+                "standing_on_road_finish_pass": bool(
+                    standing_on_road_target_pass[index].item()
+                ),
+                "standing_on_road_rank": rank_by_robot[index],
             }
             for index in range(len(raw_forward))
         ]
@@ -633,14 +862,12 @@ class RollCycleAuditor:
                 "max_consecutive_candidate_steps": int(
                     self.max_recovery_candidate_streak.max().item()
                 ),
-                "foot_release_fraction": foot_release_steps
-                / max(awaiting_steps, 1),
+                "foot_release_fraction": foot_release_steps / max(awaiting_steps, 1),
                 "upright_given_foot_release_fraction": upright_steps
                 / max(foot_release_steps, 1),
                 "sagittal_given_upright_fraction": sagittal_steps
                 / max(upright_steps, 1),
-                "rate_given_sagittal_fraction": rate_steps
-                / max(sagittal_steps, 1),
+                "rate_given_sagittal_fraction": rate_steps / max(sagittal_steps, 1),
             },
             "repeated_roll_rate": float(repeated.float().mean().item()),
             "head_top_contact_count": int(self.head_top_contact_count.sum().item()),
@@ -648,6 +875,26 @@ class RollCycleAuditor:
                 torch.quantile(self.max_lateral_drift, 0.95).item()
             ),
             "maximum_lateral_drift_m": float(self.max_lateral_drift.max().item()),
+            "road_half_width_m": ROAD_HALF_WIDTH_M,
+            "road_safe_full_reward_half_width_m": (ROAD_SAFE_FULL_REWARD_HALF_WIDTH_M),
+            "road_reposition_trigger_m": ROAD_REPOSITION_TRIGGER_M,
+            "road_reposition_rearm_m": ROAD_REPOSITION_REARM_M,
+            "p95_maximum_abs_course_lateral_m": float(
+                torch.quantile(self.max_abs_course_lateral, 0.95).item()
+            ),
+            "maximum_abs_course_lateral_m": float(
+                self.max_abs_course_lateral.max().item()
+            ),
+            "maximum_safe_band_excursion_m": float(
+                self.max_safe_band_excursion.max().item()
+            ),
+            "maximum_road_boundary_overshoot_m": float(
+                self.max_road_boundary_overshoot.max().item()
+            ),
+            "road_exit_env_count": int(
+                (self.max_road_boundary_overshoot > 0.0).sum().item()
+            ),
+            "total_road_exit_steps": int(self.road_exit_steps.sum().item()),
             "maximum_heading_yaw_deviation_deg": float(
                 max_heading_deviation_deg.max().item()
             ),
@@ -659,9 +906,13 @@ class RollCycleAuditor:
             "four_robot_batch_target_20m_pass": bool(
                 len(per_robot) == 4 and target_distance_pass.all().item()
             ),
+            "standing_on_road_target_reach_rate": float(
+                standing_on_road_target_pass.float().mean().item()
+            ),
+            "standing_on_road_winner_robot_index": winner_index,
             "per_robot": per_robot,
-            "four_robot_batch_straight_lane_pass": bool(
-                len(per_robot) == 4 and straight_lane_pass.all().item()
+            "four_robot_batch_road_corridor_pass": bool(
+                len(per_robot) == 4 and road_corridor_pass.all().item()
             ),
             "mean_uncredited_positive_displacement_m": float(uncredited.mean().item()),
             "p95_peak_angular_speed_rad_s": float(
@@ -692,9 +943,13 @@ def absolute_race_goal_pass(report: dict[str, object]) -> bool:
         >= PROMOTION["mean_roll_linked_speed_mps"]
         and float(report["target_distance_reach_rate"])
         >= PROMOTION["target_distance_reach_rate"]
-        and float(report["p95_lateral_drift_m"]) <= PROMOTION["p95_lateral_drift_m"]
+        and float(report["standing_on_road_target_reach_rate"])
+        >= PROMOTION["standing_on_road_target_reach_rate"]
+        and float(report["maximum_road_boundary_overshoot_m"])
+        <= PROMOTION["maximum_road_boundary_overshoot_m"]
         and float(report["mean_uncredited_positive_displacement_m"])
         <= PROMOTION["mean_uncredited_positive_displacement_m"]
+        and int(report["road_exit_env_count"]) == 0
         and int(report["nan_env_count"]) == 0
         and int(report["out_of_bounds_env_count"]) == 0
     )
@@ -745,12 +1000,12 @@ def summarize_recovery_battery(
         orientation_report = summarize(orientation_cases)
         p95 = orientation_report["recovery_latency_p95_s"]
         orientation_report["pass"] = bool(
-            float(orientation_report["success_rate"])
-            >= RECOVERY_MIN_ORIENTATION_RATE
+            float(orientation_report["success_rate"]) >= RECOVERY_MIN_ORIENTATION_RATE
             and p95 is not None
             and float(p95) <= RECOVERY_MAX_P95_LATENCY_S
             and not any(bool(case["nan_seen"]) for case in orientation_cases)
             and not any(bool(case["out_of_bounds"]) for case in orientation_cases)
+            and not any(int(case["road_exit_steps"]) > 0 for case in orientation_cases)
         )
         by_orientation[orientation] = orientation_report
 
@@ -767,6 +1022,13 @@ def summarize_recovery_battery(
     ]
     recovery_drift = [float(case["maximum_lateral_drift_m"]) for case in cases]
     recovery_p95_drift = _p95(recovery_drift) or 0.0
+    recovery_overshoots = [
+        float(case["maximum_road_boundary_overshoot_m"]) for case in cases
+    ]
+    recovery_max_overshoot = max(recovery_overshoots, default=0.0)
+    recovery_road_exit_case_count = sum(
+        int(case["road_exit_steps"]) > 0 for case in cases
+    )
     race_frontier = float(race_report["mean_credited_forward_frontier_m"])
     if parent_frontier_m is None or parent_frontier_m <= 0.0:
         parent_ratio = None
@@ -791,7 +1053,9 @@ def summarize_recovery_battery(
         and reroll_rate >= RECOVERY_MIN_REROLL_RATE
         and all(bool(report["pass"]) for report in by_orientation.values())
         and race_frontier_improved
-        and float(race_report["p95_lateral_drift_m"]) <= 0.40
+        and bool(race_report["four_robot_batch_road_corridor_pass"])
+        and recovery_road_exit_case_count == 0
+        and recovery_max_overshoot <= 0.0
         and nan_count == 0
         and out_of_bounds_count == 0
     )
@@ -811,6 +1075,8 @@ def summarize_recovery_battery(
             else None
         ),
         "p95_lateral_drift_m": recovery_p95_drift,
+        "maximum_road_boundary_overshoot_m": recovery_max_overshoot,
+        "road_exit_case_count": recovery_road_exit_case_count,
         "nan_case_count": nan_count - int(race_report["nan_env_count"]),
         "out_of_bounds_case_count": out_of_bounds_count
         - int(race_report["out_of_bounds_env_count"]),
@@ -849,6 +1115,7 @@ def _run_recovery_battery(
                 seed=seed,
                 orientations=RECOVERY_ORIENTATIONS,
             )
+            initial_course_lateral = base_env.scene.terrain.env_origins[:, 1].clone()
         alive = torch.ones(4, dtype=torch.bool, device=base_env.device)
         nan_seen = torch.zeros_like(alive)
         out_of_bounds = torch.zeros_like(alive)
@@ -856,6 +1123,10 @@ def _run_recovery_battery(
             (4,), float("nan"), device=base_env.device, dtype=torch.float32
         )
         max_lateral_drift = torch.zeros(4, device=base_env.device)
+        max_abs_course_lateral = initial_course_lateral.abs().clone()
+        max_road_boundary_overshoot = torch.zeros(4, device=base_env.device)
+        road_exit_steps = torch.zeros(4, dtype=torch.long, device=base_env.device)
+        final_course_lateral = initial_course_lateral.clone()
         for step in range(steps):
             with torch.inference_mode():
                 observations = env.get_observations()
@@ -874,6 +1145,25 @@ def _run_recovery_battery(
                     base_env._roll_sprint_lateral_displacement.abs(),
                     nan=float("inf"),
                 ),
+            )
+            course_lateral = initial_course_lateral + torch.nan_to_num(
+                base_env._roll_sprint_lateral_displacement,
+                nan=float("inf"),
+            )
+            abs_course_lateral = course_lateral.abs()
+            road_overshoot = torch.clamp(
+                abs_course_lateral - (ROAD_HALF_WIDTH_M + ROAD_BOUNDARY_TOLERANCE_M),
+                min=0.0,
+            )
+            max_abs_course_lateral = torch.maximum(
+                max_abs_course_lateral, abs_course_lateral
+            )
+            max_road_boundary_overshoot = torch.maximum(
+                max_road_boundary_overshoot, road_overshoot
+            )
+            road_exit_steps += (alive & (road_overshoot > 0.0)).to(torch.long)
+            final_course_lateral = torch.where(
+                alive, course_lateral, final_course_lateral
             )
             self_righted = base_env._roll_sprint_self_righted_now & alive
             first_edge = self_righted & torch.isnan(first_latency)
@@ -917,9 +1207,18 @@ def _run_recovery_battery(
                         if reposition_events
                         else None
                     ),
-                    "maximum_lateral_drift_m": float(
-                        max_lateral_drift[index].item()
+                    "maximum_lateral_drift_m": float(max_lateral_drift[index].item()),
+                    "initial_course_lateral_m": float(
+                        initial_course_lateral[index].item()
                     ),
+                    "final_course_lateral_m": float(final_course_lateral[index].item()),
+                    "maximum_abs_course_lateral_m": float(
+                        max_abs_course_lateral[index].item()
+                    ),
+                    "maximum_road_boundary_overshoot_m": float(
+                        max_road_boundary_overshoot[index].item()
+                    ),
+                    "road_exit_steps": int(road_exit_steps[index].item()),
                     "nan_seen": bool(nan_seen[index].item()),
                     "out_of_bounds": bool(out_of_bounds[index].item()),
                 }
@@ -981,12 +1280,20 @@ def main() -> int:
     race_forward_starts = microduck_mdp._roll_sprint_forward_position(
         base_env, robot, race_headings
     )
+    expected_lane_centers = torch.tensor(
+        [-0.42, -0.14, 0.14, 0.42],
+        device=race_origins.device,
+        dtype=race_origins.dtype,
+    )
+    race_body_headings = heading_from_quat(robot.data.root_link_quat_w)
+    race_yaws = torch.atan2(race_body_headings[:, 1], race_body_headings[:, 0])
     race_alignment_pass = bool(
         torch.allclose(
             race_forward_starts,
-            race_forward_starts[:1].expand_as(race_forward_starts),
+            torch.zeros_like(race_forward_starts),
             atol=1.0e-7,
         )
+        and torch.allclose(race_origins[:, 1], expected_lane_centers, atol=1.0e-7)
         and torch.allclose(
             race_headings,
             torch.tensor(
@@ -996,6 +1303,7 @@ def main() -> int:
             ),
             atol=1.0e-7,
         )
+        and torch.allclose(race_yaws, torch.zeros_like(race_yaws), atol=1.0e-7)
     )
     env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
     runner_cls = load_runner_cls(TASK_ID) or MjlabOnPolicyRunner
@@ -1014,6 +1322,7 @@ def main() -> int:
         robot.data.root_link_quat_w,
         robot.data.root_link_lin_vel_w[:, 2],
         base_env.step_dt,
+        course_center_xy=race_origins[:, :2].mean(dim=0),
     )
     alive = torch.ones(args.num_envs, dtype=torch.bool, device=args.device)
     termination_seen = {
@@ -1065,7 +1374,7 @@ def main() -> int:
 
     race_summary = auditor.summary(args.duration)
     report: dict[str, object] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "task": TASK_ID,
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": _sha256(checkpoint),
@@ -1076,7 +1385,10 @@ def main() -> int:
             "seed": env_cfg.seed,
             "projected_forward_start_m": race_forward_starts.cpu().tolist(),
             "lane_center_y_m": race_origins[:, 1].cpu().tolist(),
+            "body_yaw_rad": race_yaws.cpu().tolist(),
             "reward_heading_xy": race_headings.cpu().tolist(),
+            "shared_road_boundary_y_m": [-ROAD_HALF_WIDTH_M, ROAD_HALF_WIDTH_M],
+            "shared_road_width_m": 2.0 * ROAD_HALF_WIDTH_M,
             "alignment_pass": race_alignment_pass,
         },
         **race_summary,
@@ -1104,10 +1416,11 @@ def main() -> int:
     report["race_frontier_improvement_pass"] = recovery_battery[
         "race_frontier_improved_over_parent"
     ]
-    report["straight_lane_batch_pass"] = report[
-        "four_robot_batch_straight_lane_pass"
-    ]
-    report["p95_lateral_drift_pass"] = report["p95_lateral_drift_m"] <= 0.40
+    report["shared_road_batch_pass"] = report["four_robot_batch_road_corridor_pass"]
+    report["shared_road_boundary_pass"] = bool(
+        int(report["road_exit_env_count"]) == 0
+        and float(report["maximum_road_boundary_overshoot_m"]) <= 0.0
+    )
     final_recovery_pass = bool(
         float(recovery_battery["success_rate"]) >= 0.90
         and all(
@@ -1120,9 +1433,10 @@ def main() -> int:
     report["acceptance_pass"] = bool(
         report["absolute_race_goal_pass"]
         and final_recovery_pass
-        and report["straight_lane_batch_pass"]
+        and race_alignment_pass
+        and report["shared_road_batch_pass"]
         and report["race_frontier_improvement_pass"]
-        and report["p95_lateral_drift_pass"]
+        and report["shared_road_boundary_pass"]
     )
     output = args.output or checkpoint.with_suffix(".roll-sprint-eval.json")
     _write_json_atomic(output.resolve(), report)

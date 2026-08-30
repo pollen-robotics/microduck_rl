@@ -67,7 +67,10 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         weight=1.5,
         params={
             "max_paid_rate": 5.0,
-            "lane_half_width": microduck_mdp._ROLL_SPRINT_LANE_HALF_WIDTH,
+            "road_half_width": microduck_mdp._ROLL_SPRINT_ROAD_HALF_WIDTH,
+            "road_safe_half_width": (
+                microduck_mdp._ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH
+            ),
         },
     )
     # Primary race score: signed net forward frontier released only after a
@@ -85,7 +88,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     )
     cfg.rewards["roll_sprint_recovery"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_recovery_rate,
-        # A53 measured recovery extinction before the first lane stage. This
+        # A53 measured recovery extinction before the first course stage. This
         # remains a single latched event and is still much smaller than the
         # valid frontier released by even one useful roll.
         weight=1.0,
@@ -106,15 +109,15 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     )
     cfg.rewards["roll_sprint_self_right_upward"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_self_right_upward_velocity,
-        weight=0.0,
+        weight=1.0,
     )
     cfg.rewards["roll_sprint_self_right_fallen_tax"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_self_right_fallen_tax,
-        weight=0.0,
+        weight=-0.25,
     )
     cfg.rewards["roll_sprint_self_right_success"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_self_right_success_rate,
-        weight=0.0,
+        weight=5.0,
     )
     cfg.rewards["roll_sprint_head_pivot"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_head_pivot,
@@ -141,10 +144,14 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     cfg.rewards["roll_sprint_straightness"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_straightness_penalty,
         weight=-3.0,
-        params={"deadband": 0.01},
+        params={
+            "road_safe_half_width": (
+                microduck_mdp._ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH
+            )
+        },
     )
-    cfg.rewards["roll_sprint_lane_centering"] = RewardTermCfg(
-        func=microduck_mdp.roll_sprint_lane_centering_progress,
+    cfg.rewards["roll_sprint_road_return"] = RewardTermCfg(
+        func=microduck_mdp.roll_sprint_road_return_progress,
         weight=4.0,
     )
     cfg.rewards["roll_sprint_heading_alignment"] = RewardTermCfg(
@@ -180,12 +187,15 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
             "standing_prob": 1.0 if play else 0.45,
             "midroll_prob": 0.0 if play else 0.10,
             "postroll_prob": 0.0 if play else 0.15,
-            "crouch_prob": 0.0 if play else 0.15,
-            "ground_recovery_prob": 0.0 if play else 0.15,
+            "crouch_prob": 0.0 if play else 0.10,
+            "ground_recovery_prob": 0.0 if play else 0.20,
             "ground_face_down_prob": 0.25,
             "ground_face_up_prob": 0.25,
             "ground_left_prob": 0.25,
             "ground_right_prob": 0.25,
+            "road_interior_prob": 1.0 if play else 0.70,
+            "road_edge_prob": 0.0 if play else 0.20,
+            "road_return_prob": 0.0 if play else 0.10,
             "standing_z_min": old_reset.params["standing_z_min"],
             "standing_z_max": old_reset.params["standing_z_max"],
             "standing_tilt_max": old_reset.params["standing_tilt_max"],
@@ -202,7 +212,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     )
 
     # Keep the 61D command block shape-compatible. The roll state uses its
-    # existing twist slots for self-right mode, lane return, and reset-heading
+    # existing twist slots for self-right mode, road return, and reset-heading
     # correction without adding an actor observation.
     command = cfg.commands["twist"]
     command.resampling_time_range = (EPISODE_LENGTH_S, EPISODE_LENGTH_S * 2)
@@ -281,8 +291,8 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                         "standing_prob": 0.45,
                         "midroll_prob": 0.10,
                         "postroll_prob": 0.15,
-                        "crouch_prob": 0.15,
-                        "ground_recovery_prob": 0.15,
+                        "crouch_prob": 0.10,
+                        "ground_recovery_prob": 0.20,
                         "ground_face_down_prob": 0.25,
                         "ground_face_up_prob": 0.25,
                         "ground_left_prob": 0.25,
@@ -335,29 +345,12 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         },
     )
 
-    lane_width_stages = (
-        [{"step": 0, "width": microduck_mdp._ROLL_SPRINT_LANE_HALF_WIDTH}]
-        if play
-        else [
-            {
-                "step": 0,
-                "width": microduck_mdp._ROLL_SPRINT_BOOTSTRAP_LANE_HALF_WIDTH,
-            },
-            # A63 improved raw/frontier distance while all four canonical
-            # robots reached 168--180 degrees yaw and p95 drift 1.49 m. A 2 m
-            # bootstrap explicitly paid that failure. Teach a correctable
-            # corridor first and reach the canonical gate before mid-training.
-            {"step": 250 * 24, "width": 0.28},
-            {"step": 750 * 24, "width": 0.20},
-            {
-                "step": 1500 * 24,
-                "width": microduck_mdp._ROLL_SPRINT_LANE_HALF_WIDTH,
-            },
-        ]
-    )
-    cfg.curriculum["roll_sprint_lane_half_width"] = CurriculumTermCfg(
+    road_width_stages = [
+        {"step": 0, "width": microduck_mdp._ROLL_SPRINT_ROAD_HALF_WIDTH}
+    ]
+    cfg.curriculum["roll_sprint_road_half_width"] = CurriculumTermCfg(
         func=microduck_mdp.roll_sprint_lane_half_width_curriculum,
-        params={"width_stages": lane_width_stages},
+        params={"width_stages": road_width_stages},
     )
     cfg.curriculum["roll_sprint_invalid_cycle_weight"] = CurriculumTermCfg(
         func=microduck_mdp.reward_weight,
@@ -412,8 +405,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
             "roll_sprint_self_right_upward_weight",
             "roll_sprint_self_right_upward",
             [
-                {"step": 0, "weight": 0.0},
-                {"step": 400 * 24, "weight": 1.0},
+                {"step": 0, "weight": 1.0},
                 {"step": 1000 * 24, "weight": 2.0},
             ],
         ),
@@ -421,8 +413,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
             "roll_sprint_self_right_fallen_tax_weight",
             "roll_sprint_self_right_fallen_tax",
             [
-                {"step": 0, "weight": 0.0},
-                {"step": 400 * 24, "weight": -0.25},
+                {"step": 0, "weight": -0.25},
                 {"step": 1000 * 24, "weight": -0.5},
             ],
         ),
@@ -430,8 +421,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
             "roll_sprint_self_right_success_weight",
             "roll_sprint_self_right_success",
             [
-                {"step": 0, "weight": 0.0},
-                {"step": 400 * 24, "weight": 5.0},
+                {"step": 0, "weight": 5.0},
                 {"step": 1000 * 24, "weight": 10.0},
             ],
         ),

@@ -27,7 +27,9 @@ DEFAULT_INTERVAL_SECONDS = 150.0
 RECORDING_STEPS = 1000
 RECOVERY_RECORDING_STEPS = 600
 SIMULATION_HZ = 50
-OUTPUT_FPS = 12.5
+# Ten rendered frames per simulated second keeps the full 20 s race readable
+# while leaving enough wall-clock margin to start a fresh clip every 150 s.
+OUTPUT_FPS = 10.0
 OUTPUT_VIDEO_SECONDS = 20.0
 RECORDING_FRAME_STRIDE = round(
     RECORDING_STEPS / (OUTPUT_FPS * OUTPUT_VIDEO_SECONDS)

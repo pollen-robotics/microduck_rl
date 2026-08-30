@@ -11486,11 +11486,12 @@ _ROLL_SPRINT_HEAD_SENSOR = _ROULADE_HEAD_SENSOR
 _ROLL_SPRINT_FEET_SENSOR = "feet_ground_contact"
 _ROLL_SPRINT_MIN_FORWARD_RATE = 0.5
 _ROLL_SPRINT_MAX_DISTANCE_PER_RAD = 0.12
-_ROLL_SPRINT_LANE_HALF_WIDTH = 0.14
-# A63 visibly left every canonical lane within 3--7 s while its 2 m bootstrap
-# gate still paid the motion. Start close enough that wandering cannot be the
-# learned roll strategy, then tighten to the canonical 14 cm gate in cfg.
-_ROLL_SPRINT_BOOTSTRAP_LANE_HALF_WIDTH = 0.40
+_ROLL_SPRINT_ROAD_HALF_WIDTH = 0.56
+_ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH = 0.42
+# Compatibility aliases for older checkpoint tooling. These now describe the
+# fixed shared road, not an individual start lane.
+_ROLL_SPRINT_LANE_HALF_WIDTH = _ROLL_SPRINT_ROAD_HALF_WIDTH
+_ROLL_SPRINT_BOOTSTRAP_LANE_HALF_WIDTH = _ROLL_SPRINT_ROAD_HALF_WIDTH
 _ROLL_SPRINT_LATERAL_INVALID_Z = math.sin(math.radians(60.0))
 # A launch-ready recovery is deliberately dynamic. Normal MicroDuck roll
 # transit is 3.5--5.5 rad/s. The frozen parent policy produced 94 feet-down,
@@ -11508,11 +11509,11 @@ _ROLL_SPRINT_SELF_RIGHT_TILT_COS = math.cos(math.radians(60.0))
 _ROLL_SPRINT_SELF_RIGHT_STALL_RATE = 1.0
 _ROLL_SPRINT_SELF_RIGHT_STALL_SECONDS = 0.30
 _ROLL_SPRINT_SELF_RIGHT_HEIGHT_CEILING_M = 0.115
-# Leaving a 28 cm-wide lane aborts the active roll. The policy must return well
-# inside the lane before phase zero is rearmed. Hysteresis prevents a noisy
-# boundary contact from rapidly toggling the state.
-_ROLL_SPRINT_REPOSITION_TRIGGER_M = _ROLL_SPRINT_LANE_HALF_WIDTH
-_ROLL_SPRINT_REPOSITION_REARM_M = 0.07
+# The four visible lane guides share one 1.12 m-wide course road. Internal lane
+# crossings are legal. Reposition begins before the hard road edge, rearms with
+# hysteresis, and aims only for the nearest safe edge instead of the center.
+_ROLL_SPRINT_REPOSITION_TRIGGER_M = 0.50
+_ROLL_SPRINT_REPOSITION_REARM_M = 0.46
 _ROLL_SPRINT_REPOSITION_LATERAL_COMMAND_MPS = 0.20
 _ROLL_SPRINT_REPOSITION_LATERAL_KP = 2.0
 _ROLL_SPRINT_REPOSITION_HEADING_TRIGGER_RAD = math.radians(20.0)
@@ -11612,9 +11613,19 @@ def _roll_sprint_state(env: ManagerBasedRlEnv) -> None:
     env._roll_sprint_lateral_origin = z.clone()
     env._roll_sprint_lateral_displacement = z.clone()
     env._roll_sprint_lane_centering_delta = z.clone()
-    env._roll_sprint_lane_half_width_m = _ROLL_SPRINT_LANE_HALF_WIDTH
+    env._roll_sprint_lane_half_width_m = _ROLL_SPRINT_ROAD_HALF_WIDTH
+    env._roll_sprint_course_center_xy_w = torch.zeros(
+        (env.num_envs, 2), device=env.device
+    )
+    env._roll_sprint_course_lateral_position = z.clone()
     env._roll_sprint_heading_w = torch.zeros((env.num_envs, 2), device=env.device)
     env._roll_sprint_heading_ready = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_reset_heading_override_w = torch.zeros(
+        (env.num_envs, 2), device=env.device
+    )
+    env._roll_sprint_reset_heading_override_valid = torch.zeros(
         env.num_envs, dtype=torch.bool, device=env.device
     )
     env._roll_sprint_heading_error_rad = z.clone()
@@ -11672,10 +11683,13 @@ def _roll_sprint_forward_position(
     asset: Entity,
     heading_w: torch.Tensor,
 ) -> torch.Tensor:
-    """Project root position onto the heading selected at reset."""
+    """Project root position onto the frozen global course heading."""
     position_xy = torch.nan_to_num(asset.data.root_link_pos_w[:, :2], nan=0.0)
-    origins_xy = torch.nan_to_num(env.scene.terrain.env_origins[:, :2], nan=0.0)
-    return ((position_xy - origins_xy) * heading_w).sum(dim=-1)
+    course_center_xy = torch.nan_to_num(
+        env._roll_sprint_course_center_xy_w,
+        nan=0.0,
+    )
+    return ((position_xy - course_center_xy) * heading_w).sum(dim=-1)
 
 
 def _roll_sprint_lateral_position(
@@ -11683,11 +11697,14 @@ def _roll_sprint_lateral_position(
     asset: Entity,
     heading_w: torch.Tensor,
 ) -> torch.Tensor:
-    """Project root position onto the reset-heading lane's lateral axis."""
+    """Project root position onto the frozen shared course's lateral axis."""
     position_xy = torch.nan_to_num(asset.data.root_link_pos_w[:, :2], nan=0.0)
-    origins_xy = torch.nan_to_num(env.scene.terrain.env_origins[:, :2], nan=0.0)
+    course_center_xy = torch.nan_to_num(
+        env._roll_sprint_course_center_xy_w,
+        nan=0.0,
+    )
     lateral_w = torch.stack((-heading_w[:, 1], heading_w[:, 0]), dim=-1)
-    return ((position_xy - origins_xy) * lateral_w).sum(dim=-1)
+    return ((position_xy - course_center_xy) * lateral_w).sum(dim=-1)
 
 
 def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
@@ -11708,10 +11725,28 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
 
     heading = _roll_sprint_heading(asset)
     not_ready = active & ~env._roll_sprint_heading_ready
+    use_reset_heading = not_ready & env._roll_sprint_reset_heading_override_valid
+    initial_heading = torch.where(
+        use_reset_heading.unsqueeze(-1),
+        env._roll_sprint_reset_heading_override_w,
+        heading,
+    )
     reference_heading = torch.where(
-        not_ready.unsqueeze(-1), heading, env._roll_sprint_heading_w
+        not_ready.unsqueeze(-1), initial_heading, env._roll_sprint_heading_w
     )
     env._roll_sprint_heading_w = reference_heading
+    position_xy = torch.nan_to_num(asset.data.root_link_pos_w[:, :2], nan=0.0)
+    reference_lateral_w = torch.stack(
+        (-reference_heading[:, 1], reference_heading[:, 0]), dim=-1
+    )
+    initialized_course_center_xy = position_xy - (
+        env._roll_sprint_course_lateral_position.unsqueeze(-1) * reference_lateral_w
+    )
+    env._roll_sprint_course_center_xy_w = torch.where(
+        not_ready.unsqueeze(-1),
+        initialized_course_center_xy,
+        env._roll_sprint_course_center_xy_w,
+    )
     heading_error = _roll_sprint_signed_heading_error(heading, reference_heading)
     heading_error_abs = heading_error.abs()
     previous_heading_error_abs = torch.where(
@@ -11746,20 +11781,38 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
         not_ready, lateral_position, env._roll_sprint_lateral_origin
     )
     env._roll_sprint_heading_ready |= not_ready
+    env._roll_sprint_reset_heading_override_valid &= ~not_ready
     env._roll_sprint_forward_position = torch.where(
         active, position, env._roll_sprint_forward_position
     )
     lateral_displacement = lateral_position - lateral_origin
+    previous_course_lateral = torch.where(
+        not_ready,
+        lateral_position,
+        env._roll_sprint_course_lateral_position,
+    )
+    previous_road_edge_excess = torch.clamp(
+        previous_course_lateral.abs() - _ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH,
+        min=0.0,
+    )
+    road_edge_excess = torch.clamp(
+        lateral_position.abs() - _ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH,
+        min=0.0,
+    )
     env._roll_sprint_lane_centering_delta = torch.where(
         active,
-        env._roll_sprint_lateral_displacement.abs()
-        - lateral_displacement.abs(),
+        previous_road_edge_excess - road_edge_excess,
         env._roll_sprint_lane_centering_delta,
     )
     env._roll_sprint_lateral_displacement = torch.where(
         active,
         lateral_displacement,
         env._roll_sprint_lateral_displacement,
+    )
+    env._roll_sprint_course_lateral_position = torch.where(
+        active,
+        lateral_position,
+        env._roll_sprint_course_lateral_position,
     )
 
     support = _sensor_any_contact(env, _ROLL_SPRINT_SUPPORT_SENSOR)
@@ -11798,7 +11851,7 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
         & ~reposition_before
         & (upright_cos > _ROLL_SPRINT_SELF_RIGHT_TILT_COS)
         & (
-            (lateral_displacement.abs() > _ROLL_SPRINT_REPOSITION_TRIGGER_M)
+            (lateral_position.abs() > _ROLL_SPRINT_REPOSITION_TRIGGER_M)
             | (
                 heading_error_abs
                 > _ROLL_SPRINT_REPOSITION_HEADING_TRIGGER_RAD
@@ -11862,7 +11915,7 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
         active
         & ~self_right_before
         & (awaiting_before | reposition_before)
-        & (lateral_displacement.abs() <= _ROLL_SPRINT_REPOSITION_REARM_M)
+        & (lateral_position.abs() <= _ROLL_SPRINT_REPOSITION_REARM_M)
         & (heading_error_abs <= _ROLL_SPRINT_REPOSITION_HEADING_REARM_RAD)
         & launch_ready
     )
@@ -11878,7 +11931,7 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
         & (recovery_hold >= _ROLL_SPRINT_RECOVERY_HOLD_STEPS)
     )
     self_right_rearmed_now = self_righted_now & (
-        lateral_displacement.abs() <= _ROLL_SPRINT_REPOSITION_REARM_M
+        lateral_position.abs() <= _ROLL_SPRINT_REPOSITION_REARM_M
     ) & (heading_error_abs <= _ROLL_SPRINT_REPOSITION_HEADING_REARM_RAD)
     transitioned_now = regular_transitioned_now | self_right_rearmed_now
     recovered_now = transitioned_now & awaiting_before
@@ -12030,7 +12083,7 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
     corridor_violation = (
         active
         & ~locked_before
-        & (lateral_displacement.abs() > env._roll_sprint_lane_half_width_m)
+        & (lateral_position.abs() > env._roll_sprint_lane_half_width_m)
     )
     heading_violation = (
         active
@@ -12109,14 +12162,14 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
         (completion_needs_self_right | stalled_fall_now) & ~self_right_before
     )
     post_self_right_reposition = self_righted_now & (
-        (lateral_displacement.abs() > _ROLL_SPRINT_REPOSITION_REARM_M)
+        (lateral_position.abs() > _ROLL_SPRINT_REPOSITION_REARM_M)
         | (heading_error_abs > _ROLL_SPRINT_REPOSITION_HEADING_REARM_RAD)
     )
     completion_reposition = (
         (valid_completion | bootstrap_completion)
         & launch_ready
         & (
-            (lateral_displacement.abs() > _ROLL_SPRINT_REPOSITION_REARM_M)
+            (lateral_position.abs() > _ROLL_SPRINT_REPOSITION_REARM_M)
             | (heading_error_abs > _ROLL_SPRINT_REPOSITION_HEADING_REARM_RAD)
         )
     )
@@ -12368,6 +12421,9 @@ def reset_roll_sprint_state(
     tuck_overrides: Optional[dict] = None,
     tuck_factor_range: tuple = (0.3, 1.0),
     joint_noise_std: float = 0.08,
+    road_interior_prob: float = 0.70,
+    road_edge_prob: float = 0.20,
+    road_return_prob: float = 0.10,
 ) -> None:
     """Reset pose plus every cyclic sprint buffer for the selected envs."""
     if env_ids is None or len(env_ids) == 0:
@@ -12457,6 +12513,44 @@ def reset_roll_sprint_state(
     spawn_kind[is_postroll] = 7
     spawn_kind[is_crouch] = 5
     spawn_kind[is_ground] = ground_orientation
+    road_total = road_interior_prob + road_edge_prob + road_return_prob
+    if road_total <= 0.0:
+        raise ValueError("roll-sprint road start probabilities need positive mass")
+    road_sample = torch.rand(len(env_ids), device=env.device) * road_total
+    is_road_interior = road_sample < road_interior_prob
+    is_road_edge = (road_sample >= road_interior_prob) & (
+        road_sample < road_interior_prob + road_edge_prob
+    )
+    road_sign = torch.where(
+        torch.rand(len(env_ids), device=env.device) < 0.5,
+        -torch.ones(len(env_ids), device=env.device),
+        torch.ones(len(env_ids), device=env.device),
+    )
+    road_lateral_position = (
+        torch.rand(len(env_ids), device=env.device) * 0.70 - 0.35
+    )
+    road_lateral_position = torch.where(
+        is_road_edge,
+        road_sign
+        * (
+            _ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH
+            + torch.rand(len(env_ids), device=env.device) * 0.07
+        ),
+        road_lateral_position,
+    )
+    road_lateral_position = torch.where(
+        ~(is_road_interior | is_road_edge),
+        road_sign
+        * (
+            0.51
+            + torch.rand(len(env_ids), device=env.device) * 0.13
+        ),
+        road_lateral_position,
+    )
+    spawn_awaiting_reposition = (
+        road_lateral_position.abs() > _ROLL_SPRINT_REPOSITION_TRIGGER_M
+    )
+    spawn_cycle_eligible &= ~spawn_awaiting_reposition
     _reset_roll_sprint_buffers(
         env,
         env_ids,
@@ -12464,12 +12558,20 @@ def reset_roll_sprint_state(
         spawn_head_latch=torch.zeros(len(env_ids), dtype=torch.bool, device=env.device),
         spawn_cycle_eligible=spawn_cycle_eligible,
         spawn_awaiting_recovery=spawn_self_righting,
+        spawn_awaiting_reposition=spawn_awaiting_reposition,
         spawn_self_righting=spawn_self_righting,
         spawn_recovery_kind=spawn_kind,
+        spawn_course_lateral_position=road_lateral_position,
     )
     if len(ground_ids) > 0:
-        env._roll_sprint_heading_w[ground_ids] = ground_heading
-        env._roll_sprint_heading_ready[ground_ids] = True
+        env._roll_sprint_reset_heading_override_w[ground_ids] = ground_heading
+        env._roll_sprint_reset_heading_override_valid[ground_ids] = True
+    # Raw qpos writes above do not necessarily refresh ``asset.data`` before
+    # this reset event returns. Keep the intended road coordinate in the
+    # buffer, then freeze heading and course center from the first post-reset
+    # physics state in ``_update_roll_sprint_state``. Canonical evaluation
+    # helpers call ``sim.forward()`` and initialize their fixed +x frame
+    # explicitly, so they remain exactly deterministic.
 
 
 def _reset_roll_sprint_buffers(
@@ -12479,8 +12581,10 @@ def _reset_roll_sprint_buffers(
     spawn_head_latch: torch.Tensor | None = None,
     spawn_cycle_eligible: torch.Tensor | None = None,
     spawn_awaiting_recovery: torch.Tensor | None = None,
+    spawn_awaiting_reposition: torch.Tensor | None = None,
     spawn_self_righting: torch.Tensor | None = None,
     spawn_recovery_kind: torch.Tensor | None = None,
+    spawn_course_lateral_position: torch.Tensor | None = None,
 ) -> None:
     """Reset only cyclic sprint bookkeeping, preserving other env state."""
     _roll_sprint_state(env)
@@ -12501,16 +12605,22 @@ def _reset_roll_sprint_buffers(
         spawn_self_righting = torch.zeros(
             len(env_ids), dtype=torch.bool, device=env.device
         )
+    if spawn_awaiting_reposition is None:
+        spawn_awaiting_reposition = torch.zeros(
+            len(env_ids), dtype=torch.bool, device=env.device
+        )
     if spawn_recovery_kind is None:
         spawn_recovery_kind = torch.zeros(
             len(env_ids), dtype=torch.long, device=env.device
         )
+    if spawn_course_lateral_position is None:
+        spawn_course_lateral_position = torch.zeros(len(env_ids), device=env.device)
     env._roll_sprint_accum[env_ids] = spawn_accum
     env._roll_sprint_phase_frontier[env_ids] = spawn_accum
     env._roll_sprint_head_latch[env_ids] = spawn_head_latch
     env._roll_sprint_cycle_eligible[env_ids] = spawn_cycle_eligible
     env._roll_sprint_awaiting_recovery[env_ids] = spawn_awaiting_recovery
-    env._roll_sprint_awaiting_reposition[env_ids] = False
+    env._roll_sprint_awaiting_reposition[env_ids] = spawn_awaiting_reposition
     env._roll_sprint_self_righting[env_ids] = spawn_self_righting
     env._roll_sprint_self_right_started_now[env_ids] = False
     env._roll_sprint_self_righted_now[env_ids] = False
@@ -12548,8 +12658,14 @@ def _reset_roll_sprint_buffers(
     env._roll_sprint_lateral_origin[env_ids] = 0.0
     env._roll_sprint_lateral_displacement[env_ids] = 0.0
     env._roll_sprint_lane_centering_delta[env_ids] = 0.0
+    env._roll_sprint_course_center_xy_w[env_ids] = 0.0
+    env._roll_sprint_course_lateral_position[env_ids] = (
+        spawn_course_lateral_position
+    )
     env._roll_sprint_heading_w[env_ids] = 0.0
     env._roll_sprint_heading_ready[env_ids] = False
+    env._roll_sprint_reset_heading_override_w[env_ids] = 0.0
+    env._roll_sprint_reset_heading_override_valid[env_ids] = False
     env._roll_sprint_heading_error_rad[env_ids] = 0.0
     env._roll_sprint_heading_alignment_delta[env_ids] = 0.0
     env._roll_sprint_progress_delta[env_ids] = 0.0
@@ -12590,8 +12706,14 @@ def arrange_roll_sprint_race_start(
     env.sim.forward()
 
     env_ids = torch.arange(env.num_envs, device=env.device)
-    _reset_roll_sprint_buffers(env, env_ids)
+    course_lateral_position = lane_indices * lane_spacing
+    _reset_roll_sprint_buffers(
+        env,
+        env_ids,
+        spawn_course_lateral_position=course_lateral_position,
+    )
     heading = _roll_sprint_heading(asset)
+    env._roll_sprint_course_center_xy_w.zero_()
     forward_position = _roll_sprint_forward_position(env, asset, heading)
     lateral_position = _roll_sprint_lateral_position(env, asset, heading)
     env._roll_sprint_heading_w.copy_(heading)
@@ -12604,6 +12726,7 @@ def arrange_roll_sprint_race_start(
     env._roll_sprint_forward_frontier.copy_(forward_position)
     env._roll_sprint_lateral_origin.copy_(lateral_position)
     env._roll_sprint_lateral_displacement.zero_()
+    env._roll_sprint_course_lateral_position.copy_(lateral_position)
     env._roll_sprint_lane_centering_delta.zero_()
     return origins
 
@@ -12678,9 +12801,11 @@ def arrange_roll_sprint_recovery_start(
         spawn_awaiting_recovery=true,
         spawn_self_righting=true,
         spawn_recovery_kind=codes,
+        spawn_course_lateral_position=lane_indices * lane_spacing,
     )
     heading = torch.zeros((env.num_envs, 2), device=env.device, dtype=pose.dtype)
     heading[:, 0] = 1.0
+    env._roll_sprint_course_center_xy_w.zero_()
     forward_position = _roll_sprint_forward_position(env, asset, heading)
     lateral_position = _roll_sprint_lateral_position(env, asset, heading)
     env._roll_sprint_heading_w.copy_(heading)
@@ -12693,6 +12818,7 @@ def arrange_roll_sprint_recovery_start(
     env._roll_sprint_forward_frontier.copy_(forward_position)
     env._roll_sprint_lateral_origin.copy_(lateral_position)
     env._roll_sprint_lateral_displacement.zero_()
+    env._roll_sprint_course_lateral_position.copy_(lateral_position)
     env._roll_sprint_lane_centering_delta.zero_()
     return origins
 
@@ -12700,7 +12826,8 @@ def arrange_roll_sprint_recovery_start(
 def roll_sprint_progress(
     env: ManagerBasedRlEnv,
     max_paid_rate: float = 5.0,
-    lane_half_width: float = 0.14,
+    road_half_width: float = _ROLL_SPRINT_ROAD_HALF_WIDTH,
+    road_safe_half_width: float = _ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Pay valid forward-roll progress, but never a known-invalid cycle."""
@@ -12710,14 +12837,24 @@ def roll_sprint_progress(
         env._roll_sprint_progress_delta,
         max=max_paid_rate * env.step_dt,
     )
-    active_lane_half_width = getattr(
+    active_road_half_width = getattr(
         env,
         "_roll_sprint_lane_half_width_m",
-        lane_half_width,
+        road_half_width,
     )
-    lane_quality = torch.clamp(
+    safe_half_width = min(road_safe_half_width, active_road_half_width)
+    road_edge_fraction = torch.clamp(
+        (
+            env._roll_sprint_course_lateral_position.abs()
+            - safe_half_width
+        )
+        / max(active_road_half_width - safe_half_width, 1.0e-6),
+        min=0.0,
+        max=1.0,
+    )
+    road_quality = torch.clamp(
         1.0
-        - (env._roll_sprint_lateral_displacement / active_lane_half_width).square(),
+        - road_edge_fraction.square(),
         min=0.0,
         max=1.0,
     )
@@ -12732,7 +12869,7 @@ def roll_sprint_progress(
     )
     # Bootstrap through the complete head-contact opportunity. Once that phase
     # has passed, the rest of the dense cycle is eligible only if the required
-    # flat head-top contact was actually witnessed. Orientation/lane-invalid
+    # flat head-top contact was actually witnessed. Orientation/road-invalid
     # cycles stop paying immediately, and their completion step cannot leak a
     # final progress payment after the state machine resets its phase frontier.
     head_phase_valid = (
@@ -12745,7 +12882,7 @@ def roll_sprint_progress(
         & ~env._roll_sprint_invalid_now
     )
     return (
-        lane_quality
+        road_quality
         * heading_quality
         * cycle_valid.float()
         * paid_rate
@@ -12765,14 +12902,14 @@ def roll_sprint_distance(
 
 def roll_sprint_straightness_penalty(
     env: ManagerBasedRlEnv,
-    deadband: float = 0.01,
+    road_safe_half_width: float = _ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Charge lane offset only while supported forward roll progress is active."""
+    """Charge only motion in the road-edge band during active roll progress."""
     asset = env.scene[asset_cfg.name]
     _update_roll_sprint_state(env, asset)
-    lane_offset = torch.clamp(
-        env._roll_sprint_lateral_displacement.abs() - deadband,
+    road_edge_excess = torch.clamp(
+        env._roll_sprint_course_lateral_position.abs() - road_safe_half_width,
         min=0.0,
     )
     roll_activity = torch.clamp(
@@ -12781,7 +12918,7 @@ def roll_sprint_straightness_penalty(
         min=0.0,
         max=1.0,
     )
-    return lane_offset * roll_activity
+    return road_edge_excess * roll_activity
 
 
 def _roll_sprint_roll_penalty_mask(env: ManagerBasedRlEnv) -> torch.Tensor:
@@ -12796,13 +12933,16 @@ def _roll_sprint_roll_penalty_mask(env: ManagerBasedRlEnv) -> torch.Tensor:
 
 
 def _roll_sprint_lane_reward_mask(env: ManagerBasedRlEnv) -> torch.Tensor:
-    """Pause lane shaping while getting up, but keep it for repositioning."""
-    recovery_mode = (
-        env._roll_sprint_awaiting_recovery
-        | env._roll_sprint_self_righting
+    """Pause road shaping only while getting up, not while repositioning."""
+    getting_up = (
+        env._roll_sprint_self_righting
         | env._roll_sprint_self_righted_now
+        | (
+            env._roll_sprint_awaiting_recovery
+            & ~env._roll_sprint_awaiting_reposition
+        )
     )
-    return (~recovery_mode).float()
+    return (~getting_up).float()
 
 
 def roll_sprint_sagittal_penalty(
@@ -12841,11 +12981,11 @@ def roll_sprint_flatness_penalty(
     ) * _roll_sprint_roll_penalty_mask(env)
 
 
-def roll_sprint_lane_centering_progress(
+def roll_sprint_road_return_progress(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Potential-based reward for reducing lane offset, with no idle annuity."""
+    """Potential reward for reducing road-edge excess, with no center pull."""
     asset = env.scene[asset_cfg.name]
     _update_roll_sprint_state(env, asset)
     return (
@@ -12853,6 +12993,14 @@ def roll_sprint_lane_centering_progress(
         / env.step_dt
         * _roll_sprint_lane_reward_mask(env)
     )
+
+
+def roll_sprint_lane_centering_progress(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Compatibility wrapper for the shared-road return potential."""
+    return roll_sprint_road_return_progress(env, asset_cfg)
 
 
 def roll_sprint_heading_alignment_progress(
@@ -12878,10 +13026,10 @@ def roll_sprint_reposition_command(
     heading_gain: float = _ROLL_SPRINT_REPOSITION_HEADING_COMMAND_KP,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Expose self-right and lane-return modes in the existing twist slots.
+    """Expose self-right and shared-road return modes in existing twist slots.
 
-    ``twist[0]`` is one only during self-righting. During reposition,
-    ``twist[1]`` gives a proportional lane return after yaw is corrected.
+    ``twist[0]`` is one only during self-righting. Near a road edge,
+    ``twist[1]`` gives the nearest-safe-edge return after yaw is corrected.
     ``twist[2]`` continuously exposes the bounded reset-heading correction,
     including while self-righting, so yaw-invariant proprioception can hold a
     straight line. This preserves the shared 61D contract.
@@ -12889,14 +13037,20 @@ def roll_sprint_reposition_command(
     asset = env.scene[asset_cfg.name]
     _update_roll_sprint_state(env, asset)
     command = torch.zeros_like(env.command_manager.get_command(command_name))
-    needs_return = env._roll_sprint_awaiting_reposition
+    road_position = env._roll_sprint_course_lateral_position
+    road_return_error = road_position - torch.clamp(
+        road_position,
+        min=-_ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH,
+        max=_ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH,
+    )
+    needs_return = road_return_error.abs() > 0.0
     needs_heading_return = env._roll_sprint_heading_ready
     lateral_aligned = (
         env._roll_sprint_heading_error_rad.abs()
         <= _ROLL_SPRINT_REPOSITION_HEADING_TRIGGER_RAD
     )
     lateral_return = torch.clamp(
-        -lateral_gain * env._roll_sprint_lateral_displacement,
+        -lateral_gain * road_return_error,
         min=-lateral_speed,
         max=lateral_speed,
     )

@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import shutil
 import subprocess
 from collections import deque
 from dataclasses import asdict
 from pathlib import Path
+from typing import NamedTuple
 
 import mjlab.tasks  # noqa: F401  # Populate the task registry.
 import mujoco
@@ -26,6 +28,10 @@ from mjlab_microduck.tasks import mdp as microduck_mdp
 TASK_ID = "Mjlab-Roll-Sprint-Flat-MicroDuck"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RACE_LANE_SPACING = 0.28
+ROAD_HALF_WIDTH_M = microduck_mdp._ROLL_SPRINT_ROAD_HALF_WIDTH
+ROAD_SAFE_FULL_REWARD_HALF_WIDTH_M = microduck_mdp._ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH
+ROAD_REPOSITION_TRIGGER_M = microduck_mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M
+ROAD_REPOSITION_REARM_M = microduck_mdp._ROLL_SPRINT_REPOSITION_REARM_M
 TARGET_DISTANCE_M = 20.0
 RACE_CAMERA_LOOKAT = (0.60, 0.0, 0.08)
 RACE_CAMERA_DISTANCE = 3.2
@@ -33,8 +39,10 @@ RACE_CAMERA_FOVY = 45.0
 RACE_CAMERA_AZIMUTH = 90.0
 RACE_CAMERA_ELEVATION = -45.0
 RACE_CAMERA_LEAD_M = 0.60
-RACE_CAMERA_FOLLOW_ALPHA = 0.25
-RACE_CAMERA_MAX_STEP_M = 0.08
+RACE_CAMERA_SPRING_GAIN_S2 = 9.0
+RACE_CAMERA_DAMPING_S_INV = 6.0
+RACE_CAMERA_MAX_SPEED_MPS = 3.0
+RACE_CAMERA_MAX_ACCEL_MPS2 = 4.0
 RACE_LINE_HEIGHT = 0.008
 RACE_LINE_RADIUS = 0.018
 SPEED_WINDOW_S = 1.0
@@ -47,6 +55,13 @@ LABEL_COLORS = (
     (255, 200, 74),
 )
 RECOVERY_ORIENTATIONS = ("face_down", "face_up", "left", "right")
+
+
+class CameraFollowState(NamedTuple):
+    """Longitudinal camera state for a damped, frame-rate-independent follow."""
+
+    x_m: float
+    velocity_mps: float = 0.0
 
 
 def _parse_args() -> argparse.Namespace:
@@ -130,7 +145,7 @@ def _recording_fps(policy_dt: float, frame_stride: int) -> float:
 def _race_header_text(elapsed_s: float, total_s: float, leader_index: int) -> str:
     return (
         f"20 m ROLL RACE  |  t {elapsed_s:05.1f} s / {total_s:.1f} s"
-        f"  |  camera follows in-lane leader R{leader_index + 1}"
+        f"  |  camera follows on-road standing leader R{leader_index + 1}"
     )
 
 
@@ -231,7 +246,9 @@ def _race_corridor_segments(
     target_distance_m: float = TARGET_DISTANCE_M,
 ) -> list[tuple[np.ndarray, np.ndarray, tuple[float, float, float, float], float]]:
     """Return visible lane, start, finish, and distance-marker line segments."""
-    edge_y = 2.0 * lane_spacing
+    if not np.isclose(2.0 * lane_spacing, ROAD_HALF_WIDTH_M):
+        raise ValueError("four-lane spacing must match the shared-road half-width")
+    edge_y = ROAD_HALF_WIDTH_M
     lane_boundaries = np.linspace(-edge_y, edge_y, 5)
     segments = [
         (
@@ -373,10 +390,14 @@ def _project_world_points(
     return pixels, visible
 
 
-def _camera_follow_x(previous_x_m: float, robot_x_m: float) -> float:
-    """Smoothly follow the lane leader longitudinally in either direction."""
-    if not np.isfinite(robot_x_m):
-        return previous_x_m
+def _camera_follow_x(
+    state: CameraFollowState,
+    robot_x_m: float,
+    dt_s: float,
+) -> CameraFollowState:
+    """Advance a critically damped camera without position or velocity snaps."""
+    if not np.isfinite(robot_x_m) or not np.isfinite(dt_s) or dt_s <= 0.0:
+        return state
     target_x_m = float(
         np.clip(
             robot_x_m + RACE_CAMERA_LEAD_M,
@@ -384,76 +405,131 @@ def _camera_follow_x(previous_x_m: float, robot_x_m: float) -> float:
             TARGET_DISTANCE_M,
         )
     )
-    step_m = float(
+    acceleration_mps2 = float(
         np.clip(
-            (target_x_m - previous_x_m) * RACE_CAMERA_FOLLOW_ALPHA,
-            -RACE_CAMERA_MAX_STEP_M,
-            RACE_CAMERA_MAX_STEP_M,
+            RACE_CAMERA_SPRING_GAIN_S2 * (target_x_m - state.x_m)
+            - RACE_CAMERA_DAMPING_S_INV * state.velocity_mps,
+            -RACE_CAMERA_MAX_ACCEL_MPS2,
+            RACE_CAMERA_MAX_ACCEL_MPS2,
         )
     )
-    return previous_x_m + step_m
-
-
-def _camera_follow_y(previous_y_m: float, robot_y_m: float) -> float:
-    """Smoothly follow robot 1 laterally in either direction."""
-    if not np.isfinite(robot_y_m):
-        return previous_y_m
-    step_m = float(
+    velocity_mps = float(
         np.clip(
-            (robot_y_m - previous_y_m) * RACE_CAMERA_FOLLOW_ALPHA,
-            -RACE_CAMERA_MAX_STEP_M,
-            RACE_CAMERA_MAX_STEP_M,
+            state.velocity_mps + acceleration_mps2 * dt_s,
+            -RACE_CAMERA_MAX_SPEED_MPS,
+            RACE_CAMERA_MAX_SPEED_MPS,
         )
     )
-    return previous_y_m + step_m
-
-
-def _select_in_lane_leader(base_env: ManagerBasedRlEnv) -> int:
-    """Return the furthest-forward robot that remains inside its race lane."""
-    forward_position = base_env._roll_sprint_forward_position
-    lateral_displacement = base_env._roll_sprint_lateral_displacement
-    in_lane = (
-        torch.isfinite(forward_position)
-        & torch.isfinite(lateral_displacement)
-        & (lateral_displacement.abs() <= 0.5 * RACE_LANE_SPACING)
+    return CameraFollowState(
+        x_m=state.x_m + velocity_mps * dt_s,
+        velocity_mps=velocity_mps,
     )
-    if torch.any(in_lane):
-        scores = torch.where(
-            in_lane,
-            forward_position,
-            torch.full_like(forward_position, -torch.inf),
-        )
-        return int(torch.argmax(scores).item())
-    return int(torch.argmin(lateral_displacement.abs()).item())
 
 
-def _follow_lane_leader(
+def _sensor_contact(base_env: ManagerBasedRlEnv, name: str) -> torch.Tensor:
+    sensor = base_env.scene.sensors.get(name)
+    if sensor is None or sensor.data.found is None:
+        return torch.zeros(base_env.num_envs, dtype=torch.bool, device=base_env.device)
+    found = sensor.data.found
+    return (found.view(found.shape[0], -1) > 0).any(dim=-1)
+
+
+def _course_lateral_positions(base_env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Return the reward-side shared-course coordinate used by the policy."""
+    return base_env._roll_sprint_course_lateral_position
+
+
+def _launch_ready_mask(base_env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Return the existing feet-supported, upright, course-aligned launch gate."""
+    robot = base_env.scene["robot"]
+    quat = torch.nan_to_num(robot.data.root_link_quat_w, nan=0.0)
+    upright_cos = 1.0 - 2.0 * (quat[:, 1].square() + quat[:, 2].square())
+    lateral_axis_z = 2.0 * (quat[:, 2] * quat[:, 3] + quat[:, 0] * quat[:, 1]).abs()
+    root_height = (
+        robot.data.root_link_pos_w[:, 2] - base_env.scene.terrain.env_origins[:, 2]
+    )
+    forward_rate = robot.data.root_link_ang_vel_b[:, 1].abs()
+    heading_error = base_env._roll_sprint_heading_error_rad.abs()
+    return (
+        _sensor_contact(base_env, "feet_ground_contact")
+        & ~_sensor_contact(base_env, "head_ground_contact")
+        & (upright_cos >= microduck_mdp._ROLL_SPRINT_RECOVERY_UPRIGHT_COS)
+        & (lateral_axis_z <= microduck_mdp._ROLL_SPRINT_RECOVERY_LATERAL_Z)
+        & (root_height >= microduck_mdp._ROLL_SPRINT_RECOVERY_MIN_HEIGHT_M)
+        & (forward_rate <= microduck_mdp._ROLL_SPRINT_RECOVERY_MAX_FORWARD_RATE)
+        & (heading_error <= math.radians(20.0))
+    )
+
+
+def _furthest_frontier_index(
+    frontier: torch.Tensor,
+    forward_position: torch.Tensor,
+    eligible: torch.Tensor,
+) -> int:
+    candidates = torch.nonzero(eligible, as_tuple=False).flatten().tolist()
+    return max(
+        candidates,
+        key=lambda index: (
+            float(frontier[index].item()),
+            float(forward_position[index].item()),
+            -index,
+        ),
+    )
+
+
+def _select_on_road_leader(
     base_env: ManagerBasedRlEnv,
-    previous_x_m: float,
-    previous_y_m: float,
-) -> tuple[float, float, int]:
-    """Travel with the current furthest-forward in-lane robot."""
+    previous_leader_index: int | None = None,
+) -> int:
+    """Choose the furthest credited standing robot anywhere on the shared road."""
+    forward_position = base_env._roll_sprint_forward_position
+    frontier = (
+        base_env._roll_sprint_forward_frontier - base_env._roll_sprint_forward_origin
+    ).clamp_min(0.0)
+    course_lateral = _course_lateral_positions(base_env)
+    on_road = (
+        torch.isfinite(forward_position)
+        & torch.isfinite(frontier)
+        & torch.isfinite(course_lateral)
+        & (course_lateral.abs() <= ROAD_HALF_WIDTH_M)
+    )
+    launch_ready = _launch_ready_mask(base_env)
+    eligible = on_road & launch_ready
+    if bool(eligible.any()):
+        return _furthest_frontier_index(frontier, forward_position, eligible)
+    if (
+        previous_leader_index is not None
+        and 0 <= previous_leader_index < len(on_road)
+        and bool(on_road[previous_leader_index].item())
+    ):
+        return previous_leader_index
+    if bool(on_road.any()):
+        return _furthest_frontier_index(frontier, forward_position, on_road)
+    return int(torch.argmin(course_lateral.abs()).item())
+
+
+def _follow_on_road_leader(
+    base_env: ManagerBasedRlEnv,
+    camera_state: CameraFollowState,
+    previous_leader_index: int | None,
+    dt_s: float,
+) -> tuple[CameraFollowState, float, int]:
+    """Travel longitudinally with the on-road leader while showing the full road."""
     renderer = base_env._offline_renderer
     if renderer is None:
         raise RuntimeError("Offline renderer is not initialized")
     # Use the reward-side position cache. The asset root position exposed by
     # the offscreen backend can lag the physics state and let the leader leave.
-    leader_index = _select_in_lane_leader(base_env)
+    leader_index = _select_on_road_leader(base_env, previous_leader_index)
     leader_x_m = float(base_env._roll_sprint_forward_position[leader_index].item())
-    leader_y_m = float(
-        (
-            base_env.scene.terrain.env_origins[leader_index, 1]
-            + base_env._roll_sprint_lateral_displacement[leader_index]
-        ).item()
-    )
-    camera_x_m = _camera_follow_x(previous_x_m, leader_x_m)
-    camera_y_m = _camera_follow_y(previous_y_m, leader_y_m)
+    camera_state = _camera_follow_x(camera_state, leader_x_m, dt_s)
+    camera_y_m = 0.0
     renderer._cam.lookat[:] = (
-        camera_x_m,
+        camera_state.x_m,
         camera_y_m,
         RACE_CAMERA_LOOKAT[2],
     )
-    return camera_x_m, camera_y_m, leader_index
+    return camera_state, camera_y_m, leader_index
 
 
 def _overlay_race_labels(
@@ -515,9 +591,7 @@ def _overlay_race_labels(
     valid_distances = valid_distances_m.detach().cpu().tolist()
     if recovery_montage:
         self_righting = base_env._roll_sprint_self_righting.detach().cpu().tolist()
-        rerolled = (
-            base_env._roll_sprint_recovered_and_rerolled.detach().cpu().tolist()
-        )
+        rerolled = base_env._roll_sprint_recovered_and_rerolled.detach().cpu().tolist()
         labels = [
             f"{RECOVERY_ORIENTATIONS[index].replace('_', ' ')}"
             f"  |  {'self-righting' if self_righting[index] else 'upright'}"
@@ -636,8 +710,7 @@ def main() -> int:
     forward_position_history: deque[torch.Tensor] = deque(
         [previous_forward_position_m], maxlen=speed_window_steps + 1
     )
-    camera_x_m = RACE_CAMERA_LOOKAT[0]
-    camera_y_m = RACE_CAMERA_LOOKAT[1]
+    camera_state = CameraFollowState(RACE_CAMERA_LOOKAT[0])
     leader_index = 0
 
     writer: subprocess.Popen[bytes] | None = None
@@ -669,10 +742,11 @@ def main() -> int:
                     - base_env._roll_sprint_forward_origin
                 ).clamp_min(0.0)
             if not args.recovery_montage:
-                camera_x_m, camera_y_m, leader_index = _follow_lane_leader(
+                camera_state, _camera_y_m, leader_index = _follow_on_road_leader(
                     base_env,
-                    camera_x_m,
-                    camera_y_m,
+                    camera_state,
+                    leader_index,
+                    policy_dt,
                 )
             if (step + 1) % args.frame_stride != 0:
                 continue

@@ -436,13 +436,13 @@ def _roll_sprint_evaluation_payload(payload: dict[str, Any], path: Path) -> dict
             "race_frontier_retention_pass",
             "race.frontier_retention_pass",
         ),
-        "straightLane": _dashboard_bool(
-            payload, "straight_lane_batch_pass", "four_robot_batch_straight_lane_pass"
+        "sharedRoad": _dashboard_bool(
+            payload,
+            "four_robot_batch_road_corridor_pass",
+            "straight_lane_batch_pass",
+            "four_robot_batch_straight_lane_pass",
         ),
         "target20m": _dashboard_bool(payload, "four_robot_batch_target_20m_pass"),
-        "lateralDrift": _dashboard_bool(
-            payload, "p95_lateral_drift_pass", "lateral_drift_pass"
-        ),
     }
     nan_count = _dashboard_number(payload, "nan_env_count")
     out_of_bounds_count = _dashboard_number(payload, "out_of_bounds_env_count")
@@ -453,6 +453,11 @@ def _roll_sprint_evaluation_payload(payload: dict[str, Any], path: Path) -> dict
     )
     if passes["reroll"] is None and reroll_rate is not None:
         passes["reroll"] = reroll_rate >= 0.5
+    standing_target_rate = _dashboard_number(
+        payload, "standing_on_road_target_reach_rate"
+    )
+    if standing_target_rate is not None:
+        passes["target20m"] = standing_target_rate >= 0.75
     passes["finite"] = (
         nan_count == 0 and out_of_bounds_count == 0
         if nan_count is not None and out_of_bounds_count is not None
@@ -530,17 +535,25 @@ def _roll_sprint_evaluation_payload(payload: dict[str, Any], path: Path) -> dict
             "recovery_battery.frontier_after_recovery_m",
             "self_righting.frontier_after_recovery_m",
         ),
-        "laneRepositionCount": _dashboard_number(
+        "roadReturnCount": _dashboard_number(
             payload,
             "recovery_battery.lane_reposition_count",
             "total_lane_reposition_count",
             "lane_reposition_count",
         ),
-        "laneRepositionLatencyMeanS": _dashboard_number(
+        "roadReturnLatencyMeanS": _dashboard_number(
             payload,
             "recovery_battery.lane_reposition_latency_mean_s",
             "mean_lane_reposition_latency_s",
             "lane_reposition_latency_mean_s",
+        ),
+        "roadExitEnvCount": _dashboard_number(payload, "road_exit_env_count"),
+        "maximumRoadOvershootM": _dashboard_number(
+            payload, "maximum_road_boundary_overshoot_m"
+        ),
+        "standingOnRoadTargetRate": standing_target_rate,
+        "standingOnRoadWinnerRobotIndex": _dashboard_number(
+            payload, "standing_on_road_winner_robot_index"
         ),
         "orientations": _orientation_dashboard_metrics(payload),
         "passes": passes,

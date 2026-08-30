@@ -120,8 +120,10 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert mdp._ROLL_SPRINT_RECOVERY_HOLD_STEPS == 5
     assert mdp._ROLL_SPRINT_RECOVERY_MIN_HEIGHT_M == 0.09
     assert mdp._ROLL_SPRINT_SELF_RIGHT_STALL_SECONDS == 0.30
-    assert mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M == 0.14
-    assert mdp._ROLL_SPRINT_REPOSITION_REARM_M == 0.07
+    assert mdp._ROLL_SPRINT_ROAD_HALF_WIDTH == 0.56
+    assert mdp._ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH == 0.42
+    assert mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M == 0.50
+    assert mdp._ROLL_SPRINT_REPOSITION_REARM_M == 0.46
     assert mdp._ROLL_SPRINT_REPOSITION_LATERAL_COMMAND_MPS == 0.20
     assert mdp._ROLL_SPRINT_REPOSITION_LATERAL_KP == 2.0
     assert mdp._ROLL_SPRINT_REPOSITION_HEADING_TRIGGER_RAD == pytest.approx(
@@ -153,17 +155,17 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
         cfg.rewards["roll_sprint_distance"].weight
         > cfg.rewards["roll_sprint_progress"].weight
     )
-    assert cfg.rewards["roll_sprint_progress"].params["lane_half_width"] == (
-        mdp._ROLL_SPRINT_LANE_HALF_WIDTH
+    assert cfg.rewards["roll_sprint_progress"].params["road_half_width"] == (
+        mdp._ROLL_SPRINT_ROAD_HALF_WIDTH
     )
     assert cfg.rewards["roll_sprint_cycle_rate"].weight == 1.0
     assert cfg.rewards["roll_sprint_recovery"].weight == 1.0
     assert cfg.rewards["roll_sprint_recovered_reroll"].weight == 4.0
     assert cfg.rewards["roll_sprint_self_right_upright"].weight == 5.0
     assert cfg.rewards["roll_sprint_self_right_height"].weight == 30.0
-    assert cfg.rewards["roll_sprint_self_right_upward"].weight == 0.0
-    assert cfg.rewards["roll_sprint_self_right_fallen_tax"].weight == 0.0
-    assert cfg.rewards["roll_sprint_self_right_success"].weight == 0.0
+    assert cfg.rewards["roll_sprint_self_right_upward"].weight == 1.0
+    assert cfg.rewards["roll_sprint_self_right_fallen_tax"].weight == -0.25
+    assert cfg.rewards["roll_sprint_self_right_success"].weight == 5.0
     assert (
         cfg.rewards["roll_sprint_recovered_reroll"].weight
         < cfg.rewards["roll_sprint_distance"].weight
@@ -173,7 +175,7 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert cfg.rewards["roll_sprint_flatness"].weight == -0.25
     assert cfg.rewards["roll_sprint_lateral_vel"].weight == -0.35
     assert cfg.rewards["roll_sprint_straightness"].weight == -3.0
-    assert cfg.rewards["roll_sprint_lane_centering"].weight == 4.0
+    assert cfg.rewards["roll_sprint_road_return"].weight == 4.0
     assert cfg.rewards["roll_sprint_heading_alignment"].weight == 1.0
     for name in (
         "roll_sprint_overspeed",
@@ -199,8 +201,13 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert reset_params["standing_prob"] == 0.45
     assert reset_params["midroll_prob"] == 0.10
     assert reset_params["postroll_prob"] == 0.15
-    assert reset_params["crouch_prob"] == 0.15
-    assert reset_params["ground_recovery_prob"] == 0.15
+    assert reset_params["crouch_prob"] == 0.10
+    assert reset_params["ground_recovery_prob"] == 0.20
+    assert (
+        reset_params["road_interior_prob"],
+        reset_params["road_edge_prob"],
+        reset_params["road_return_prob"],
+    ) == (0.70, 0.20, 0.10)
     assert tuple(
         reset_params[name]
         for name in (
@@ -210,18 +217,13 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
             "ground_right_prob",
         )
     ) == (0.25, 0.25, 0.25, 0.25)
-    assert cfg.curriculum["roll_sprint_lane_half_width"].params[
+    assert cfg.curriculum["roll_sprint_road_half_width"].params[
         "width_stages"
-    ] == [
-        {"step": 0, "width": 0.40},
-        {"step": 250 * 24, "width": 0.28},
-        {"step": 750 * 24, "width": 0.20},
-        {"step": 1500 * 24, "width": 0.14},
-    ]
+    ] == [{"step": 0, "width": 0.56}]
     play_cfg = make_microduck_roll_sprint_env_cfg(play=True)
-    assert play_cfg.curriculum["roll_sprint_lane_half_width"].params[
+    assert play_cfg.curriculum["roll_sprint_road_half_width"].params[
         "width_stages"
-    ] == [{"step": 0, "width": 0.14}]
+    ] == [{"step": 0, "width": 0.56}]
     assert cfg.curriculum["roll_sprint_invalid_cycle_weight"].params[
         "weight_stages"
     ] == [
@@ -247,7 +249,7 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
         )
         for stage in spawn_stages
     ] == [
-        (0.45, 0.10, 0.15, 0.15, 0.15),
+        (0.45, 0.10, 0.15, 0.10, 0.20),
         (0.45, 0.05, 0.15, 0.15, 0.20),
         (0.55, 0.05, 0.10, 0.10, 0.20),
         (0.65, 0.00, 0.10, 0.05, 0.20),
@@ -285,8 +287,7 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert cfg.curriculum["roll_sprint_self_right_upward_weight"].params[
         "weight_stages"
     ] == [
-        {"step": 0, "weight": 0.0},
-        {"step": 400 * 24, "weight": 1.0},
+        {"step": 0, "weight": 1.0},
         {"step": 1000 * 24, "weight": 2.0},
     ]
     assert cfg.curriculum["roll_sprint_self_right_fallen_tax_weight"].params[
@@ -378,6 +379,86 @@ def test_roll_sprint_buffer_reset_is_per_environment():
     )
     assert torch.equal(env._roll_sprint_reposition_count, torch.tensor([2.0, 0.0, 2.0]))
     assert torch.equal(env._roll_sprint_recovery_count, torch.tensor([2.0, 0.0, 2.0]))
+
+
+def test_first_post_reset_update_freezes_actual_course_frame(monkeypatch):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    env.scene.terrain.env_origins[0, :2] = torch.tensor([-9.0, 4.0])
+    mdp._reset_roll_sprint_buffers(
+        env,
+        torch.tensor([0]),
+        spawn_course_lateral_position=torch.tensor([0.31]),
+    )
+
+    asset.data.root_link_pos_w[0] = torch.tensor([3.0, -2.0, 0.115])
+    _set_yaw(asset, torch.tensor([math.pi / 2.0]))
+    mdp._update_roll_sprint_state(env, asset)
+
+    assert env._roll_sprint_heading_ready[0]
+    assert env._roll_sprint_heading_w[0].tolist() == pytest.approx(
+        [0.0, 1.0], abs=1.0e-6
+    )
+    assert env._roll_sprint_course_center_xy_w[0].tolist() == pytest.approx(
+        [3.31, -2.0]
+    )
+    assert env._roll_sprint_course_lateral_position[0] == pytest.approx(0.31)
+    assert env._roll_sprint_forward_origin[0] == pytest.approx(0.0, abs=1.0e-6)
+
+
+@pytest.mark.parametrize("left_prob,right_prob", [(1.0, 0.0), (0.0, 1.0)])
+def test_side_recovery_reset_preserves_sampled_course_heading(
+    monkeypatch,
+    left_prob,
+    right_prob,
+):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    env.sim = SimpleNamespace(
+        data=SimpleNamespace(qpos=torch.zeros(1, 21), qvel=torch.zeros(1, 20))
+    )
+    env._roulade_accum = torch.zeros(1)
+    monkeypatch.setattr(mdp, "reset_roulade_state", lambda *args, **kwargs: None)
+
+    yaw = 0.73
+    mdp.reset_roll_sprint_state(
+        env,
+        torch.tensor([0]),
+        standing_prob=0.0,
+        midroll_prob=0.0,
+        postroll_prob=0.0,
+        crouch_prob=0.0,
+        ground_recovery_prob=1.0,
+        ground_face_down_prob=0.0,
+        ground_face_up_prob=0.0,
+        ground_left_prob=left_prob,
+        ground_right_prob=right_prob,
+        yaw_range=(yaw, yaw),
+        road_interior_prob=1.0,
+        road_edge_prob=0.0,
+        road_return_prob=0.0,
+    )
+
+    intended_lateral = env._roll_sprint_course_lateral_position.clone()
+    expected_heading = torch.tensor([math.cos(yaw), math.sin(yaw)])
+    assert env._roll_sprint_reset_heading_override_valid[0]
+    assert not env._roll_sprint_heading_ready[0]
+    assert env._roll_sprint_reset_heading_override_w[0].tolist() == pytest.approx(
+        expected_heading.tolist()
+    )
+
+    asset.data.root_link_pos_w[0] = torch.tensor([2.0, -1.0, 0.22])
+    asset.data.root_link_quat_w[0] = env.sim.data.qpos[0, 3:7]
+    mdp._update_roll_sprint_state(env, asset)
+
+    assert env._roll_sprint_heading_ready[0]
+    assert not env._roll_sprint_reset_heading_override_valid[0]
+    assert env._roll_sprint_heading_w[0].tolist() == pytest.approx(
+        expected_heading.tolist()
+    )
+    assert env._roll_sprint_course_lateral_position[0].item() == pytest.approx(
+        intended_lateral[0].item(), abs=1.0e-6
+    )
 
 
 def test_roll_sprint_requires_support_and_sagittal_forward_rotation(monkeypatch):
@@ -944,21 +1025,41 @@ def test_roll_sprint_only_credits_extension_beyond_global_frontier(monkeypatch):
     assert env._roll_sprint_forward_frontier[0] == pytest.approx(0.35)
 
 
-def test_roll_sprint_lateral_displacement_has_no_credit_and_costs_straightness(
+def test_roll_sprint_lateral_crossing_has_no_credit_and_only_road_edge_costs(
     monkeypatch,
 ):
     env, asset = _fake_env(1)
     _enable_flat_valid_roll(monkeypatch, env)
     _prime_roll_heading(env, asset)
-    _complete_valid_roll(env, asset, forward=0.0, lateral=0.25)
+    _complete_valid_roll(env, asset, forward=0.0, lateral=0.49)
     env._roll_sprint_progress_delta[:] = env.step_dt * mdp._ROLL_SPRINT_TARGET_ANGLE
 
-    penalty = mdp.roll_sprint_straightness_penalty(env, deadband=0.01)
+    penalty = mdp.roll_sprint_straightness_penalty(env)
 
     assert env._roll_sprint_completed_distance[0] == 0.0
-    assert penalty[0] == pytest.approx(0.24)
+    assert penalty[0] == pytest.approx(0.07)
     env._roll_sprint_progress_delta.zero_()
-    assert mdp.roll_sprint_straightness_penalty(env, deadband=0.01)[0] == 0.0
+    assert mdp.roll_sprint_straightness_penalty(env)[0] == 0.0
+
+
+def test_crossing_internal_lane_guides_remains_a_valid_road_cycle(monkeypatch):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    asset.data.root_link_pos_w[:, 1] = -0.42
+    mdp._reset_roll_sprint_buffers(
+        env,
+        torch.tensor([0]),
+        spawn_course_lateral_position=torch.tensor([-0.42]),
+    )
+    _prime_roll_heading(env, asset)
+
+    env.common_step_counter += 1
+    _complete_valid_roll(env, asset, forward=0.30, lateral=0.42)
+
+    assert env._roll_sprint_completed_now[0]
+    assert env._roll_sprint_completed_distance[0] == pytest.approx(0.30)
+    assert not env._roll_sprint_awaiting_reposition[0]
+    assert not env._roll_sprint_lateral_invalid[0]
 
 
 def test_roll_sprint_excessive_drift_requires_reposition_before_restart(monkeypatch):
@@ -1007,6 +1108,26 @@ def test_roll_sprint_excessive_drift_requires_reposition_before_restart(monkeypa
     assert env._roll_sprint_completed_now[0]
     assert env._roll_sprint_completed_distance[0] == pytest.approx(0.10)
     assert env._roll_sprint_forward_frontier[0] == pytest.approx(0.45)
+
+
+def test_leaving_shared_road_discards_partial_cycle_and_frontier_credit(monkeypatch):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    _prime_roll_heading(env, asset)
+    env._roll_sprint_accum[:] = 2.0 * torch.pi - 0.01
+    env._roll_sprint_phase_frontier[:] = env._roll_sprint_accum
+    env._roll_sprint_head_latch[:] = True
+    asset.data.root_link_pos_w[:, 0] = 0.40
+    asset.data.root_link_pos_w[:, 1] = mdp._ROLL_SPRINT_ROAD_HALF_WIDTH + 0.01
+    asset.data.root_link_ang_vel_b[:, 1] = 1.0
+
+    mdp._update_roll_sprint_state(env, asset)
+
+    assert env._roll_sprint_awaiting_reposition[0]
+    assert env._roll_sprint_accum[0] == 0.0
+    assert not env._roll_sprint_completed_now[0]
+    assert env._roll_sprint_completed_distance[0] == 0.0
+    assert env._roll_sprint_forward_frontier[0] == 0.0
 
 
 def test_roll_sprint_yaw_error_requires_alignment_before_restart(monkeypatch):
@@ -1059,7 +1180,7 @@ def test_roll_sprint_heading_violation_invalidates_active_cycle(monkeypatch):
     assert env._roll_sprint_forward_frontier[0] == 0.0
 
 
-def test_roll_sprint_reposition_command_points_back_to_lane_center(monkeypatch):
+def test_roll_sprint_reposition_command_points_to_nearest_safe_road_edge(monkeypatch):
     env, asset = _fake_env(3)
     _enable_flat_valid_roll(monkeypatch, env)
     base_command = torch.tensor(
@@ -1069,7 +1190,7 @@ def test_roll_sprint_reposition_command_points_back_to_lane_center(monkeypatch):
         get_command=lambda command_name: base_command,
     )
     _prime_roll_heading(env, asset)
-    asset.data.root_link_pos_w[:, 1] = torch.tensor([0.15, -0.15, 0.15])
+    asset.data.root_link_pos_w[:, 1] = torch.tensor([0.60, -0.60, 0.60])
     _set_yaw(
         asset,
         torch.tensor(
@@ -1150,21 +1271,11 @@ def test_roll_completion_outside_heading_rearm_repositions_and_preserves_frontie
     assert env._roll_sprint_completed_distance[0] == pytest.approx(0.20)
 
 
-def test_roll_sprint_training_lane_gate_tightens_to_canonical_width():
+def test_roll_sprint_shared_road_width_is_fixed():
     env, _asset = _fake_env(1)
-    stages = [
-        {"step": 0, "width": 0.40},
-        {"step": 250 * 24, "width": 0.28},
-        {"step": 750 * 24, "width": 0.20},
-        {"step": 1500 * 24, "width": 0.14},
-    ]
+    stages = [{"step": 0, "width": 0.56}]
 
-    for step, expected in (
-        (0, 0.40),
-        (250 * 24, 0.28),
-        (750 * 24, 0.20),
-        (1500 * 24, 0.14),
-    ):
+    for step, expected in ((0, 0.56), (2000 * 24, 0.56)):
         env.common_step_counter = step
         reported = mdp.roll_sprint_lane_half_width_curriculum(
             env,
@@ -1175,43 +1286,46 @@ def test_roll_sprint_training_lane_gate_tightens_to_canonical_width():
         assert env._roll_sprint_lane_half_width_m == pytest.approx(expected)
 
 
-def test_roll_progress_reward_fades_to_zero_at_lane_edge_without_idle_annuity():
-    env, _asset = _fake_env(4)
+def test_roll_progress_is_full_across_lanes_and_fades_only_at_road_edge():
+    env, _asset = _fake_env(3)
     mdp._roll_sprint_state(env)
     env._roll_sprint_last_update_step[:] = env.common_step_counter
     env._roll_sprint_progress_delta[:] = env.step_dt * mdp._ROLL_SPRINT_TARGET_ANGLE
-    env._roll_sprint_lateral_displacement[:] = torch.tensor([0.0, 0.07, 0.14, 0.25])
+    env._roll_sprint_course_lateral_position[:] = torch.tensor([0.42, 0.49, 0.56])
 
     reward = mdp.roll_sprint_progress(
         env,
         max_paid_rate=10.0,
-        lane_half_width=0.14,
+        road_half_width=0.56,
+        road_safe_half_width=0.42,
     )
 
-    assert reward.tolist() == pytest.approx([1.0, 0.75, 0.0, 0.0])
+    assert reward.tolist() == pytest.approx([1.0, 0.75, 0.0])
     env._roll_sprint_progress_delta.zero_()
     assert torch.equal(
         mdp.roll_sprint_progress(
             env,
             max_paid_rate=10.0,
-            lane_half_width=0.14,
+            road_half_width=0.56,
+            road_safe_half_width=0.42,
         ),
-        torch.zeros(4),
+        torch.zeros(3),
     )
 
 
-def test_roll_progress_uses_active_training_lane_width_curriculum():
+def test_roll_progress_uses_active_shared_road_width():
     env, _asset = _fake_env(3)
     mdp._roll_sprint_state(env)
     env._roll_sprint_last_update_step[:] = env.common_step_counter
     env._roll_sprint_progress_delta[:] = env.step_dt * mdp._ROLL_SPRINT_TARGET_ANGLE
-    env._roll_sprint_lateral_displacement[:] = torch.tensor([0.0, 0.20, 0.40])
-    env._roll_sprint_lane_half_width_m = 0.40
+    env._roll_sprint_course_lateral_position[:] = torch.tensor([0.42, 0.49, 0.56])
+    env._roll_sprint_lane_half_width_m = 0.56
 
     reward = mdp.roll_sprint_progress(
         env,
         max_paid_rate=10.0,
-        lane_half_width=0.14,
+        road_half_width=0.56,
+        road_safe_half_width=0.42,
     )
 
     assert reward.tolist() == pytest.approx([1.0, 0.75, 0.0])
@@ -1256,13 +1370,14 @@ def test_roll_progress_stops_after_missed_head_phase_or_cycle_violation():
     reward = mdp.roll_sprint_progress(
         env,
         max_paid_rate=10.0,
-        lane_half_width=0.14,
+            road_half_width=0.56,
+            road_safe_half_width=0.42,
     )
 
     assert reward.tolist() == pytest.approx([1.0, 0.0, 1.0, 0.0, 0.0])
 
 
-def test_lane_centering_progress_penalizes_departure_rewards_correction_and_not_idle(
+def test_road_return_progress_has_no_center_pull_and_no_idle_annuity(
     monkeypatch,
 ):
     env, asset = _fake_env(1)
@@ -1270,22 +1385,43 @@ def test_lane_centering_progress_penalizes_departure_rewards_correction_and_not_
     mdp._update_roll_sprint_state(env, asset)
 
     env.common_step_counter += 1
-    asset.data.root_link_pos_w[:, 1] = 0.10
-    departure = mdp.roll_sprint_lane_centering_progress(env)
+    asset.data.root_link_pos_w[:, 1] = 0.49
+    departure = mdp.roll_sprint_road_return_progress(env)
 
     env.common_step_counter += 1
-    asset.data.root_link_pos_w[:, 1] = 0.04
-    correction = mdp.roll_sprint_lane_centering_progress(env)
+    asset.data.root_link_pos_w[:, 1] = 0.44
+    correction = mdp.roll_sprint_road_return_progress(env)
 
     env.common_step_counter += 1
-    idle = mdp.roll_sprint_lane_centering_progress(env)
+    asset.data.root_link_pos_w[:, 1] = 0.20
+    interior = mdp.roll_sprint_road_return_progress(env)
 
-    assert departure[0] == pytest.approx(-0.10 / env.step_dt)
-    assert correction[0] == pytest.approx(0.06 / env.step_dt)
+    env.common_step_counter += 1
+    idle = mdp.roll_sprint_road_return_progress(env)
+
+    assert departure[0] == pytest.approx(-0.07 / env.step_dt)
+    assert correction[0] == pytest.approx(0.05 / env.step_dt)
+    assert interior[0] == pytest.approx(0.02 / env.step_dt)
     assert idle[0] == 0.0
-    assert env.step_dt * (departure[0] + correction[0] + idle[0]) == pytest.approx(
-        -0.04
+    assert env.step_dt * (
+        departure[0] + correction[0] + interior[0] + idle[0]
+    ) == pytest.approx(
+        0.0, abs=1.0e-6
     )
+
+
+def test_road_return_shaping_remains_active_during_reposition():
+    env, _asset = _fake_env(1)
+    mdp._roll_sprint_state(env)
+    env._roll_sprint_awaiting_recovery[:] = True
+    env._roll_sprint_awaiting_reposition[:] = True
+    env._roll_sprint_self_righting[:] = False
+    env._roll_sprint_self_righted_now[:] = False
+
+    assert mdp._roll_sprint_lane_reward_mask(env)[0] == 1.0
+
+    env._roll_sprint_self_righting[:] = True
+    assert mdp._roll_sprint_lane_reward_mask(env)[0] == 0.0
 
 
 def test_heading_alignment_progress_is_signed_potential_without_annuity(monkeypatch):

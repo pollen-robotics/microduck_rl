@@ -94,17 +94,16 @@
       : "Self-right then valid roll";
     $("#metric-frontier-after-recovery").textContent = formatDistance(evaluation.frontierAfterRecoveryM);
     $("#metric-lane-reposition").textContent = [
-      formatCount(evaluation.laneRepositionCount),
-      formatSeconds(evaluation.laneRepositionLatencyMeanS),
+      formatCount(evaluation.roadReturnCount),
+      formatSeconds(evaluation.roadReturnLatencyMeanS),
     ].join(" / ");
 
     const gateNames = {
       recovery: "Recovery",
       reroll: "Recovered reroll",
       raceFrontier: "Beats previous best",
-      straightLane: "Straight lane",
-      target20m: "20 m target",
-      lateralDrift: "Lateral drift",
+      sharedRoad: "Shared road",
+      target20m: "3 of 4 finish standing",
       finite: "NaN / OOB",
     };
     const gateList = $("#audit-gates");

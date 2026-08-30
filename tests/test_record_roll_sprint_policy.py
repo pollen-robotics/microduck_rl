@@ -123,18 +123,42 @@ def test_race_camera_is_close_and_keeps_all_lanes_centered() -> None:
     assert MODULE.RACE_CAMERA_FOVY == 45.0
     assert MODULE.RACE_CAMERA_AZIMUTH == 90.0
     assert MODULE.RACE_CAMERA_ELEVATION == -45.0
+    assert MODULE.ROAD_HALF_WIDTH_M == pytest.approx(0.56)
+    assert MODULE.ROAD_SAFE_FULL_REWARD_HALF_WIDTH_M == pytest.approx(0.42)
+    assert MODULE.ROAD_REPOSITION_TRIGGER_M == pytest.approx(0.50)
+    assert MODULE.ROAD_REPOSITION_REARM_M == pytest.approx(0.46)
 
 
 def test_follow_camera_advances_and_retreats_smoothly() -> None:
-    first = MODULE._camera_follow_x(0.60, 1.00)
-    second = MODULE._camera_follow_x(first, 1.50)
+    dt_s = 0.02
+    initial = MODULE.CameraFollowState(0.60)
+    first = MODULE._camera_follow_x(initial, 1.00, dt_s)
+    second = MODULE._camera_follow_x(first, 1.50, dt_s)
 
-    assert 0.60 < first <= 0.60 + MODULE.RACE_CAMERA_MAX_STEP_M
-    assert first < second <= first + MODULE.RACE_CAMERA_MAX_STEP_M
-    assert MODULE._camera_follow_x(second, -5.0) == pytest.approx(
-        second - MODULE.RACE_CAMERA_MAX_STEP_M
+    assert 0.60 < first.x_m < second.x_m
+    assert first.velocity_mps > 0.0
+    assert second.velocity_mps > first.velocity_mps
+    assert second.velocity_mps - first.velocity_mps <= (
+        MODULE.RACE_CAMERA_MAX_ACCEL_MPS2 * dt_s + 1.0e-12
     )
-    assert MODULE._camera_follow_x(second, float("nan")) == second
+    assert abs(second.velocity_mps) <= MODULE.RACE_CAMERA_MAX_SPEED_MPS
+    assert MODULE._camera_follow_x(second, float("nan"), dt_s) == second
+
+
+def test_follow_camera_does_not_snap_when_leader_resets_behind() -> None:
+    dt_s = 0.02
+    moving_forward = MODULE.CameraFollowState(x_m=3.0, velocity_mps=1.2)
+    after_reset = MODULE._camera_follow_x(moving_forward, -5.0, dt_s)
+
+    # The view keeps its momentum for one frame and brakes at the configured
+    # acceleration bound instead of teleporting or reversing immediately.
+    assert after_reset.x_m > moving_forward.x_m
+    assert after_reset.velocity_mps == pytest.approx(
+        moving_forward.velocity_mps - MODULE.RACE_CAMERA_MAX_ACCEL_MPS2 * dt_s
+    )
+    assert abs(after_reset.x_m - moving_forward.x_m) <= (
+        MODULE.RACE_CAMERA_MAX_SPEED_MPS * dt_s
+    )
 
 
 def test_recording_fps_preserves_real_simulation_time() -> None:
@@ -144,7 +168,7 @@ def test_recording_fps_preserves_real_simulation_time() -> None:
 def test_race_header_uses_requested_rollout_duration() -> None:
     assert MODULE._race_header_text(19.1, 20.0, 2) == (
         "20 m ROLL RACE  |  t 019.1 s / 20.0 s"
-        "  |  camera follows in-lane leader R3"
+        "  |  camera follows on-road standing leader R3"
     )
 
 
@@ -180,12 +204,17 @@ def test_recovery_montage_uses_all_four_deterministic_orientations(
     )
 
 
-def test_camera_follows_furthest_forward_robot_that_remains_in_lane() -> None:
+def test_camera_follows_furthest_credited_standing_robot_anywhere_on_road(
+    monkeypatch,
+) -> None:
     camera = SimpleNamespace(lookat=MODULE.np.zeros(3))
     env = SimpleNamespace(
         _offline_renderer=SimpleNamespace(_cam=camera),
         _roll_sprint_forward_position=torch.tensor([8.0, 3.0, 2.0, 1.0]),
-        _roll_sprint_lateral_displacement=torch.tensor([0.20, 0.10, 0.0, 0.0]),
+        _roll_sprint_forward_frontier=torch.tensor([4.0, 3.0, 2.0, 1.0]),
+        _roll_sprint_forward_origin=torch.zeros(4),
+        _roll_sprint_lateral_displacement=torch.tensor([0.60, 0.10, 0.0, 0.0]),
+        _roll_sprint_course_lateral_position=torch.tensor([0.18, -0.04, 0.14, 0.42]),
         scene=SimpleNamespace(
             terrain=SimpleNamespace(
                 env_origins=torch.tensor(
@@ -199,15 +228,70 @@ def test_camera_follows_furthest_forward_robot_that_remains_in_lane() -> None:
             )
         ),
     )
-
-    next_x, next_y, leader_index = MODULE._follow_lane_leader(env, 0.60, 0.0)
-
-    assert leader_index == 1
-    assert next_x == pytest.approx(0.60 + MODULE.RACE_CAMERA_MAX_STEP_M)
-    assert next_y == pytest.approx(-0.01)
-    assert camera.lookat.tolist() == pytest.approx(
-        [next_x, next_y, MODULE.RACE_CAMERA_LOOKAT[2]]
+    monkeypatch.setattr(
+        MODULE,
+        "_launch_ready_mask",
+        lambda _env: torch.ones(4, dtype=torch.bool),
     )
+
+    initial = MODULE.CameraFollowState(0.60)
+    next_state, next_y, leader_index = MODULE._follow_on_road_leader(
+        env,
+        initial,
+        1,
+        0.02,
+    )
+
+    # R1 crossed its original lane, but course y = -0.42 + 0.60 = +0.18 m.
+    assert leader_index == 0
+    assert next_state.x_m > initial.x_m
+    assert next_state.velocity_mps == pytest.approx(
+        MODULE.RACE_CAMERA_MAX_ACCEL_MPS2 * 0.02
+    )
+    assert next_y == 0.0
+    assert camera.lookat.tolist() == pytest.approx(
+        [next_state.x_m, next_y, MODULE.RACE_CAMERA_LOOKAT[2]]
+    )
+
+
+def test_leader_rejects_lying_or_off_road_robot_and_retains_safe_fallback(
+    monkeypatch,
+) -> None:
+    env = SimpleNamespace(
+        _roll_sprint_forward_position=torch.tensor([9.0, 4.0, 3.0, 2.0]),
+        _roll_sprint_forward_frontier=torch.tensor([8.0, 4.0, 3.0, 2.0]),
+        _roll_sprint_forward_origin=torch.zeros(4),
+        _roll_sprint_lateral_displacement=torch.tensor([-0.20, 0.0, 0.0, 0.20]),
+        _roll_sprint_course_lateral_position=torch.tensor([-0.62, -0.14, 0.14, 0.62]),
+        scene=SimpleNamespace(
+            terrain=SimpleNamespace(
+                env_origins=torch.tensor(
+                    [
+                        [0.0, -0.42, 0.0],
+                        [0.0, -0.14, 0.0],
+                        [0.0, 0.14, 0.0],
+                        [0.0, 0.42, 0.0],
+                    ]
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "_launch_ready_mask",
+        lambda _env: torch.tensor([True, True, False, True]),
+    )
+
+    # R1 and R4 are outside the shared road; standing on-road R2 wins.
+    assert MODULE._select_on_road_leader(env) == 1
+
+    monkeypatch.setattr(
+        MODULE,
+        "_launch_ready_mask",
+        lambda _env: torch.zeros(4, dtype=torch.bool),
+    )
+    # With no standing robot, retain the previous on-road leader safely.
+    assert MODULE._select_on_road_leader(env, previous_leader_index=2) == 2
 
 
 def test_corridor_has_four_lanes_and_spans_exactly_twenty_meters() -> None:
@@ -225,6 +309,8 @@ def test_corridor_has_four_lanes_and_spans_exactly_twenty_meters() -> None:
     assert sorted(start[1] for start, _end in longitudinal) == pytest.approx(
         [-0.56, -0.28, 0.0, 0.28, 0.56]
     )
+    assert longitudinal[0][0][1] == pytest.approx(-MODULE.ROAD_HALF_WIDTH_M)
+    assert longitudinal[-1][0][1] == pytest.approx(MODULE.ROAD_HALF_WIDTH_M)
     assert {start[0] for start, _end in cross_track} == set(
         MODULE.np.arange(0.0, MODULE.TARGET_DISTANCE_M + 1.0, 1.0)
     )
