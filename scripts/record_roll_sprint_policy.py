@@ -357,9 +357,9 @@ def _follow_first_robot(base_env: ManagerBasedRlEnv, previous_x_m: float) -> flo
     renderer = base_env._offline_renderer
     if renderer is None:
         raise RuntimeError("Offline renderer is not initialized")
-    first_robot_x_m = float(
-        base_env.scene["robot"].data.root_link_pos_w[0, 0].item()
-    )
+    # Use the reward-side position cache. The asset root position exposed by
+    # the offscreen backend can lag the physics state and let R1 leave frame.
+    first_robot_x_m = float(base_env._roll_sprint_forward_position[0].item())
     camera_x_m = _camera_follow_x(previous_x_m, first_robot_x_m)
     renderer._cam.lookat[:] = (
         camera_x_m,

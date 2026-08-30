@@ -135,6 +135,21 @@ def test_follow_camera_advances_smoothly_without_retreating() -> None:
     assert MODULE._camera_follow_x(second, float("nan")) == second
 
 
+def test_follow_camera_uses_fresh_reward_position() -> None:
+    camera = SimpleNamespace(lookat=MODULE.np.zeros(3))
+    env = SimpleNamespace(
+        _offline_renderer=SimpleNamespace(_cam=camera),
+        _roll_sprint_forward_position=torch.tensor([3.0, 0.0, 0.0, 0.0]),
+    )
+
+    next_x = MODULE._follow_first_robot(env, 0.60)
+
+    assert next_x == pytest.approx(0.60 + MODULE.RACE_CAMERA_MAX_STEP_M)
+    assert camera.lookat.tolist() == pytest.approx(
+        [next_x, MODULE.RACE_CAMERA_LOOKAT[1], MODULE.RACE_CAMERA_LOOKAT[2]]
+    )
+
+
 def test_corridor_has_four_lanes_and_spans_exactly_twenty_meters() -> None:
     segments = MODULE._race_corridor_segments()
     longitudinal = [
