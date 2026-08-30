@@ -11487,7 +11487,10 @@ _ROLL_SPRINT_FEET_SENSOR = "feet_ground_contact"
 _ROLL_SPRINT_MIN_FORWARD_RATE = 0.5
 _ROLL_SPRINT_MAX_DISTANCE_PER_RAD = 0.12
 _ROLL_SPRINT_LANE_HALF_WIDTH = 0.14
-_ROLL_SPRINT_BOOTSTRAP_LANE_HALF_WIDTH = 0.40
+# The A39 source needs enough room to preserve its roll sequence while the
+# potential-based lane terms teach correction. The cycle gate then tightens
+# well before the final half of training; canonical play always stays at 0.14.
+_ROLL_SPRINT_BOOTSTRAP_LANE_HALF_WIDTH = 2.0
 _ROLL_SPRINT_LATERAL_INVALID_Z = math.sin(math.radians(60.0))
 # A launch-ready recovery is deliberately dynamic. Normal MicroDuck roll
 # transit is 3.5--5.5 rad/s (and the A35 diagnostic reached still higher

@@ -243,10 +243,11 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                 "step": 0,
                 "width": microduck_mdp._ROLL_SPRINT_BOOTSTRAP_LANE_HALF_WIDTH,
             },
-            {"step": 250 * 24, "width": 0.28},
-            {"step": 500 * 24, "width": 0.20},
+            {"step": 250 * 24, "width": 0.40},
+            {"step": 500 * 24, "width": 0.28},
+            {"step": 1000 * 24, "width": 0.20},
             {
-                "step": 1000 * 24,
+                "step": 1500 * 24,
                 "width": microduck_mdp._ROLL_SPRINT_LANE_HALF_WIDTH,
             },
         ]
