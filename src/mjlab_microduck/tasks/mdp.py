@@ -2841,9 +2841,13 @@ def snapshot_stair_frontier_tier_baseline(
         env_ids = torch.arange(env.num_envs, device=env.device)
     env_ids = env_ids.to(device=env.device, dtype=torch.long)
     asset: Entity = env.scene[asset_cfg.name]
-    local = asset.data.root_link_pos_w[env_ids] - env.scene.terrain.env_origins[
-        env_ids
+    # Reset events run before MuJoCo forward kinematics refresh derived xpos.
+    # State-bank events immediately preceding this one write the free-joint
+    # qpos directly, so qpos is the only authoritative reset pose here.
+    root_qpos = env.sim.data.qpos[env_ids][
+        :, asset.indexing.free_joint_q_adr
     ]
+    local = root_qpos[:, :3] - env.scene.terrain.env_origins[env_ids]
     x_threshold = torch.tensor(
         x_thresholds, dtype=local.dtype, device=local.device
     )

@@ -174,8 +174,10 @@ def test_delayed_frontier_tiers_permanently_reject_lateral_bypass():
 
 def test_reset_snapshot_prelatches_only_milestones_already_satisfied():
     robot = SimpleNamespace(
+        indexing=SimpleNamespace(free_joint_q_adr=torch.arange(7)),
         data=SimpleNamespace(
-            root_link_pos_w=torch.tensor([[0.640, 0.0, 0.170]]),
+            # Deliberately stale derived position from the previous episode.
+            root_link_pos_w=torch.tensor([[0.100, 0.0, 0.100]]),
         )
     )
     env = SimpleNamespace(
@@ -183,6 +185,11 @@ def test_reset_snapshot_prelatches_only_milestones_already_satisfied():
         device="cpu",
         episode_length_buf=torch.tensor([1]),
         scene=_Scene(robot),
+        sim=SimpleNamespace(
+            data=SimpleNamespace(
+                qpos=torch.tensor([[0.640, 0.0, 0.170, 1.0, 0.0, 0.0, 0.0]])
+            )
+        ),
     )
     x_thresholds = (0.625, 0.640, 0.650)
     z_thresholds = (0.160, 0.170, 0.175)
@@ -203,10 +210,18 @@ def test_reset_snapshot_prelatches_only_milestones_already_satisfied():
     assert env._stair_delayed_frontier_tier_paid.tolist() == [
         [True, True, False]
     ]
-    robot.data.root_link_pos_w[:] = torch.tensor([[0.650, 0.0, 0.175]])
+    # Forward kinematics now exposes the same reset pose; holding it cannot
+    # repay either pre-latched milestone.
+    robot.data.root_link_pos_w[:] = torch.tensor([[0.640, 0.0, 0.170]])
     env.episode_length_buf[:] = 3
     assert microduck_mdp.stair_delayed_frontier_tiers(env, **params).item() == 0.0
     env.episode_length_buf[:] = 4
+    assert microduck_mdp.stair_delayed_frontier_tiers(env, **params).item() == 0.0
+
+    robot.data.root_link_pos_w[:] = torch.tensor([[0.650, 0.0, 0.175]])
+    env.episode_length_buf[:] = 5
+    assert microduck_mdp.stair_delayed_frontier_tiers(env, **params).item() == 0.0
+    env.episode_length_buf[:] = 6
     assert microduck_mdp.stair_delayed_frontier_tiers(env, **params).item() == 40.0
 
 
