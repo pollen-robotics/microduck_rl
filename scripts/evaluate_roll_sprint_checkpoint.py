@@ -19,6 +19,8 @@ from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 
+from mjlab_microduck.tasks import mdp as microduck_mdp
+
 TASK_ID = "Mjlab-Roll-Sprint-Flat-MicroDuck"
 TARGET_ANGLE = 2.0 * math.pi
 HEAD_WINDOW = (math.radians(20.0), math.radians(170.0))
@@ -28,9 +30,17 @@ FLAT_FULL = 0.5
 FLAT_ZERO = math.sin(math.radians(60.0))
 MIN_FORWARD_RATE = 0.5
 MAX_DISTANCE_PER_RAD = 0.12
+RECOVERY_MAX_FORWARD_RATE = 3.0
+RECOVERY_UPRIGHT_COS = math.cos(math.radians(50.0))
+RECOVERY_LATERAL_Z = math.sin(math.radians(35.0))
+RECOVERY_HOLD_STEPS = 3
+RACE_LANE_SPACING = 0.28
+STRAIGHT_LANE_MAX_DRIFT_M = 0.08
+STRAIGHT_LANE_MAX_YAW_DEVIATION_DEG = 20.0
 PROMOTION = {
     "repeated_roll_rate": 0.75,
     "mean_valid_roll_count": 2.0,
+    "mean_recovered_and_rerolled_count": 1.0,
     "mean_roll_linked_distance_m": 0.35,
     "mean_roll_linked_speed_mps": 0.058,
     "p95_lateral_drift_m": 0.08,
@@ -118,10 +128,24 @@ class RollCycleAuditor:
         self.linked_distance = zero.clone()
         self.valid_count = torch.zeros(count, dtype=torch.long, device=device)
         self.invalid_count = torch.zeros(count, dtype=torch.long, device=device)
+        self.awaiting_recovery = false.clone()
+        self.recovery_hold_steps = torch.zeros(count, dtype=torch.long, device=device)
+        self.recovery_latency_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.recovery_latency_total_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.recovery_count = torch.zeros(count, dtype=torch.long, device=device)
+        self.recovered_cycle_armed = false.clone()
+        self.recovered_and_rerolled_count = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
         self.head_top_contact_count = torch.zeros(
             count, dtype=torch.long, device=device
         )
         self.max_lateral_drift = zero.clone()
+        self.max_heading_deviation = zero.clone()
         self.peak_angular_speed = zero.clone()
         self.peak_impact_acceleration = zero.clone()
         self.nan_seen = false.clone()
@@ -135,6 +159,7 @@ class RollCycleAuditor:
         linear_velocity_w: torch.Tensor,
         angular_velocity_b: torch.Tensor,
         support: torch.Tensor,
+        foot_support: torch.Tensor,
         head_contact: torch.Tensor,
         active: torch.Tensor | None = None,
     ) -> None:
@@ -161,9 +186,49 @@ class RollCycleAuditor:
         )
         flatness = flat_u.square() * (3.0 - 2.0 * flat_u)
         omega = angular_velocity_b[:, 1]
+        upright_cos = 1.0 - 2.0 * (root_quat[:, 1].square() + root_quat[:, 2].square())
+        awaiting_before = self.awaiting_recovery
+        recovery_candidate = (
+            active
+            & awaiting_before
+            & foot_support
+            & ~head_contact
+            & (upright_cos >= RECOVERY_UPRIGHT_COS)
+            & (lateral_z <= RECOVERY_LATERAL_Z)
+            & (omega <= RECOVERY_MAX_FORWARD_RATE)
+        )
+        old_recovery_hold = self.recovery_hold_steps
+        recovery_hold = torch.where(
+            recovery_candidate,
+            old_recovery_hold + 1,
+            torch.zeros_like(old_recovery_hold),
+        )
+        recovered = (
+            recovery_candidate
+            & (old_recovery_hold < RECOVERY_HOLD_STEPS)
+            & (recovery_hold >= RECOVERY_HOLD_STEPS)
+        )
+        recovery_latency = torch.where(
+            active & awaiting_before,
+            self.recovery_latency_steps + 1,
+            self.recovery_latency_steps,
+        )
+        self.recovery_latency_total_steps += torch.where(
+            recovered,
+            recovery_latency,
+            torch.zeros_like(recovery_latency),
+        )
+        self.recovery_count += recovered.to(torch.long)
+
         valid_rotation = support.float() * flatness
-        signed_delta = omega * self.step_dt * valid_rotation
-        candidate_accum = torch.clamp(self.accum + signed_delta, min=0.0)
+        rotation_eligible = active & ~awaiting_before & ~recovered
+        signed_delta = omega * self.step_dt * valid_rotation * rotation_eligible.float()
+        old_accum = torch.where(
+            awaiting_before | recovered,
+            torch.zeros_like(self.accum),
+            self.accum,
+        )
+        candidate_accum = torch.clamp(old_accum + signed_delta, min=0.0)
         new_accum = torch.where(active, candidate_accum, self.accum)
 
         in_head_window = (new_accum > HEAD_WINDOW[0]) & (new_accum < HEAD_WINDOW[1])
@@ -171,16 +236,28 @@ class RollCycleAuditor:
             active & support & head_contact & in_head_window & head_top_down(head_quat)
         )
         self.head_top_contact_count += (top_contact & ~self.head_latch).to(torch.long)
-        new_head_latch = self.head_latch | top_contact
-        lateral_violation = (
-            active & support & (omega >= MIN_FORWARD_RATE) & (lateral_z > FLAT_ZERO)
+        old_head_latch = torch.where(
+            recovered, torch.zeros_like(self.head_latch), self.head_latch
         )
-        new_lateral_invalid = self.lateral_invalid | lateral_violation
+        new_head_latch = old_head_latch | top_contact
+        lateral_violation = (
+            active
+            & ~awaiting_before
+            & support
+            & (omega >= MIN_FORWARD_RATE)
+            & (lateral_z > FLAT_ZERO)
+        )
+        old_lateral_invalid = torch.where(
+            recovered,
+            torch.zeros_like(self.lateral_invalid),
+            self.lateral_invalid,
+        )
+        new_lateral_invalid = old_lateral_invalid | lateral_violation
 
         displacement = position_xy - self.start_position
         forward_position = (displacement * self.heading).sum(dim=-1)
 
-        completed = active & (new_accum >= TARGET_ANGLE)
+        completed = active & ~awaiting_before & (new_accum >= TARGET_ANGLE)
         valid = completed & new_head_latch & ~new_lateral_invalid
         invalid = completed & ~valid
         rotation_budget = MAX_DISTANCE_PER_RAD * torch.clamp(
@@ -198,6 +275,8 @@ class RollCycleAuditor:
         )
         self.valid_count += valid.to(torch.long)
         self.invalid_count += invalid.to(torch.long)
+        recovered_rerolled = valid & self.recovered_cycle_armed
+        self.recovered_and_rerolled_count += recovered_rerolled.to(torch.long)
         self.linked_distance += torch.where(
             valid, credited_distance, torch.zeros_like(credited_distance)
         )
@@ -207,21 +286,47 @@ class RollCycleAuditor:
             self.forward_frontier,
         )
         self.cycle_start_forward = torch.where(
-            completed, forward_position, self.cycle_start_forward
+            completed | recovered, forward_position, self.cycle_start_forward
         )
-        residual = torch.clamp(new_accum - TARGET_ANGLE, min=0.0)
         self.accum = torch.where(
-            valid,
-            residual,
-            torch.where(invalid, torch.zeros_like(new_accum), new_accum),
+            completed | recovered,
+            torch.zeros_like(new_accum),
+            new_accum,
         )
         self.head_latch = torch.where(
-            completed, torch.zeros_like(new_head_latch), new_head_latch
+            completed | recovered,
+            torch.zeros_like(new_head_latch),
+            new_head_latch,
         )
         self.lateral_invalid = torch.where(
-            completed,
+            completed | recovered,
             torch.zeros_like(new_lateral_invalid),
             new_lateral_invalid,
+        )
+        self.awaiting_recovery = torch.where(
+            valid,
+            torch.ones_like(awaiting_before),
+            torch.where(recovered, torch.zeros_like(awaiting_before), awaiting_before),
+        )
+        self.recovered_cycle_armed = torch.where(
+            valid,
+            torch.zeros_like(self.recovered_cycle_armed),
+            torch.where(
+                recovered,
+                torch.ones_like(self.recovered_cycle_armed),
+                self.recovered_cycle_armed,
+            ),
+        )
+        reset_recovery_clock = recovered | valid
+        self.recovery_hold_steps = torch.where(
+            reset_recovery_clock,
+            torch.zeros_like(recovery_hold),
+            recovery_hold,
+        )
+        self.recovery_latency_steps = torch.where(
+            reset_recovery_clock,
+            torch.zeros_like(recovery_latency),
+            recovery_latency,
         )
 
         lateral_drift = (displacement * self.lateral).sum(dim=-1).abs()
@@ -229,6 +334,18 @@ class RollCycleAuditor:
             active,
             torch.maximum(self.max_lateral_drift, lateral_drift),
             self.max_lateral_drift,
+        )
+        current_heading = heading_from_quat(root_quat)
+        heading_dot = (self.heading * current_heading).sum(dim=-1).clamp(-1.0, 1.0)
+        heading_cross = (
+            self.heading[:, 0] * current_heading[:, 1]
+            - self.heading[:, 1] * current_heading[:, 0]
+        )
+        heading_deviation = torch.atan2(heading_cross, heading_dot).abs()
+        self.max_heading_deviation = torch.where(
+            active,
+            torch.maximum(self.max_heading_deviation, heading_deviation),
+            self.max_heading_deviation,
         )
         self.peak_angular_speed = torch.where(
             active,
@@ -259,7 +376,40 @@ class RollCycleAuditor:
             torch.clamp(raw_forward, min=0.0) - self.linked_distance,
             min=0.0,
         )
-        repeated = self.valid_count >= 2
+        repeated = self.recovered_and_rerolled_count >= 1
+        total_recoveries = int(self.recovery_count.sum().item())
+        mean_recovery_latency = (
+            float(self.recovery_latency_total_steps.sum().item())
+            * self.step_dt
+            / max(total_recoveries, 1)
+        )
+        max_heading_deviation_deg = torch.rad2deg(self.max_heading_deviation)
+        straight_lane_pass = (
+            (self.max_lateral_drift <= STRAIGHT_LANE_MAX_DRIFT_M)
+            & (
+                max_heading_deviation_deg
+                <= STRAIGHT_LANE_MAX_YAW_DEVIATION_DEG
+            )
+            & (self.recovered_and_rerolled_count >= 1)
+            & ~self.nan_seen
+        )
+        per_robot = [
+            {
+                "robot_index": index,
+                "net_forward_distance_m": float(raw_forward[index].item()),
+                "maximum_lateral_drift_m": float(
+                    self.max_lateral_drift[index].item()
+                ),
+                "maximum_heading_yaw_deviation_deg": float(
+                    max_heading_deviation_deg[index].item()
+                ),
+                "valid_roll_recover_reroll_count": int(
+                    self.recovered_and_rerolled_count[index].item()
+                ),
+                "straight_lane_pass": bool(straight_lane_pass[index].item()),
+            }
+            for index in range(len(raw_forward))
+        ]
         return {
             "mean_raw_forward_distance_m": float(raw_forward.mean().item()),
             "best_raw_forward_distance_m": float(raw_forward.max().item()),
@@ -278,12 +428,28 @@ class RollCycleAuditor:
             "total_valid_roll_count": int(self.valid_count.sum().item()),
             "mean_invalid_roll_count": float(self.invalid_count.float().mean().item()),
             "total_invalid_roll_count": int(self.invalid_count.sum().item()),
+            "mean_recovery_count": float(self.recovery_count.float().mean().item()),
+            "total_recovery_count": total_recoveries,
+            "mean_recovered_and_rerolled_count": float(
+                self.recovered_and_rerolled_count.float().mean().item()
+            ),
+            "total_recovered_and_rerolled_count": int(
+                self.recovered_and_rerolled_count.sum().item()
+            ),
+            "mean_recovery_latency_s": mean_recovery_latency,
             "repeated_roll_rate": float(repeated.float().mean().item()),
             "head_top_contact_count": int(self.head_top_contact_count.sum().item()),
             "p95_lateral_drift_m": float(
                 torch.quantile(self.max_lateral_drift, 0.95).item()
             ),
             "maximum_lateral_drift_m": float(self.max_lateral_drift.max().item()),
+            "maximum_heading_yaw_deviation_deg": float(
+                max_heading_deviation_deg.max().item()
+            ),
+            "per_robot": per_robot,
+            "four_robot_batch_straight_lane_pass": bool(
+                len(per_robot) == 4 and straight_lane_pass.all().item()
+            ),
             "mean_uncredited_positive_displacement_m": float(uncredited.mean().item()),
             "p95_peak_angular_speed_rad_s": float(
                 torch.quantile(self.peak_angular_speed, 0.95).item()
@@ -303,6 +469,8 @@ def promotion_pass(report: dict[str, object]) -> bool:
     return (
         float(report["repeated_roll_rate"]) >= PROMOTION["repeated_roll_rate"]
         and float(report["mean_valid_roll_count"]) >= PROMOTION["mean_valid_roll_count"]
+        and float(report["mean_recovered_and_rerolled_count"])
+        >= PROMOTION["mean_recovered_and_rerolled_count"]
         and float(report["mean_roll_linked_distance_m"])
         >= PROMOTION["mean_roll_linked_distance_m"]
         and float(report["mean_roll_linked_speed_mps"])
@@ -318,7 +486,7 @@ def promotion_pass(report: dict[str, object]) -> bool:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", type=Path)
-    parser.add_argument("--num-envs", type=int, default=64)
+    parser.add_argument("--num-envs", type=int, default=4)
     parser.add_argument("--duration", type=float, default=6.0)
     parser.add_argument(
         "--device", default="cuda:0" if torch.cuda.is_available() else "cpu"
@@ -332,21 +500,49 @@ def main() -> int:
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_file():
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
-    if args.num_envs < 1 or args.duration <= 0.0:
-        raise SystemExit("--num-envs and --duration must be positive")
+    if args.num_envs != 4 or args.duration <= 0.0:
+        raise SystemExit("canonical evaluation requires --num-envs 4 and positive duration")
 
     configure_torch_backends()
     env_cfg = load_env_cfg(TASK_ID, play=True)
     agent_cfg = load_rl_cfg(TASK_ID)
     env_cfg.scene.num_envs = args.num_envs
+    env_cfg.scene.env_spacing = RACE_LANE_SPACING
+    env_cfg.scene.terrain.env_spacing = RACE_LANE_SPACING
     env_cfg.seed = 0
     env_cfg.auto_reset = False
     env_cfg.episode_length_s = args.duration
     reset_cfg = env_cfg.events["set_roll_sprint_state"]
     reset_cfg.params["standing_prob"] = 1.0
     reset_cfg.params["midroll_prob"] = 0.0
+    reset_cfg.params["postroll_prob"] = 0.0
+    reset_cfg.params["yaw_range"] = (0.0, 0.0)
 
     base_env = ManagerBasedRlEnv(cfg=env_cfg, device=args.device, render_mode=None)
+    race_origins = microduck_mdp.arrange_roll_sprint_race_start(
+        base_env, RACE_LANE_SPACING
+    )
+    robot = base_env.scene["robot"]
+    race_headings = base_env._roll_sprint_heading_w.clone()
+    race_forward_starts = microduck_mdp._roll_sprint_forward_position(
+        base_env, robot, race_headings
+    )
+    race_alignment_pass = bool(
+        torch.allclose(
+            race_forward_starts,
+            race_forward_starts[:1].expand_as(race_forward_starts),
+            atol=1.0e-7,
+        )
+        and torch.allclose(
+            race_headings,
+            torch.tensor(
+                [[1.0, 0.0]] * 4,
+                device=race_headings.device,
+                dtype=race_headings.dtype,
+            ),
+            atol=1.0e-7,
+        )
+    )
     env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
     runner_cls = load_runner_cls(TASK_ID) or MjlabOnPolicyRunner
     runner = runner_cls(env, asdict(agent_cfg), device=args.device)
@@ -357,7 +553,6 @@ def main() -> int:
         map_location=args.device,
     )
     policy = runner.get_inference_policy(device=args.device)
-    robot = base_env.scene["robot"]
     head_ids, _ = robot.find_bodies("jaw_soft")
     head_id = head_ids[0]
     auditor = RollCycleAuditor(
@@ -386,6 +581,7 @@ def main() -> int:
                 linear_velocity_w=robot.data.root_link_lin_vel_w,
                 angular_velocity_b=robot.data.root_link_ang_vel_b,
                 support=sensor_contact(base_env, "robot_ground_contact"),
+                foot_support=sensor_contact(base_env, "feet_ground_contact"),
                 head_contact=sensor_contact(base_env, "head_ground_contact"),
                 active=alive,
             )
@@ -402,13 +598,20 @@ def main() -> int:
         env.close()
 
     report: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "task": TASK_ID,
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": _sha256(checkpoint),
         "checkpoint_iteration": int(checkpoint.stem.rsplit("_", 1)[-1]),
         "num_envs": args.num_envs,
         "duration_s": args.duration,
+        "canonical_race_alignment": {
+            "seed": env_cfg.seed,
+            "projected_forward_start_m": race_forward_starts.cpu().tolist(),
+            "lane_center_y_m": race_origins[:, 1].cpu().tolist(),
+            "reward_heading_xy": race_headings.cpu().tolist(),
+            "alignment_pass": race_alignment_pass,
+        },
         **auditor.summary(args.duration),
         "termination_counts": {
             name: int(values.sum().item()) for name, values in termination_seen.items()

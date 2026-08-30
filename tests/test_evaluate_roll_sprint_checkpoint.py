@@ -37,6 +37,7 @@ def _observe(
     lateral_position: float = 0.0,
     forward_velocity: float = 0.0,
     support: bool = True,
+    foot_support: bool = True,
     head_contact: bool = False,
     head_quat: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
     root_quat: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
@@ -48,8 +49,20 @@ def _observe(
         linear_velocity_w=torch.tensor([[forward_velocity, 0.0, 0.0]]),
         angular_velocity_b=torch.tensor([[0.0, omega, 0.0]]),
         support=torch.tensor([support]),
+        foot_support=torch.tensor([foot_support]),
         head_contact=torch.tensor([head_contact]),
     )
+
+
+def _recover(auditor, *, forward_position: float) -> None:
+    for _ in range(MODULE.RECOVERY_HOLD_STEPS):
+        _observe(
+            auditor,
+            omega=0.0,
+            forward_position=forward_position,
+            foot_support=True,
+            head_contact=False,
+        )
 
 
 def test_auditor_backward_rocking_cannot_complete_or_repay_angle() -> None:
@@ -96,11 +109,13 @@ def test_auditor_uses_net_cycle_advance_and_global_frontier() -> None:
     _observe(auditor, omega=1.0, forward_position=0.20)
     assert auditor.linked_distance.item() == pytest.approx(0.20)
 
+    _recover(auditor, forward_position=0.20)
     auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
     auditor.head_latch[:] = True
     _observe(auditor, omega=1.0, forward_position=0.20)
     assert auditor.linked_distance.item() == pytest.approx(0.20)
 
+    _recover(auditor, forward_position=0.20)
     auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
     auditor.head_latch[:] = False
     _observe(auditor, omega=1.0, forward_position=0.0)
@@ -110,6 +125,31 @@ def test_auditor_uses_net_cycle_advance_and_global_frontier() -> None:
     auditor.head_latch[:] = True
     _observe(auditor, omega=1.0, forward_position=0.35)
     assert auditor.linked_distance.item() == pytest.approx(0.35)
+
+
+def test_auditor_requires_recovery_before_second_credited_roll() -> None:
+    auditor = _auditor()
+    auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
+    auditor.head_latch[:] = True
+    _observe(auditor, omega=1.0, forward_position=0.20)
+
+    auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
+    auditor.head_latch[:] = True
+    _observe(auditor, omega=1.0, forward_position=0.40)
+    assert auditor.valid_count.item() == 1
+    assert auditor.linked_distance.item() == pytest.approx(0.20)
+
+    _recover(auditor, forward_position=0.20)
+    auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
+    auditor.head_latch[:] = True
+    _observe(auditor, omega=1.0, forward_position=0.45)
+
+    assert auditor.valid_count.item() == 2
+    assert auditor.recovery_count.item() == 1
+    assert auditor.recovered_and_rerolled_count.item() == 1
+    report = auditor.summary(6.0)
+    assert report["mean_recovery_latency_s"] == pytest.approx(0.06)
+    assert report["repeated_roll_rate"] == pytest.approx(1.0)
 
 
 def test_heading_uses_lateral_axis_at_vertical_pitch() -> None:

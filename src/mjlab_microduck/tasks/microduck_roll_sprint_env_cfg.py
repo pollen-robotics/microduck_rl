@@ -10,6 +10,7 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers import (
     CurriculumTermCfg,
     EventTermCfg,
+    MetricsTermCfg,
     ObservationTermCfg,
     RewardTermCfg,
 )
@@ -75,6 +76,10 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         func=microduck_mdp.roll_sprint_cycle_rate,
         weight=1.0,
     )
+    cfg.rewards["roll_sprint_recovery"] = RewardTermCfg(
+        func=microduck_mdp.roll_sprint_recovery_rate,
+        weight=0.25,
+    )
     cfg.rewards["roll_sprint_head_pivot"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_head_pivot,
         weight=0.25,
@@ -127,7 +132,8 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         mode=old_reset.mode,
         params={
             "standing_prob": 1.0 if play else 0.50,
-            "midroll_prob": 0.0 if play else 0.50,
+            "midroll_prob": 0.0 if play else 0.25,
+            "postroll_prob": 0.0 if play else 0.25,
             "standing_z_min": old_reset.params["standing_z_min"],
             "standing_z_max": old_reset.params["standing_z_max"],
             "standing_tilt_max": old_reset.params["standing_tilt_max"],
@@ -158,6 +164,22 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         params={"dim": 16},
     )
 
+    # These are cumulative latch counters sampled at episode end. They appear
+    # in TensorBoard and therefore in the existing dashboard without affecting
+    # PPO reward or introducing any per-step upright annuity.
+    cfg.metrics["roll_sprint_recovery_count"] = MetricsTermCfg(
+        func=microduck_mdp.roll_sprint_recovery_count,
+        reduce="last",
+    )
+    cfg.metrics["roll_sprint_recovered_reroll_count"] = MetricsTermCfg(
+        func=microduck_mdp.roll_sprint_recovered_reroll_count,
+        reduce="last",
+    )
+    cfg.metrics["roll_sprint_mean_recovery_latency_s"] = MetricsTermCfg(
+        func=microduck_mdp.roll_sprint_mean_recovery_latency,
+        reduce="last",
+    )
+
     # Rebuild curricula so no one-roll landing weights or old reward names can
     # silently remain active. DR stages are retained from the roulade recipe.
     for name in list(cfg.curriculum):
@@ -172,21 +194,24 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                     "step": 0,
                     "params": {
                         "standing_prob": 0.50,
-                        "midroll_prob": 0.50,
+                        "midroll_prob": 0.25,
+                        "postroll_prob": 0.25,
                     },
                 },
                 {
                     "step": 500 * 24,
                     "params": {
-                        "standing_prob": 0.65,
-                        "midroll_prob": 0.35,
+                        "standing_prob": 0.60,
+                        "midroll_prob": 0.20,
+                        "postroll_prob": 0.20,
                     },
                 },
                 {
                     "step": 1500 * 24,
                     "params": {
-                        "standing_prob": 0.85,
-                        "midroll_prob": 0.15,
+                        "standing_prob": 0.80,
+                        "midroll_prob": 0.10,
+                        "postroll_prob": 0.10,
                     },
                 },
                 {
@@ -194,6 +219,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                     "params": {
                         "standing_prob": 1.0,
                         "midroll_prob": 0.0,
+                        "postroll_prob": 0.0,
                     },
                 },
             ],

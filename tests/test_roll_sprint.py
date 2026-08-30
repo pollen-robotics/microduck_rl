@@ -41,6 +41,9 @@ def _fake_env(num_envs: int = 1):
         "head_ground_contact": SimpleNamespace(
             data=SimpleNamespace(found=torch.zeros(num_envs, 1))
         ),
+        "feet_ground_contact": SimpleNamespace(
+            data=SimpleNamespace(found=torch.ones(num_envs, 1))
+        ),
     }
     env = SimpleNamespace(
         num_envs=num_envs,
@@ -82,6 +85,16 @@ def _complete_valid_roll(env, asset, *, forward: float, lateral: float = 0.0) ->
     mdp._update_roll_sprint_state(env, asset)
 
 
+def _recover(env, asset) -> None:
+    env.scene.sensors["head_ground_contact"].data.found[:] = 0.0
+    env.scene.sensors["feet_ground_contact"].data.found[:] = 1.0
+    asset.data.root_link_quat_w[:] = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    asset.data.root_link_ang_vel_b[:] = 0.0
+    for _ in range(mdp._ROLL_SPRINT_RECOVERY_HOLD_STEPS):
+        env.common_step_counter += 1
+        mdp._update_roll_sprint_state(env, asset)
+
+
 def test_roll_sprint_is_separate_six_second_61d_policy():
     cfg = make_microduck_roll_sprint_env_cfg()
     roulade = make_microduck_roulade_env_cfg()
@@ -102,6 +115,7 @@ def test_roll_sprint_is_separate_six_second_61d_policy():
         > cfg.rewards["roll_sprint_progress"].weight
     )
     assert cfg.rewards["roll_sprint_cycle_rate"].weight == 1.0
+    assert cfg.rewards["roll_sprint_recovery"].weight == 0.25
     assert cfg.rewards["roll_sprint_invalid_cycle"].weight == -2.0
     assert cfg.rewards["roll_sprint_sagittal"].weight == -0.05
     assert cfg.rewards["roll_sprint_flatness"].weight == -0.25
@@ -126,6 +140,15 @@ def test_roll_sprint_is_separate_six_second_61d_policy():
     assert cfg.terminations["nan_state"].time_out is False
     assert MicroduckRollSprintRlCfg.experiment_name == "microduck_roll_sprint"
     assert MicroduckRollSprintRlCfg.save_interval == 100
+    reset_params = cfg.events["set_roll_sprint_state"].params
+    assert reset_params["standing_prob"] == 0.50
+    assert reset_params["midroll_prob"] == 0.25
+    assert reset_params["postroll_prob"] == 0.25
+    assert {
+        "roll_sprint_recovery_count",
+        "roll_sprint_recovered_reroll_count",
+        "roll_sprint_mean_recovery_latency_s",
+    }.issubset(cfg.metrics)
 
 
 def test_roll_sprint_and_backlash_tasks_are_registered():
@@ -147,6 +170,8 @@ def test_roll_sprint_buffer_reset_is_per_environment():
     env._roll_sprint_completed[:] = torch.tensor([2.0, 3.0, 4.0])
     env._roll_sprint_head_latch[:] = True
     env._roll_sprint_cycle_eligible[:] = True
+    env._roll_sprint_awaiting_recovery[:] = True
+    env._roll_sprint_recovery_count[:] = 2.0
     env._roll_sprint_lateral_invalid[:] = True
 
     mdp._reset_roll_sprint_buffers(
@@ -168,6 +193,10 @@ def test_roll_sprint_buffer_reset_is_per_environment():
     assert torch.equal(
         env._roll_sprint_lateral_invalid, torch.tensor([True, False, True])
     )
+    assert torch.equal(
+        env._roll_sprint_awaiting_recovery, torch.tensor([True, False, True])
+    )
+    assert torch.equal(env._roll_sprint_recovery_count, torch.tensor([2.0, 0.0, 2.0]))
 
 
 def test_roll_sprint_requires_support_and_sagittal_forward_rotation(monkeypatch):
@@ -284,16 +313,84 @@ def test_midroll_bootstrap_segment_cannot_receive_cycle_credit(monkeypatch):
     assert not env._roll_sprint_invalid_now[0]
     assert env._roll_sprint_completed[0] == 0.0
     assert env._roll_sprint_completed_distance[0] == 0.0
+    assert env._roll_sprint_awaiting_recovery[0]
+    assert not env._roll_sprint_cycle_eligible[0]
+
+    _recover(env, asset)
+    assert not env._roll_sprint_awaiting_recovery[0]
     assert env._roll_sprint_cycle_eligible[0]
 
-    env.common_step_counter = 1
-    env._roll_sprint_accum[:] = 2.0 * torch.pi - 0.01
-    env._roll_sprint_phase_frontier[:] = env._roll_sprint_accum
-    env._roll_sprint_head_latch[:] = True
-    mdp._update_roll_sprint_state(env, asset)
+    env.common_step_counter += 1
+    _complete_valid_roll(env, asset, forward=0.20)
 
     assert env._roll_sprint_completed_now[0]
     assert env._roll_sprint_completed[0] == 1.0
+
+
+def test_valid_roll_enters_recovery_required_and_blocks_second_roll(monkeypatch):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    _prime_roll_heading(env, asset)
+    _complete_valid_roll(env, asset, forward=0.20)
+
+    assert env._roll_sprint_awaiting_recovery[0]
+    assert not env._roll_sprint_cycle_eligible[0]
+    assert env._roll_sprint_completed[0] == 1.0
+
+    env.common_step_counter += 1
+    _complete_valid_roll(env, asset, forward=0.40)
+
+    assert env._roll_sprint_completed[0] == 1.0
+    assert env._roll_sprint_completed_distance[0] == 0.0
+    assert env._roll_sprint_accum[0] == 0.0
+    assert env._roll_sprint_forward_frontier[0] == pytest.approx(0.20)
+
+
+def test_feet_supported_recovery_rearms_once_without_standing_annuity(monkeypatch):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    _prime_roll_heading(env, asset)
+    _complete_valid_roll(env, asset, forward=0.20)
+
+    _recover(env, asset)
+
+    assert env._roll_sprint_recovered_now[0]
+    assert env._roll_sprint_recovery_count[0] == 1.0
+    assert env._roll_sprint_cycle_eligible[0]
+    assert not env._roll_sprint_awaiting_recovery[0]
+
+    env.common_step_counter += 1
+    reward = mdp.roll_sprint_recovery_rate(env)
+    assert reward[0] == 0.0
+    assert env._roll_sprint_recovery_count[0] == 1.0
+
+
+def test_standing_without_completed_roll_cannot_farm_recovery_reward(monkeypatch):
+    env, _asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+
+    for _ in range(8):
+        reward = mdp.roll_sprint_recovery_rate(env)
+        assert reward[0] == 0.0
+        env.common_step_counter += 1
+
+    assert env._roll_sprint_recovery_count[0] == 0.0
+
+
+def test_roll_recover_reroll_credits_two_cycles(monkeypatch):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    _prime_roll_heading(env, asset)
+    _complete_valid_roll(env, asset, forward=0.20)
+    _recover(env, asset)
+
+    env.common_step_counter += 1
+    _complete_valid_roll(env, asset, forward=0.45)
+
+    assert env._roll_sprint_completed[0] == 2.0
+    assert env._roll_sprint_recovered_and_rerolled[0] == 1.0
+    assert env._roll_sprint_forward_frontier[0] == pytest.approx(0.45)
+    assert env._roll_sprint_completed_distance[0] == pytest.approx(0.25)
 
 
 def test_roll_sprint_side_violation_invalidates_whole_cycle(monkeypatch):
@@ -440,6 +537,7 @@ def test_roll_sprint_revisiting_credited_forward_point_earns_zero(monkeypatch):
     _complete_valid_roll(env, asset, forward=0.30)
     assert env._roll_sprint_completed_distance[0] == pytest.approx(0.30)
 
+    _recover(env, asset)
     env.common_step_counter += 1
     _complete_valid_roll(env, asset, forward=0.30)
 
@@ -453,6 +551,7 @@ def test_roll_sprint_only_credits_extension_beyond_global_frontier(monkeypatch):
     _prime_roll_heading(env, asset)
     _complete_valid_roll(env, asset, forward=0.20)
 
+    _recover(env, asset)
     env.common_step_counter += 1
     asset.data.root_link_pos_w[:, 0] = 0.0
     asset.data.root_link_ang_vel_b[:, 1] = 1.0
@@ -506,7 +605,7 @@ def test_roll_sprint_backward_rotation_and_translation_earn_no_credit(monkeypatc
     assert env._roll_sprint_forward_frontier[0] == 0.0
 
 
-def test_roll_sprint_completion_preserves_only_small_overshoot(monkeypatch):
+def test_roll_sprint_completion_discards_overshoot_until_recovery(monkeypatch):
     env, asset = _fake_env(1)
     asset.data.root_link_ang_vel_b[:, 1] = 2.0
     monkeypatch.setattr(
@@ -522,7 +621,6 @@ def test_roll_sprint_completion_preserves_only_small_overshoot(monkeypatch):
     mdp._update_roll_sprint_state(env, asset)
 
     assert env._roll_sprint_completed_now[0]
-    assert torch.allclose(env._roll_sprint_accum, torch.tensor([0.03]), atol=1.0e-5)
-    assert torch.allclose(
-        env._roll_sprint_phase_frontier, env._roll_sprint_accum
-    )
+    assert env._roll_sprint_awaiting_recovery[0]
+    assert torch.equal(env._roll_sprint_accum, torch.zeros(1))
+    assert torch.equal(env._roll_sprint_phase_frontier, torch.zeros(1))

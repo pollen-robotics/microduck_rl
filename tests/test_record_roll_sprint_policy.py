@@ -35,6 +35,8 @@ class _FakeRobot:
 
     def write_root_link_pose_to_sim(self, pose) -> None:
         self.pose = pose.clone()
+        self.data.root_link_pos_w = pose[:, :3].clone()
+        self.data.root_link_quat_w = pose[:, 3:].clone()
 
     def write_root_link_velocity_to_sim(self, velocity) -> None:
         self.velocity = velocity.clone()
@@ -88,7 +90,31 @@ def test_canonical_video_arranges_four_parallel_deterministic_race_lanes() -> No
     assert torch.equal(terrain.env_origins[:, 0], torch.zeros(4))
     assert torch.allclose(terrain.env_origins[:, 1], expected_y)
     assert sim.forward_called
-    assert not env._roll_sprint_heading_ready.any()
+    assert env._roll_sprint_heading_ready.all()
+
+    headings = env._roll_sprint_heading_w
+    projected_starts = MODULE.microduck_mdp._roll_sprint_forward_position(
+        env, robot, headings
+    )
+    yaws = torch.atan2(
+        2.0
+        * (
+            robot.pose[:, 3] * robot.pose[:, 6]
+            + robot.pose[:, 4] * robot.pose[:, 5]
+        ),
+        1.0 - 2.0 * (robot.pose[:, 5].square() + robot.pose[:, 6].square()),
+    )
+    assert torch.allclose(projected_starts, projected_starts[:1], atol=1.0e-7)
+    assert torch.allclose(projected_starts, torch.zeros(4), atol=1.0e-7)
+    assert torch.allclose(headings, torch.tensor([[1.0, 0.0]] * 4), atol=1.0e-7)
+    assert torch.allclose(yaws, torch.zeros(4), atol=1.0e-7)
+
+    # The reward-side projection is locked to the exact shared race heading.
+    robot.data.root_link_pos_w[:, 0] += 0.25
+    projected_advance = MODULE.microduck_mdp._roll_sprint_forward_position(
+        env, robot, env._roll_sprint_heading_w
+    )
+    assert torch.allclose(projected_advance, torch.full((4,), 0.25), atol=1.0e-7)
 
 
 def test_race_camera_is_centered_down_the_shared_forward_axis() -> None:

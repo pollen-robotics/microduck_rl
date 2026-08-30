@@ -111,36 +111,7 @@ def _arrange_race_start(
     lane_spacing: float = RACE_LANE_SPACING,
 ) -> None:
     """Place all robots on one deterministic start line facing world +x."""
-    robot = base_env.scene["robot"]
-    old_origins = base_env.scene.terrain.env_origins.clone()
-    origins = _race_lane_origins(
-        base_env.num_envs,
-        lane_spacing,
-        device=base_env.device,
-        dtype=old_origins.dtype,
-    )
-    pose = torch.cat(
-        (
-            robot.data.root_link_pos_w.clone(),
-            robot.data.root_link_quat_w.clone(),
-        ),
-        dim=-1,
-    )
-    local_height = pose[:, 2] - old_origins[:, 2]
-    pose[:, :3] = origins
-    pose[:, 2] += local_height
-    pose[:, 3:] = 0.0
-    pose[:, 3] = 1.0
-    velocity = torch.zeros(
-        (base_env.num_envs, 6), device=base_env.device, dtype=pose.dtype
-    )
-
-    base_env.scene.terrain.env_origins.copy_(origins)
-    robot.write_root_link_pose_to_sim(pose)
-    robot.write_root_link_velocity_to_sim(velocity)
-    base_env.sim.forward()
-    env_ids = torch.arange(base_env.num_envs, device=base_env.device)
-    microduck_mdp._reset_roll_sprint_buffers(base_env, env_ids)
+    microduck_mdp.arrange_roll_sprint_race_start(base_env, lane_spacing)
 
 
 def main() -> int:
@@ -176,6 +147,7 @@ def main() -> int:
     reset_cfg = env_cfg.events["set_roll_sprint_state"]
     reset_cfg.params["standing_prob"] = 1.0
     reset_cfg.params["midroll_prob"] = 0.0
+    reset_cfg.params["postroll_prob"] = 0.0
     reset_cfg.params["yaw_range"] = (0.0, 0.0)
 
     base_env = ManagerBasedRlEnv(
