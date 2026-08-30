@@ -21,7 +21,12 @@ from mjlab_microduck.rom.supervisor_state import (
         ("RUNNING", "STOP_CLAIMED", "STOPPING", ("SEND_STOP",), False),
         ("STOPPING", "TERMINAL_ACK", "IDLE", ("RELEASE_SLOT",), True),
         ("STARTING", "OPERATION_TIMEOUT", "QUARANTINED", ("QUARANTINE",), False),
-        ("QUARANTINED", "SIGTERM_SENT", "TERMINATING", ("SEND_SIGTERM",), False),
+        ("IDLE", "TERMINATION_CLAIMED", "TERMINATING", ("SEND_SIGTERM",), False),
+        ("RUNNING", "TERMINATION_CLAIMED", "TERMINATING", ("SEND_SIGTERM",), False),
+        ("STARTING", "TERMINATION_CLAIMED", "TERMINATING", ("SEND_SIGTERM",), False),
+        ("STOPPING", "TERMINATION_CLAIMED", "TERMINATING", ("SEND_SIGTERM",), False),
+        ("QUARANTINED", "TERMINATION_CLAIMED", "TERMINATING", ("SEND_SIGTERM",), False),
+        ("TERMINATING", "CHILD_EXITED", "REAPING", ("REAP",), False),
         ("TERMINATING", "TERM_TIMEOUT", "KILLING", ("SEND_SIGKILL",), False),
         ("KILLING", "SIGKILL_SENT", "REAPING", ("REAP",), False),
         ("REAPING", "CHILD_REAPED", "NO_CHILD", ("RELEASE_SLOT",), True),
@@ -60,7 +65,17 @@ def test_every_state_event_pair_is_explicit_or_quarantines() -> None:
         (SupervisorState.RUNNING, SupervisorEvent.STOP_CLAIMED),
         (SupervisorState.STOPPING, SupervisorEvent.TERMINAL_ACK),
         (SupervisorState.STARTING, SupervisorEvent.OPERATION_TIMEOUT),
-        (SupervisorState.QUARANTINED, SupervisorEvent.SIGTERM_SENT),
+        *(
+            (state, SupervisorEvent.TERMINATION_CLAIMED)
+            for state in (
+                SupervisorState.IDLE,
+                SupervisorState.RUNNING,
+                SupervisorState.STARTING,
+                SupervisorState.STOPPING,
+                SupervisorState.QUARANTINED,
+            )
+        ),
+        (SupervisorState.TERMINATING, SupervisorEvent.CHILD_EXITED),
         (SupervisorState.TERMINATING, SupervisorEvent.TERM_TIMEOUT),
         (SupervisorState.KILLING, SupervisorEvent.SIGKILL_SENT),
         (SupervisorState.REAPING, SupervisorEvent.CHILD_REAPED),

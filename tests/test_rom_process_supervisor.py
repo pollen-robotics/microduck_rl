@@ -16,7 +16,9 @@ from mjlab_microduck.rom.process_supervisor import (
     ChildLaunch,
     RuntimeProcessSupervisor,
     SupervisorOperationError,
+    SupervisorUnavailable,
 )
+from mjlab_microduck.rom.supervisor_state import SupervisorState
 
 
 def test_supervisor_module_exposes_process_owner() -> None:
@@ -72,14 +74,14 @@ class FakeLaunch:
 
 
 def _supervisor(
-    mode: str = "normal", **kwargs: object
+    mode: str = "normal", *, operation_timeout_s: float = 0.75, **kwargs: object
 ) -> tuple[RuntimeProcessSupervisor, FakeLaunch]:
     launch = FakeLaunch(mode)
     supervisor = RuntimeProcessSupervisor(
         bundle_root="bundle",
         bundle_digest=DIGEST,
         launch_factory=launch,
-        operation_timeout_s=0.75,
+        operation_timeout_s=operation_timeout_s,
         terminate_timeout_s=0.1,
         **kwargs,
     )
@@ -104,16 +106,18 @@ def _assert_pidfd_dead(pidfd: int) -> None:
 
 
 def _assert_containment_trace(
-    supervisor: RuntimeProcessSupervisor, *, killed: bool = False
+    supervisor: RuntimeProcessSupervisor,
+    *,
+    leading: str = "OPERATION_TIMEOUT",
+    killed: bool = False,
 ) -> None:
-    trace = supervisor.trace
-    required = ["QUARANTINED", "SIGTERM_SENT"]
+    expected = [leading, "QUARANTINED", "SIGTERM_SENT"]
     if killed:
-        required += ["TERM_TIMEOUT", "SIGKILL_SENT"]
-    required += ["CHILD_REAPED", "NO_CHILD"]
-    positions = [trace.index(item) for item in required]
-    assert positions == sorted(positions)
-    assert trace[-1] == "NO_CHILD"
+        expected += ["TERM_TIMEOUT", "SIGKILL_SENT"]
+    expected += ["CHILD_REAPED", "NO_CHILD"]
+    assert supervisor.trace == tuple(expected)
+    assert supervisor.snapshot().state is SupervisorState.NO_CHILD
+    assert supervisor.snapshot().pid is None
     assert supervisor.snapshot().slot_releasable is True
 
 
@@ -218,8 +222,8 @@ def test_each_block_mode_has_ordered_reap_barrier(
     caller.join(timeout=2)
     assert not caller.is_alive()
     assert len(errors) == 1 and isinstance(errors[0], SupervisorOperationError)
-    _assert_containment_trace(supervisor)
     _assert_pidfd_dead(pidfd)
+    _assert_containment_trace(supervisor)
     supervisor.close()
     for peer in launch.test_peers:
         peer.close()
@@ -238,6 +242,9 @@ def test_late_packet_is_released_only_by_post_deadline_sigterm() -> None:
     caller = threading.Thread(target=ready)
     caller.start()
     peer = _receive_gate(launch, b"HELLO")
+    pid = supervisor.snapshot().pid
+    assert pid is not None
+    pidfd = os.pidfd_open(pid)
     # No timer releases the fake. Its SIGTERM handler sends the late response,
     # proving the packet was emitted only after the supervisor's deadline path.
     assert peer.recv(64) == b"LATE_SENT"
@@ -247,6 +254,8 @@ def test_late_packet_is_released_only_by_post_deadline_sigterm() -> None:
     assert supervisor.trace.index("OPERATION_TIMEOUT") < supervisor.trace.index(
         "SIGTERM_SENT"
     )
+    # Exact PID death is the release barrier; inspect it before availability.
+    _assert_pidfd_dead(pidfd)
     _assert_containment_trace(supervisor, killed=True)
     supervisor.close()
     peer.close()
@@ -427,13 +436,22 @@ def test_blocking_terminal_callback_cannot_block_owner_or_close() -> None:
         entered.set()
         release.wait()
 
-    supervisor, launch = _supervisor("normal", terminal_callback=callback)
+    supervisor, launch = _supervisor(
+        "normal", operation_timeout_s=2.0, terminal_callback=callback
+    )
     supervisor.start(_request())
     supervisor.stop(TASK_ID, "CANCELLED")
     assert entered.wait(timeout=1)
-    supervisor.close()
+    with pytest.raises(SupervisorUnavailable, match="terminal delivery worker"):
+        supervisor.close()
     assert supervisor.snapshot().pid is None
+    assert supervisor.snapshot().state is SupervisorState.NO_CHILD
+    assert supervisor.terminal_delivery_alive
+    assert "TERMINAL_WORKER_ABANDONED" in supervisor.trace
     release.set()
+    supervisor.close()
+    assert not supervisor.terminal_delivery_alive
+    assert supervisor.trace[-1] == "TERMINAL_WORKER_TERMINATED"
     assert launch.test_peer is not None
     launch.test_peer.close()
 
@@ -445,20 +463,43 @@ def test_throwing_terminal_callback_isolated_from_acknowledged_stop() -> None:
         called.set()
         raise RuntimeError("test callback failure")
 
-    supervisor, launch = _supervisor("normal", terminal_callback=callback)
+    supervisor, launch = _supervisor(
+        "normal", operation_timeout_s=2.0, terminal_callback=callback
+    )
     supervisor.start(_request())
     terminal = supervisor.stop(TASK_ID, "CANCELLED")
     assert terminal.evidence.stopReason == "CANCELLED"
     assert called.wait(timeout=1)
     supervisor.close()
     assert any(item.startswith("TERMINAL_DELIVERY_FAILED") for item in supervisor.trace)
+    assert not supervisor.terminal_delivery_alive
+    assert supervisor.trace[-1] == "TERMINAL_WORKER_TERMINATED"
+    assert launch.test_peer is not None
+    launch.test_peer.close()
+
+
+def test_completed_terminal_callback_worker_is_joined_on_close() -> None:
+    called = threading.Event()
+
+    def callback(_terminal: object) -> None:
+        called.set()
+
+    supervisor, launch = _supervisor(
+        "normal", operation_timeout_s=2.0, terminal_callback=callback
+    )
+    supervisor.start(_request())
+    supervisor.stop(TASK_ID, "CANCELLED")
+    assert called.wait(timeout=1)
+    supervisor.close()
+    assert not supervisor.terminal_delivery_alive
+    assert supervisor.trace[-1] == "TERMINAL_WORKER_TERMINATED"
     assert launch.test_peer is not None
     launch.test_peer.close()
 
 
 @pytest.mark.parametrize("mode", ["gate-malformed", "gate-exit"])
 def test_protocol_failure_and_unexpected_exit_reap_captured_exact_pid(mode: str) -> None:
-    supervisor, launch = _supervisor(mode)
+    supervisor, launch = _supervisor(mode, operation_timeout_s=2.0)
     errors: list[BaseException] = []
 
     def ready() -> None:
@@ -478,9 +519,7 @@ def test_protocol_failure_and_unexpected_exit_reap_captured_exact_pid(mode: str)
     assert not caller.is_alive()
     assert len(errors) == 1 and isinstance(errors[0], SupervisorOperationError)
     _assert_pidfd_dead(pidfd)
-    trace = supervisor.trace
-    assert trace.index("QUARANTINED") < trace.index("CHILD_REAPED")
-    assert trace[-1] == "NO_CHILD"
+    _assert_containment_trace(supervisor, leading="OPERATION_FAILED")
     supervisor.close()
     peer.close()
 
@@ -539,6 +578,8 @@ def test_close_is_bounded_and_exactly_reaps_from_owned_lifecycle_state(
     _assert_pidfd_dead(pidfd)
     assert supervisor.snapshot().pid is None
     assert supervisor.snapshot().slot_releasable
+    assert supervisor.snapshot().state is SupervisorState.NO_CHILD
+    assert supervisor.trace[-1] == "NO_CHILD"
     supervisor.close()
     for peer in launch.test_peers:
         peer.close()
@@ -570,8 +611,9 @@ def test_close_queued_during_fault_is_bounded_through_quarantine_and_reap() -> N
     closer.join(timeout=2)
     caller.join(timeout=2)
     assert not closer.is_alive() and not caller.is_alive()
-    _assert_containment_trace(supervisor)
     _assert_pidfd_dead(pidfd)
+    _assert_containment_trace(supervisor)
+    assert supervisor.snapshot().state is SupervisorState.NO_CHILD
     supervisor.close()
     for peer in launch.test_peers:
         peer.close()

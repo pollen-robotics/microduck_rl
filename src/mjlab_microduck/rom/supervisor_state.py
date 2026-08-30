@@ -28,7 +28,8 @@ class SupervisorEvent(str, Enum):
     STOP_CLAIMED = "STOP_CLAIMED"
     TERMINAL_ACK = "TERMINAL_ACK"
     OPERATION_TIMEOUT = "OPERATION_TIMEOUT"
-    SIGTERM_SENT = "SIGTERM_SENT"
+    TERMINATION_CLAIMED = "TERMINATION_CLAIMED"
+    CHILD_EXITED = "CHILD_EXITED"
     TERM_TIMEOUT = "TERM_TIMEOUT"
     SIGKILL_SENT = "SIGKILL_SENT"
     CHILD_REAPED = "CHILD_REAPED"
@@ -82,8 +83,20 @@ _TRANSITIONS = MappingProxyType({
     (SupervisorState.STARTING, SupervisorEvent.OPERATION_TIMEOUT): SupervisorTransition(
         SupervisorState.QUARANTINED, (SupervisorEffect.QUARANTINE,)
     ),
-    (SupervisorState.QUARANTINED, SupervisorEvent.SIGTERM_SENT): SupervisorTransition(
-        SupervisorState.TERMINATING, (SupervisorEffect.SEND_SIGTERM,)
+    **{
+        (state, SupervisorEvent.TERMINATION_CLAIMED): SupervisorTransition(
+            SupervisorState.TERMINATING, (SupervisorEffect.SEND_SIGTERM,)
+        )
+        for state in (
+            SupervisorState.IDLE,
+            SupervisorState.RUNNING,
+            SupervisorState.STARTING,
+            SupervisorState.STOPPING,
+            SupervisorState.QUARANTINED,
+        )
+    },
+    (SupervisorState.TERMINATING, SupervisorEvent.CHILD_EXITED): SupervisorTransition(
+        SupervisorState.REAPING, (SupervisorEffect.REAP,)
     ),
     (SupervisorState.TERMINATING, SupervisorEvent.TERM_TIMEOUT): SupervisorTransition(
         SupervisorState.KILLING, (SupervisorEffect.SEND_SIGKILL,)

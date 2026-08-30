@@ -100,14 +100,17 @@ class RuntimeProcessSupervisor:
         self._operation_timeout = operation_timeout_s
         self._terminate_timeout = terminate_timeout_s
         self._terminal_callback = terminal_callback
-        self._terminal_queue: queue.Queue[TerminalPayload] | None = None
+        self._terminal_queue: queue.Queue[TerminalPayload | None] | None = None
+        self._terminal_thread: threading.Thread | None = None
+        self._terminal_shutdown_sent = False
         if terminal_callback is not None:
             self._terminal_queue = queue.Queue(maxsize=1)
-            threading.Thread(
+            self._terminal_thread = threading.Thread(
                 target=self._deliver_terminals,
-                name="microduck-terminal-delivery",
+                name=f"microduck-terminal-delivery-{id(self):x}",
                 daemon=True,
-            ).start()
+            )
+            self._terminal_thread.start()
         self._queue: queue.Queue[_Intent] = queue.Queue(maxsize=queue_size)
         self._snapshot_lock = threading.Lock()
         self._trace_lock = threading.Lock()
@@ -130,6 +133,8 @@ class RuntimeProcessSupervisor:
         assert self._terminal_queue is not None and self._terminal_callback is not None
         while True:
             payload = self._terminal_queue.get()
+            if payload is None:
+                return
             try:
                 self._terminal_callback(payload)
             except Exception as exc:  # noqa: BLE001 - callback boundary is isolated
@@ -178,6 +183,11 @@ class RuntimeProcessSupervisor:
             SupervisorState.RUNNING,
         }
 
+    @property
+    def terminal_delivery_alive(self) -> bool:
+        """Whether the optional callback worker still owns execution resources."""
+        return self._terminal_thread is not None and self._terminal_thread.is_alive()
+
     def ensure_ready(self) -> SupervisorSnapshot:
         return self._submit("ready")
 
@@ -199,19 +209,45 @@ class RuntimeProcessSupervisor:
         return self._submit("stop", task_id, reason)
 
     def close(self) -> None:
-        if self._closed and not self._thread.is_alive():
+        if (
+            self._closed
+            and not self._thread.is_alive()
+            and not self.terminal_delivery_alive
+        ):
             return
-        try:
-            self._submit("close")
-        except SupervisorUnavailable as exc:
+        if self._thread.is_alive():
+            try:
+                self._submit("close")
+            except SupervisorUnavailable as exc:
+                raise SupervisorUnavailable(
+                    "close could not reach the process owner"
+                ) from exc
+            self._thread.join(self._operation_timeout + self._terminate_timeout + 1)
+            if self._thread.is_alive() or self.snapshot().pid is not None:
+                raise SupervisorUnavailable(
+                    "close did not prove owner termination and exact reap"
+                )
+        self._shutdown_terminal_delivery()
+
+    def _shutdown_terminal_delivery(self) -> None:
+        thread = self._terminal_thread
+        terminal_queue = self._terminal_queue
+        if thread is None or terminal_queue is None or not thread.is_alive():
+            return
+        if not self._terminal_shutdown_sent:
+            try:
+                terminal_queue.put(None, timeout=self._terminate_timeout)
+            except queue.Full:
+                self._record("TERMINAL_WORKER_SENTINEL_BACKPRESSURE")
+            else:
+                self._terminal_shutdown_sent = True
+        thread.join(self._terminate_timeout)
+        if thread.is_alive():
+            self._record("TERMINAL_WORKER_ABANDONED")
             raise SupervisorUnavailable(
-                "close could not reach the process owner"
-            ) from exc
-        self._thread.join(self._operation_timeout + self._terminate_timeout + 1)
-        if self._thread.is_alive() or self.snapshot().pid is not None:
-            raise SupervisorUnavailable(
-                "close did not prove owner termination and exact reap"
+                "child contained but terminal delivery worker did not terminate"
             )
+        self._record("TERMINAL_WORKER_TERMINATED")
 
     def _submit(self, kind: IntentKind, *args: object) -> Any:
         if self._closed and kind != "close":
@@ -553,7 +589,7 @@ class RuntimeProcessSupervisor:
         if process is None:
             self._publish(SupervisorState.NO_CHILD, healthy=False, slot=True)
             return
-        self._advance(SupervisorEvent.SIGTERM_SENT, slot=False)
+        self._advance(SupervisorEvent.TERMINATION_CLAIMED, slot=False)
         if process.poll() is None:
             process.send_signal(signal.SIGTERM)
             self._record("SIGTERM_SENT")
@@ -566,7 +602,7 @@ class RuntimeProcessSupervisor:
                 self._record("SIGKILL_SENT")
                 self._advance(SupervisorEvent.SIGKILL_SENT, slot=False)
         if self.snapshot().state is SupervisorState.TERMINATING:
-            self._publish(SupervisorState.REAPING, slot=False)
+            self._advance(SupervisorEvent.CHILD_EXITED, slot=False)
         process.wait(timeout=max(self._operation_timeout, 0.1))
         if process.poll() is None:
             raise RuntimeError("exact child reap was not confirmed")

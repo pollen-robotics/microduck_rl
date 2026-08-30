@@ -116,3 +116,70 @@ Files changed in this round:
 - this report
 
 Self-review found no remaining Task 3 proof gaps. Task 4 was not started.
+
+## Scoped-review fix round 3
+
+- Added explicit `TERMINATION_CLAIMED` and `CHILD_EXITED` lifecycle events. IDLE,
+  STARTING, RUNNING, STOPPING, and QUARANTINED now enter TERMINATING through the
+  total transition table; a normal child exit enters REAPING through that table;
+  only exact `CHILD_REAPED` reaches NO_CHILD and releases the slot. The prior direct
+  REAPING publication was removed.
+- Extended the Task 1 totality/effect tests for every new checked edge. Every close
+  lifecycle test now requires final `NO_CHILD`, `pid is None`, and
+  `slot_releasable is True`.
+- Strengthened all five block-mode proofs to require the exact complete trace
+  `(OPERATION_TIMEOUT, QUARANTINED, SIGTERM_SENT, CHILD_REAPED, NO_CHILD)`.
+  Gated malformed and immediate-exit proofs require the corresponding full
+  `OPERATION_FAILED` trace. The SIGTERM-ignore late-response proof additionally
+  requires `TERM_TIMEOUT` and `SIGKILL_SENT`. Exact pidfd death is checked before
+  inspecting slot availability.
+- Made the optional terminal callback worker an owned resource with a retained
+  thread handle, sentinel shutdown, bounded join, and explicit outcome. Completed
+  and throwing callbacks terminate on close. A permanently blocking callback cannot
+  impede exact child containment; close reports the bounded
+  `TERMINAL_WORKER_ABANDONED` outcome and raises rather than claiming all resources
+  terminated. After callback release, idempotent close joins the worker and records
+  `TERMINAL_WORKER_TERMINATED`.
+- Increased only the non-timeout proof helpers' cold-child startup allowance after
+  a repeat run showed host scheduling could exceed 750 ms. The actual timeout/block
+  adversaries retain their 750 ms deadline.
+
+TDD evidence:
+
+```text
+RED: test_supervisor_transition_table[IDLE-TERMINATION_CLAIMED-...]
+     ValueError: TERMINATION_CLAIMED was not a SupervisorEvent
+GREEN: 19 passed in 0.40s
+
+Focused lifecycle/callback/trace suite:
+53 passed in 32.38s
+
+Focused callback plus gated failure repeat:
+50 passed, 290 deselected in 28.24s
+```
+
+Required verification:
+
+```text
+uv run --with pytest --with pytest-repeat pytest tests/test_rom_process_supervisor.py tests/test_rom_process_protocol.py tests/test_rom_supervisor_state.py -q --count=10
+860 passed in 326.62s (0:05:26)
+
+MUJOCO_GL=egl uv run --with pytest pytest tests/test_rom_runtime_child.py -q
+21 passed in 9.84s
+
+uv run ruff check src/mjlab_microduck/rom/process_supervisor.py src/mjlab_microduck/rom/supervisor_state.py tests/test_rom_process_supervisor.py tests/test_rom_supervisor_state.py
+All checks passed!
+
+git diff --check
+(no output)
+```
+
+Files changed in this round:
+
+- `src/mjlab_microduck/rom/process_supervisor.py`
+- `src/mjlab_microduck/rom/supervisor_state.py`
+- `tests/test_rom_process_supervisor.py`
+- `tests/test_rom_supervisor_state.py`
+- this report
+
+Self-review found no remaining Task 3 review gaps. Task 4 was not started.
