@@ -42,7 +42,7 @@ MODES = (
     "duplicate-event",
     "stale-event",
     "malformed-event",
-    "lease-semantic-cleanup-failure",
+    "lease-null-cleanup-failure",
 )
 
 PROOF_MODES = (
@@ -259,10 +259,10 @@ def main() -> int:
             "duplicate-event",
             "stale-event",
             "malformed-event",
-            "lease-semantic-cleanup-failure",
+            "lease-null-cleanup-failure",
         }:
             test_control.sendall(b"STARTED")
-            if args.mode == "lease-semantic-cleanup-failure":
+            if args.mode == "lease-null-cleanup-failure":
                 if test_control.recv(4) == b"EMIT":
                     return 0
             elif args.mode == "terminal-event":

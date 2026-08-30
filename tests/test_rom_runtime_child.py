@@ -57,9 +57,13 @@ def test_runtime_child_has_bounded_run_interface() -> None:
         "WATCHDOG_FAILURE",
         "ZERO_COMMAND_FAILED",
         "UNKNOWN_FUTURE_FAILURE",
+        None,
+        True,
+        7,
+        0.5,
     ],
 )
-def test_cleanup_evidence_semantics_fail_closed(failure: str) -> None:
+def test_cleanup_evidence_semantics_fail_closed(failure: object) -> None:
     assert not _cleanup_evidence_is_truthful(
         RuntimeEvidence(metrics={"safetyFailure": failure})
     )
@@ -160,7 +164,7 @@ def test_fake_child_exposes_every_required_environment_free_mode() -> None:
         "duplicate-event",
         "stale-event",
         "malformed-event",
-        "lease-semantic-cleanup-failure",
+        "lease-null-cleanup-failure",
     )
 
 
@@ -471,7 +475,15 @@ def test_lease_expiry_initiates_zero_stop_without_parent_watchdog() -> None:
 
 @pytest.mark.parametrize(
     "failure",
-    ["exception", "invalid-evidence", "runtime-unresponsive", "unknown-safety-failure"],
+    [
+        "exception",
+        "invalid-evidence",
+        "runtime-unresponsive",
+        "unknown-safety-failure",
+        "null-safety-failure",
+        "bool-safety-failure",
+        "numeric-safety-failure",
+    ],
 )
 def test_lease_expiry_safe_stop_failure_withholds_event_and_retires_transport(
     failure: str,
@@ -484,8 +496,14 @@ def test_lease_expiry_safe_stop_failure_withholds_event_and_retires_transport(
         runtime.safe_stop_metrics = {f"metric-{index}": index for index in range(33)}
     elif failure == "runtime-unresponsive":
         runtime.safe_stop_metrics = {"safetyFailure": "RUNTIME_UNRESPONSIVE"}
-    else:
+    elif failure == "unknown-safety-failure":
         runtime.safe_stop_metrics = {"safetyFailure": "NEW_UNKNOWN_FAILURE"}
+    elif failure == "null-safety-failure":
+        runtime.safe_stop_metrics = {"safetyFailure": None}
+    elif failure == "bool-safety-failure":
+        runtime.safe_stop_metrics = {"safetyFailure": True}
+    else:
+        runtime.safe_stop_metrics = {"safetyFailure": 7}
     host._last_request = RuntimeMessage(
         kind="COMMAND", generation=7, operationSequence=1, taskId="1" * 32,
         payload=CommandPayload(

@@ -178,10 +178,10 @@ def test_idle_owner_consumes_unsolicited_terminal_and_releases_slot() -> None:
         supervisor.close()
 
 
-def test_lease_semantic_cleanup_failure_eof_is_reaped_before_slot_release() -> None:
+def test_lease_null_cleanup_failure_eof_is_reaped_before_slot_release() -> None:
     delivered = threading.Event()
     supervisor, launch = _supervisor(
-        "lease-semantic-cleanup-failure",
+        "lease-null-cleanup-failure",
         terminal_callback=lambda _payload: delivered.set(),
     )
     try:

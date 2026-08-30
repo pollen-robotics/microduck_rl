@@ -78,9 +78,11 @@ _UNTRUTHFUL_SAFETY_FAILURES = frozenset(
 
 def _cleanup_evidence_is_truthful(evidence: RuntimeEvidence) -> bool:
     """Accept cleanup only when code-owned evidence proves containment."""
-    safety_failure = evidence.metrics.get("safetyFailure")
-    if safety_failure is None:
+    if "safetyFailure" not in evidence.metrics:
         return True
+    safety_failure = evidence.metrics["safetyFailure"]
+    if not isinstance(safety_failure, str):
+        return False
     if safety_failure in _TRUTHFUL_SAFETY_FAILURES:
         return True
     if safety_failure in _UNTRUTHFUL_SAFETY_FAILURES:
