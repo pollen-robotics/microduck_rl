@@ -25,7 +25,10 @@ from mjlab_microduck.rom.process_protocol import (
     encode_packet,
 )
 from mjlab_microduck.rom.runtime import RuntimeEvidence, RuntimeHandle, RuntimeSample
-from mjlab_microduck.rom.runtime_child import RuntimeChildHost
+from mjlab_microduck.rom.runtime_child import (
+    RuntimeChildHost,
+    _cleanup_evidence_is_truthful,
+)
 from mjlab_microduck.rom.runtime_identity import runtime_revision
 from tests.fakes.fake_microduck_runtime import FakeMicroduckRuntime
 from tests.fakes.fake_runtime_child import MODES
@@ -43,6 +46,27 @@ def test_runtime_child_requires_unix_seqpacket_descriptor() -> None:
 
 def test_runtime_child_has_bounded_run_interface() -> None:
     assert callable(RuntimeChildHost.run)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "EMERGENCY_STOP_FAILED",
+        "RUNTIME_UNRESPONSIVE",
+        "SAFE_STOP_FAILED",
+        "WATCHDOG_FAILURE",
+        "ZERO_COMMAND_FAILED",
+        "UNKNOWN_FUTURE_FAILURE",
+    ],
+)
+def test_cleanup_evidence_semantics_fail_closed(failure: str) -> None:
+    assert not _cleanup_evidence_is_truthful(
+        RuntimeEvidence(metrics={"safetyFailure": failure})
+    )
+
+
+def test_cleanup_evidence_without_safety_failure_is_truthful() -> None:
+    assert _cleanup_evidence_is_truthful(RuntimeEvidence(metrics={"safeStop": True}))
 
 
 def _exchange(peer: socket.socket, message: RuntimeMessage) -> RuntimeMessage:
@@ -136,7 +160,7 @@ def test_fake_child_exposes_every_required_environment_free_mode() -> None:
         "duplicate-event",
         "stale-event",
         "malformed-event",
-        "lease-cleanup-failure",
+        "lease-semantic-cleanup-failure",
     )
 
 
@@ -445,7 +469,10 @@ def test_lease_expiry_initiates_zero_stop_without_parent_watchdog() -> None:
     thread.join(timeout=1)
 
 
-@pytest.mark.parametrize("failure", ["exception", "invalid-evidence"])
+@pytest.mark.parametrize(
+    "failure",
+    ["exception", "invalid-evidence", "runtime-unresponsive", "unknown-safety-failure"],
+)
 def test_lease_expiry_safe_stop_failure_withholds_event_and_retires_transport(
     failure: str,
 ) -> None:
@@ -453,8 +480,12 @@ def test_lease_expiry_safe_stop_failure_withholds_event_and_retires_transport(
     host._start_runtime_monitor()
     if failure == "exception":
         runtime.safe_stop_error = RuntimeError("uncertain cleanup")
-    else:
+    elif failure == "invalid-evidence":
         runtime.safe_stop_metrics = {f"metric-{index}": index for index in range(33)}
+    elif failure == "runtime-unresponsive":
+        runtime.safe_stop_metrics = {"safetyFailure": "RUNTIME_UNRESPONSIVE"}
+    else:
+        runtime.safe_stop_metrics = {"safetyFailure": "NEW_UNKNOWN_FAILURE"}
     host._last_request = RuntimeMessage(
         kind="COMMAND", generation=7, operationSequence=1, taskId="1" * 32,
         payload=CommandPayload(
@@ -464,6 +495,37 @@ def test_lease_expiry_safe_stop_failure_withholds_event_and_retires_transport(
     )
     with host._state_lock:
         host._lease_deadline = time.monotonic() + 0.03
+    assert runtime.safe_stopped.wait(timeout=1)
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert host._cleanup_timed_out.is_set()
+    parent.settimeout(1)
+    assert parent.recv(65_537) == b""
+    parent.close()
+
+
+def test_continuous_completion_unresponsive_evidence_withholds_event() -> None:
+    host, runtime, parent, thread = _active_host()
+    runtime.safe_stop_metrics = {"safetyFailure": "RUNTIME_UNRESPONSIVE"}
+    runtime.complete_next(state="FAILED", metrics={}, stop_reason="FALLEN")
+    host._start_runtime_monitor()
+    assert runtime.safe_stopped.wait(timeout=1)
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert host._cleanup_timed_out.is_set()
+    parent.settimeout(1)
+    assert parent.recv(65_537) == b""
+    parent.close()
+
+
+def test_normal_stop_unresponsive_evidence_withholds_correlated_terminal() -> None:
+    host, runtime, parent, thread = _active_host()
+    runtime.safe_stop_metrics = {"safetyFailure": "RUNTIME_UNRESPONSIVE"}
+    host._start_runtime_monitor()
+    parent.sendall(encode_packet(RuntimeMessage(
+        kind="ZERO_AND_STOP", generation=7, operationSequence=1,
+        taskId="1" * 32, payload=ZeroAndStopPayload(reason="OPERATOR_CANCELLED"),
+    )))
     assert runtime.safe_stopped.wait(timeout=1)
     thread.join(timeout=1)
     assert not thread.is_alive()

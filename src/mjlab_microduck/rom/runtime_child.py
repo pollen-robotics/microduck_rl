@@ -64,6 +64,28 @@ _ERROR_CODES = {
     RuntimeMessageKind.SHUTDOWN: "SHUTDOWN_FAILED",
 }
 _FATAL_CLEANUP_TIMEOUT_S = 0.25
+_TRUTHFUL_SAFETY_FAILURES = frozenset()
+_UNTRUTHFUL_SAFETY_FAILURES = frozenset(
+    {
+        "EMERGENCY_STOP_FAILED",
+        "RUNTIME_UNRESPONSIVE",
+        "SAFE_STOP_FAILED",
+        "WATCHDOG_FAILURE",
+        "ZERO_COMMAND_FAILED",
+    }
+)
+
+
+def _cleanup_evidence_is_truthful(evidence: RuntimeEvidence) -> bool:
+    """Accept cleanup only when code-owned evidence proves containment."""
+    safety_failure = evidence.metrics.get("safetyFailure")
+    if safety_failure is None:
+        return True
+    if safety_failure in _TRUTHFUL_SAFETY_FAILURES:
+        return True
+    if safety_failure in _UNTRUTHFUL_SAFETY_FAILURES:
+        return False
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,7 +294,9 @@ class RuntimeChildHost:
         def cleanup() -> None:
             cleanup_evidence = evidence
             if handle is None:
-                cleanup_result.append((cleanup_evidence, True))
+                cleanup_result.append(
+                    (cleanup_evidence, _cleanup_evidence_is_truthful(cleanup_evidence))
+                )
                 return
             try:
                 template = action_template(self._bundle_action_code())
@@ -297,7 +321,9 @@ class RuntimeChildHost:
                 )
                 cleanup_result.append((cleanup_evidence, False))
                 return
-            cleanup_result.append((cleanup_evidence, True))
+            cleanup_result.append(
+                (cleanup_evidence, _cleanup_evidence_is_truthful(cleanup_evidence))
+            )
 
         if handle is not None:
             cleanup_thread = threading.Thread(
@@ -322,6 +348,9 @@ class RuntimeChildHost:
             with self._state_lock:
                 self._handle = None
                 self._sample_thread = None
+        if not _cleanup_evidence_is_truthful(evidence):
+            self._retire_uncertain_cleanup()
+            return
         if (
             request is not None
             and request.taskId is not None
@@ -349,6 +378,8 @@ class RuntimeChildHost:
         return self._active_action_code
 
     def _terminal(self, request: RuntimeMessage, reason: str, evidence: RuntimeEvidence) -> RuntimeMessage:
+        if not _cleanup_evidence_is_truthful(evidence):
+            raise ValueError("cleanup evidence does not prove containment")
         assert self._bundle is not None
         action = next(item for item in self._bundle.actions if item.actionCode == self._active_action_code)
         policy = next(item for item in self._bundle.policies if item.policyRef == action.policyRef)
@@ -465,6 +496,9 @@ class RuntimeChildHost:
                     metrics=raw_stopped.metrics, stopReason=raw_stopped.stopReason
                 )
             except Exception:  # noqa: BLE001 - uncertain cleanup requires exact reap
+                self._retire_uncertain_cleanup()
+                return
+            if not _cleanup_evidence_is_truthful(stopped):
                 self._retire_uncertain_cleanup()
                 return
             metrics = dict(completion.sample.metrics)
@@ -605,7 +639,13 @@ class RuntimeChildHost:
             template = action_template(self._active_action_code)
             zero: Mapping[str, object] = template.lease.zeroCommand if template.lease else {}
             self._runtime.command(handle, zero)
-            evidence = self._runtime.safe_stop(handle, reason)
+            raw_evidence = self._runtime.safe_stop(handle, reason)
+            evidence = RuntimeEvidence(
+                metrics=raw_evidence.metrics, stopReason=raw_evidence.stopReason
+            )
+            if not _cleanup_evidence_is_truthful(evidence):
+                self._retire_uncertain_cleanup()
+                return
             self._send(self._terminal(message, reason, evidence))
             with self._state_lock:
                 self._truthfully_stopped_completion = (
