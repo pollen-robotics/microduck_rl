@@ -158,9 +158,9 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert cfg.rewards["roll_sprint_progress"].params["road_half_width"] == (
         mdp._ROLL_SPRINT_ROAD_HALF_WIDTH
     )
-    assert cfg.rewards["roll_sprint_cycle_rate"].weight == 4.0
+    assert cfg.rewards["roll_sprint_cycle_rate"].weight == 1.0
     assert cfg.rewards["roll_sprint_recovery"].weight == 1.0
-    assert cfg.rewards["roll_sprint_recovered_reroll"].weight == 8.0
+    assert cfg.rewards["roll_sprint_recovered_reroll"].weight == 4.0
     assert cfg.rewards["roll_sprint_self_right_upright"].weight == 5.0
     assert cfg.rewards["roll_sprint_self_right_height"].weight == 30.0
     assert cfg.rewards["roll_sprint_self_right_upward"].weight == 1.0

@@ -84,10 +84,10 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     )
     cfg.rewards["roll_sprint_cycle_rate"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_cycle_rate,
-        # A67 checkpoint 100 reached only 8.75 valid cycles in 20 seconds;
-        # the 10 m gate needs at least 14. Keep this one-shot completion
-        # reward meaningful without displacing the dominant frontier term.
-        weight=4.0,
+        # A68 showed that quadrupling this term reduced deterministic valid
+        # cycles and frontier. Keep the proven A67 scale and fix the blocked
+        # self-right-to-reposition transition directly.
+        weight=1.0,
     )
     cfg.rewards["roll_sprint_recovery"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_recovery_rate,
@@ -100,10 +100,9 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         func=microduck_mdp.roll_sprint_recovered_reroll_rate,
         # One-shot only: reward the missing recovery-to-reroll transition,
         # never standing or merely remaining upright after recovery.
-        # A67 checkpoint 100 self-righted 16/16 times but only 5/16 recovery
-        # cases rerolled, so strengthen the transition rather than recovery
-        # pose shaping or forward speed.
-        weight=8.0,
+        # A68 showed that doubling this term did not increase deterministic
+        # rerolls. Preserve the A67 scale while sequencing the command modes.
+        weight=4.0,
     )
     cfg.rewards["roll_sprint_self_right_upright"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_self_right_upright_progress,
