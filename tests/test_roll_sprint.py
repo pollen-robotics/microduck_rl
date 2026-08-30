@@ -160,6 +160,7 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     )
     assert cfg.rewards["roll_sprint_cycle_rate"].weight == 1.0
     assert cfg.rewards["roll_sprint_recovery"].weight == 1.0
+    assert cfg.rewards["roll_sprint_reposition"].weight == 2.0
     assert cfg.rewards["roll_sprint_recovered_reroll"].weight == 4.0
     assert cfg.rewards["roll_sprint_self_right_upright"].weight == 5.0
     assert cfg.rewards["roll_sprint_self_right_height"].weight == 30.0
@@ -221,6 +222,7 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
         reset_params["road_edge_prob"],
         reset_params["road_return_prob"],
     ) == (0.70, 0.20, 0.10)
+    assert reset_params["recovery_road_return_prob"] == 0.35
     assert tuple(
         reset_params[name]
         for name in (
@@ -267,6 +269,9 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
         (0.55, 0.05, 0.10, 0.10, 0.20),
         (0.65, 0.00, 0.10, 0.05, 0.20),
     ]
+    assert [
+        stage["params"]["recovery_road_return_prob"] for stage in spawn_stages
+    ] == [0.35, 0.30, 0.20, 0.10]
     assert [
         tuple(
             stage["params"][name]
@@ -482,6 +487,41 @@ def test_side_recovery_reset_preserves_sampled_course_heading(
     )
     assert env._roll_sprint_course_lateral_position[0].item() == pytest.approx(
         intended_lateral[0].item(), abs=1.0e-6
+    )
+
+
+def test_recovery_curriculum_forces_integrated_road_return_starts(monkeypatch):
+    env, _asset = _fake_env(4)
+    _enable_flat_valid_roll(monkeypatch, env)
+    env.sim = SimpleNamespace(
+        data=SimpleNamespace(qpos=torch.zeros(4, 21), qvel=torch.zeros(4, 20))
+    )
+    env._roulade_accum = torch.zeros(4)
+    monkeypatch.setattr(mdp, "reset_roulade_state", lambda *args, **kwargs: None)
+
+    mdp.reset_roll_sprint_state(
+        env,
+        torch.arange(4),
+        standing_prob=0.0,
+        midroll_prob=0.0,
+        postroll_prob=0.0,
+        crouch_prob=0.0,
+        ground_recovery_prob=1.0,
+        ground_face_down_prob=1.0,
+        ground_face_up_prob=0.0,
+        ground_left_prob=0.0,
+        ground_right_prob=0.0,
+        road_interior_prob=1.0,
+        road_edge_prob=0.0,
+        road_return_prob=0.0,
+        recovery_road_return_prob=1.0,
+    )
+
+    assert torch.all(env._roll_sprint_self_righting)
+    assert torch.all(env._roll_sprint_awaiting_reposition)
+    assert torch.all(
+        env._roll_sprint_course_lateral_position.abs()
+        > mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M
     )
 
 
@@ -1309,6 +1349,7 @@ def test_roll_recovery_waits_for_lane_reposition_before_reroll(monkeypatch):
     _recover(env, asset)
     assert env._roll_sprint_recovered_now[0]
     assert env._roll_sprint_repositioned_now[0]
+    assert mdp.roll_sprint_reposition_rate(env)[0] == pytest.approx(1.0 / env.step_dt)
     assert env._roll_sprint_recovery_count[0] == 1.0
     assert env._roll_sprint_reposition_count[0] == 1.0
     assert env._roll_sprint_forward_frontier[0] == pytest.approx(0.20)

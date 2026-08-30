@@ -12449,6 +12449,7 @@ def reset_roll_sprint_state(
     road_interior_prob: float = 0.70,
     road_edge_prob: float = 0.20,
     road_return_prob: float = 0.10,
+    recovery_road_return_prob: float = 0.0,
 ) -> None:
     """Reset pose plus every cyclic sprint buffer for the selected envs."""
     if env_ids is None or len(env_ids) == 0:
@@ -12541,11 +12542,22 @@ def reset_roll_sprint_state(
     road_total = road_interior_prob + road_edge_prob + road_return_prob
     if road_total <= 0.0:
         raise ValueError("roll-sprint road start probabilities need positive mass")
+    if not 0.0 <= recovery_road_return_prob <= 1.0:
+        raise ValueError("recovery road-return probability must be in [0, 1]")
     road_sample = torch.rand(len(env_ids), device=env.device) * road_total
     is_road_interior = road_sample < road_interior_prob
     is_road_edge = (road_sample >= road_interior_prob) & (
         road_sample < road_interior_prob + road_edge_prob
     )
+    # A69 never completed a road reposition and side recoveries never rerolled.
+    # Train the combined self-right -> road-return handoff directly, rather
+    # than sampling those states only in isolation. Forced cases still use the
+    # normal return geometry below.
+    force_recovery_road_return = spawn_self_righting & (
+        torch.rand(len(env_ids), device=env.device) < recovery_road_return_prob
+    )
+    is_road_interior &= ~force_recovery_road_return
+    is_road_edge &= ~force_recovery_road_return
     road_sign = torch.where(
         torch.rand(len(env_ids), device=env.device) < 0.5,
         -torch.ones(len(env_ids), device=env.device),
@@ -13138,6 +13150,16 @@ def roll_sprint_recovery_rate(
     asset = env.scene[asset_cfg.name]
     _update_roll_sprint_state(env, asset)
     return env._roll_sprint_recovered_now.float() / env.step_dt
+
+
+def roll_sprint_reposition_rate(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """One-shot road-reposition completion rate, never a centering annuity."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_repositioned_now.float() / env.step_dt
 
 
 def roll_sprint_self_right_upright_progress(

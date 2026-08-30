@@ -96,6 +96,12 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         # valid frontier released by even one useful roll.
         weight=1.0,
     )
+    cfg.rewards["roll_sprint_reposition"] = RewardTermCfg(
+        func=microduck_mdp.roll_sprint_reposition_rate,
+        # A modest one-shot transition reward, worth far less than one valid
+        # frontier cycle and impossible to farm by standing inside the road.
+        weight=2.0,
+    )
     cfg.rewards["roll_sprint_recovered_reroll"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_recovered_reroll_rate,
         # One-shot only: reward the missing recovery-to-reroll transition,
@@ -207,6 +213,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
             "road_interior_prob": 1.0 if play else 0.70,
             "road_edge_prob": 0.0 if play else 0.20,
             "road_return_prob": 0.0 if play else 0.10,
+            "recovery_road_return_prob": 0.0 if play else 0.35,
             "standing_z_min": old_reset.params["standing_z_min"],
             "standing_z_max": old_reset.params["standing_z_max"],
             "standing_tilt_max": old_reset.params["standing_tilt_max"],
@@ -308,6 +315,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                         "ground_face_up_prob": 0.25,
                         "ground_left_prob": 0.25,
                         "ground_right_prob": 0.25,
+                        "recovery_road_return_prob": 0.35,
                     },
                 },
                 {
@@ -322,6 +330,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                         "ground_face_up_prob": 0.25,
                         "ground_left_prob": 0.25,
                         "ground_right_prob": 0.25,
+                        "recovery_road_return_prob": 0.30,
                     },
                 },
                 {
@@ -336,6 +345,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                         "ground_face_up_prob": 0.25,
                         "ground_left_prob": 0.25,
                         "ground_right_prob": 0.25,
+                        "recovery_road_return_prob": 0.20,
                     },
                 },
                 {
@@ -350,6 +360,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                         "ground_face_up_prob": 0.25,
                         "ground_left_prob": 0.25,
                         "ground_right_prob": 0.25,
+                        "recovery_road_return_prob": 0.10,
                     },
                 },
             ],
