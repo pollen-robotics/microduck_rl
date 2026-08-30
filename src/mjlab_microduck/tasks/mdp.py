@@ -11487,6 +11487,7 @@ _ROLL_SPRINT_FEET_SENSOR = "feet_ground_contact"
 _ROLL_SPRINT_MIN_FORWARD_RATE = 0.5
 _ROLL_SPRINT_MAX_DISTANCE_PER_RAD = 0.12
 _ROLL_SPRINT_LANE_HALF_WIDTH = 0.14
+_ROLL_SPRINT_BOOTSTRAP_LANE_HALF_WIDTH = 0.40
 _ROLL_SPRINT_LATERAL_INVALID_Z = math.sin(math.radians(60.0))
 # A launch-ready recovery is deliberately dynamic. Normal MicroDuck roll
 # transit is 3.5--5.5 rad/s (and the A35 diagnostic reached still higher
@@ -11544,6 +11545,7 @@ def _roll_sprint_state(env: ManagerBasedRlEnv) -> None:
     env._roll_sprint_lateral_origin = z.clone()
     env._roll_sprint_lateral_displacement = z.clone()
     env._roll_sprint_lane_centering_delta = z.clone()
+    env._roll_sprint_lane_half_width_m = _ROLL_SPRINT_LANE_HALF_WIDTH
     env._roll_sprint_heading_w = torch.zeros((env.num_envs, 2), device=env.device)
     env._roll_sprint_heading_ready = torch.zeros(
         env.num_envs, dtype=torch.bool, device=env.device
@@ -11780,7 +11782,7 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
     corridor_violation = (
         active
         & ~awaiting_before
-        & (lateral_displacement.abs() > _ROLL_SPRINT_LANE_HALF_WIDTH)
+        & (lateral_displacement.abs() > env._roll_sprint_lane_half_width_m)
     )
     lateral_violation = orientation_violation | corridor_violation
     old_lateral_invalid = torch.where(
@@ -12167,6 +12169,22 @@ def roll_sprint_lane_centering_progress(
     asset = env.scene[asset_cfg.name]
     _update_roll_sprint_state(env, asset)
     return env._roll_sprint_lane_centering_delta / env.step_dt
+
+
+def roll_sprint_lane_half_width_curriculum(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    width_stages: list[dict],
+) -> torch.Tensor:
+    """Tighten the training cycle gate while canonical play stays exact."""
+    del env_ids
+    _roll_sprint_state(env)
+    current_width = width_stages[0]["width"]
+    for stage in width_stages:
+        if env.common_step_counter >= stage["step"]:
+            current_width = stage["width"]
+    env._roll_sprint_lane_half_width_m = float(current_width)
+    return torch.tensor([current_width], device=env.device)
 
 
 def roll_sprint_cycle_rate(

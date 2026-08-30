@@ -235,6 +235,27 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         },
     )
 
+    lane_width_stages = (
+        [{"step": 0, "width": microduck_mdp._ROLL_SPRINT_LANE_HALF_WIDTH}]
+        if play
+        else [
+            {
+                "step": 0,
+                "width": microduck_mdp._ROLL_SPRINT_BOOTSTRAP_LANE_HALF_WIDTH,
+            },
+            {"step": 250 * 24, "width": 0.28},
+            {"step": 500 * 24, "width": 0.20},
+            {
+                "step": 1000 * 24,
+                "width": microduck_mdp._ROLL_SPRINT_LANE_HALF_WIDTH,
+            },
+        ]
+    )
+    cfg.curriculum["roll_sprint_lane_half_width"] = CurriculumTermCfg(
+        func=microduck_mdp.roll_sprint_lane_half_width_curriculum,
+        params={"width_stages": lane_width_stages},
+    )
+
     if ENABLE_COM_RANDOMIZATION:
         cfg.curriculum["com_range"] = CurriculumTermCfg(
             func=microduck_mdp.com_range_curriculum,

@@ -152,6 +152,16 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert reset_params["standing_prob"] == 0.50
     assert reset_params["midroll_prob"] == 0.25
     assert reset_params["postroll_prob"] == 0.25
+    assert [
+        stage["width"]
+        for stage in cfg.curriculum["roll_sprint_lane_half_width"].params[
+            "width_stages"
+        ]
+    ] == [0.40, 0.28, 0.20, 0.14]
+    play_cfg = make_microduck_roll_sprint_env_cfg(play=True)
+    assert play_cfg.curriculum["roll_sprint_lane_half_width"].params[
+        "width_stages"
+    ] == [{"step": 0, "width": 0.14}]
     assert {
         "roll_sprint_recovery_count",
         "roll_sprint_recovered_reroll_count",
@@ -618,6 +628,31 @@ def test_roll_sprint_forward_cycle_outside_lane_cannot_credit_frontier(monkeypat
     assert env._roll_sprint_completed[0] == 0.0
     assert env._roll_sprint_completed_distance[0] == 0.0
     assert env._roll_sprint_forward_frontier[0] == 0.0
+
+
+def test_roll_sprint_training_lane_gate_tightens_to_canonical_width():
+    env, _asset = _fake_env(1)
+    stages = [
+        {"step": 0, "width": 0.40},
+        {"step": 250 * 24, "width": 0.28},
+        {"step": 500 * 24, "width": 0.20},
+        {"step": 1000 * 24, "width": 0.14},
+    ]
+
+    for step, expected in (
+        (0, 0.40),
+        (250 * 24, 0.28),
+        (500 * 24, 0.20),
+        (1000 * 24, 0.14),
+    ):
+        env.common_step_counter = step
+        reported = mdp.roll_sprint_lane_half_width_curriculum(
+            env,
+            torch.tensor([0]),
+            stages,
+        )
+        assert reported[0] == pytest.approx(expected)
+        assert env._roll_sprint_lane_half_width_m == pytest.approx(expected)
 
 
 def test_roll_progress_reward_fades_to_zero_at_lane_edge_without_idle_annuity():
