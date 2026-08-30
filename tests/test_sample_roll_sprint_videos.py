@@ -48,7 +48,8 @@ def test_defaults_record_long_race_every_150_seconds() -> None:
         == sampler.OUTPUT_VIDEO_SECONDS
         == 20.0
     )
-    assert sampler.EVALUATION_DURATION == 40.0
+    assert sampler.EVALUATION_DURATION == 20.0
+    assert sampler.EVALUATION_SCHEMA_VERSION == 6
     assert args.parent_frontier_m is None
 
 
@@ -105,7 +106,7 @@ def test_sample_once_records_four_robot_video_and_persists_state(
     evaluation_command, command, recovery_command = observed["commands"]
     assert evaluation_command[2] == str(checkpoint)
     assert evaluation_command[evaluation_command.index("--num-envs") + 1] == "4"
-    assert evaluation_command[evaluation_command.index("--duration") + 1] == "40"
+    assert evaluation_command[evaluation_command.index("--duration") + 1] == "20"
     assert command[2] == str(checkpoint)
     assert command[command.index("--steps") + 1] == "1000"
     assert command[command.index("--frame-stride") + 1] == "5"
@@ -122,6 +123,7 @@ def test_sample_once_records_four_robot_video_and_persists_state(
     state = json.loads(args.state_file.read_text(encoding="utf-8"))
     assert state["last_checkpoint"]["iteration"] == 25
     assert Path(state["last_evaluation"]).is_file()
+    assert "race-20s-v6" in Path(state["last_evaluation"]).name
     assert state["last_video"] == str(output.resolve())
     assert Path(state["last_recovery_montage"]).is_file()
 

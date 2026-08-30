@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import math
+import sys
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,34 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+def test_canonical_evaluation_defaults_to_twenty_seconds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkpoint = tmp_path / "model_0.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT_PATH), str(checkpoint)])
+
+    args = MODULE._parse_args()
+
+    assert MODULE.CANONICAL_RACE_DURATION_S == pytest.approx(20.0)
+    assert args.duration == pytest.approx(20.0)
+
+
+def test_canonical_evaluation_rejects_forty_second_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkpoint = tmp_path / "model_0.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(SCRIPT_PATH), str(checkpoint), "--duration", "40"],
+    )
+
+    with pytest.raises(SystemExit, match="--duration 20"):
+        MODULE.main()
 
 
 def _auditor(initial_course_y: float = 0.0) -> object:
@@ -438,6 +467,35 @@ def test_evaluator_ranks_standing_on_road_robot_by_credited_frontier() -> None:
     assert report["per_robot"][1]["standing_on_road_rank"] == 2
     assert not report["per_robot"][1]["target_10m_pass"]
     assert not report["per_robot"][1]["standing_on_road_finish_pass"]
+
+
+def test_ten_meter_finish_boundary_is_scored_at_twenty_seconds() -> None:
+    lane_centers = torch.tensor([-0.42, -0.14, 0.14, 0.42])
+    auditor = MODULE.RollCycleAuditor(
+        initial_position_xy=torch.stack((torch.zeros(4), lane_centers), dim=-1),
+        initial_root_quat=torch.tensor([[1.0, 0.0, 0.0, 0.0]] * 4),
+        initial_vertical_velocity=torch.zeros(4),
+        step_dt=0.02,
+        course_center_xy=torch.zeros(2),
+    )
+    auditor.last_position[:] = torch.stack(
+        (torch.tensor([10.0, 10.0, 10.0, 9.99]), lane_centers), dim=-1
+    )
+    auditor.final_course_lateral[:] = lane_centers
+    auditor.linked_distance[:] = torch.tensor([10.0, 10.0, 10.0, 9.99])
+    auditor.launch_ready[:] = True
+
+    report = auditor.summary(MODULE.CANONICAL_RACE_DURATION_S)
+
+    assert report["target_distance_reach_rate"] == pytest.approx(0.75)
+    assert report["standing_on_road_target_reach_rate"] == pytest.approx(0.75)
+    assert [robot["target_10m_pass"] for robot in report["per_robot"]] == [
+        True,
+        True,
+        True,
+        False,
+    ]
+    assert report["mean_roll_linked_speed_mps"] == pytest.approx(39.99 / 4 / 20)
 
 
 def test_heading_uses_lateral_axis_at_vertical_pitch() -> None:

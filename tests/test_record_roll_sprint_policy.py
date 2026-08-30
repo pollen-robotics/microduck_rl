@@ -332,10 +332,16 @@ def test_corridor_visualizer_installs_when_no_existing_callback() -> None:
     assert len(observed) == len(MODULE._race_corridor_segments())
 
 
-def test_race_label_reports_robot_max_speed_and_valid_distance() -> None:
-    label = MODULE._race_label_text(0, 1.234, 4.56)
+def test_race_label_reports_credited_average_speed_and_target_distance() -> None:
+    label = MODULE._race_label_text(0, 8.0, 20.0)
 
-    assert label == "R1  MAX 1s 1.23 m/s  |  4.6 m valid"
+    assert label == "R1  VALID AVG 0.40 m/s  |  8.0/10.0 m"
+
+
+def test_credited_average_speed_matches_ten_meter_twenty_second_finish() -> None:
+    assert MODULE._credited_average_speed_mps(10.0, 20.0) == pytest.approx(0.5)
+    assert MODULE._credited_average_speed_mps(8.0, 20.0) == pytest.approx(0.4)
+    assert MODULE._credited_average_speed_mps(10.0, 0.0) == 0.0
 
 
 def test_video_overlay_uses_compact_fonts() -> None:
@@ -366,36 +372,6 @@ def test_world_projection_anchors_label_to_robot_screen_position() -> None:
     assert visible.tolist() == [True, True]
     assert pixels[0].tolist() == pytest.approx([100.0, 50.0])
     assert pixels[1, 0] > pixels[0, 0]
-
-
-def test_speed_accumulator_uses_visible_forward_displacement_when_velocity_lags() -> (
-    None
-):
-    max_speeds, current_position = MODULE._accumulate_max_forward_speed(
-        torch.zeros(2),
-        torch.tensor([0.0, 0.0]),
-        torch.tensor([0.02, 0.01]),
-        torch.zeros(2, 3),
-        torch.tensor([[1.0, 0.0], [1.0, 0.0]]),
-        0.02,
-    )
-
-    assert current_position.tolist() == pytest.approx([0.02, 0.01])
-    assert max_speeds.tolist() == pytest.approx([1.0, 0.5])
-
-
-def test_speed_accumulator_keeps_peak_and_ignores_backward_motion() -> None:
-    max_speeds, current_position = MODULE._accumulate_max_forward_speed(
-        torch.tensor([1.2, 0.8]),
-        torch.tensor([0.5, 0.5]),
-        torch.tensor([0.49, 0.51]),
-        torch.tensor([[-2.0, 0.0, 0.0], [0.9, 0.0, 0.0]]),
-        torch.tensor([[1.0, 0.0], [1.0, 0.0]]),
-        0.02,
-    )
-
-    assert current_position.tolist() == pytest.approx([0.49, 0.51])
-    assert max_speeds.tolist() == pytest.approx([1.2, 0.9])
 
 
 def test_label_layout_does_not_overlap_aligned_robot_labels() -> None:

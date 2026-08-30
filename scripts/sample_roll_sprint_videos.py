@@ -35,7 +35,8 @@ RECORDING_FRAME_STRIDE = round(
     RECORDING_STEPS / (OUTPUT_FPS * OUTPUT_VIDEO_SECONDS)
 )
 EVALUATION_ENVS = 4
-EVALUATION_DURATION = 40.0
+EVALUATION_DURATION = 20.0
+EVALUATION_SCHEMA_VERSION = 6
 STATE_FILENAME = ".sample-roll-sprint-videos.json"
 CHECKPOINT_PATTERN = re.compile(r"model_(\d+)\.pt$")
 
@@ -135,7 +136,10 @@ def _evaluation_path(output_dir: Path, identity: CheckpointIdentity) -> Path:
     return (
         output_dir
         / "evaluations"
-        / f"checkpoint-{identity.iteration:06d}-{identity.sha256[:12]}.json"
+        / (
+            f"checkpoint-{identity.iteration:06d}-{identity.sha256[:12]}"
+            f"-race-{EVALUATION_DURATION:g}s-v{EVALUATION_SCHEMA_VERSION}.json"
+        )
     )
 
 

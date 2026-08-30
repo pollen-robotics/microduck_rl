@@ -51,6 +51,7 @@ SELF_RIGHT_STALL_RATE = microduck_mdp._ROLL_SPRINT_SELF_RIGHT_STALL_RATE
 SELF_RIGHT_STALL_SECONDS = microduck_mdp._ROLL_SPRINT_SELF_RIGHT_STALL_SECONDS
 RACE_LANE_SPACING = 0.28
 TARGET_DISTANCE_M = 10.0
+CANONICAL_RACE_DURATION_S = 20.0
 MIN_VALID_ROLLS_FOR_TARGET = math.ceil(
     TARGET_DISTANCE_M / (TARGET_ANGLE * MAX_DISTANCE_PER_RAD)
 )
@@ -1234,7 +1235,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", type=Path)
     parser.add_argument("--num-envs", type=int, default=4)
-    parser.add_argument("--duration", type=float, default=40.0)
+    parser.add_argument("--duration", type=float, default=CANONICAL_RACE_DURATION_S)
     parser.add_argument(
         "--device", default="cuda:0" if torch.cuda.is_available() else "cpu"
     )
@@ -1253,9 +1254,14 @@ def main() -> int:
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_file():
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
-    if args.num_envs != 4 or args.duration <= 0.0 or args.recovery_duration <= 0.0:
+    if (
+        args.num_envs != 4
+        or not math.isclose(args.duration, CANONICAL_RACE_DURATION_S)
+        or args.recovery_duration <= 0.0
+    ):
         raise SystemExit(
-            "canonical evaluation requires --num-envs 4 and positive duration"
+            "canonical evaluation requires --num-envs 4, --duration 20, "
+            "and positive recovery duration"
         )
 
     configure_torch_backends()
@@ -1378,7 +1384,7 @@ def main() -> int:
 
     race_summary = auditor.summary(args.duration)
     report: dict[str, object] = {
-        "schema_version": 5,
+        "schema_version": 6,
         "task": TASK_ID,
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": _sha256(checkpoint),

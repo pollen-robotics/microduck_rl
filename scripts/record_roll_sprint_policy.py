@@ -8,7 +8,6 @@ import math
 import os
 import shutil
 import subprocess
-from collections import deque
 from dataclasses import asdict
 from pathlib import Path
 from typing import NamedTuple
@@ -45,7 +44,6 @@ RACE_CAMERA_MAX_SPEED_MPS = 3.0
 RACE_CAMERA_MAX_ACCEL_MPS2 = 4.0
 RACE_LINE_HEIGHT = 0.008
 RACE_LINE_RADIUS = 0.018
-SPEED_WINDOW_S = 1.0
 ROBOT_LABEL_FONT_SIZE = 13
 HEADER_FONT_SIZE = 15
 LABEL_COLORS = (
@@ -195,49 +193,25 @@ def _arrange_recovery_montage(
     )
 
 
+def _credited_average_speed_mps(valid_distance_m: float, elapsed_s: float) -> float:
+    """Return finish-relevant average speed from credited frontier only."""
+    if not math.isfinite(valid_distance_m) or not math.isfinite(elapsed_s):
+        return 0.0
+    if elapsed_s <= 0.0:
+        return 0.0
+    return max(valid_distance_m, 0.0) / elapsed_s
+
+
 def _race_label_text(
-    robot_index: int, max_speed_mps: float, valid_distance_m: float
+    robot_index: int,
+    valid_distance_m: float,
+    elapsed_s: float,
+    target_distance_m: float = TARGET_DISTANCE_M,
 ) -> str:
+    valid_average_mps = _credited_average_speed_mps(valid_distance_m, elapsed_s)
     return (
-        f"R{robot_index + 1}  MAX 1s {max_speed_mps:.2f} m/s"
-        f"  |  {valid_distance_m:.1f} m valid"
-    )
-
-
-def _accumulate_max_forward_speed(
-    max_speeds_mps: torch.Tensor,
-    previous_forward_position_m: torch.Tensor,
-    current_forward_position_m: torch.Tensor,
-    linear_velocity_w: torch.Tensor,
-    heading_xy: torch.Tensor,
-    sample_dt: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Update peak speed from visible travel and the simulator velocity signal.
-
-    The position delta is authoritative for the video because it measures the
-    same projected displacement viewers see.  Taking the larger finite signal
-    also handles offscreen backends whose cached root velocity can lag a step.
-    """
-    current_forward_position_m = torch.nan_to_num(
-        current_forward_position_m,
-        nan=0.0,
-        posinf=0.0,
-        neginf=0.0,
-    )
-    position_speed_mps = (
-        current_forward_position_m - previous_forward_position_m
-    ) / sample_dt
-    velocity_speed_mps = (linear_velocity_w[:, :2] * heading_xy).sum(dim=-1)
-    observed_speed_mps = torch.maximum(position_speed_mps, velocity_speed_mps)
-    observed_speed_mps = torch.nan_to_num(
-        observed_speed_mps,
-        nan=0.0,
-        posinf=0.0,
-        neginf=0.0,
-    ).clamp_min(0.0)
-    return (
-        torch.maximum(max_speeds_mps, observed_speed_mps),
-        current_forward_position_m,
+        f"R{robot_index + 1}  VALID AVG {valid_average_mps:.2f} m/s"
+        f"  |  {valid_distance_m:.1f}/{target_distance_m:.1f} m"
     )
 
 
@@ -537,7 +511,6 @@ def _overlay_race_labels(
     frame: np.ndarray,
     base_env: ManagerBasedRlEnv,
     *,
-    max_speeds_mps: torch.Tensor,
     valid_distances_m: torch.Tensor,
     elapsed_s: float,
     total_s: float,
@@ -588,7 +561,6 @@ def _overlay_race_labels(
     )
     draw.text((20, 14), header, font=header_font, fill=(255, 255, 255))
 
-    max_speeds = max_speeds_mps.detach().cpu().tolist()
     valid_distances = valid_distances_m.detach().cpu().tolist()
     if recovery_montage:
         self_righting = base_env._roll_sprint_self_righting.detach().cpu().tolist()
@@ -601,7 +573,7 @@ def _overlay_race_labels(
         ]
     else:
         labels = [
-            _race_label_text(index, max_speeds[index], valid_distances[index])
+            _race_label_text(index, valid_distances[index], elapsed_s)
             for index in range(len(pixels))
         ]
     label_sizes = []
@@ -703,14 +675,6 @@ def main() -> int:
         map_location=args.device,
     )
     policy = runner.get_inference_policy(device=args.device)
-    robot = base_env.scene["robot"]
-    race_heading = base_env._roll_sprint_heading_w.clone()
-    max_speeds_mps = torch.zeros(4, device=base_env.device)
-    previous_forward_position_m = base_env._roll_sprint_forward_position.clone()
-    speed_window_steps = max(1, round(SPEED_WINDOW_S / policy_dt))
-    forward_position_history: deque[torch.Tensor] = deque(
-        [previous_forward_position_m], maxlen=speed_window_steps + 1
-    )
     camera_state = CameraFollowState(RACE_CAMERA_LOOKAT[0])
     leader_index = 0
 
@@ -721,23 +685,6 @@ def main() -> int:
                 observations = env.get_observations()
                 actions = policy(observations)
                 env.step(actions)
-                current_forward_position_m = (
-                    base_env._roll_sprint_forward_position.clone()
-                )
-                forward_position_history.append(current_forward_position_m)
-                if len(forward_position_history) == speed_window_steps + 1:
-                    max_speeds_mps, previous_forward_position_m = (
-                        _accumulate_max_forward_speed(
-                            max_speeds_mps,
-                            forward_position_history[0],
-                            current_forward_position_m,
-                            robot.data.root_link_lin_vel_w,
-                            race_heading,
-                            speed_window_steps * policy_dt,
-                        )
-                    )
-                else:
-                    previous_forward_position_m = current_forward_position_m
                 valid_distances_m = (
                     base_env._roll_sprint_forward_frontier
                     - base_env._roll_sprint_forward_origin
@@ -758,7 +705,6 @@ def main() -> int:
             frame = _overlay_race_labels(
                 frame,
                 base_env,
-                max_speeds_mps=max_speeds_mps,
                 valid_distances_m=valid_distances_m,
                 elapsed_s=(step + 1) * policy_dt,
                 total_s=args.steps * policy_dt,
