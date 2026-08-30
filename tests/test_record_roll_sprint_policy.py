@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -116,16 +117,52 @@ def test_canonical_video_arranges_four_parallel_deterministic_race_lanes() -> No
 
 
 def test_race_camera_is_centered_down_the_shared_forward_axis() -> None:
-    assert MODULE.RACE_CAMERA_LOOKAT[0] > 0.0
+    assert MODULE.RACE_CAMERA_LOOKAT[0] == MODULE.TARGET_DISTANCE_M / 2.0
     assert MODULE.RACE_CAMERA_LOOKAT[1] == 0.0
-    assert MODULE.RACE_CAMERA_DISTANCE >= 2.5
-    assert MODULE.RACE_CAMERA_ELEVATION <= -45.0
+    assert MODULE.RACE_CAMERA_DISTANCE >= 15.0
+    assert MODULE.RACE_CAMERA_AZIMUTH == 90.0
+    assert MODULE.RACE_CAMERA_ELEVATION <= -60.0
+
+
+def test_corridor_has_four_lanes_and_spans_exactly_twenty_meters() -> None:
+    segments = MODULE._race_corridor_segments()
+    longitudinal = [
+        (start, end) for start, end, _color, _radius in segments if start[1] == end[1]
+    ]
+    cross_track = [
+        (start, end) for start, end, _color, _radius in segments if start[0] == end[0]
+    ]
+
+    assert len(longitudinal) == 5
+    assert all(start[0] == 0.0 for start, _end in longitudinal)
+    assert all(end[0] == MODULE.TARGET_DISTANCE_M for _start, end in longitudinal)
+    assert sorted(start[1] for start, _end in longitudinal) == pytest.approx(
+        [-0.56, -0.28, 0.0, 0.28, 0.56]
+    )
+    assert {start[0] for start, _end in cross_track} == set(
+        MODULE.np.arange(0.0, MODULE.TARGET_DISTANCE_M + 1.0, 1.0)
+    )
+
+
+def test_corridor_visualizer_installs_when_no_existing_callback() -> None:
+    env = SimpleNamespace()
+    observed = []
+    visualizer = SimpleNamespace(
+        add_cylinder=lambda start, end, radius, color: observed.append(
+            (start, end, radius, color)
+        )
+    )
+
+    MODULE._install_race_corridor_visualizer(env)
+    env.update_visualizers(visualizer)
+
+    assert len(observed) == len(MODULE._race_corridor_segments())
 
 
 def test_race_label_reports_robot_max_speed_and_valid_distance() -> None:
     label = MODULE._race_label_text(0, 1.234, 4.56)
 
-    assert label == "R1  MAX 1.23 m/s  |  4.6 m valid"
+    assert label == "R1  MAX 1s 1.23 m/s  |  4.6 m valid"
 
 
 def test_world_projection_anchors_label_to_robot_screen_position() -> None:
@@ -153,24 +190,46 @@ def test_world_projection_anchors_label_to_robot_screen_position() -> None:
     assert pixels[1, 0] > pixels[0, 0]
 
 
-def test_camera_follows_first_robot_only_along_forward_axis() -> None:
-    robot = SimpleNamespace(
-        data=SimpleNamespace(
-            root_link_pos_w=torch.tensor([[8.5, -0.42, 0.12], [12.0, -0.14, 0.12]])
-        )
-    )
-    camera = SimpleNamespace(lookat=MODULE.np.zeros(3))
-
-    class _Scene:
-        def __getitem__(self, name):
-            assert name == "robot"
-            return robot
-
-    env = SimpleNamespace(
-        scene=_Scene(),
-        _offline_renderer=SimpleNamespace(_cam=camera),
+def test_speed_accumulator_uses_visible_forward_displacement_when_velocity_lags() -> (
+    None
+):
+    max_speeds, current_position = MODULE._accumulate_max_forward_speed(
+        torch.zeros(2),
+        torch.tensor([0.0, 0.0]),
+        torch.tensor([0.02, 0.01]),
+        torch.zeros(2, 3),
+        torch.tensor([[1.0, 0.0], [1.0, 0.0]]),
+        0.02,
     )
 
-    MODULE._follow_first_robot(env)
+    assert current_position.tolist() == pytest.approx([0.02, 0.01])
+    assert max_speeds.tolist() == pytest.approx([1.0, 0.5])
 
-    assert camera.lookat.tolist() == pytest.approx([8.5, -0.42, 0.08])
+
+def test_speed_accumulator_keeps_peak_and_ignores_backward_motion() -> None:
+    max_speeds, current_position = MODULE._accumulate_max_forward_speed(
+        torch.tensor([1.2, 0.8]),
+        torch.tensor([0.5, 0.5]),
+        torch.tensor([0.49, 0.51]),
+        torch.tensor([[-2.0, 0.0, 0.0], [0.9, 0.0, 0.0]]),
+        torch.tensor([[1.0, 0.0], [1.0, 0.0]]),
+        0.02,
+    )
+
+    assert current_position.tolist() == pytest.approx([0.49, 0.51])
+    assert max_speeds.tolist() == pytest.approx([1.2, 0.9])
+
+
+def test_label_layout_does_not_overlap_aligned_robot_labels() -> None:
+    positions = MODULE._label_positions(
+        MODULE.np.array([[100.0, 200.0]] * 4),
+        MODULE.np.ones(4, dtype=bool),
+        [(150, 22)] * 4,
+        width=960,
+        height=540,
+    )
+
+    boxes = [
+        (x, y, x + 150, y + 22) for index in range(4) for x, y in [positions[index]]
+    ]
+    assert all(first[3] + 7.0 <= second[1] for first, second in pairwise(boxes))

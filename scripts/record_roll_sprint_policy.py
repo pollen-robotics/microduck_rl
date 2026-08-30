@@ -7,6 +7,7 @@ import argparse
 import os
 import shutil
 import subprocess
+from collections import deque
 from dataclasses import asdict
 from pathlib import Path
 
@@ -25,11 +26,14 @@ from mjlab_microduck.tasks import mdp as microduck_mdp
 TASK_ID = "Mjlab-Roll-Sprint-Flat-MicroDuck"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RACE_LANE_SPACING = 0.28
-RACE_CAMERA_LOOKAT = (0.60, 0.0, 0.08)
-RACE_CAMERA_DISTANCE = 2.8
-RACE_CAMERA_AZIMUTH = 135.0
-RACE_CAMERA_ELEVATION = -55.0
 TARGET_DISTANCE_M = 20.0
+RACE_CAMERA_LOOKAT = (TARGET_DISTANCE_M / 2.0, 0.0, 0.05)
+RACE_CAMERA_DISTANCE = 17.0
+RACE_CAMERA_AZIMUTH = 90.0
+RACE_CAMERA_ELEVATION = -62.0
+RACE_LINE_HEIGHT = 0.008
+RACE_LINE_RADIUS = 0.018
+SPEED_WINDOW_S = 1.0
 LABEL_COLORS = (
     (64, 180, 255),
     (255, 91, 91),
@@ -133,9 +137,141 @@ def _race_label_text(
     robot_index: int, max_speed_mps: float, valid_distance_m: float
 ) -> str:
     return (
-        f"R{robot_index + 1}  MAX {max_speed_mps:.2f} m/s"
+        f"R{robot_index + 1}  MAX 1s {max_speed_mps:.2f} m/s"
         f"  |  {valid_distance_m:.1f} m valid"
     )
+
+
+def _accumulate_max_forward_speed(
+    max_speeds_mps: torch.Tensor,
+    previous_forward_position_m: torch.Tensor,
+    current_forward_position_m: torch.Tensor,
+    linear_velocity_w: torch.Tensor,
+    heading_xy: torch.Tensor,
+    sample_dt: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Update peak speed from visible travel and the simulator velocity signal.
+
+    The position delta is authoritative for the video because it measures the
+    same projected displacement viewers see.  Taking the larger finite signal
+    also handles offscreen backends whose cached root velocity can lag a step.
+    """
+    current_forward_position_m = torch.nan_to_num(
+        current_forward_position_m,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    position_speed_mps = (
+        current_forward_position_m - previous_forward_position_m
+    ) / sample_dt
+    velocity_speed_mps = (linear_velocity_w[:, :2] * heading_xy).sum(dim=-1)
+    observed_speed_mps = torch.maximum(position_speed_mps, velocity_speed_mps)
+    observed_speed_mps = torch.nan_to_num(
+        observed_speed_mps,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    ).clamp_min(0.0)
+    return (
+        torch.maximum(max_speeds_mps, observed_speed_mps),
+        current_forward_position_m,
+    )
+
+
+def _race_corridor_segments(
+    *,
+    lane_spacing: float = RACE_LANE_SPACING,
+    target_distance_m: float = TARGET_DISTANCE_M,
+) -> list[tuple[np.ndarray, np.ndarray, tuple[float, float, float, float], float]]:
+    """Return visible lane, start, finish, and distance-marker line segments."""
+    edge_y = 2.0 * lane_spacing
+    lane_boundaries = np.linspace(-edge_y, edge_y, 5)
+    segments = [
+        (
+            np.array([0.0, lane_y, RACE_LINE_HEIGHT]),
+            np.array([target_distance_m, lane_y, RACE_LINE_HEIGHT]),
+            (0.35, 0.74, 1.0, 0.9),
+            RACE_LINE_RADIUS,
+        )
+        for lane_y in lane_boundaries
+    ]
+    segments.extend(
+        (
+            np.array([distance_m, -edge_y, RACE_LINE_HEIGHT]),
+            np.array([distance_m, edge_y, RACE_LINE_HEIGHT]),
+            (1.0, 1.0, 1.0, 1.0) if distance_m == 0.0 else (1.0, 0.76, 0.15, 1.0),
+            RACE_LINE_RADIUS * 1.6,
+        )
+        for distance_m in (0.0, target_distance_m)
+    )
+    segments.extend(
+        (
+            np.array([distance_m, -edge_y, RACE_LINE_HEIGHT]),
+            np.array([distance_m, edge_y, RACE_LINE_HEIGHT]),
+            (0.72, 0.78, 0.86, 0.5),
+            RACE_LINE_RADIUS * 0.55,
+        )
+        for distance_m in np.arange(1.0, target_distance_m, 1.0)
+    )
+    return segments
+
+
+def _draw_race_corridor(visualizer) -> None:
+    """Draw a non-colliding four-lane 20 m corridor into the render scene."""
+    for start, end, color, radius in _race_corridor_segments():
+        visualizer.add_cylinder(start, end, radius=radius, color=color)
+
+
+def _install_race_corridor_visualizer(base_env: ManagerBasedRlEnv) -> None:
+    """Add the corridor after normal debug visuals on every rendered frame."""
+    original_update_visualizers = getattr(base_env, "update_visualizers", None)
+
+    def update_visualizers(visualizer) -> None:
+        if original_update_visualizers is not None:
+            original_update_visualizers(visualizer)
+        _draw_race_corridor(visualizer)
+
+    base_env.update_visualizers = update_visualizers
+
+
+def _label_positions(
+    pixels: np.ndarray,
+    visible: np.ndarray,
+    label_sizes: list[tuple[int, int]],
+    *,
+    width: int,
+    height: int,
+) -> dict[int, tuple[float, float]]:
+    """Place robot-anchored labels without overlapping one another."""
+    margin = 8.0
+    gap = 7.0
+    top = 54.0
+    order = sorted(
+        (index for index, is_visible in enumerate(visible) if is_visible),
+        key=lambda index: (float(pixels[index, 1]), float(pixels[index, 0])),
+    )
+    positions: dict[int, tuple[float, float]] = {}
+    previous_bottom = top
+    for index in order:
+        label_width, label_height = label_sizes[index]
+        anchor_x = float(pixels[index, 0])
+        desired_x = (
+            anchor_x + 14.0
+            if anchor_x <= width / 2.0
+            else anchor_x - label_width - 14.0
+        )
+        x = min(max(desired_x, margin), width - label_width - margin)
+        desired_y = float(pixels[index, 1]) - label_height / 2.0
+        y = max(desired_y, previous_bottom + gap)
+        positions[index] = (x, y)
+        previous_bottom = y + label_height
+
+    if positions and previous_bottom > height - margin:
+        shift = previous_bottom - (height - margin)
+        for index, (x, y) in positions.items():
+            positions[index] = (x, max(top, y - shift))
+    return positions
 
 
 def _project_world_points(
@@ -191,19 +327,6 @@ def _project_world_points(
     return pixels, visible
 
 
-def _follow_first_robot(base_env: ManagerBasedRlEnv) -> None:
-    """Keep robot 1 centered as the straight-lane race diverges."""
-    renderer = base_env._offline_renderer
-    if renderer is None:
-        raise RuntimeError("Offline renderer is not initialized")
-    first_position = base_env.scene["robot"].data.root_link_pos_w[0]
-    renderer._cam.lookat[:] = (
-        float(first_position[0].item()),
-        float(first_position[1].item()),
-        RACE_CAMERA_LOOKAT[2],
-    )
-
-
 def _overlay_race_labels(
     frame: np.ndarray,
     base_env: ManagerBasedRlEnv,
@@ -239,7 +362,9 @@ def _overlay_race_labels(
         font = ImageFont.load_default(size=18)
         header_font = ImageFont.load_default(size=20)
 
-    header = f"20 m ROLL RACE  |  t {elapsed_s:05.1f} s / 40.0 s  |  camera follows R1"
+    header = (
+        f"20 m ROLL RACE  |  t {elapsed_s:05.1f} s / 40.0 s  |  full four-lane corridor"
+    )
     header_box = draw.textbbox((0, 0), header, font=header_font)
     header_width = header_box[2] - header_box[0]
     draw.rounded_rectangle(
@@ -253,20 +378,25 @@ def _overlay_race_labels(
 
     max_speeds = max_speeds_mps.detach().cpu().tolist()
     valid_distances = valid_distances_m.detach().cpu().tolist()
-    draw_order = (*range(1, len(pixels)), 0)
-    for index in draw_order:
-        pixel = pixels[index]
-        is_visible = visible[index]
-        if not is_visible:
-            continue
-        label = _race_label_text(index, max_speeds[index], valid_distances[index])
+    labels = [
+        _race_label_text(index, max_speeds[index], valid_distances[index])
+        for index in range(len(pixels))
+    ]
+    label_sizes = []
+    for label in labels:
         text_box = draw.textbbox((0, 0), label, font=font)
-        label_width = text_box[2] - text_box[0]
-        label_height = text_box[3] - text_box[1]
-        x = min(
-            max(float(pixel[0]) - label_width / 2.0, 8.0), width - label_width - 20.0
-        )
-        y = min(max(float(pixel[1]) - label_height - 20.0, 50.0), height - 38.0)
+        label_sizes.append((text_box[2] - text_box[0], text_box[3] - text_box[1]))
+    positions = _label_positions(
+        pixels,
+        visible,
+        label_sizes,
+        width=width,
+        height=height,
+    )
+    for index, (x, y) in positions.items():
+        pixel = pixels[index]
+        label = labels[index]
+        label_width, label_height = label_sizes[index]
         color = LABEL_COLORS[index % len(LABEL_COLORS)]
         draw.rounded_rectangle(
             (x - 6, y - 4, x + label_width + 6, y + label_height + 7),
@@ -276,8 +406,14 @@ def _overlay_race_labels(
             width=2,
         )
         draw.text((x, y), label, font=font, fill=color)
+        label_edge_x = x if float(pixel[0]) < x else x + label_width
         draw.line(
-            (float(pixel[0]), y + label_height + 7, float(pixel[0]), float(pixel[1])),
+            (
+                float(pixel[0]),
+                float(pixel[1]),
+                label_edge_x,
+                y + label_height / 2.0,
+            ),
             fill=color,
             width=2,
         )
@@ -328,6 +464,7 @@ def main() -> int:
         render_mode="rgb_array",
     )
     _arrange_race_start(base_env)
+    _install_race_corridor_visualizer(base_env)
     env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
     runner_cls = load_runner_cls(args.task_id) or MjlabOnPolicyRunner
     runner = runner_cls(env, asdict(agent_cfg), device=args.device)
@@ -341,6 +478,11 @@ def main() -> int:
     robot = base_env.scene["robot"]
     race_heading = base_env._roll_sprint_heading_w.clone()
     max_speeds_mps = torch.zeros(4, device=base_env.device)
+    previous_forward_position_m = base_env._roll_sprint_forward_position.clone()
+    speed_window_steps = max(1, round(SPEED_WINDOW_S / policy_dt))
+    forward_position_history: deque[torch.Tensor] = deque(
+        [previous_forward_position_m], maxlen=speed_window_steps + 1
+    )
 
     writer: subprocess.Popen[bytes] | None = None
     try:
@@ -349,18 +491,28 @@ def main() -> int:
                 observations = env.get_observations()
                 actions = policy(observations)
                 env.step(actions)
-                forward_speed = (
-                    robot.data.root_link_lin_vel_w[:, :2] * race_heading
-                ).sum(dim=-1)
-                max_speeds_mps = torch.maximum(
-                    max_speeds_mps, forward_speed.clamp_min(0.0)
+                current_forward_position_m = (
+                    base_env._roll_sprint_forward_position.clone()
                 )
+                forward_position_history.append(current_forward_position_m)
+                if len(forward_position_history) == speed_window_steps + 1:
+                    max_speeds_mps, previous_forward_position_m = (
+                        _accumulate_max_forward_speed(
+                            max_speeds_mps,
+                            forward_position_history[0],
+                            current_forward_position_m,
+                            robot.data.root_link_lin_vel_w,
+                            race_heading,
+                            speed_window_steps * policy_dt,
+                        )
+                    )
+                else:
+                    previous_forward_position_m = current_forward_position_m
                 valid_distances_m = (
                     base_env._roll_sprint_forward_frontier
                     - base_env._roll_sprint_forward_origin
                 ).clamp_min(0.0)
-            _follow_first_robot(base_env)
-            if step % args.frame_stride != 0 and step != args.steps - 1:
+            if (step + 1) % args.frame_stride != 0:
                 continue
             rendered = base_env.render()
             if rendered is None:

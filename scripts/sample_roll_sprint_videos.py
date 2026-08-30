@@ -25,7 +25,12 @@ DEFAULT_OUTPUT_DIR = REPO_ROOT / "artifacts" / "training" / "roll-sprint-samples
 DEFAULT_TASK_ID = "Mjlab-Roll-Sprint-Flat-MicroDuck"
 DEFAULT_INTERVAL_SECONDS = 150.0
 RECORDING_STEPS = 2000
-RECORDING_FRAME_STRIDE = 7
+SIMULATION_HZ = 50
+OUTPUT_FPS = 50
+OUTPUT_VIDEO_SECONDS = 20.0
+RECORDING_FRAME_STRIDE = round(
+    RECORDING_STEPS / (OUTPUT_FPS * OUTPUT_VIDEO_SECONDS)
+)
 EVALUATION_ENVS = 4
 EVALUATION_DURATION = 40.0
 STATE_FILENAME = ".sample-roll-sprint-videos.json"
@@ -219,8 +224,9 @@ def sample_once(args: argparse.Namespace) -> bool:
         device=args.device,
     )
     _log(
-        f"recording checkpoint iteration {identity.iteration} for "
-        f"{RECORDING_STEPS / 50:g}s to {output}"
+        f"recording checkpoint iteration {identity.iteration}: "
+        f"{RECORDING_STEPS / SIMULATION_HZ:g}s simulation as a "
+        f"{OUTPUT_VIDEO_SECONDS:g}s video to {output}"
     )
     result = subprocess.run(command, cwd=REPO_ROOT, check=False)
     if result.returncode != 0:
