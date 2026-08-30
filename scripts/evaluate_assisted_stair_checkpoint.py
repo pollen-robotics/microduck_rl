@@ -32,7 +32,13 @@ A32_TASK_ID = "Mjlab-Stairs-Stage15-Reverse-RSI-Specialist-MicroDuck"
 A33_TASK_ID = "Mjlab-Stairs-Stage2-Reverse-RSI-Specialist-MicroDuck"
 A34_TASK_ID = "Mjlab-Stairs-Near-Shell-Reverse-RSI-Specialist-MicroDuck"
 A35_TASK_ID = "Mjlab-Stairs-Stratified-Shell-Reverse-RSI-Specialist-MicroDuck"
-STAGE2_SEEDED_TASK_IDS = (A33_TASK_ID, A34_TASK_ID, A35_TASK_ID)
+A36_TASK_ID = "Mjlab-Stairs-Option-Frontier-Forward-RSI-Specialist-MicroDuck"
+STAGE2_SEEDED_TASK_IDS = (
+    A33_TASK_ID,
+    A34_TASK_ID,
+    A35_TASK_ID,
+    A36_TASK_ID,
+)
 CONTACT_TRANSFER_TASK_IDS = (
     A30_TASK_ID,
     A31_TASK_ID,
@@ -40,6 +46,7 @@ CONTACT_TRANSFER_TASK_IDS = (
     A33_TASK_ID,
     A34_TASK_ID,
     A35_TASK_ID,
+    A36_TASK_ID,
 )
 STAGE15_TASK_IDS = (
     A31_TASK_ID,
@@ -47,6 +54,7 @@ STAGE15_TASK_IDS = (
     A33_TASK_ID,
     A34_TASK_ID,
     A35_TASK_ID,
+    A36_TASK_ID,
 )
 TASK_IDS = (
     "Mjlab-Stairs-Assisted-Specialist-MicroDuck",
@@ -72,6 +80,7 @@ TASK_IDS = (
     A33_TASK_ID,
     A34_TASK_ID,
     A35_TASK_ID,
+    A36_TASK_ID,
     "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
     "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
@@ -148,6 +157,14 @@ A35_RESET_MODES = {
     2: "stratified_shell_reverse_bank",
 }
 A35_RESET_FAMILY_OVERRIDES = A34_RESET_FAMILY_OVERRIDES
+A36_RESET_MODES = {
+    **A35_RESET_MODES,
+    3: "option_frontier_stage15_bank",
+}
+A36_RESET_FAMILY_OVERRIDES = {
+    **A35_RESET_FAMILY_OVERRIDES,
+    "option-frontier": 3,
+}
 BODY_PART_CONTACT_SENSORS = {
     "head": "head_ground_contact",
     "trunk": "trunk_ground_contact",
@@ -473,6 +490,7 @@ def _parse_args() -> argparse.Namespace:
                     *A33_RESET_FAMILY_OVERRIDES,
                     *A34_RESET_FAMILY_OVERRIDES,
                     *A35_RESET_FAMILY_OVERRIDES,
+                    *A36_RESET_FAMILY_OVERRIDES,
                 )
             )
         ),
@@ -482,7 +500,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--bank-stratum",
         choices=("lower", "upper"),
-        help="Restrict A35 family 2 to one reverse-curriculum stratum.",
+        help="Restrict A35/A36 family 2 to one reverse-curriculum stratum.",
     )
     return parser.parse_args()
 
@@ -514,6 +532,7 @@ def main() -> int:
     is_a33 = args.task == A33_TASK_ID
     is_a34 = args.task == A34_TASK_ID
     is_a35 = args.task == A35_TASK_ID
+    is_a36 = args.task == A36_TASK_ID
     uses_stage2_seed_semantics = args.task in STAGE2_SEEDED_TASK_IDS
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_file():
@@ -533,13 +552,16 @@ def main() -> int:
             "--reset-family is supported only for contact-transfer tasks"
         )
     if args.bank_stratum is not None and (
-        not is_a35 or args.reset_family != "near-shell-reverse"
+        not (is_a35 or is_a36)
+        or args.reset_family != "near-shell-reverse"
     ):
         raise SystemExit(
-            "--bank-stratum requires the A35 task with "
+            "--bank-stratum requires the A35 or A36 task with "
             "--reset-family near-shell-reverse"
         )
-    if is_a35:
+    if is_a36:
+        reset_family_overrides = A36_RESET_FAMILY_OVERRIDES
+    elif is_a35:
         reset_family_overrides = A35_RESET_FAMILY_OVERRIDES
     elif is_a34:
         reset_family_overrides = A34_RESET_FAMILY_OVERRIDES
@@ -553,7 +575,9 @@ def main() -> int:
         raise SystemExit(
             f"--reset-family {args.reset_family!r} is invalid for {args.task}"
         )
-    if is_a35:
+    if is_a36:
+        reset_modes = A36_RESET_MODES
+    elif is_a35:
         reset_modes = A35_RESET_MODES
     elif is_a34:
         reset_modes = A34_RESET_MODES
@@ -715,6 +739,9 @@ def main() -> int:
     mode_stage15_without_stage1 = {name: 0 for name in reset_modes.values()}
     mode_stage2_without_stage15 = {name: 0 for name in reset_modes.values()}
     mode_shell_before_stage2 = {name: 0 for name in reset_modes.values()}
+    mode_secured_before_clearance = {
+        name: 0 for name in reset_modes.values()
+    }
     secured_events = 0
     face_contact_events = 0
     tread_contact_events = 0
@@ -1020,11 +1047,14 @@ def main() -> int:
                 new_stage1_policy &= live_prefix_edge
                 new_stage15_policy &= live_prefix_edge
             elif uses_stage2_seed_semantics:
-                # Families 1 and 2 seed the Stage 1/1.5 prefix. Family 2 also
-                # seeds Stage 2. Suppress only those reset-created edges during
-                # the first two policy steps; family 0 remains fully live.
+                # Families 1 and 2 seed the Stage 1/1.5 prefix. A36 family 3
+                # also seeds that prefix from the composed option frontier.
+                # Family 2 alone seeds Stage 2. Suppress only reset-created
+                # edges during the first two policy steps; family 0 stays live.
                 initial_policy_steps = episode_control_steps < 2
                 seeded_prefix = (episode_mode == 1) | (episode_mode == 2)
+                if is_a36:
+                    seeded_prefix |= episode_mode == 3
                 seeded_stage2 = episode_mode == 2
                 new_stage1_policy &= ~(seeded_prefix & initial_policy_steps)
                 new_stage15_policy &= ~(seeded_prefix & initial_policy_steps)
@@ -1263,6 +1293,13 @@ def main() -> int:
                 mode_secured[name] += int(
                     episode_event_flags["secured"][mode_mask].sum().item()
                 )
+                mode_secured_before_clearance[name] += int(
+                    episode_event_flags["secured_before_clearance"][
+                        mode_mask
+                    ]
+                    .sum()
+                    .item()
+                )
                 mode_face_contact[name] += int(
                     episode_event_flags["face_contact"][mode_mask].sum().item()
                 )
@@ -1495,6 +1532,9 @@ def main() -> int:
                     ),
                     "contact_transfer_stage2_policy_achieved_rate": (
                         mode_stage2_policy[name] / max(trials, 1)
+                    ),
+                    "secured_before_true_shell_clearance_events": (
+                        mode_secured_before_clearance[name]
                     ),
                 }
             )
@@ -1744,6 +1784,8 @@ def main() -> int:
                 ),
             }
         )
+    if is_a36:
+        report["schema_version"] = 15
     output = args.output or checkpoint.with_suffix(".assisted-eval.json")
     _write_json_atomic(output.resolve(), report)
     print(json.dumps(report, indent=2, sort_keys=True))
