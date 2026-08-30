@@ -25,6 +25,8 @@ def _args(tmp_path: Path, checkpoint_root: Path) -> argparse.Namespace:
         task_id="Mjlab-Roll-Sprint-Flat-MicroDuck",
         device="cpu",
         allow_repeats=False,
+        video_only=False,
+        audit_only=False,
         once=True,
     )
 
@@ -153,3 +155,53 @@ def test_allow_repeats_records_every_interval_but_audits_checkpoint_once(
     assert sampler.sample_once(args) is True
     assert sum(command[1] == str(sampler.EVALUATOR) for command in calls) == 1
     assert sum(command[1] == str(sampler.RECORDER) for command in calls) == 2
+
+
+def test_video_only_keeps_recording_independent_from_audit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    checkpoint_root = tmp_path / "run"
+    checkpoint_root.mkdir()
+    (checkpoint_root / "model_100.pt").write_bytes(b"checkpoint")
+    args = _args(tmp_path, checkpoint_root)
+    args.video_only = True
+    calls: list[list[str]] = []
+
+    def fake_run(command, *, cwd, check):
+        del cwd, check
+        calls.append(command)
+        Path(command[3]).parent.mkdir(parents=True, exist_ok=True)
+        Path(command[3]).write_bytes(b"video")
+        return argparse.Namespace(returncode=0)
+
+    monkeypatch.setattr(sampler.subprocess, "run", fake_run)
+
+    assert sampler.sample_once(args) is True
+    assert len(calls) == 1
+    assert calls[0][1] == str(sampler.RECORDER)
+    state = json.loads(args.state_file.read_text(encoding="utf-8"))
+    assert state["last_evaluation"] is None
+
+
+def test_audit_only_skips_video_recording(tmp_path: Path, monkeypatch) -> None:
+    checkpoint_root = tmp_path / "run"
+    checkpoint_root.mkdir()
+    (checkpoint_root / "model_100.pt").write_bytes(b"checkpoint")
+    args = _args(tmp_path, checkpoint_root)
+    args.audit_only = True
+    calls: list[list[str]] = []
+
+    def fake_run(command, *, cwd, check):
+        del cwd, check
+        calls.append(command)
+        output = Path(command[command.index("--output") + 1])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("{}", encoding="utf-8")
+        return argparse.Namespace(returncode=0)
+
+    monkeypatch.setattr(sampler.subprocess, "run", fake_run)
+
+    assert sampler.sample_once(args) is True
+    assert len(calls) == 1
+    assert calls[0][1] == str(sampler.EVALUATOR)
+    assert not args.state_file.exists()

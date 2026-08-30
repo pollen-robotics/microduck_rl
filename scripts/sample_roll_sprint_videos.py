@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record the newest roll-sprint checkpoint at most once every 150 seconds."""
+"""Audit and record the newest roll-sprint checkpoint on a 150-second cadence."""
 
 from __future__ import annotations
 
@@ -182,7 +182,7 @@ def sample_once(args: argparse.Namespace) -> bool:
         return False
 
     evaluation = _evaluation_path(args.output_dir, identity)
-    if not evaluation.is_file():
+    if not args.video_only and not evaluation.is_file():
         evaluation.parent.mkdir(parents=True, exist_ok=True)
         evaluation_command = _evaluator_command(
             checkpoint=checkpoint,
@@ -205,8 +205,11 @@ def sample_once(args: argparse.Namespace) -> bool:
         if not evaluation.is_file():
             _log("evaluator returned success without JSON; state unchanged")
             return False
-    else:
+    elif not args.video_only:
         _log(f"reusing completed audit: {evaluation}")
+
+    if args.audit_only:
+        return True
 
     output = _output_path(args.output_dir, identity)
     command = _recorder_command(
@@ -231,7 +234,9 @@ def sample_once(args: argparse.Namespace) -> bool:
         {
             "version": 2,
             "last_checkpoint": asdict(identity),
-            "last_evaluation": str(evaluation.resolve()),
+            "last_evaluation": (
+                str(evaluation.resolve()) if evaluation.is_file() else None
+            ),
             "last_video": str(output.resolve()),
             "sampled_at_utc": datetime.now(UTC).isoformat(),
         },
@@ -251,6 +256,17 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--task-id", default=DEFAULT_TASK_ID)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--allow-repeats", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--video-only",
+        action="store_true",
+        help="Keep the video cadence independent from long checkpoint audits.",
+    )
+    mode.add_argument(
+        "--audit-only",
+        action="store_true",
+        help="Audit each unique checkpoint without recording a video.",
+    )
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
     args.checkpoint_root = args.checkpoint_root.expanduser().resolve()
@@ -267,9 +283,9 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
-    if not RECORDER.is_file():
+    if not args.audit_only and not RECORDER.is_file():
         raise SystemExit(f"Recorder not found: {RECORDER}")
-    if not EVALUATOR.is_file():
+    if not args.video_only and not EVALUATOR.is_file():
         raise SystemExit(f"Evaluator not found: {EVALUATOR}")
     if not args.checkpoint_root.is_dir():
         raise SystemExit(f"Checkpoint root not found: {args.checkpoint_root}")
