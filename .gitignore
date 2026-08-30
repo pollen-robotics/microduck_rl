@@ -1,4 +1,6 @@
 # Python-generated files
+.worktrees/
+
 __pycache__/
 *.py[oc]
 build/
