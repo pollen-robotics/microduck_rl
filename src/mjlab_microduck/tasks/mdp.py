@@ -2475,8 +2475,9 @@ def stair_coupled_frontier_collocation(
     immediately before the first lip.  The minimum of normalized forward and
     vertical progress prevents either axis from compensating for the other.
     A running maximum makes dense progress finite and non-farmable. Progress
-    starts from the first reset-safe policy state, while the held target bonus
-    still requires the physical A24 two-contact impulse. This keeps an
+    starts from the maximum seen before arming, so lowering progress during the
+    first policy actions cannot create a profitable rebound. The held target
+    bonus still requires the physical A24 two-contact impulse. This keeps an
     attainable mentor signal without paying reset state or accepting a target
     reached by unrelated motion.
     """
@@ -2507,6 +2508,7 @@ def stair_coupled_frontier_collocation(
         env._stair_coupled_frontier_armed = torch.zeros(
             env.num_envs, dtype=torch.bool, device=env.device
         )
+        env._stair_coupled_frontier_prearm_peak = torch.zeros_like(x)
         env._stair_coupled_frontier_arm_value = torch.zeros_like(x)
         env._stair_coupled_frontier_max_value = torch.zeros_like(x)
         env._stair_coupled_frontier_paid_gain = torch.zeros_like(x)
@@ -2534,6 +2536,7 @@ def stair_coupled_frontier_collocation(
 
     fresh = env.episode_length_buf <= 1
     env._stair_coupled_frontier_armed[fresh] = False
+    env._stair_coupled_frontier_prearm_peak[fresh] = 0.0
     env._stair_coupled_frontier_arm_value[fresh] = 0.0
     env._stair_coupled_frontier_max_value[fresh] = 0.0
     env._stair_coupled_frontier_paid_gain[fresh] = 0.0
@@ -2546,6 +2549,17 @@ def stair_coupled_frontier_collocation(
     env._stair_coupled_frontier_bypass_latched[fresh] = False
 
     already_target = (x >= x_target) & (z >= z_target)
+    prearm_eligible = (
+        ~env._stair_coupled_frontier_armed
+        & finite
+        & (abs_y <= corridor_half_width)
+        & ~already_target
+    )
+    env._stair_coupled_frontier_prearm_peak = torch.where(
+        prearm_eligible,
+        torch.maximum(env._stair_coupled_frontier_prearm_peak, coupled),
+        env._stair_coupled_frontier_prearm_peak,
+    )
     newly_armed = (
         (env.episode_length_buf >= arm_after_control_steps)
         & finite
@@ -2554,8 +2568,12 @@ def stair_coupled_frontier_collocation(
         & ~env._stair_coupled_frontier_armed
     )
     env._stair_coupled_frontier_armed |= newly_armed
-    env._stair_coupled_frontier_arm_value[newly_armed] = coupled[newly_armed]
-    env._stair_coupled_frontier_max_value[newly_armed] = coupled[newly_armed]
+    env._stair_coupled_frontier_arm_value[newly_armed] = (
+        env._stair_coupled_frontier_prearm_peak[newly_armed]
+    )
+    env._stair_coupled_frontier_max_value[newly_armed] = (
+        env._stair_coupled_frontier_prearm_peak[newly_armed]
+    )
     env._stair_coupled_frontier_paid_gain[newly_armed] = 0.0
 
     active = (

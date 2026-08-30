@@ -360,3 +360,38 @@ def test_coupled_frontier_bypass_repays_only_policy_created_gain(monkeypatch):
     assert torch.isclose(repayment, -gain).item()
     assert env._stair_coupled_frontier_bypass_latched.item() is True
     assert microduck_mdp.stair_coupled_frontier_collocation(env).item() == 0.0
+
+
+def test_coupled_frontier_prearm_peak_prevents_baseline_depression():
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            root_link_pos_w=torch.tensor([[0.6425, 0.0, 0.160]]),
+            root_link_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
+            root_link_lin_vel_w=torch.zeros(1, 3),
+        )
+    )
+    env = SimpleNamespace(
+        num_envs=1,
+        device="cpu",
+        step_dt=0.02,
+        episode_length_buf=torch.tensor([1]),
+        scene=_Scene(robot),
+        _stair_lip_commitment_impulse_latched=torch.tensor([False]),
+    )
+
+    assert microduck_mdp.stair_coupled_frontier_collocation(env).item() == 0.0
+    robot.data.root_link_pos_w[:] = torch.tensor([[0.620, 0.0, 0.145]])
+    env.episode_length_buf[:] = 2
+    assert microduck_mdp.stair_coupled_frontier_collocation(env).item() == 0.0
+    assert env._stair_coupled_frontier_armed.item() is True
+
+    robot.data.root_link_pos_w[:] = torch.tensor([[0.6425, 0.0, 0.160]])
+    env.episode_length_buf[:] = 3
+    assert microduck_mdp.stair_coupled_frontier_collocation(env).item() == 0.0
+
+    robot.data.root_link_pos_w[:] = torch.tensor([[0.665, 0.0, 0.175]])
+    env.episode_length_buf[:] = 4
+    assert torch.isclose(
+        microduck_mdp.stair_coupled_frontier_collocation(env),
+        torch.tensor([10.0]),
+    ).item()
