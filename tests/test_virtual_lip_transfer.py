@@ -14,6 +14,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     BoxStandardStaircaseTerrainCfg,
     make_microduck_stair_contact_stage_rsi_env_cfg,
     make_microduck_stair_near_shell_reverse_rsi_env_cfg,
+    make_microduck_stair_stratified_shell_reverse_rsi_env_cfg,
     make_microduck_stair_stage15_reverse_rsi_env_cfg,
     make_microduck_stair_stage2_reverse_rsi_env_cfg,
     make_microduck_stair_forward_propagation_rsi_env_cfg,
@@ -860,3 +861,18 @@ def test_a34_changes_only_the_stage2_bank_to_dynamic_near_shell_states():
     for name in a33.rewards:
         assert a34.rewards[name].weight == a33.rewards[name].weight
         assert a34.rewards[name].params == a33.rewards[name].params
+
+
+def test_a35_changes_only_family2_to_the_balanced_stratified_bank():
+    a34 = make_microduck_stair_near_shell_reverse_rsi_env_cfg()
+    a35 = make_microduck_stair_stratified_shell_reverse_rsi_env_cfg()
+
+    assert a35.events["state_bank_family"].params["family_weights"] == (2, 1, 1)
+    assert a35.events["stage2_reverse_state_bank"].params["bank_path"].endswith(
+        "full170-a35-stratified-shell-state-bank.pt"
+    )
+    assert tuple(a35.events) == tuple(a34.events)
+    assert tuple(a35.rewards) == tuple(a34.rewards)
+    for name in a34.rewards:
+        assert a35.rewards[name].weight == a34.rewards[name].weight
+        assert a35.rewards[name].params == a34.rewards[name].params

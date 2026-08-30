@@ -301,6 +301,7 @@ def load_walk_state_bank(path: str | Path) -> dict[str, Any]:
 def eligible_walk_state_rows(
     states: dict[str, Any],
     *,
+    state_field_value: tuple[str, int] | None = None,
     source_episode_step_range: tuple[int, int] | None = None,
     min_forward_speed: float | None = None,
     min_vertical_speed: float | None = None,
@@ -315,6 +316,18 @@ def eligible_walk_state_rows(
 
     count = walk_state_count(states)
     eligible = torch.ones(count, dtype=torch.bool)
+    if state_field_value is not None:
+        field_name, required_value = state_field_value
+        if field_name not in states:
+            raise ValueError(
+                f"state_field_value requires {field_name!r} in the bank"
+            )
+        field = states[field_name]
+        if not isinstance(field, torch.Tensor) or field.shape != (count,):
+            raise ValueError(
+                f"state_field_value field {field_name!r} must have shape ({count},)"
+            )
+        eligible &= field == required_value
     if source_episode_step_range is not None:
         if "source_episode_step" not in states:
             raise ValueError(
@@ -350,6 +363,24 @@ def eligible_walk_state_rows(
     if len(rows) == 0:
         raise ValueError("Walker-state phase filters rejected every bank row")
     return rows
+
+
+def balanced_walk_state_rows(
+    eligible_rows: torch.Tensor,
+    sample_count: int,
+    *,
+    device: str | torch.device,
+) -> torch.Tensor:
+    """Repeat every eligible row equally, then randomize environment assignment."""
+
+    if len(eligible_rows) == 0 or sample_count < 1:
+        raise ValueError("Balanced replay requires rows and a positive sample count")
+    if sample_count % len(eligible_rows) != 0:
+        raise ValueError(
+            "Balanced replay sample count must be divisible by eligible row count"
+        )
+    rows = eligible_rows.to(device).repeat(sample_count // len(eligible_rows))
+    return rows[torch.randperm(sample_count, device=device)]
 
 
 def phase_balanced_row_buckets(
@@ -455,6 +486,10 @@ class WalkerStateBankReset:
         )
         self._replay_fraction = float(cfg.params.get("replay_fraction", 1.0))
         self._reset_family = cfg.params.get("reset_family")
+        self._state_field_value = cfg.params.get("state_field_value")
+        self._balanced_row_replay = bool(
+            cfg.params.get("balanced_row_replay", False)
+        )
         if not 0.0 <= self._replay_fraction <= 1.0:
             raise ValueError("replay_fraction must be between zero and one")
         if self._reset_family is not None and (
@@ -465,6 +500,7 @@ class WalkerStateBankReset:
             raise ValueError("late_fraction must be between zero and one")
         self._eligible_rows = eligible_walk_state_rows(
             self._states,
+            state_field_value=self._state_field_value,
             source_episode_step_range=self._source_episode_step_range,
             min_forward_speed=cfg.params.get("min_forward_speed"),
             min_vertical_speed=cfg.params.get("min_vertical_speed"),
@@ -511,6 +547,12 @@ class WalkerStateBankReset:
                 raise ValueError(
                     "Late-mixture filters rejected every eligible bank row"
                 )
+        if self._balanced_row_replay and (
+            self._phase_balanced or self._late_fraction > 0.0
+        ):
+            raise ValueError(
+                "Balanced row replay cannot be combined with phase or late mixtures"
+            )
         if self._phase_aligned_local_x_range is not None:
             if self._local_x_range is not None:
                 raise ValueError(
@@ -554,6 +596,8 @@ class WalkerStateBankReset:
         late_source_episode_step_range: tuple[int, int] | None = None,
         replay_fraction: float = 1.0,
         reset_family: int | None = None,
+        state_field_value: tuple[str, int] | None = None,
+        balanced_row_replay: bool = False,
     ) -> None:
         del (
             bank_path,
@@ -578,6 +622,8 @@ class WalkerStateBankReset:
             late_source_episode_step_range,
             replay_fraction,
             reset_family,
+            state_field_value,
+            balanced_row_replay,
         )
         mode = getattr(env, "_stair_assisted_reset_mode", None)
         if mode is None:
@@ -614,7 +660,13 @@ class WalkerStateBankReset:
             self._pending_rows = None
             return
 
-        if self._late_rows is not None:
+        if self._balanced_row_replay:
+            rows = balanced_walk_state_rows(
+                self._eligible_rows,
+                len(selected_ids),
+                device=env.device,
+            )
+        elif self._late_rows is not None:
             late_mask = (
                 torch.rand(len(selected_ids), device=env.device) < self._late_fraction
             )

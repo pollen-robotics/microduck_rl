@@ -1901,6 +1901,18 @@ def make_microduck_stair_near_shell_reverse_rsi_env_cfg(
     return cfg
 
 
+def make_microduck_stair_stratified_shell_reverse_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A35: balance solved and backward-expanded hard-stair states."""
+
+    cfg = make_microduck_stair_near_shell_reverse_rsi_env_cfg(play=play)
+    cfg.events["stage2_reverse_state_bank"].params["bank_path"] = (
+        ".tmp/codex/full170-a35-stratified-shell-state-bank.pt"
+    )
+    return cfg
+
+
 def make_microduck_stair_tread_contact_bank_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -2358,6 +2370,16 @@ MicroduckStairNearShellReverseRsiRlCfg.experiment_name = (
 )
 MicroduckStairNearShellReverseRsiRlCfg.run_name = (
     "microduck_stair_near_shell_reverse_rsi_specialist"
+)
+
+MicroduckStairStratifiedShellReverseRsiRlCfg = deepcopy(
+    MicroduckStairNearShellReverseRsiRlCfg
+)
+MicroduckStairStratifiedShellReverseRsiRlCfg.experiment_name = (
+    "microduck_stair_stratified_shell_reverse_rsi_specialist"
+)
+MicroduckStairStratifiedShellReverseRsiRlCfg.run_name = (
+    "microduck_stair_stratified_shell_reverse_rsi_specialist"
 )
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)

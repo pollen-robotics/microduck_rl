@@ -31,15 +31,23 @@ A31_TASK_ID = "Mjlab-Stairs-Contact-Stage-RSI-Specialist-MicroDuck"
 A32_TASK_ID = "Mjlab-Stairs-Stage15-Reverse-RSI-Specialist-MicroDuck"
 A33_TASK_ID = "Mjlab-Stairs-Stage2-Reverse-RSI-Specialist-MicroDuck"
 A34_TASK_ID = "Mjlab-Stairs-Near-Shell-Reverse-RSI-Specialist-MicroDuck"
-STAGE2_SEEDED_TASK_IDS = (A33_TASK_ID, A34_TASK_ID)
+A35_TASK_ID = "Mjlab-Stairs-Stratified-Shell-Reverse-RSI-Specialist-MicroDuck"
+STAGE2_SEEDED_TASK_IDS = (A33_TASK_ID, A34_TASK_ID, A35_TASK_ID)
 CONTACT_TRANSFER_TASK_IDS = (
     A30_TASK_ID,
     A31_TASK_ID,
     A32_TASK_ID,
     A33_TASK_ID,
     A34_TASK_ID,
+    A35_TASK_ID,
 )
-STAGE15_TASK_IDS = (A31_TASK_ID, A32_TASK_ID, A33_TASK_ID, A34_TASK_ID)
+STAGE15_TASK_IDS = (
+    A31_TASK_ID,
+    A32_TASK_ID,
+    A33_TASK_ID,
+    A34_TASK_ID,
+    A35_TASK_ID,
+)
 TASK_IDS = (
     "Mjlab-Stairs-Assisted-Specialist-MicroDuck",
     "Mjlab-Stairs-Bridge-Specialist-MicroDuck",
@@ -63,6 +71,7 @@ TASK_IDS = (
     A32_TASK_ID,
     A33_TASK_ID,
     A34_TASK_ID,
+    A35_TASK_ID,
     "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
     "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
@@ -133,6 +142,12 @@ A34_RESET_FAMILY_OVERRIDES = {
     "stage15-reverse": 1,
     "near-shell-reverse": 2,
 }
+A35_RESET_MODES = {
+    0: "face_no_tread_bank",
+    1: "stage15_reverse_bank",
+    2: "stratified_shell_reverse_bank",
+}
+A35_RESET_FAMILY_OVERRIDES = A34_RESET_FAMILY_OVERRIDES
 BODY_PART_CONTACT_SENSORS = {
     "head": "head_ground_contact",
     "trunk": "trunk_ground_contact",
@@ -457,12 +472,18 @@ def _parse_args() -> argparse.Namespace:
                     *A32_RESET_FAMILY_OVERRIDES,
                     *A33_RESET_FAMILY_OVERRIDES,
                     *A34_RESET_FAMILY_OVERRIDES,
+                    *A35_RESET_FAMILY_OVERRIDES,
                 )
             )
         ),
         default="mixed",
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--bank-stratum",
+        choices=("lower", "upper"),
+        help="Restrict A35 family 2 to one reverse-curriculum stratum.",
+    )
     return parser.parse_args()
 
 
@@ -492,6 +513,7 @@ def main() -> int:
     is_a32 = args.task == A32_TASK_ID
     is_a33 = args.task == A33_TASK_ID
     is_a34 = args.task == A34_TASK_ID
+    is_a35 = args.task == A35_TASK_ID
     uses_stage2_seed_semantics = args.task in STAGE2_SEEDED_TASK_IDS
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_file():
@@ -510,7 +532,16 @@ def main() -> int:
         raise SystemExit(
             "--reset-family is supported only for contact-transfer tasks"
         )
-    if is_a34:
+    if args.bank_stratum is not None and (
+        not is_a35 or args.reset_family != "near-shell-reverse"
+    ):
+        raise SystemExit(
+            "--bank-stratum requires the A35 task with "
+            "--reset-family near-shell-reverse"
+        )
+    if is_a35:
+        reset_family_overrides = A35_RESET_FAMILY_OVERRIDES
+    elif is_a34:
         reset_family_overrides = A34_RESET_FAMILY_OVERRIDES
     elif is_a33:
         reset_family_overrides = A33_RESET_FAMILY_OVERRIDES
@@ -522,7 +553,9 @@ def main() -> int:
         raise SystemExit(
             f"--reset-family {args.reset_family!r} is invalid for {args.task}"
         )
-    if is_a34:
+    if is_a35:
+        reset_modes = A35_RESET_MODES
+    elif is_a34:
         reset_modes = A34_RESET_MODES
     elif is_a33:
         reset_modes = A33_RESET_MODES
@@ -558,6 +591,13 @@ def main() -> int:
 
     configure_torch_backends()
     env_cfg = load_env_cfg(args.task, play=True)
+    if args.bank_stratum is not None:
+        bank = env_cfg.events["stage2_reverse_state_bank"]
+        bank.params["state_field_value"] = (
+            "reverse_curriculum_stratum",
+            0 if args.bank_stratum == "lower" else 1,
+        )
+        bank.params["balanced_row_replay"] = True
     if args.root_over_lip_replay_fraction is not None:
         bank = env_cfg.events.get("root_over_lip_state_bank")
         if bank is None:
@@ -1495,6 +1535,7 @@ def main() -> int:
             args.root_over_lip_replay_fraction
         ),
         "requested_episodes_per_env": args.episodes,
+        "bank_stratum_override": args.bank_stratum,
         "completed_trials": completed_trials,
         "clearance_events": clearance_events,
         "clearance_rate": clearance_events / denominator,

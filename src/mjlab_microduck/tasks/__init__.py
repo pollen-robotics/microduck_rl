@@ -154,6 +154,7 @@ from .microduck_standard_stairs_env_cfg import (
     make_microduck_stair_stage15_reverse_rsi_env_cfg,
     make_microduck_stair_stage2_reverse_rsi_env_cfg,
     make_microduck_stair_near_shell_reverse_rsi_env_cfg,
+    make_microduck_stair_stratified_shell_reverse_rsi_env_cfg,
     make_microduck_stair_soft_dynamics_rsi_env_cfg,
     make_microduck_stair_medium_dynamics_rsi_env_cfg,
     make_microduck_stair_foot_anchor_vault_env_cfg,
@@ -183,6 +184,7 @@ from .microduck_standard_stairs_env_cfg import (
     MicroduckStairStage15ReverseRsiRlCfg,
     MicroduckStairStage2ReverseRsiRlCfg,
     MicroduckStairNearShellReverseRsiRlCfg,
+    MicroduckStairStratifiedShellReverseRsiRlCfg,
     MicroduckStairSoftDynamicsRsiRlCfg,
     MicroduckStairMediumDynamicsRsiRlCfg,
     MicroduckStairFootAnchorVaultRlCfg,
@@ -577,6 +579,16 @@ register_mjlab_task(
     env_cfg=make_microduck_stair_near_shell_reverse_rsi_env_cfg(),
     play_env_cfg=make_microduck_stair_near_shell_reverse_rsi_env_cfg(play=True),
     rl_cfg=MicroduckStairNearShellReverseRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Stratified-Shell-Reverse-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_stratified_shell_reverse_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_stratified_shell_reverse_rsi_env_cfg(
+        play=True
+    ),
+    rl_cfg=MicroduckStairStratifiedShellReverseRsiRlCfg,
     runner_cls=MicroduckStairSpecialistRunner,
 )
 

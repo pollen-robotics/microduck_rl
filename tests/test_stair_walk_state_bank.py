@@ -7,6 +7,7 @@ from mjlab_microduck.tasks.stair_walk_state_bank import (
     _preappend_history,
     _restore_circular_rows,
     concatenate_walk_state_rows,
+    balanced_walk_state_rows,
     eligible_walk_state_rows,
     phase_aligned_local_x,
     phase_balanced_row_buckets,
@@ -101,6 +102,46 @@ def test_dynamic_phase_filter_rejects_backward_low_and_crash_rows():
     )
 
     assert torch.equal(rows, torch.tensor([0]))
+
+
+def test_state_field_value_selects_one_reverse_curriculum_stratum():
+    states = {
+        "root_qpos_local": torch.zeros(5, 7),
+        "reverse_curriculum_stratum": torch.tensor([0, 1, 0, 1, 1]),
+    }
+
+    rows = eligible_walk_state_rows(
+        states,
+        state_field_value=("reverse_curriculum_stratum", 1),
+    )
+
+    assert torch.equal(rows, torch.tensor([1, 3, 4]))
+
+
+def test_state_field_value_requires_a_one_dimensional_bank_field():
+    states = {
+        "root_qpos_local": torch.zeros(2, 7),
+        "reverse_curriculum_stratum": torch.zeros(2, 1),
+    }
+
+    with __import__("pytest").raises(ValueError, match="must have shape"):
+        eligible_walk_state_rows(
+            states,
+            state_field_value=("reverse_curriculum_stratum", 0),
+        )
+
+
+def test_balanced_replay_covers_every_eligible_row_equally():
+    torch.manual_seed(3)
+    rows = balanced_walk_state_rows(torch.arange(64), 1024, device="cpu")
+
+    assert len(rows) == 1024
+    assert torch.all(torch.bincount(rows) == 16)
+
+
+def test_balanced_replay_rejects_nondivisible_sample_counts():
+    with __import__("pytest").raises(ValueError, match="divisible"):
+        balanced_walk_state_rows(torch.arange(3), 8, device="cpu")
 
 
 def test_vault_momentum_accepts_forward_upward_or_pivot_motion():
