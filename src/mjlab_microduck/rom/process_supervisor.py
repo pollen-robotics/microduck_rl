@@ -47,6 +47,10 @@ class SupervisorOperationError(RuntimeError):
     """A bounded child operation failed or became ambiguous."""
 
 
+class SupervisorTaskTerminalized(SupervisorOperationError):
+    """The active task safely terminalized while another operation was pending."""
+
+
 @dataclass(frozen=True, slots=True)
 class SupervisorSnapshot:
     state: SupervisorState
@@ -478,18 +482,17 @@ class RuntimeProcessSupervisor:
         )
         assert isinstance(response.payload, TerminalPayload)
         self._active_task = None
-        if self._terminal_queue is not None:
-            try:
-                self._terminal_queue.put_nowait(response.payload)
-            except queue.Full as exc:
-                self._quarantine("TERMINAL_DELIVERY_BACKPRESSURE")
-                raise SupervisorOperationError("terminal handoff unavailable") from exc
         self._advance(
             SupervisorEvent.TERMINAL_ACK,
             healthy=True,
             slot=True,
             terminal=response.payload,
         )
+        if self._terminal_queue is not None:
+            try:
+                self._terminal_queue.put_nowait(response.payload)
+            except queue.Full:
+                self._record("TERMINAL_DELIVERY_BACKPRESSURE")
         return response.payload
 
     def _require_active(self, task_id: str) -> None:
@@ -502,6 +505,8 @@ class RuntimeProcessSupervisor:
     def _guarded_exchange(self, *args: Any) -> RuntimeMessage:
         try:
             return self._exchange(*args)
+        except SupervisorTaskTerminalized:
+            raise
         except BaseException as exc:
             self._record(
                 "OPERATION_TIMEOUT"
@@ -548,7 +553,9 @@ class RuntimeProcessSupervisor:
             response = decode_packet(packet)
             if response.kind is RuntimeMessageKind.TERMINAL_EVENT:
                 self._accept_terminal_event(response)
-                continue
+                raise SupervisorTaskTerminalized(
+                    "task terminalized while operation was pending"
+                )
             if (
                 response.generation != self._generation
                 or response.operationSequence != self._sequence
@@ -590,15 +597,15 @@ class RuntimeProcessSupervisor:
             raise SupervisorOperationError("stale or replayed terminal event")
         terminal = payload.terminal
         self._last_event_sequence = payload.eventSequence
-        if self._terminal_queue is not None:
-            try:
-                self._terminal_queue.put_nowait(terminal)
-            except queue.Full as exc:
-                raise SupervisorOperationError("terminal handoff unavailable") from exc
         self._active_task = None
         self._advance(
             SupervisorEvent.TERMINAL_ACK, healthy=True, slot=True, terminal=terminal
         )
+        if self._terminal_queue is not None:
+            try:
+                self._terminal_queue.put_nowait(terminal)
+            except queue.Full:
+                self._record("TERMINAL_DELIVERY_BACKPRESSURE")
 
     def _quarantine(self, reason: str, *, protocol_usable: bool = False) -> None:
         self._advance(

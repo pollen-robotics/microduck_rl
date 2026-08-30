@@ -10,6 +10,7 @@ import socket
 import threading
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from .action_catalog import (
@@ -65,6 +66,14 @@ _ERROR_CODES = {
 _FATAL_CLEANUP_TIMEOUT_S = 0.25
 
 
+@dataclass(frozen=True, slots=True)
+class _DiscreteCompletion:
+    handle: RuntimeHandle
+    sample: RuntimeSample
+    outcome: str
+    reason: str
+
+
 def clear_runtime_environment() -> None:
     kept = {name: value for name, value in os.environ.items() if name in _ALLOWED_ENVIRONMENT}
     os.environ.clear()
@@ -92,7 +101,7 @@ class RuntimeChildHost:
         if fatal_cleanup_timeout_s <= 0:
             raise ValueError("fatal cleanup timeout must be positive")
         self._fatal_cleanup_timeout_s = fatal_cleanup_timeout_s
-        self._messages: queue.Queue[RuntimeMessage | None] = queue.Queue(maxsize=8)
+        self._messages: queue.Queue[RuntimeMessage | _DiscreteCompletion | None] = queue.Queue(maxsize=8)
         self._send_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._stop = threading.Event()
@@ -113,6 +122,11 @@ class RuntimeChildHost:
         self._operation_active = threading.Event()
         self._event_sequence = 0
         self._completion_claim = threading.Lock()
+        self._sample_thread: threading.Thread | None = None
+
+    @property
+    def sample_monitor_alive(self) -> bool:
+        return self._sample_thread is not None and self._sample_thread.is_alive()
 
     def _send(self, message: RuntimeMessage) -> bool:
         try:
@@ -188,7 +202,9 @@ class RuntimeChildHost:
                 return
             self._put_message(message)
 
-    def _put_message(self, message: RuntimeMessage | None) -> None:
+    def _put_message(
+        self, message: RuntimeMessage | _DiscreteCompletion | None
+    ) -> None:
         try:
             self._messages.put_nowait(message)
         except queue.Full:
@@ -282,6 +298,9 @@ class RuntimeChildHost:
                 self._cleanup_timed_out.set()
                 return
             evidence = cleanup_result[0]
+            if self.sample_monitor_alive:
+                self._cleanup_timed_out.set()
+                return
             with self._state_lock:
                 self._handle = None
         if (
@@ -360,55 +379,77 @@ class RuntimeChildHost:
             except Exception:  # noqa: BLE001 - runtime detail is never serialized
                 sample = RuntimeSample(running=False, terminalState="FAILED")
                 reason, outcome = "RUNTIME_EXCEPTION", "FAILED"
-            with self._completion_claim:
-                with self._state_lock:
-                    if handle is not self._handle or self._safety_requested.is_set():
-                        return
-                try:
-                    stopped = runtime.safe_stop(handle, reason)
-                except Exception:  # noqa: BLE001
-                    stopped = RuntimeEvidence(metrics={"safetyFailure": "SAFE_STOP_FAILED"}, stopReason=reason)
-                    outcome, reason = "FAILED", "RUNTIME_EXCEPTION"
-                if self._safety_requested.is_set():
-                    return
-                metrics = dict(sample.metrics)
-                for key in sorted(stopped.metrics):
-                    candidate = metrics | {key: stopped.metrics[key]}
-                    try:
-                        RuntimeEvidence(metrics=candidate)
-                    except (TypeError, ValueError):
-                        break
-                    metrics = candidate
-                assert self._bundle is not None
-                action = next(item for item in self._bundle.actions if item.actionCode == self._active_action_code)
-                policy = next(item for item in self._bundle.policies if item.policyRef == action.policyRef)
-                terminal = TerminalPayload(
-                    outcome=outcome,
-                    evidence=TaskEvidence(
-                        bundleDigest=self._bundle.bundleDigest,
-                        policyDigest=policy.digest,
-                        modelDigest=self._bundle.model.digest,
-                        metrics=metrics, stopReason=reason,
-                    ),
-                )
-                with self._state_lock:
-                    generation, task_id = self._generation, self._task_id
-                    self._handle = None
-                    self._lease_deadline = None
-                    self._event_sequence += 1
-                    event_sequence = self._event_sequence
-                assert generation is not None and task_id is not None
-                self._send(RuntimeMessage(
-                    kind=RuntimeMessageKind.TERMINAL_EVENT,
-                    generation=generation, operationSequence=0, taskId=task_id,
-                    payload=TerminalEventPayload(eventSequence=event_sequence, terminal=terminal),
-                ))
-                with self._state_lock:
-                    self._generation = None
-                    self._task_id = None
-                    self._last_request = None
+            self._put_message(_DiscreteCompletion(handle, sample, outcome, reason))
 
-        threading.Thread(target=monitor, name="runtime-child-discrete-monitor", daemon=True).start()
+        self._sample_thread = threading.Thread(
+            target=monitor, name="runtime-child-discrete-monitor", daemon=True
+        )
+        self._sample_thread.start()
+
+    def _retire_uncertain_cleanup(self) -> None:
+        self._cleanup_timed_out.set()
+        self._stop.set()
+        self._put_message(None)
+
+    def _handle_discrete_completion(self, completion: _DiscreteCompletion) -> None:
+        monitor = self._sample_thread
+        if monitor is None:
+            self._retire_uncertain_cleanup()
+            return
+        monitor.join(timeout=self._fatal_cleanup_timeout_s)
+        if monitor.is_alive():
+            self._retire_uncertain_cleanup()
+            return
+        with self._completion_claim:
+            with self._state_lock:
+                if completion.handle is not self._handle or self._safety_requested.is_set():
+                    return
+            assert self._runtime is not None
+            try:
+                raw_stopped = self._runtime.safe_stop(completion.handle, completion.reason)
+                stopped = RuntimeEvidence(
+                    metrics=raw_stopped.metrics, stopReason=raw_stopped.stopReason
+                )
+            except Exception:  # noqa: BLE001 - uncertain cleanup requires exact reap
+                self._retire_uncertain_cleanup()
+                return
+            metrics = dict(completion.sample.metrics)
+            for key in sorted(stopped.metrics):
+                candidate = metrics | {key: stopped.metrics[key]}
+                try:
+                    RuntimeEvidence(metrics=candidate)
+                except (TypeError, ValueError):
+                    break
+                metrics = candidate
+            assert self._bundle is not None
+            action = next(item for item in self._bundle.actions if item.actionCode == self._active_action_code)
+            policy = next(item for item in self._bundle.policies if item.policyRef == action.policyRef)
+            terminal = TerminalPayload(
+                outcome=completion.outcome,
+                evidence=TaskEvidence(
+                    bundleDigest=self._bundle.bundleDigest,
+                    policyDigest=policy.digest,
+                    modelDigest=self._bundle.model.digest,
+                    metrics=metrics, stopReason=completion.reason,
+                ),
+            )
+            with self._state_lock:
+                generation, task_id = self._generation, self._task_id
+                self._handle = None
+                self._lease_deadline = None
+                self._event_sequence += 1
+                event_sequence = self._event_sequence
+            assert generation is not None and task_id is not None
+            self._send(RuntimeMessage(
+                kind=RuntimeMessageKind.TERMINAL_EVENT,
+                generation=generation, operationSequence=0, taskId=task_id,
+                payload=TerminalEventPayload(eventSequence=event_sequence, terminal=terminal),
+            ))
+            with self._state_lock:
+                self._generation = None
+                self._task_id = None
+                self._last_request = None
+                self._sample_thread = None
 
     def _handle_message(self, message: RuntimeMessage) -> bool:
         self._last_request = message
@@ -545,6 +586,9 @@ class RuntimeChildHost:
             message = self._messages.get()
             if message is None:
                 break
+            if isinstance(message, _DiscreteCompletion):
+                self._handle_discrete_completion(message)
+                continue
             result: list[bool] = []
 
             def execute(
@@ -567,6 +611,10 @@ class RuntimeChildHost:
         self._stop.set()
         if self._safety_requested.is_set():
             self._safety_complete.wait(timeout=self._fatal_cleanup_timeout_s + 0.05)
+        try:
+            self._socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         try:
             self._socket.close()
         except OSError:

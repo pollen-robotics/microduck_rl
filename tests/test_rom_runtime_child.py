@@ -164,6 +164,64 @@ def test_discrete_sample_is_safely_stopped_then_emitted_with_metrics(
     parent.close()
 
 
+def test_discrete_safe_stop_failure_withholds_terminal_and_exits_transport() -> None:
+    host, runtime, parent, thread = _active_host()
+    host._active_action_code = "STAND"
+    host._bundle.actions[0].actionCode = "STAND"
+    runtime.safe_stop_error = RuntimeError("uncertain cleanup")
+    runtime.complete_next(state="SUCCEEDED", metrics={"upright": True})
+    host._start_discrete_monitor()
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    parent.settimeout(1)
+    assert parent.recv(65_537) == b""
+    assert not host._safety_complete.is_set()
+    parent.close()
+
+
+def test_discrete_unbounded_safe_stop_evidence_withholds_terminal() -> None:
+    host, runtime, parent, thread = _active_host()
+    host._active_action_code = "STAND"
+    host._bundle.actions[0].actionCode = "STAND"
+    runtime.safe_stop_metrics = {f"metric-{index}": index for index in range(33)}
+    runtime.complete_next(state="SUCCEEDED", metrics={})
+    host._start_discrete_monitor()
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    parent.settimeout(1)
+    assert parent.recv(65_537) == b""
+    parent.close()
+
+
+def test_blocked_discrete_sample_forces_process_retirement_on_cleanup() -> None:
+    host, runtime, parent, thread = _active_host()
+    host._active_action_code = "STAND"
+    host._bundle.actions[0].actionCode = "STAND"
+    runtime.sample_release.clear()
+    host._start_discrete_monitor()
+    assert runtime.sample_started.wait(timeout=1)
+    host._last_request = RuntimeMessage(
+        kind="STATUS", generation=7, operationSequence=1, taskId="1" * 32, payload={}
+    )
+    host._request_safety("LEASE_EXPIRED")
+    assert runtime.safe_stopped.wait(timeout=1)
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert host.sample_monitor_alive
+    parent.settimeout(1)
+    assert parent.recv(65_537) == b""
+    with pytest.raises(BrokenPipeError):
+        parent.sendall(encode_packet(RuntimeMessage(
+            kind="START", generation=8, operationSequence=2, taskId="2" * 32,
+            payload=StartPayload(
+                actionCode="STAND", bundleDigest="sha256:" + "a" * 64,
+                parameters={}, scenario={"terrain": "flat", "seed": 8}, leaseMs=1000,
+            ),
+        )))
+    runtime.sample_release.set()
+    parent.close()
+
+
 def _active_host() -> tuple[RuntimeChildHost, FakeMicroduckRuntime, socket.socket, threading.Thread]:
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     runtime = FakeMicroduckRuntime()

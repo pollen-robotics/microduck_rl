@@ -12,11 +12,17 @@ from pathlib import Path
 
 import pytest
 
-from mjlab_microduck.rom.contracts import TaskCommandRequest, TaskCreateRequest
+from mjlab_microduck.rom.contracts import (
+    TaskCommandRequest,
+    TaskCreateRequest,
+    TaskEvidence,
+)
+from mjlab_microduck.rom.process_protocol import TerminalPayload
 from mjlab_microduck.rom.process_supervisor import (
     ChildLaunch,
     RuntimeProcessSupervisor,
     SupervisorOperationError,
+    SupervisorTaskTerminalized,
     SupervisorUnavailable,
 )
 from mjlab_microduck.rom.supervisor_state import SupervisorState
@@ -174,8 +180,8 @@ def test_terminal_event_interleaved_with_status_is_not_consumed_as_response() ->
     try:
         supervisor.ensure_ready()
         supervisor.start(_request())
-        status = supervisor.status(TASK_ID)
-        assert status.health["healthy"] is True
+        with pytest.raises(SupervisorTaskTerminalized):
+            supervisor.status(TASK_ID)
         assert delivered.wait(timeout=2)
         assert supervisor.snapshot().cached_terminal is not None
     finally:
@@ -190,17 +196,82 @@ def test_terminal_event_interleaved_with_command_is_not_consumed_as_response() -
     try:
         supervisor.ensure_ready()
         supervisor.start(_request())
-        supervisor.command(
-            TASK_ID,
-            TaskCommandRequest(
-                commandSequence=1,
-                parameters={"vxMps": 0.1, "vyMps": 0.0, "yawRateRadps": 0.0},
-                leaseMs=500,
-            ),
-        )
+        with pytest.raises(SupervisorTaskTerminalized):
+            supervisor.command(
+                TASK_ID,
+                TaskCommandRequest(
+                    commandSequence=1,
+                    parameters={"vxMps": 0.1, "vyMps": 0.0, "yawRateRadps": 0.0},
+                    leaseMs=500,
+                ),
+            )
         assert delivered.wait(timeout=2)
         assert supervisor.snapshot().cached_terminal is not None
     finally:
+        supervisor.close()
+
+
+def test_terminal_callback_observes_published_idle_snapshot() -> None:
+    observed: list[object] = []
+    delivered = threading.Event()
+    supervisor: RuntimeProcessSupervisor
+
+    def callback(terminal: object) -> None:
+        observed.extend((terminal, supervisor.snapshot()))
+        delivered.set()
+
+    supervisor, launch = _supervisor("terminal-event", terminal_callback=callback)
+    try:
+        supervisor.ensure_ready()
+        supervisor.start(_request())
+        peer = _receive_gate(launch, b"STARTED")
+        peer.sendall(b"EMIT")
+        assert delivered.wait(timeout=2)
+        terminal, snapshot = observed
+        assert snapshot.state is SupervisorState.IDLE
+        assert snapshot.cached_terminal == terminal
+        assert snapshot.slot_releasable is True
+    finally:
+        supervisor.close()
+
+
+def test_terminal_callback_backpressure_preserves_truthful_idle_cache() -> None:
+    blocked = threading.Event()
+    release = threading.Event()
+    supervisor, launch = _supervisor(
+        "terminal-event",
+        terminal_callback=lambda _payload: (blocked.set(), release.wait(timeout=2)),
+    )
+    try:
+        supervisor.ensure_ready()
+        supervisor.start(_request())
+        assert supervisor._terminal_queue is not None
+        supervisor._terminal_queue.put_nowait(TerminalPayload(
+            outcome="CANCELLED",
+            evidence=TaskEvidence(
+                bundleDigest=DIGEST, policyDigest="sha256:" + "b" * 64,
+                modelDigest="sha256:" + "c" * 64, stopReason="CANCELLED",
+            ),
+        ))
+        assert blocked.wait(timeout=1)
+        supervisor._terminal_queue.put_nowait(TerminalPayload(
+            outcome="CANCELLED",
+            evidence=TaskEvidence(
+                bundleDigest=DIGEST, policyDigest="sha256:" + "b" * 64,
+                modelDigest="sha256:" + "c" * 64, stopReason="CANCELLED",
+            ),
+        ))
+        peer = _receive_gate(launch, b"STARTED")
+        peer.sendall(b"EMIT")
+        deadline = time.monotonic() + 1
+        while supervisor.snapshot().state is not SupervisorState.IDLE and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert supervisor.snapshot().state is SupervisorState.IDLE
+        assert supervisor.snapshot().cached_terminal is not None
+        assert "TERMINAL_DELIVERY_BACKPRESSURE" in supervisor.trace
+        assert supervisor.snapshot().pid is not None
+    finally:
+        release.set()
         supervisor.close()
 
 
