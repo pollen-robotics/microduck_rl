@@ -11071,6 +11071,7 @@ def reset_roulade_state(
     standing_z_min: float = 0.11,
     standing_z_max: float = 0.12,
     standing_tilt_max: float = 0.0,
+    yaw_range: tuple = (-math.pi, math.pi),
     forward_vel_range: tuple = (0.0, 0.0),
     midroll_pitch_min: float = math.radians(50.0),
     midroll_pitch_max: float = math.radians(185.0),
@@ -11083,7 +11084,7 @@ def reset_roulade_state(
 ):
     """Reset to a standing start or a mid-roll state (reverse curriculum).
 
-    Standing bucket: upright (±standing_tilt_max pitch/roll noise), random yaw,
+    Standing bucket: upright (±standing_tilt_max pitch/roll noise), sampled yaw,
     HOME joints (left from reset_robot_joints), z in [standing_z_min, _max].
     ``forward_vel_range`` is the élan hook: a per-env forward base velocity
     (body x, mapped to world through the spawn yaw) sampled uniformly — 0 for
@@ -11107,7 +11108,10 @@ def reset_roulade_state(
     total = standing_prob + midroll_prob
     is_mid = torch.rand(num, device=env.device) < (midroll_prob / max(total, 1e-6))
 
-    yaw = torch.rand(num, device=env.device) * 2 * np.pi - np.pi
+    yaw = (
+        torch.rand(num, device=env.device) * (yaw_range[1] - yaw_range[0])
+        + yaw_range[0]
+    )
     cy = torch.cos(yaw * 0.5)
     sy = torch.sin(yaw * 0.5)
 
@@ -11473,8 +11477,9 @@ def roulade_lateral_velocity_penalty(
 # ============================================================================
 #
 # This state is deliberately separate from the one-roll roulade state.  The
-# existing task uses a monotonic frontier and landing rewards; a sprint needs a
-# cyclic accumulator and must release distance only at a valid cycle boundary.
+# existing task uses a monotonic angular frontier and landing rewards; a sprint
+# needs a cyclic accumulator plus a separate global forward frontier. Distance
+# is released only at a valid cycle boundary and only for newly covered ground.
 _ROLL_SPRINT_TARGET_ANGLE = 2.0 * math.pi
 _ROLL_SPRINT_SUPPORT_SENSOR = _ROULADE_SUPPORT_SENSOR
 _ROLL_SPRINT_HEAD_SENSOR = _ROULADE_HEAD_SENSOR
@@ -11489,7 +11494,7 @@ def _roll_sprint_state(env: ManagerBasedRlEnv) -> None:
         return
     z = torch.zeros(env.num_envs, device=env.device)
     env._roll_sprint_accum = z.clone()
-    env._roll_sprint_frontier = z.clone()
+    env._roll_sprint_phase_frontier = z.clone()
     env._roll_sprint_completed = z.clone()
     env._roll_sprint_head_latch = torch.zeros(
         env.num_envs, dtype=torch.bool, device=env.device
@@ -11500,9 +11505,12 @@ def _roll_sprint_state(env: ManagerBasedRlEnv) -> None:
     env._roll_sprint_lateral_invalid = torch.zeros(
         env.num_envs, dtype=torch.bool, device=env.device
     )
-    env._roll_sprint_cycle_distance = z.clone()
     env._roll_sprint_forward_position = z.clone()
     env._roll_sprint_forward_origin = z.clone()
+    env._roll_sprint_cycle_start_position = z.clone()
+    env._roll_sprint_forward_frontier = z.clone()
+    env._roll_sprint_lateral_origin = z.clone()
+    env._roll_sprint_lateral_displacement = z.clone()
     env._roll_sprint_heading_w = torch.zeros(
         (env.num_envs, 2), device=env.device
     )
@@ -11555,14 +11563,27 @@ def _roll_sprint_forward_position(
     return ((position_xy - origins_xy) * heading_w).sum(dim=-1)
 
 
+def _roll_sprint_lateral_position(
+    env: ManagerBasedRlEnv,
+    asset: Entity,
+    heading_w: torch.Tensor,
+) -> torch.Tensor:
+    """Project root position onto the reset-heading lane's lateral axis."""
+    position_xy = torch.nan_to_num(asset.data.root_link_pos_w[:, :2], nan=0.0)
+    origins_xy = torch.nan_to_num(env.scene.terrain.env_origins[:, :2], nan=0.0)
+    lateral_w = torch.stack((-heading_w[:, 1], heading_w[:, 0]), dim=-1)
+    return ((position_xy - origins_xy) * lateral_w).sum(dim=-1)
+
+
 def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
     """Advance one cyclic roll state update, guarded against double updates.
 
     Signed angular progress requires ground support and sagittal orientation,
     so backward rocking removes phase instead of accumulating a fake turn.
-    Dense shaping advances only at a new per-cycle frontier.  Forward distance
-    is linked to actively rotating angle and released only after a witnessed
-    flat head-top contact on an eligible full cycle.
+    Dense shaping advances only at a new per-cycle angular frontier. Forward
+    distance is the signed net cycle advance beyond the globally credited
+    frontier, bounded by the cycle's supported rotation budget, and released
+    only after a witnessed flat head-top contact on an eligible full cycle.
     """
     _roll_sprint_state(env)
     step = int(env.common_step_counter)
@@ -11581,9 +11602,26 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
     env._roll_sprint_forward_origin = torch.where(
         not_ready, position, env._roll_sprint_forward_origin
     )
+    cycle_start_position = torch.where(
+        not_ready, position, env._roll_sprint_cycle_start_position
+    )
+    forward_frontier = torch.where(
+        not_ready, position, env._roll_sprint_forward_frontier
+    )
+    lateral_position = _roll_sprint_lateral_position(
+        env, asset, env._roll_sprint_heading_w
+    )
+    lateral_origin = torch.where(
+        not_ready, lateral_position, env._roll_sprint_lateral_origin
+    )
     env._roll_sprint_heading_ready |= not_ready
     env._roll_sprint_forward_position = torch.where(
         active, position, env._roll_sprint_forward_position
+    )
+    env._roll_sprint_lateral_displacement = torch.where(
+        active,
+        lateral_position - lateral_origin,
+        env._roll_sprint_lateral_displacement,
     )
 
     support = _sensor_any_contact(env, _ROLL_SPRINT_SUPPORT_SENSOR)
@@ -11612,11 +11650,15 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
     old_accum = env._roll_sprint_accum
     candidate_accum = torch.clamp(old_accum + signed_rotation_delta, min=0.0)
     new_accum = torch.where(active, candidate_accum, old_accum)
-    old_frontier = env._roll_sprint_frontier
-    new_frontier = torch.where(
-        active, torch.maximum(old_frontier, new_accum), old_frontier
+    old_phase_frontier = env._roll_sprint_phase_frontier
+    new_phase_frontier = torch.where(
+        active,
+        torch.maximum(old_phase_frontier, new_accum),
+        old_phase_frontier,
     )
-    progress_delta = torch.clamp(new_frontier - old_frontier, min=0.0)
+    progress_delta = torch.clamp(
+        new_phase_frontier - old_phase_frontier, min=0.0
+    )
     env._roll_sprint_progress_delta = torch.where(
         active, progress_delta, env._roll_sprint_progress_delta
     )
@@ -11640,27 +11682,6 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
     )
     new_lateral_invalid = env._roll_sprint_lateral_invalid | lateral_violation
 
-    forward_velocity = torch.nan_to_num(
-        asset.data.root_link_lin_vel_w[:, :2], nan=0.0
-    )
-    forward_velocity = (forward_velocity * env._roll_sprint_heading_w).sum(dim=-1)
-    forward_angle = torch.clamp(signed_rotation_delta, min=0.0)
-    distance_from_velocity = (
-        torch.clamp(forward_velocity, min=0.0)
-        * env.step_dt
-        * valid_rotation
-        * (positive_rate >= _ROLL_SPRINT_MIN_FORWARD_RATE).float()
-    )
-    linked_distance = torch.minimum(
-        distance_from_velocity,
-        _ROLL_SPRINT_MAX_DISTANCE_PER_RAD * forward_angle,
-    )
-    cycle_distance = torch.where(
-        active,
-        env._roll_sprint_cycle_distance + linked_distance,
-        env._roll_sprint_cycle_distance,
-    )
-
     completed = active & (new_accum >= _ROLL_SPRINT_TARGET_ANGLE)
     bootstrap_completion = completed & ~env._roll_sprint_cycle_eligible
     valid_completion = (
@@ -11676,6 +11697,20 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
     )
     any_completion = valid_completion | invalid_completion | bootstrap_completion
 
+    rotation_budget = _ROLL_SPRINT_MAX_DISTANCE_PER_RAD * torch.clamp(
+        new_accum, min=0.0, max=_ROLL_SPRINT_TARGET_ANGLE
+    )
+    cycle_net_advance = torch.clamp(
+        position - cycle_start_position, min=0.0
+    )
+    new_frontier_advance = torch.clamp(
+        position - forward_frontier, min=0.0
+    )
+    completed_distance = torch.minimum(
+        rotation_budget,
+        torch.minimum(cycle_net_advance, new_frontier_advance),
+    )
+
     env._roll_sprint_completed_now = torch.where(
         active, valid_completion, env._roll_sprint_completed_now
     )
@@ -11687,10 +11722,10 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
     )
     env._roll_sprint_completed_distance = torch.where(
         active & valid_completion,
-        cycle_distance,
+        completed_distance,
         torch.where(
             active,
-            torch.zeros_like(cycle_distance),
+            torch.zeros_like(completed_distance),
             env._roll_sprint_completed_distance,
         ),
     )
@@ -11705,19 +11740,31 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
         torch.where(invalid_completion, torch.zeros_like(new_accum), new_accum),
     )
     env._roll_sprint_accum = next_accum
-    env._roll_sprint_frontier = torch.where(
+    env._roll_sprint_phase_frontier = torch.where(
         any_completion,
         torch.where(
             invalid_completion,
-            torch.zeros_like(new_frontier),
+            torch.zeros_like(new_phase_frontier),
             residual,
         ),
-        new_frontier,
+        new_phase_frontier,
     )
-    env._roll_sprint_cycle_distance = torch.where(
-        any_completion,
-        torch.zeros_like(cycle_distance),
-        cycle_distance,
+    env._roll_sprint_forward_frontier = torch.where(
+        active & valid_completion,
+        torch.maximum(forward_frontier, position),
+        torch.where(active, forward_frontier, env._roll_sprint_forward_frontier),
+    )
+    env._roll_sprint_cycle_start_position = torch.where(
+        active & any_completion,
+        position,
+        torch.where(
+            active,
+            cycle_start_position,
+            env._roll_sprint_cycle_start_position,
+        ),
+    )
+    env._roll_sprint_lateral_origin = torch.where(
+        active, lateral_origin, env._roll_sprint_lateral_origin
     )
     env._roll_sprint_head_latch = torch.where(
         any_completion,
@@ -11750,6 +11797,7 @@ def reset_roll_sprint_state(
     standing_z_min: float = 0.11,
     standing_z_max: float = 0.12,
     standing_tilt_max: float = 0.0,
+    yaw_range: tuple = (-math.pi, math.pi),
     forward_vel_range: tuple = (0.0, 0.0),
     midroll_pitch_min: float = math.radians(50.0),
     midroll_pitch_max: float = math.radians(340.0),
@@ -11773,6 +11821,7 @@ def reset_roll_sprint_state(
         standing_z_min=standing_z_min,
         standing_z_max=standing_z_max,
         standing_tilt_max=standing_tilt_max,
+        yaw_range=yaw_range,
         forward_vel_range=forward_vel_range,
         midroll_pitch_min=midroll_pitch_min,
         midroll_pitch_max=midroll_pitch_max,
@@ -11813,14 +11862,17 @@ def _reset_roll_sprint_buffers(
     if spawn_cycle_eligible is None:
         spawn_cycle_eligible = spawn_accum <= 1.0e-6
     env._roll_sprint_accum[env_ids] = spawn_accum
-    env._roll_sprint_frontier[env_ids] = spawn_accum
+    env._roll_sprint_phase_frontier[env_ids] = spawn_accum
     env._roll_sprint_head_latch[env_ids] = spawn_head_latch
     env._roll_sprint_cycle_eligible[env_ids] = spawn_cycle_eligible
     env._roll_sprint_lateral_invalid[env_ids] = False
     env._roll_sprint_completed[env_ids] = 0.0
-    env._roll_sprint_cycle_distance[env_ids] = 0.0
     env._roll_sprint_forward_position[env_ids] = 0.0
     env._roll_sprint_forward_origin[env_ids] = 0.0
+    env._roll_sprint_cycle_start_position[env_ids] = 0.0
+    env._roll_sprint_forward_frontier[env_ids] = 0.0
+    env._roll_sprint_lateral_origin[env_ids] = 0.0
+    env._roll_sprint_lateral_displacement[env_ids] = 0.0
     env._roll_sprint_heading_w[env_ids] = 0.0
     env._roll_sprint_heading_ready[env_ids] = False
     env._roll_sprint_progress_delta[env_ids] = 0.0
@@ -11850,10 +11902,24 @@ def roll_sprint_distance(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Release forward distance only on a genuine completed roll cycle."""
+    """Release only newly extended signed forward frontier on valid cycles."""
     asset = env.scene[asset_cfg.name]
     _update_roll_sprint_state(env, asset)
     return env._roll_sprint_completed_distance / env.step_dt
+
+
+def roll_sprint_straightness_penalty(
+    env: ManagerBasedRlEnv,
+    deadband: float = 0.01,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Lane-offset cost; lateral travel never contributes to forward credit."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return torch.clamp(
+        env._roll_sprint_lateral_displacement.abs() - deadband,
+        min=0.0,
+    )
 
 
 def roll_sprint_cycle_rate(

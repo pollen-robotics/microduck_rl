@@ -33,6 +33,8 @@ def _observe(
     auditor,
     *,
     omega: float,
+    forward_position: float = 0.0,
+    lateral_position: float = 0.0,
     forward_velocity: float = 0.0,
     support: bool = True,
     head_contact: bool = False,
@@ -40,7 +42,7 @@ def _observe(
     root_quat: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
 ) -> None:
     auditor.observe(
-        position_xy=torch.zeros(1, 2),
+        position_xy=torch.tensor([[forward_position, lateral_position]]),
         root_quat=torch.tensor([root_quat]),
         head_quat=torch.tensor([head_quat]),
         linear_velocity_w=torch.tensor([[forward_velocity, 0.0, 0.0]]),
@@ -79,11 +81,35 @@ def test_auditor_releases_only_rotation_capped_distance_on_valid_cycle() -> None
     auditor.head_latch[:] = True
     auditor.accum[:] = MODULE.TARGET_ANGLE - 0.02
 
-    _observe(auditor, omega=2.0, forward_velocity=100.0)
+    _observe(auditor, omega=2.0, forward_position=100.0)
 
-    expected_cap = MODULE.MAX_DISTANCE_PER_RAD * 2.0 * 0.02
+    expected_cap = MODULE.MAX_DISTANCE_PER_RAD * MODULE.TARGET_ANGLE
     assert auditor.valid_count.item() == 1
     assert auditor.linked_distance.item() == pytest.approx(expected_cap)
+
+
+def test_auditor_uses_net_cycle_advance_and_global_frontier() -> None:
+    auditor = _auditor()
+    _observe(auditor, omega=1.0, forward_position=0.40)
+    auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
+    auditor.head_latch[:] = True
+    _observe(auditor, omega=1.0, forward_position=0.20)
+    assert auditor.linked_distance.item() == pytest.approx(0.20)
+
+    auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
+    auditor.head_latch[:] = True
+    _observe(auditor, omega=1.0, forward_position=0.20)
+    assert auditor.linked_distance.item() == pytest.approx(0.20)
+
+    auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
+    auditor.head_latch[:] = False
+    _observe(auditor, omega=1.0, forward_position=0.0)
+    assert auditor.invalid_count.item() == 1
+
+    auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
+    auditor.head_latch[:] = True
+    _observe(auditor, omega=1.0, forward_position=0.35)
+    assert auditor.linked_distance.item() == pytest.approx(0.35)
 
 
 def test_heading_uses_lateral_axis_at_vertical_pitch() -> None:

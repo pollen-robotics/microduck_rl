@@ -64,6 +64,9 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         weight=1.5,
         params={"max_paid_rate": 5.0},
     )
+    # Primary race score: signed net forward frontier released only after a
+    # valid full roll. The MDP term rejects revisits, backward travel, and
+    # positive-path integration within a cycle.
     cfg.rewards["roll_sprint_distance"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_distance,
         weight=32.0,
@@ -92,7 +95,12 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     )
     cfg.rewards["roll_sprint_lateral_vel"] = RewardTermCfg(
         func=microduck_mdp.roulade_lateral_velocity_penalty,
-        weight=-0.20,
+        weight=-0.35,
+    )
+    cfg.rewards["roll_sprint_straightness"] = RewardTermCfg(
+        func=microduck_mdp.roll_sprint_straightness_penalty,
+        weight=-3.0,
+        params={"deadband": 0.01},
     )
     cfg.rewards["roll_sprint_flatness"] = RewardTermCfg(
         func=microduck_mdp.roulade_flatness_penalty,
@@ -237,6 +245,8 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                 {"step": 0, "weight": 1.5},
                 {"step": 250 * 24, "weight": 0.75},
                 {"step": 750 * 24, "weight": 0.25},
+                # Dense rotation is only a bootstrap. The final race objective
+                # is exclusively the valid-cycle forward frontier above.
                 {"step": 1500 * 24, "weight": 0.0},
             ],
         },

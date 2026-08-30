@@ -18,8 +18,15 @@ from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 
+from mjlab_microduck.tasks import mdp as microduck_mdp
+
 TASK_ID = "Mjlab-Roll-Sprint-Flat-MicroDuck"
 REPO_ROOT = Path(__file__).resolve().parents[1]
+RACE_LANE_SPACING = 0.28
+RACE_CAMERA_LOOKAT = (0.60, 0.0, 0.08)
+RACE_CAMERA_DISTANCE = 2.8
+RACE_CAMERA_AZIMUTH = 135.0
+RACE_CAMERA_ELEVATION = -55.0
 
 
 def _parse_args() -> argparse.Namespace:
@@ -84,6 +91,58 @@ def _ffmpeg_writer(
     )
 
 
+def _race_lane_origins(
+    num_lanes: int,
+    lane_spacing: float,
+    *,
+    device: torch.device | str,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Return equal-width parallel lanes with one shared +x start line."""
+    lane_indices = torch.arange(num_lanes, device=device, dtype=dtype)
+    lane_indices -= (num_lanes - 1) / 2.0
+    origins = torch.zeros((num_lanes, 3), device=device, dtype=dtype)
+    origins[:, 1] = lane_indices * lane_spacing
+    return origins
+
+
+def _arrange_race_start(
+    base_env: ManagerBasedRlEnv,
+    lane_spacing: float = RACE_LANE_SPACING,
+) -> None:
+    """Place all robots on one deterministic start line facing world +x."""
+    robot = base_env.scene["robot"]
+    old_origins = base_env.scene.terrain.env_origins.clone()
+    origins = _race_lane_origins(
+        base_env.num_envs,
+        lane_spacing,
+        device=base_env.device,
+        dtype=old_origins.dtype,
+    )
+    pose = torch.cat(
+        (
+            robot.data.root_link_pos_w.clone(),
+            robot.data.root_link_quat_w.clone(),
+        ),
+        dim=-1,
+    )
+    local_height = pose[:, 2] - old_origins[:, 2]
+    pose[:, :3] = origins
+    pose[:, 2] += local_height
+    pose[:, 3:] = 0.0
+    pose[:, 3] = 1.0
+    velocity = torch.zeros(
+        (base_env.num_envs, 6), device=base_env.device, dtype=pose.dtype
+    )
+
+    base_env.scene.terrain.env_origins.copy_(origins)
+    robot.write_root_link_pose_to_sim(pose)
+    robot.write_root_link_velocity_to_sim(velocity)
+    base_env.sim.forward()
+    env_ids = torch.arange(base_env.num_envs, device=base_env.device)
+    microduck_mdp._reset_roll_sprint_buffers(base_env, env_ids)
+
+
 def main() -> int:
     args = _parse_args()
     checkpoint = args.checkpoint.expanduser().resolve()
@@ -100,28 +159,31 @@ def main() -> int:
     env_cfg = load_env_cfg(args.task_id, play=True)
     agent_cfg = load_rl_cfg(args.task_id)
     env_cfg.scene.num_envs = 4
-    env_cfg.scene.env_spacing = 0.45
-    env_cfg.scene.terrain.env_spacing = 0.45
+    env_cfg.scene.env_spacing = RACE_LANE_SPACING
+    env_cfg.scene.terrain.env_spacing = RACE_LANE_SPACING
     env_cfg.seed = args.seed
+    env_cfg.auto_reset = False
     policy_dt = env_cfg.sim.mujoco.timestep * env_cfg.decimation
     env_cfg.episode_length_s = max(6.0, args.steps * policy_dt)
     env_cfg.viewer.origin_type = type(env_cfg.viewer).OriginType.WORLD
-    env_cfg.viewer.lookat = (0.0, 0.0, 0.08)
-    env_cfg.viewer.distance = 3.0
-    env_cfg.viewer.azimuth = 135.0
-    env_cfg.viewer.elevation = -50.0
+    env_cfg.viewer.lookat = RACE_CAMERA_LOOKAT
+    env_cfg.viewer.distance = RACE_CAMERA_DISTANCE
+    env_cfg.viewer.azimuth = RACE_CAMERA_AZIMUTH
+    env_cfg.viewer.elevation = RACE_CAMERA_ELEVATION
     env_cfg.viewer.max_extra_envs = 3
     env_cfg.viewer.width = args.width
     env_cfg.viewer.height = args.height
     reset_cfg = env_cfg.events["set_roll_sprint_state"]
     reset_cfg.params["standing_prob"] = 1.0
     reset_cfg.params["midroll_prob"] = 0.0
+    reset_cfg.params["yaw_range"] = (0.0, 0.0)
 
     base_env = ManagerBasedRlEnv(
         cfg=env_cfg,
         device=args.device,
         render_mode="rgb_array",
     )
+    _arrange_race_start(base_env)
     env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
     runner_cls = load_runner_cls(args.task_id) or MjlabOnPolicyRunner
     runner = runner_cls(env, asdict(agent_cfg), device=args.device)

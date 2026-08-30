@@ -113,7 +113,8 @@ class RollCycleAuditor:
         self.accum = zero.clone()
         self.head_latch = false.clone()
         self.lateral_invalid = false.clone()
-        self.cycle_distance = zero.clone()
+        self.cycle_start_forward = zero.clone()
+        self.forward_frontier = zero.clone()
         self.linked_distance = zero.clone()
         self.valid_count = torch.zeros(count, dtype=torch.long, device=device)
         self.invalid_count = torch.zeros(count, dtype=torch.long, device=device)
@@ -176,38 +177,43 @@ class RollCycleAuditor:
         )
         new_lateral_invalid = self.lateral_invalid | lateral_violation
 
-        forward_angle = torch.clamp(signed_delta, min=0.0)
-        forward_velocity = (linear_velocity_w[:, :2] * self.heading).sum(dim=-1)
-        velocity_distance = (
-            torch.clamp(forward_velocity, min=0.0)
-            * self.step_dt
-            * valid_rotation
-            * (omega >= MIN_FORWARD_RATE).float()
-        )
-        linked_step = torch.minimum(
-            velocity_distance,
-            MAX_DISTANCE_PER_RAD * forward_angle,
-        )
-        cycle_distance = torch.where(
-            active, self.cycle_distance + linked_step, self.cycle_distance
-        )
+        displacement = position_xy - self.start_position
+        forward_position = (displacement * self.heading).sum(dim=-1)
 
         completed = active & (new_accum >= TARGET_ANGLE)
         valid = completed & new_head_latch & ~new_lateral_invalid
         invalid = completed & ~valid
+        rotation_budget = MAX_DISTANCE_PER_RAD * torch.clamp(
+            new_accum, min=0.0, max=TARGET_ANGLE
+        )
+        cycle_net_advance = torch.clamp(
+            forward_position - self.cycle_start_forward, min=0.0
+        )
+        new_frontier_advance = torch.clamp(
+            forward_position - self.forward_frontier, min=0.0
+        )
+        credited_distance = torch.minimum(
+            rotation_budget,
+            torch.minimum(cycle_net_advance, new_frontier_advance),
+        )
         self.valid_count += valid.to(torch.long)
         self.invalid_count += invalid.to(torch.long)
         self.linked_distance += torch.where(
-            valid, cycle_distance, torch.zeros_like(cycle_distance)
+            valid, credited_distance, torch.zeros_like(credited_distance)
+        )
+        self.forward_frontier = torch.where(
+            valid,
+            torch.maximum(self.forward_frontier, forward_position),
+            self.forward_frontier,
+        )
+        self.cycle_start_forward = torch.where(
+            completed, forward_position, self.cycle_start_forward
         )
         residual = torch.clamp(new_accum - TARGET_ANGLE, min=0.0)
         self.accum = torch.where(
             valid,
             residual,
             torch.where(invalid, torch.zeros_like(new_accum), new_accum),
-        )
-        self.cycle_distance = torch.where(
-            completed, torch.zeros_like(cycle_distance), cycle_distance
         )
         self.head_latch = torch.where(
             completed, torch.zeros_like(new_head_latch), new_head_latch
@@ -218,7 +224,6 @@ class RollCycleAuditor:
             new_lateral_invalid,
         )
 
-        displacement = position_xy - self.start_position
         lateral_drift = (displacement * self.lateral).sum(dim=-1).abs()
         self.max_lateral_drift = torch.where(
             active,
@@ -258,6 +263,12 @@ class RollCycleAuditor:
         return {
             "mean_raw_forward_distance_m": float(raw_forward.mean().item()),
             "best_raw_forward_distance_m": float(raw_forward.max().item()),
+            "mean_credited_forward_frontier_m": float(
+                self.linked_distance.mean().item()
+            ),
+            "best_credited_forward_frontier_m": float(
+                self.linked_distance.max().item()
+            ),
             "mean_roll_linked_distance_m": float(self.linked_distance.mean().item()),
             "best_roll_linked_distance_m": float(self.linked_distance.max().item()),
             "mean_roll_linked_speed_mps": float(
