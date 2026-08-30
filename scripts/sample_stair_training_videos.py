@@ -16,19 +16,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Sequence
 
+from mjlab_microduck.policies import (
+    OFFICIAL_WALKER_RELATIVE_PATH,
+    resolve_official_walker_checkpoint,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RECORDER = REPO_ROOT / "scripts" / "record_stair_policy.py"
 DEFAULT_CHECKPOINT_ROOT = REPO_ROOT / "logs"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "artifacts" / "training" / "stair-policy-samples"
-DEFAULT_WALKER_CHECKPOINT = (
-    REPO_ROOT
-    / "logs"
-    / "rsl_rl"
-    / "velocity"
-    / "2026-08-29_08-50-53_base_walk"
-    / "model_500.pt"
-)
+DEFAULT_WALKER_CHECKPOINT = REPO_ROOT / OFFICIAL_WALKER_RELATIVE_PATH
 DEFAULT_TASK_ID = "Mjlab-Stairs-Route-MicroDuck"
 DEFAULT_INTERVAL_SECONDS = 150.0
 RECORDING_STEPS = 1000
@@ -273,8 +270,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit(f"Recorder not found: {RECORDER}")
     if not args.checkpoint_root.is_dir():
         raise SystemExit(f"Checkpoint root not found: {args.checkpoint_root}")
-    if args.walker_checkpoint is not None and not args.walker_checkpoint.is_file():
-        raise SystemExit(f"Walker checkpoint not found: {args.walker_checkpoint}")
+    if args.walker_checkpoint is not None:
+        try:
+            args.walker_checkpoint = resolve_official_walker_checkpoint(
+                REPO_ROOT,
+                args.walker_checkpoint,
+            )
+        except (FileNotFoundError, ValueError) as error:
+            raise SystemExit(str(error)) from error
 
     _log(
         f"watching {args.checkpoint_root} every {args.interval_seconds:g}s; "

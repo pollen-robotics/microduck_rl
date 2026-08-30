@@ -12,6 +12,11 @@ import sys
 import time
 from pathlib import Path
 
+from mjlab_microduck.policies import (
+    OFFICIAL_WALKER_RELATIVE_PATH,
+    resolve_official_walker_checkpoint,
+)
+
 try:
     from scripts.select_best_stair_preview import (
         build_manifest,
@@ -213,13 +218,17 @@ def _video_path(checkpoint: Path, video_dir: Path) -> Path:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
-    parser.add_argument("--walker-checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--walker-checkpoint",
+        type=Path,
+        default=REPO_ROOT / OFFICIAL_WALKER_RELATIVE_PATH,
+    )
     parser.add_argument("--baseline-report", type=Path, required=True)
     parser.add_argument("--poll-seconds", type=float, default=30.0)
     parser.add_argument("--eval-num-envs", type=int, default=8)
     parser.add_argument("--eval-steps", type=int, default=1_500)
     parser.add_argument("--eval-device", default="cuda:0")
-    parser.add_argument("--video-steps", type=int, default=700)
+    parser.add_argument("--video-steps", type=int, default=1000)
     parser.add_argument("--video-device", default="cpu")
     parser.add_argument(
         "--record-initial-video",
@@ -248,9 +257,13 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     run_dir = args.run_dir.resolve()
-    walker_checkpoint = args.walker_checkpoint.expanduser().resolve()
-    if not walker_checkpoint.is_file():
-        raise SystemExit(f"Missing walker checkpoint: {walker_checkpoint}")
+    try:
+        walker_checkpoint = resolve_official_walker_checkpoint(
+            REPO_ROOT,
+            args.walker_checkpoint,
+        )
+    except (FileNotFoundError, ValueError) as error:
+        raise SystemExit(str(error)) from error
     baseline_report = _load_json(args.baseline_report.resolve())
     current_report = baseline_report
     current_checkpoint = run_dir / "model_0.pt"

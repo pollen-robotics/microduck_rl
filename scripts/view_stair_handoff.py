@@ -15,15 +15,25 @@ from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.viewer import NativeMujocoViewer
 
-from mjlab_microduck.policies import HardStairHandoffPolicy, load_actor_pair
+from mjlab_microduck.policies import (
+    OFFICIAL_WALKER_RELATIVE_PATH,
+    HardStairHandoffPolicy,
+    load_actor_pair,
+    resolve_official_walker_checkpoint,
+)
 
 TASK_ID = "Mjlab-Stairs-Route-MicroDuck"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("specialist_checkpoint", type=Path)
-    parser.add_argument("--walker-checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--walker-checkpoint",
+        type=Path,
+        default=REPO_ROOT / OFFICIAL_WALKER_RELATIVE_PATH,
+    )
     parser.add_argument("--device", default="cpu")
     return parser.parse_args()
 
@@ -31,7 +41,13 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     specialist_checkpoint = args.specialist_checkpoint.expanduser().resolve()
-    walker_checkpoint = args.walker_checkpoint.expanduser().resolve()
+    try:
+        walker_checkpoint = resolve_official_walker_checkpoint(
+            REPO_ROOT,
+            args.walker_checkpoint,
+        )
+    except (FileNotFoundError, ValueError) as error:
+        raise SystemExit(str(error)) from error
     for label, checkpoint in (
         ("Specialist", specialist_checkpoint),
         ("Walker", walker_checkpoint),

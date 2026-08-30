@@ -25,6 +25,7 @@ from mjlab_microduck.tasks.microduck_stairs_env_cfg import (
 )
 from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     ROUTE_CURRICULUM_LEVELS,
+    ROUTE_APPROACH_START_X,
     ROUTE_MIN_RISER_HEIGHT,
     STANDARD_GOAL_DISTANCE,
     STANDARD_NUM_STEPS,
@@ -120,6 +121,10 @@ def test_route_stairs_walk_first_and_progress_to_standard_height():
     assert terrain.riser_height_range == (ROUTE_MIN_RISER_HEIGHT, STANDARD_RISER_HEIGHT)
     assert cfg.scene.terrain.max_init_terrain_level == 0
     assert cfg.episode_length_s == 30.0
+    assert cfg.events["reset_base"].params["pose_range"]["x"] == (
+        ROUTE_APPROACH_START_X,
+        ROUTE_APPROACH_START_X,
+    )
     assert command.ranges.lin_vel_x == (0.20, 0.28)
     assert command.ranges.lin_vel_y == (0.0, 0.0)
     assert command.ranges.ang_vel_z == (0.0, 0.0)

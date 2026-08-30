@@ -18,7 +18,12 @@ from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 
-from mjlab_microduck.policies import HardStairHandoffPolicy, load_actor_pair
+from mjlab_microduck.policies import (
+    OFFICIAL_WALKER_RELATIVE_PATH,
+    HardStairHandoffPolicy,
+    load_actor_pair,
+    resolve_official_walker_checkpoint,
+)
 
 TASK_ID = "Mjlab-Stairs-Route-MicroDuck"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -36,9 +41,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--walker-checkpoint",
         type=Path,
-        help="Immutable manufacturer walker used before the hard stair handoff.",
+        default=REPO_ROOT / OFFICIAL_WALKER_RELATIVE_PATH,
+        help="Pinned manufacturer walker used before the guarded stair handoff.",
     )
-    parser.add_argument("--steps", type=int, default=700)
+    parser.add_argument(
+        "--single-actor",
+        action="store_true",
+        help="Record an explicit specialist-only diagnostic.",
+    )
+    parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--width", type=int, default=960)
@@ -104,13 +115,17 @@ def main() -> int:
     temporary_output = temporary_dir / f"stair-recording-{os.getpid()}.mp4"
     if not checkpoint.is_file():
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
-    walker_checkpoint = (
-        args.walker_checkpoint.expanduser().resolve()
-        if args.walker_checkpoint is not None
-        else None
-    )
-    if walker_checkpoint is not None and not walker_checkpoint.is_file():
-        raise SystemExit(f"Walker checkpoint not found: {walker_checkpoint}")
+    try:
+        walker_checkpoint = (
+            None
+            if args.single_actor
+            else resolve_official_walker_checkpoint(
+                REPO_ROOT,
+                args.walker_checkpoint,
+            )
+        )
+    except (FileNotFoundError, ValueError) as error:
+        raise SystemExit(str(error)) from error
     if args.steps < 1 or args.width < 2 or args.height < 2:
         raise SystemExit("--steps, --width, and --height must be positive")
 

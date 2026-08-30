@@ -46,6 +46,7 @@ STANDARD_APPROACH_LENGTH = 1.20
 STANDARD_TOP_PLATFORM_LENGTH = 0.90
 STANDARD_SPAWN_X = STANDARD_APPROACH_LENGTH * 0.45
 STANDARD_STAIR_START_DISTANCE = STANDARD_APPROACH_LENGTH - STANDARD_SPAWN_X
+ROUTE_APPROACH_START_X = 0.30
 STANDARD_GOAL_X = (
     STANDARD_APPROACH_LENGTH
     + STANDARD_NUM_STEPS * STANDARD_TREAD_DEPTH
@@ -420,6 +421,12 @@ def make_microduck_route_stairs_env_cfg(
 ) -> ManagerBasedRlEnvCfg:
     """Create a flat-runway-to-stairs curriculum for one shared actor."""
     cfg = make_microduck_standard_stairs_env_cfg(play=False)
+    # Keep enough visible runway for a stable gait while making the guarded
+    # approach reachable inside the four-second promotion window.
+    cfg.events["reset_base"].params["pose_range"]["x"] = (
+        ROUTE_APPROACH_START_X,
+        ROUTE_APPROACH_START_X,
+    )
     # The manufacturer's walking model collides only at the feet. Contact-rich
     # ascent needs the full model so the head, shell, hips, and legs can push
     # against a riser instead of passing through it.
