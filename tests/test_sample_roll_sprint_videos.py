@@ -36,8 +36,8 @@ def test_defaults_record_long_race_every_150_seconds() -> None:
 
     assert args.interval_seconds == 150.0
     assert args.task_id == "Mjlab-Roll-Sprint-Flat-MicroDuck"
-    assert sampler.RECORDING_STEPS == 2000
-    assert sampler.RECORDING_FRAME_STRIDE == 2
+    assert sampler.RECORDING_STEPS == 1000
+    assert sampler.RECORDING_FRAME_STRIDE == 4
     assert (
         sampler.RECORDING_STEPS
         / sampler.RECORDING_FRAME_STRIDE
@@ -92,8 +92,8 @@ def test_sample_once_records_four_robot_video_and_persists_state(
     assert evaluation_command[evaluation_command.index("--num-envs") + 1] == "4"
     assert evaluation_command[evaluation_command.index("--duration") + 1] == "40"
     assert command[2] == str(checkpoint)
-    assert command[command.index("--steps") + 1] == "2000"
-    assert command[command.index("--frame-stride") + 1] == "2"
+    assert command[command.index("--steps") + 1] == "1000"
+    assert command[command.index("--frame-stride") + 1] == "4"
     assert command[command.index("--task-id") + 1] == args.task_id
     output = Path(command[3])
     assert "checkpoint-000025" in output.name

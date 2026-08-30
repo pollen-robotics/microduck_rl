@@ -531,7 +531,8 @@ def main() -> int:
                     temporary_output,
                     width=frame_width,
                     height=frame_height,
-                    fps=float(base_env.metadata.get("render_fps", 50)),
+                    fps=float(base_env.metadata.get("render_fps", 50))
+                    / args.frame_stride,
                 )
             assert writer.stdin is not None
             writer.stdin.write(frame.tobytes())
