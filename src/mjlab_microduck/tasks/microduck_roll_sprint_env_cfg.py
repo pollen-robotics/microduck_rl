@@ -327,7 +327,11 @@ MicroduckRollSprintRlCfg = RslRlOnPolicyRunnerCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.01,
+        # Warm-started roll policies already have broad stochasticity. An
+        # entropy bonus drove distribution.std_param from 0.67 to 8.20 and
+        # erased the learned roll within 700 iterations, so fine-tuning must
+        # optimize the race objective without paying for additional noise.
+        entropy_coef=0.0,
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=1.0e-4,

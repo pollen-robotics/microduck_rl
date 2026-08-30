@@ -143,6 +143,7 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert cfg.terminations["nan_state"].time_out is False
     assert MicroduckRollSprintRlCfg.experiment_name == "microduck_roll_sprint"
     assert MicroduckRollSprintRlCfg.save_interval == 100
+    assert MicroduckRollSprintRlCfg.algorithm.entropy_coef == 0.0
     reset_params = cfg.events["set_roll_sprint_state"].params
     assert reset_params["standing_prob"] == 0.50
     assert reset_params["midroll_prob"] == 0.25
