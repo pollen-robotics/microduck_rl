@@ -12118,7 +12118,7 @@ def roll_sprint_progress(
     lane_half_width: float = 0.14,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Pay supported forward roll progress in proportion to lane adherence."""
+    """Pay valid forward-roll progress, but never a known-invalid cycle."""
     asset = env.scene[asset_cfg.name]
     _update_roll_sprint_state(env, asset)
     paid_rate = torch.clamp(
@@ -12136,7 +12136,26 @@ def roll_sprint_progress(
         min=0.0,
         max=1.0,
     )
-    return lane_quality * paid_rate / (env.step_dt * _ROLL_SPRINT_TARGET_ANGLE)
+    # Bootstrap through the complete head-contact opportunity. Once that phase
+    # has passed, the rest of the dense cycle is eligible only if the required
+    # flat head-top contact was actually witnessed. Orientation/lane-invalid
+    # cycles stop paying immediately, and their completion step cannot leak a
+    # final progress payment after the state machine resets its phase frontier.
+    head_phase_valid = (
+        (env._roll_sprint_phase_frontier < _HEAD_LATCH_HI)
+        | env._roll_sprint_head_latch
+    )
+    cycle_valid = (
+        head_phase_valid
+        & ~env._roll_sprint_lateral_invalid
+        & ~env._roll_sprint_invalid_now
+    )
+    return (
+        lane_quality
+        * cycle_valid.float()
+        * paid_rate
+        / (env.step_dt * _ROLL_SPRINT_TARGET_ANGLE)
+    )
 
 
 def roll_sprint_distance(

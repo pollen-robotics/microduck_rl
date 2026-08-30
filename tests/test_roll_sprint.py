@@ -755,6 +755,36 @@ def test_roll_progress_uses_active_training_lane_width_curriculum():
     assert reward.tolist() == pytest.approx([1.0, 0.75, 0.0])
 
 
+def test_roll_progress_stops_after_missed_head_phase_or_cycle_violation():
+    env, _asset = _fake_env(5)
+    mdp._roll_sprint_state(env)
+    env._roll_sprint_last_update_step[:] = env.common_step_counter
+    env._roll_sprint_progress_delta[:] = env.step_dt * mdp._ROLL_SPRINT_TARGET_ANGLE
+    env._roll_sprint_lateral_displacement.zero_()
+    env._roll_sprint_phase_frontier[:] = torch.tensor(
+        [
+            mdp._HEAD_LATCH_HI - 0.01,
+            mdp._HEAD_LATCH_HI + 0.01,
+            mdp._HEAD_LATCH_HI + 0.01,
+            mdp._HEAD_LATCH_HI - 0.01,
+            0.0,
+        ]
+    )
+    env._roll_sprint_head_latch[:] = torch.tensor(
+        [False, False, True, False, False]
+    )
+    env._roll_sprint_lateral_invalid[3] = True
+    env._roll_sprint_invalid_now[4] = True
+
+    reward = mdp.roll_sprint_progress(
+        env,
+        max_paid_rate=10.0,
+        lane_half_width=0.14,
+    )
+
+    assert reward.tolist() == pytest.approx([1.0, 0.0, 1.0, 0.0, 0.0])
+
+
 def test_lane_centering_progress_penalizes_departure_rewards_correction_and_not_idle(
     monkeypatch,
 ):
