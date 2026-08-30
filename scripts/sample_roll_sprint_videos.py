@@ -147,8 +147,14 @@ def _recovery_montage_path(
     )
 
 
-def _evaluator_command(*, checkpoint: Path, output: Path, device: str) -> list[str]:
-    return [
+def _evaluator_command(
+    *,
+    checkpoint: Path,
+    output: Path,
+    device: str,
+    parent_frontier_m: float | None = None,
+) -> list[str]:
+    command = [
         sys.executable,
         str(EVALUATOR),
         str(checkpoint),
@@ -161,6 +167,9 @@ def _evaluator_command(*, checkpoint: Path, output: Path, device: str) -> list[s
         "--output",
         str(output),
     ]
+    if parent_frontier_m is not None:
+        command.extend(("--parent-frontier-m", f"{parent_frontier_m:g}"))
+    return command
 
 
 def _recorder_command(
@@ -212,6 +221,7 @@ def sample_once(args: argparse.Namespace) -> bool:
             checkpoint=checkpoint,
             output=evaluation,
             device=args.device,
+            parent_frontier_m=args.parent_frontier_m,
         )
         _log(
             f"auditing checkpoint iteration {identity.iteration} on "
@@ -310,6 +320,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--task-id", default=DEFAULT_TASK_ID)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument(
+        "--parent-frontier-m",
+        type=float,
+        help="Selected-parent frontier used for the evaluator's 90%% retention gate.",
+    )
     parser.add_argument("--allow-repeats", action="store_true")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(

@@ -24,6 +24,7 @@ def _args(tmp_path: Path, checkpoint_root: Path) -> argparse.Namespace:
         interval_seconds=150.0,
         task_id="Mjlab-Roll-Sprint-Flat-MicroDuck",
         device="cpu",
+        parent_frontier_m=None,
         allow_repeats=False,
         video_only=False,
         audit_only=False,
@@ -47,6 +48,18 @@ def test_defaults_record_long_race_every_150_seconds() -> None:
         == 20.0
     )
     assert sampler.EVALUATION_DURATION == 40.0
+    assert args.parent_frontier_m is None
+
+
+def test_evaluator_command_carries_selected_parent_frontier() -> None:
+    command = sampler._evaluator_command(
+        checkpoint=Path("model_100.pt"),
+        output=Path("evaluation.json"),
+        device="cpu",
+        parent_frontier_m=0.5306979418,
+    )
+
+    assert command[command.index("--parent-frontier-m") + 1] == "0.530698"
 
 
 def test_find_newest_checkpoint_uses_modification_time(tmp_path: Path) -> None:
