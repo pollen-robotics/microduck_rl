@@ -1250,6 +1250,7 @@ def test_roll_sprint_reposition_command_points_to_nearest_safe_road_edge(monkeyp
             [math.radians(15.0), math.radians(-15.0), math.radians(90.0)]
         ),
     )
+    env._roll_sprint_awaiting_reposition[:] = True
 
     command = mdp.roll_sprint_reposition_command(env)
 
@@ -1257,10 +1258,31 @@ def test_roll_sprint_reposition_command_points_to_nearest_safe_road_edge(monkeyp
     assert torch.allclose(command[1], torch.tensor([0.0, 0.20, 0.05]))
     assert torch.allclose(command[2], torch.tensor([0.0, 0.0, -0.05]))
 
-    env._roll_sprint_self_righting[2] = True
+    env._roll_sprint_self_righting[0] = True
     assert torch.allclose(
-        mdp.roll_sprint_reposition_command(env)[2],
+        mdp.roll_sprint_reposition_command(env)[0],
         torch.tensor([1.0, 0.0, -0.05]),
+    )
+
+
+def test_roll_sprint_lateral_return_command_is_reposition_only(monkeypatch):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    env.command_manager = SimpleNamespace(
+        get_command=lambda command_name: torch.tensor([[0.01, 0.02, 0.03]]),
+    )
+    _prime_roll_heading(env, asset)
+    asset.data.root_link_pos_w[:, 1] = 0.45
+
+    assert torch.allclose(
+        mdp.roll_sprint_reposition_command(env),
+        torch.tensor([[0.0, 0.0, 0.0]]),
+    )
+
+    env._roll_sprint_awaiting_reposition[:] = True
+    assert torch.allclose(
+        mdp.roll_sprint_reposition_command(env),
+        torch.tensor([[0.0, -0.06, 0.0]]),
     )
 
 

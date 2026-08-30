@@ -13054,8 +13054,10 @@ def roll_sprint_reposition_command(
 ) -> torch.Tensor:
     """Expose self-right and shared-road return modes in existing twist slots.
 
-    ``twist[0]`` is one only during self-righting. Near a road edge,
-    ``twist[1]`` gives the nearest-safe-edge return after yaw is corrected.
+    ``twist[0]`` is one only during self-righting. During explicit road
+    repositioning, ``twist[1]`` gives the nearest-safe-edge return after yaw
+    is corrected. It stays zero while self-righting so the actor is never
+    asked to get upright and translate laterally at the same time.
     ``twist[2]`` continuously exposes the bounded reset-heading correction,
     including while self-righting, so yaw-invariant proprioception can hold a
     straight line. This preserves the shared 61D contract.
@@ -13087,7 +13089,10 @@ def roll_sprint_reposition_command(
     )
     command[:, 0] = env._roll_sprint_self_righting.float()
     command[:, 1] = torch.where(
-        needs_return & lateral_aligned,
+        needs_return
+        & env._roll_sprint_awaiting_reposition
+        & ~env._roll_sprint_self_righting
+        & lateral_aligned,
         lateral_return,
         command[:, 1],
     )
