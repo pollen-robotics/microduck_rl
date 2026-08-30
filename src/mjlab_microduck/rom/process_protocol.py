@@ -64,7 +64,7 @@ class RuntimeMessageKind(str, Enum):
 
 
 class RuntimeOperationKind(str, Enum):
-    """Message kinds that can be acknowledged or reported as failed."""
+    """Parent-issued operations that can be acknowledged or reported as failed."""
 
     HELLO = "HELLO"
     LOAD = "LOAD"
@@ -73,8 +73,6 @@ class RuntimeOperationKind(str, Enum):
     STATUS = "STATUS"
     ZERO_AND_STOP = "ZERO_AND_STOP"
     SHUTDOWN = "SHUTDOWN"
-    READY = "READY"
-    TERMINAL = "TERMINAL"
 
 
 class HelloPayload(ContractModel):
@@ -200,7 +198,6 @@ _LIFECYCLE_OPERATION_KINDS = frozenset(
     {
         RuntimeOperationKind.HELLO,
         RuntimeOperationKind.LOAD,
-        RuntimeOperationKind.READY,
         RuntimeOperationKind.SHUTDOWN,
     }
 )

@@ -308,6 +308,44 @@ def test_contextual_response_rejects_a_task_id_from_the_wrong_operation_scope(
         )
 
 
+@pytest.mark.parametrize(
+    ("kind", "payload"),
+    [
+        ("ACK", {"acknowledgedKind": "READY"}),
+        ("ACK", {"acknowledgedKind": "ACK"}),
+        ("ACK", {"acknowledgedKind": "ERROR"}),
+        (
+            "ERROR",
+            {
+                "operationKind": "TERMINAL",
+                "code": "OPERATION_FAILED",
+                "detail": {"retryable": False},
+            },
+        ),
+        (
+            "ERROR",
+            {
+                "operationKind": "ERROR",
+                "code": "OPERATION_FAILED",
+                "detail": {"retryable": False},
+            },
+        ),
+    ],
+)
+def test_response_kinds_cannot_be_used_as_ack_or_error_operations(
+    kind: str, payload: dict[str, object]
+) -> None:
+    """A response context would make response task scoping recursive and ambiguous."""
+    with pytest.raises(ValidationError):
+        RuntimeMessage(
+            kind=kind,
+            generation=7,
+            operationSequence=6,
+            taskId="0" * 32,
+            payload=payload,
+        )
+
+
 def _robot_status_wire() -> dict[str, object]:
     return {
         "schema": "BIPED_POSE_V1",
