@@ -1,0 +1,35 @@
+"""Linux-only process and inherited-socket safety primitives."""
+
+from __future__ import annotations
+
+import ctypes
+import os
+import signal
+import socket
+
+_PR_SET_PDEATHSIG = 1
+
+
+def verify_seqpacket_socket(fd: int) -> socket.socket:
+    """Adopt *fd* only when it is an inherited Unix ``SOCK_SEQPACKET`` socket."""
+    if not isinstance(fd, int) or isinstance(fd, bool) or fd < 0:
+        raise ValueError("runtime socket descriptor is invalid")
+    try:
+        control = socket.socket(fileno=fd)
+    except OSError as exc:
+        raise ValueError("runtime socket descriptor is invalid") from exc
+    if control.family != socket.AF_UNIX or (control.type & 0xF) != socket.SOCK_SEQPACKET:
+        control.detach()
+        raise ValueError("runtime socket must be Unix SOCK_SEQPACKET")
+    return control
+
+
+def install_parent_death_signal() -> None:
+    """Request SIGTERM on parent death and close the fork/exec race."""
+    parent_before = os.getppid()
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, "unable to install parent-death signal")
+    if os.getppid() != parent_before:
+        os.kill(os.getpid(), signal.SIGTERM)
