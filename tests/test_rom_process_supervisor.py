@@ -24,6 +24,7 @@ from mjlab_microduck.rom.process_supervisor import (
     SupervisorOperationError,
     SupervisorTaskTerminalized,
     SupervisorUnavailable,
+    _TerminalDelivery,
 )
 from mjlab_microduck.rom.supervisor_state import SupervisorState
 
@@ -163,6 +164,9 @@ def test_idle_owner_consumes_unsolicited_terminal_and_releases_slot() -> None:
         peer = _receive_gate(launch, b"STARTED")
         peer.sendall(b"EMIT")
         assert delivered.wait(timeout=2)
+        deadline = time.monotonic() + 1
+        while not supervisor.snapshot().slot_releasable and time.monotonic() < deadline:
+            time.sleep(0.01)
         snapshot = supervisor.snapshot()
         assert snapshot.cached_terminal is not None
         assert snapshot.cached_terminal.outcome == "SUCCEEDED"
@@ -230,12 +234,13 @@ def test_terminal_callback_observes_published_idle_snapshot() -> None:
         terminal, snapshot = observed
         assert snapshot.state is SupervisorState.IDLE
         assert snapshot.cached_terminal == terminal
-        assert snapshot.slot_releasable is True
+        assert snapshot.slot_releasable is False
+        assert snapshot.terminal_delivery_outstanding is True
     finally:
         supervisor.close()
 
 
-def test_terminal_callback_backpressure_preserves_truthful_idle_cache() -> None:
+def test_terminal_callback_saturation_blocks_next_task_until_delivery_ack() -> None:
     blocked = threading.Event()
     release = threading.Event()
     supervisor, launch = _supervisor(
@@ -246,21 +251,16 @@ def test_terminal_callback_backpressure_preserves_truthful_idle_cache() -> None:
         supervisor.ensure_ready()
         supervisor.start(_request())
         assert supervisor._terminal_queue is not None
-        supervisor._terminal_queue.put_nowait(TerminalPayload(
+        dummy = TerminalPayload(
             outcome="CANCELLED",
             evidence=TaskEvidence(
                 bundleDigest=DIGEST, policyDigest="sha256:" + "b" * 64,
                 modelDigest="sha256:" + "c" * 64, stopReason="CANCELLED",
             ),
-        ))
+        )
+        supervisor._terminal_queue.put_nowait(_TerminalDelivery(0, dummy))
         assert blocked.wait(timeout=1)
-        supervisor._terminal_queue.put_nowait(TerminalPayload(
-            outcome="CANCELLED",
-            evidence=TaskEvidence(
-                bundleDigest=DIGEST, policyDigest="sha256:" + "b" * 64,
-                modelDigest="sha256:" + "c" * 64, stopReason="CANCELLED",
-            ),
-        ))
+        supervisor._terminal_queue.put_nowait(_TerminalDelivery(0, dummy))
         peer = _receive_gate(launch, b"STARTED")
         peer.sendall(b"EMIT")
         deadline = time.monotonic() + 1
@@ -268,8 +268,19 @@ def test_terminal_callback_backpressure_preserves_truthful_idle_cache() -> None:
             time.sleep(0.01)
         assert supervisor.snapshot().state is SupervisorState.IDLE
         assert supervisor.snapshot().cached_terminal is not None
-        assert "TERMINAL_DELIVERY_BACKPRESSURE" in supervisor.trace
+        assert supervisor.snapshot().terminal_delivery_outstanding is True
+        assert supervisor.snapshot().slot_releasable is False
+        assert supervisor.readiness() is False
+        with pytest.raises(SupervisorUnavailable):
+            supervisor.start(_request())
         assert supervisor.snapshot().pid is not None
+        release.set()
+        deadline = time.monotonic() + 2
+        while not supervisor.snapshot().slot_releasable and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert supervisor.snapshot().terminal_delivery_outstanding is False
+        assert supervisor.snapshot().slot_releasable is True
+        assert supervisor.readiness() is True
     finally:
         release.set()
         supervisor.close()

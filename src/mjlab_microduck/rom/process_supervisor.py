@@ -59,6 +59,7 @@ class SupervisorSnapshot:
     cached_status: RobotStatus | None
     quarantine_reason: str | None
     slot_releasable: bool
+    terminal_delivery_outstanding: bool = False
     cached_terminal: TerminalPayload | None = None
     pid: int | None = None
 
@@ -72,7 +73,7 @@ class ChildLaunch:
 
 
 type LaunchFactory = Callable[[int], ChildLaunch]
-type IntentKind = Literal["ready", "start", "command", "status", "stop", "close"]
+type IntentKind = Literal["ready", "start", "command", "status", "stop", "close", "delivery"]
 
 
 @dataclass(slots=True)
@@ -82,6 +83,12 @@ class _Intent:
     done: threading.Event = field(default_factory=threading.Event)
     result: Any = None
     error: BaseException | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _TerminalDelivery:
+    sequence: int
+    payload: TerminalPayload
 
 
 class RuntimeProcessSupervisor:
@@ -106,7 +113,7 @@ class RuntimeProcessSupervisor:
         self._operation_timeout = operation_timeout_s
         self._terminate_timeout = terminate_timeout_s
         self._terminal_callback = terminal_callback
-        self._terminal_queue: queue.Queue[TerminalPayload | None] | None = None
+        self._terminal_queue: queue.Queue[_TerminalDelivery | None] | None = None
         self._terminal_thread: threading.Thread | None = None
         self._terminal_shutdown_sent = False
         if terminal_callback is not None:
@@ -129,6 +136,9 @@ class RuntimeProcessSupervisor:
         self._sequence = 0
         self._active_task: str | None = None
         self._last_event_sequence = 0
+        self._terminal_delivery_sequence = 0
+        self._terminal_delivery_outstanding: int | None = None
+        self._pending_terminal_delivery: _TerminalDelivery | None = None
         self._trace: list[str] = []
         self._closed = False
         self._thread = threading.Thread(
@@ -139,13 +149,17 @@ class RuntimeProcessSupervisor:
     def _deliver_terminals(self) -> None:
         assert self._terminal_queue is not None and self._terminal_callback is not None
         while True:
-            payload = self._terminal_queue.get()
-            if payload is None:
+            delivery = self._terminal_queue.get()
+            if delivery is None:
                 return
             try:
-                self._terminal_callback(payload)
+                self._terminal_callback(delivery.payload)
             except Exception as exc:  # noqa: BLE001 - callback boundary is isolated
                 self._record(f"TERMINAL_DELIVERY_FAILED:{type(exc).__name__}")
+                success = False
+            else:
+                success = True
+            self._queue.put(_Intent(kind="delivery", args=(delivery.sequence, success)))
 
     def _default_launch(self, socket_fd: int) -> ChildLaunch:
         allowed = {
@@ -185,7 +199,7 @@ class RuntimeProcessSupervisor:
 
     def readiness(self) -> bool:
         snap = self.snapshot()
-        return snap.child_healthy and snap.state in {
+        return snap.child_healthy and snap.slot_releasable and snap.state in {
             SupervisorState.IDLE,
             SupervisorState.RUNNING,
         }
@@ -280,6 +294,7 @@ class RuntimeProcessSupervisor:
         healthy: bool | None = None,
         status: RobotStatus | None | object = ...,
         terminal: TerminalPayload | None | object = ...,
+        delivery_outstanding: bool | None = None,
         reason: str | None | object = ...,
         slot: bool | None = None,
     ) -> None:
@@ -291,6 +306,11 @@ class RuntimeProcessSupervisor:
             cached_status=old.cached_status if status is ... else status,  # type: ignore[arg-type]
             quarantine_reason=old.quarantine_reason if reason is ... else reason,  # type: ignore[arg-type]
             slot_releasable=old.slot_releasable if slot is None else slot,
+            terminal_delivery_outstanding=(
+                old.terminal_delivery_outstanding
+                if delivery_outstanding is None
+                else delivery_outstanding
+            ),
             cached_terminal=old.cached_terminal if terminal is ... else terminal,  # type: ignore[arg-type]
             pid=self._process.pid if self._process is not None else None,
         )
@@ -307,6 +327,7 @@ class RuntimeProcessSupervisor:
             try:
                 intent = self._queue.get(timeout=0.01)
             except queue.Empty:
+                self._flush_pending_terminal()
                 self._poll_unsolicited()
                 continue
             try:
@@ -322,12 +343,18 @@ class RuntimeProcessSupervisor:
         if intent.kind == "ready":
             if self._process is None:
                 self._spawn()
-            if self.snapshot().state is not SupervisorState.IDLE:
+            if (
+                self.snapshot().state is not SupervisorState.IDLE
+                or not self.snapshot().slot_releasable
+            ):
                 raise SupervisorUnavailable("runtime child is not idle")
             return self.snapshot()
         if intent.kind == "close":
             self._closed = True
             self._close_owned_child()
+            return None
+        if intent.kind == "delivery":
+            self._complete_terminal_delivery(*intent.args)
             return None
         if self._process is None:
             self._spawn()
@@ -412,7 +439,10 @@ class RuntimeProcessSupervisor:
         )
 
     def _start(self, request: TaskCreateRequest) -> AckPayload:
-        if self.snapshot().state is not SupervisorState.IDLE:
+        if (
+            self.snapshot().state is not SupervisorState.IDLE
+            or not self.snapshot().slot_releasable
+        ):
             raise SupervisorUnavailable("motion slot is unavailable")
         self._active_task = request.taskId
         self._last_event_sequence = 0
@@ -482,17 +512,15 @@ class RuntimeProcessSupervisor:
         )
         assert isinstance(response.payload, TerminalPayload)
         self._active_task = None
+        delivery_required = self._terminal_queue is not None
         self._advance(
             SupervisorEvent.TERMINAL_ACK,
             healthy=True,
-            slot=True,
+            slot=not delivery_required,
             terminal=response.payload,
+            delivery_outstanding=delivery_required,
         )
-        if self._terminal_queue is not None:
-            try:
-                self._terminal_queue.put_nowait(response.payload)
-            except queue.Full:
-                self._record("TERMINAL_DELIVERY_BACKPRESSURE")
+        self._queue_terminal_delivery(response.payload)
         return response.payload
 
     def _require_active(self, task_id: str) -> None:
@@ -598,14 +626,47 @@ class RuntimeProcessSupervisor:
         terminal = payload.terminal
         self._last_event_sequence = payload.eventSequence
         self._active_task = None
+        delivery_required = self._terminal_queue is not None
         self._advance(
-            SupervisorEvent.TERMINAL_ACK, healthy=True, slot=True, terminal=terminal
+            SupervisorEvent.TERMINAL_ACK,
+            healthy=True,
+            slot=not delivery_required,
+            terminal=terminal,
+            delivery_outstanding=delivery_required,
         )
-        if self._terminal_queue is not None:
-            try:
-                self._terminal_queue.put_nowait(terminal)
-            except queue.Full:
-                self._record("TERMINAL_DELIVERY_BACKPRESSURE")
+        self._queue_terminal_delivery(terminal)
+
+    def _queue_terminal_delivery(self, terminal: TerminalPayload) -> None:
+        if self._terminal_queue is None:
+            return
+        self._terminal_delivery_sequence += 1
+        delivery = _TerminalDelivery(self._terminal_delivery_sequence, terminal)
+        self._terminal_delivery_outstanding = delivery.sequence
+        self._pending_terminal_delivery = delivery
+        self._flush_pending_terminal()
+
+    def _flush_pending_terminal(self) -> None:
+        delivery = self._pending_terminal_delivery
+        terminal_queue = self._terminal_queue
+        if delivery is None or terminal_queue is None:
+            return
+        try:
+            terminal_queue.put_nowait(delivery)
+        except queue.Full:
+            return
+        self._pending_terminal_delivery = None
+
+    def _complete_terminal_delivery(self, sequence: int, success: bool) -> None:
+        if sequence != self._terminal_delivery_outstanding:
+            self._flush_pending_terminal()
+            return
+        if not success:
+            self._record("TERMINAL_DELIVERY_REQUIRED")
+            return
+        self._terminal_delivery_outstanding = None
+        self._publish(
+            self.snapshot().state, slot=True, delivery_outstanding=False
+        )
 
     def _quarantine(self, reason: str, *, protocol_usable: bool = False) -> None:
         self._advance(
