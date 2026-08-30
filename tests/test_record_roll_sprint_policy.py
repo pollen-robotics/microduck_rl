@@ -137,6 +137,10 @@ def test_follow_camera_advances_and_retreats_smoothly() -> None:
     assert MODULE._camera_follow_x(second, float("nan")) == second
 
 
+def test_recording_fps_preserves_real_simulation_time() -> None:
+    assert MODULE._recording_fps(0.04, 4) == pytest.approx(6.25)
+
+
 def test_camera_follows_furthest_forward_robot_that_remains_in_lane() -> None:
     camera = SimpleNamespace(lookat=MODULE.np.zeros(3))
     env = SimpleNamespace(
