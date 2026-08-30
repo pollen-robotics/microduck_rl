@@ -787,13 +787,18 @@ def _run_recovery_battery(
     cases: list[dict[str, object]] = []
     steps = round(duration_s / base_env.step_dt)
     for seed in RECOVERY_SEEDS:
-        env.reset()
-        microduck_mdp.arrange_roll_sprint_recovery_start(
-            base_env,
-            RACE_LANE_SPACING,
-            seed=seed,
-            orientations=RECOVERY_ORIENTATIONS,
-        )
+        # Stepping constructs actuator delay buffers while inference mode is
+        # active, so subsequent resets must mutate those buffers in the same
+        # mode.  Keeping the deterministic recovery arrangement in the scope
+        # also avoids mixing inference and normal tensors between cases.
+        with torch.inference_mode():
+            env.reset()
+            microduck_mdp.arrange_roll_sprint_recovery_start(
+                base_env,
+                RACE_LANE_SPACING,
+                seed=seed,
+                orientations=RECOVERY_ORIENTATIONS,
+            )
         alive = torch.ones(4, dtype=torch.bool, device=base_env.device)
         nan_seen = torch.zeros_like(alive)
         out_of_bounds = torch.zeros_like(alive)
@@ -830,7 +835,7 @@ def _run_recovery_battery(
             out_of_bounds |= alive & base_env.termination_manager.get_term(
                 "out_of_terrain_bounds"
             )
-            alive &= ~dones
+            alive &= ~dones.bool()
             if not bool(alive.any()):
                 break
 
