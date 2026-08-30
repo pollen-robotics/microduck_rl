@@ -1768,6 +1768,45 @@ def make_microduck_stair_virtual_lip_transfer_rsi_env_cfg(
     return cfg
 
 
+def make_microduck_stair_contact_stage_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A31: expose the first loaded-tread, face-free transfer frame."""
+
+    cfg = make_microduck_stair_virtual_lip_transfer_rsi_env_cfg(play=play)
+    sensor_names = (
+        "head_ground_contact",
+        "trunk_ground_contact",
+        "legs_ground_contact",
+        "feet_stair_contact",
+    )
+    stage2_params = cfg.rewards[
+        "stair_loaded_tread_face_release"
+    ].params
+    stage2_params["sensor_names"] = sensor_names
+    stage2_params["min_normal_force"] = 2.0
+    stage2_params["require_stage15"] = True
+    stage15_params = deepcopy(stage2_params)
+    stage15_params.pop("hold_steps", None)
+    stage15_params.pop("require_stage15", None)
+    stage15_params["min_policy_steps"] = 3
+    stage15_params["min_normal_force"] = 2.0
+    stage15_reward = RewardTermCfg(
+        func=microduck_mdp.stair_loaded_tread_no_face_first_frame,
+        weight=20.0,
+        params=stage15_params,
+    )
+    ordered_rewards = {}
+    for name, term in cfg.rewards.items():
+        if name == "stair_loaded_tread_face_release":
+            ordered_rewards["stair_loaded_tread_no_face_first_frame"] = (
+                stage15_reward
+            )
+        ordered_rewards[name] = term
+    cfg.rewards = ordered_rewards
+    return cfg
+
+
 def make_microduck_stair_tread_contact_bank_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -2185,6 +2224,17 @@ MicroduckStairVirtualLipTransferRsiRlCfg.run_name = (
 )
 MicroduckStairVirtualLipTransferRsiRlCfg.max_iterations = 75
 MicroduckStairVirtualLipTransferRsiRlCfg.save_interval = 10
+
+MicroduckStairContactStageRsiRlCfg = deepcopy(
+    MicroduckStairVirtualLipTransferRsiRlCfg
+)
+MicroduckStairContactStageRsiRlCfg.experiment_name = (
+    "microduck_stair_contact_stage_rsi_specialist"
+)
+MicroduckStairContactStageRsiRlCfg.run_name = (
+    "microduck_stair_contact_stage_rsi_specialist"
+)
+MicroduckStairContactStageRsiRlCfg.save_interval = 5
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)
 MicroduckStairTreadContactBankRlCfg.experiment_name = (

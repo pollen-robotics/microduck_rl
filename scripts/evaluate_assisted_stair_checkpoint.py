@@ -27,6 +27,8 @@ from mjlab.utils.torch import configure_torch_backends
 from mjlab_microduck.tasks.mdp import classify_standard_stair_contacts
 
 A30_TASK_ID = "Mjlab-Stairs-Virtual-Lip-Transfer-RSI-Specialist-MicroDuck"
+A31_TASK_ID = "Mjlab-Stairs-Contact-Stage-RSI-Specialist-MicroDuck"
+CONTACT_TRANSFER_TASK_IDS = (A30_TASK_ID, A31_TASK_ID)
 TASK_IDS = (
     "Mjlab-Stairs-Assisted-Specialist-MicroDuck",
     "Mjlab-Stairs-Bridge-Specialist-MicroDuck",
@@ -46,6 +48,7 @@ TASK_IDS = (
     "Mjlab-Stairs-Frontier-Tier-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Forward-Propagation-RSI-Specialist-MicroDuck",
     A30_TASK_ID,
+    A31_TASK_ID,
     "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
     "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
@@ -430,7 +433,8 @@ def _sha256(path: Path) -> str:
 
 def main() -> int:
     args = _parse_args()
-    is_a30 = args.task == A30_TASK_ID
+    is_contact_transfer = args.task in CONTACT_TRANSFER_TASK_IDS
+    is_a31 = args.task == A31_TASK_ID
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_file():
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
@@ -440,11 +444,15 @@ def main() -> int:
         0.0 <= args.root_over_lip_replay_fraction <= 1.0
     ):
         raise SystemExit("--root-over-lip-replay-fraction must be within [0, 1]")
-    if not is_a30 and args.terrain_level is not None:
-        raise SystemExit("--terrain-level is supported only for the A30 task")
-    if not is_a30 and args.reset_family != "mixed":
-        raise SystemExit("--reset-family is supported only for the A30 task")
-    if is_a30:
+    if not is_contact_transfer and args.terrain_level is not None:
+        raise SystemExit(
+            "--terrain-level is supported only for the A30/A31 tasks"
+        )
+    if not is_contact_transfer and args.reset_family != "mixed":
+        raise SystemExit(
+            "--reset-family is supported only for the A30/A31 tasks"
+        )
+    if is_contact_transfer:
         reset_modes = A30_RESET_MODES
     elif args.task in {
         "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
@@ -486,10 +494,12 @@ def main() -> int:
     env_cfg.scene.num_envs = args.num_envs
     effective_terrain_level = None
     forced_reset_family = None
-    if is_a30:
+    if is_contact_transfer:
         hard_viewer = env_cfg.events.get("a30_hard_viewer")
         if hard_viewer is None:
-            raise RuntimeError("A30 play cfg is missing the a30_hard_viewer event")
+            raise RuntimeError(
+                "Contact-transfer play cfg is missing the a30_hard_viewer event"
+            )
         effective_terrain_level = (
             2 if args.terrain_level is None else args.terrain_level
         )
@@ -500,33 +510,39 @@ def main() -> int:
         forced_reset_family = A30_RESET_FAMILY_OVERRIDES[args.reset_family]
         state_bank_family = env_cfg.events.get("state_bank_family")
         if state_bank_family is None:
-            raise RuntimeError("A30 cfg is missing the state_bank_family event")
+            raise RuntimeError(
+                "Contact-transfer cfg is missing the state_bank_family event"
+            )
         if forced_reset_family is None:
             state_bank_family.params.pop("forced_family", None)
         else:
             state_bank_family.params["forced_family"] = forced_reset_family
     env_cfg.seed = 7
     base_env = ManagerBasedRlEnv(cfg=env_cfg, device=args.device, render_mode=None)
-    if is_a30:
+    if is_contact_transfer:
         actual_levels = base_env.scene.terrain.terrain_levels
         if not torch.all(actual_levels == effective_terrain_level):
             base_env.close()
             raise RuntimeError(
-                "A30 terrain-level override did not reach every evaluation environment"
+                "Contact-transfer terrain-level override did not reach every "
+                "evaluation environment"
             )
     env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
-    if is_a30:
+    if is_contact_transfer:
         env.reset()
         actual_families = getattr(base_env, "_stair_state_bank_family", None)
         if actual_families is None:
             env.close()
-            raise RuntimeError("A30 reset-family assignment is unavailable")
+            raise RuntimeError(
+                "Contact-transfer reset-family assignment is unavailable"
+            )
         if forced_reset_family is not None and not torch.all(
             actual_families == forced_reset_family
         ):
             env.close()
             raise RuntimeError(
-                "A30 reset-family override did not reach every evaluation environment"
+                "Contact-transfer reset-family override did not reach every "
+                "evaluation environment"
             )
     runner_cls = load_runner_cls(args.task) or MjlabOnPolicyRunner
     runner = runner_cls(env, asdict(agent_cfg), device=args.device)
@@ -558,6 +574,7 @@ def main() -> int:
     previous_coupled_target = torch.zeros_like(previous_clearance)
     previous_coupled_bypass = torch.zeros_like(previous_clearance)
     previous_stage1_policy = torch.zeros_like(previous_clearance)
+    previous_stage15_policy = torch.zeros_like(previous_clearance)
     previous_stage2_policy = torch.zeros_like(previous_clearance)
     mode_trials = {name: 0 for name in reset_modes.values()}
     mode_clearance = {name: 0 for name in reset_modes.values()}
@@ -577,7 +594,10 @@ def main() -> int:
     mode_coupled_target = {name: 0 for name in reset_modes.values()}
     mode_coupled_bypass = {name: 0 for name in reset_modes.values()}
     mode_stage1_policy = {name: 0 for name in reset_modes.values()}
+    mode_stage15_policy = {name: 0 for name in reset_modes.values()}
     mode_stage2_policy = {name: 0 for name in reset_modes.values()}
+    mode_stage15_without_stage1 = {name: 0 for name in reset_modes.values()}
+    mode_stage2_without_stage15 = {name: 0 for name in reset_modes.values()}
     secured_events = 0
     face_contact_events = 0
     tread_contact_events = 0
@@ -593,7 +613,10 @@ def main() -> int:
     coupled_target_events = 0
     coupled_bypass_events = 0
     stage1_policy_events = 0
+    stage15_policy_events = 0
     stage2_policy_events = 0
+    stage15_without_stage1_events = 0
+    stage2_without_stage15_events = 0
     secured_before_clearance_events = 0
     nan_termination_events = 0
     tread_contact_source_steps: list[int] = []
@@ -625,6 +648,43 @@ def main() -> int:
         name: {metric: 0 for metric in a12_event_counts}
         for name in reset_modes.values()
     }
+    episode_event_flags = {
+        name: torch.zeros_like(previous_clearance)
+        for name in (
+            "clearance",
+            "stable",
+            "secured",
+            "secured_before_clearance",
+            "face_contact",
+            "tread_contact",
+            "contact_release",
+            "lip_impulse",
+            "lip_commitment",
+            "lip_checkpoint_progress",
+            "lip_checkpoint_target",
+            "coupled_raw_gain10",
+            "coupled_raw_gain25",
+            "coupled_gain10",
+            "coupled_gain25",
+            "coupled_target",
+            "coupled_bypass",
+            "stage1_policy",
+            "stage15_policy",
+            "stage2_policy",
+            "stage15_without_stage1",
+            "stage2_without_stage15",
+            "nan_termination",
+        )
+    }
+    episode_a12_event_flags = {
+        metric: torch.zeros_like(previous_clearance) for metric in a12_event_counts
+    }
+    episode_body_part_tread_flags = {
+        name: torch.zeros_like(previous_clearance) for name in body_part_tread_metrics
+    }
+    episode_tread_contact_source_step = torch.full(
+        (args.num_envs,), -1, dtype=torch.long, device=args.device
+    )
     joint_frontier_metrics = JointFrontierTrajectoryMetrics(
         args.num_envs, args.device
     )
@@ -646,7 +706,7 @@ def main() -> int:
         for _ in range(steps):
             reset_mode_attribute = (
                 "_stair_state_bank_family"
-                if is_a30
+                if is_contact_transfer
                 else "_stair_assisted_reset_mode"
             )
             reset_mode = getattr(base_env, reset_mode_attribute, None)
@@ -672,20 +732,16 @@ def main() -> int:
                 base_env.episode_length_buf,
             )
             for metric, event_mask in a12_events.items():
-                a12_event_counts[metric] += int(event_mask.sum().item())
-                for code, name in reset_modes.items():
-                    mode_a12_event_counts[name][metric] += int(
-                        (event_mask & (episode_mode == code)).sum().item()
-                    )
+                episode_a12_event_flags[metric] |= event_mask
             with torch.inference_mode():
                 observations = env.get_observations()
                 actions = policy(observations)
                 _, _, dones, _ = env.step(actions)
-            nan_termination_events += int(
-                base_env.termination_manager.get_term("nan_state").sum().item()
+            episode_event_flags["nan_termination"] |= (
+                base_env.termination_manager.get_term("nan_state").bool()
             )
 
-            if is_a30:
+            if is_contact_transfer:
                 clearance = getattr(
                     base_env,
                     "_stair_true_shell_clearance_policy_achieved",
@@ -693,7 +749,8 @@ def main() -> int:
                 )
                 if clearance is None:
                     raise RuntimeError(
-                        "A30 policy-created true shell-clearance tracking is unavailable"
+                        "Contact-transfer policy-created true shell-clearance "
+                        "tracking is unavailable"
                     )
             else:
                 clearance = getattr(
@@ -758,7 +815,7 @@ def main() -> int:
                 "_stair_coupled_frontier_bypass_latched",
                 previous_coupled_bypass,
             )
-            if is_a30:
+            if is_contact_transfer:
                 stage1_policy = getattr(
                     base_env,
                     "_stair_contact_transfer_stage1_policy_achieved",
@@ -771,11 +828,23 @@ def main() -> int:
                 )
                 if stage1_policy is None or stage2_policy is None:
                     raise RuntimeError(
-                        "A30 contact-transfer policy-achievement tracking is unavailable"
+                        "Contact-transfer policy-achievement tracking is unavailable"
                     )
             else:
                 stage1_policy = previous_stage1_policy
                 stage2_policy = previous_stage2_policy
+            if is_a31:
+                stage15_policy = getattr(
+                    base_env,
+                    "_stair_contact_transfer_stage15_policy_achieved",
+                    None,
+                )
+                if stage15_policy is None:
+                    raise RuntimeError(
+                        "A31 Stage 1.5 policy-achievement tracking is unavailable"
+                    )
+            else:
+                stage15_policy = previous_stage15_policy
             global_contact = base_env.scene.sensors["robot_ground_contact"].data
             if (
                 global_contact.found is None
@@ -792,7 +861,7 @@ def main() -> int:
                 base_env.scene.terrain.env_origins,
             )
             new_clearance = clearance & ~previous_clearance
-            if is_a30:
+            if is_contact_transfer:
                 # The environment deliberately pre-latches a reset state that
                 # already satisfies the shell gate. Count only a latch edge
                 # created after policy control has begun. Use the pre-step
@@ -822,53 +891,76 @@ def main() -> int:
             new_coupled_target = coupled_target & ~previous_coupled_target
             new_coupled_bypass = coupled_bypass & ~previous_coupled_bypass
             new_stage1_policy = stage1_policy & ~previous_stage1_policy
+            new_stage15_policy = stage15_policy & ~previous_stage15_policy
             new_stage2_policy = stage2_policy & ~previous_stage2_policy
+            if is_a31:
+                stage15_without_stage1 = new_stage15_policy & ~stage1_policy
+                stage2_without_stage15 = new_stage2_policy & ~stage15_policy
+            else:
+                stage15_without_stage1 = torch.zeros_like(new_stage15_policy)
+                stage2_without_stage15 = torch.zeros_like(new_stage2_policy)
             new_face_contact = face_contact_metrics.observe(
                 raw_face.any(dim=-1), base_env.episode_length_buf
             )
             new_tread_contact = tread_contact_metrics.observe(
                 raw_tread.any(dim=-1), base_env.episode_length_buf
             )
-            clearance_events += int(new_clearance.sum().item())
-            stable_events += int(new_stable.sum().item())
-            secured_events += int(new_secured.sum().item())
-            if is_a30:
-                secured_before_clearance_events += int(
-                    (new_secured & ~clearance).sum().item()
+            episode_event_flags["clearance"] |= new_clearance
+            episode_event_flags["stable"] |= new_stable
+            episode_event_flags["secured"] |= new_secured
+            if is_contact_transfer:
+                episode_event_flags["secured_before_clearance"] |= (
+                    new_secured & ~clearance
                 )
-            contact_release_events += int(new_contact_release.sum().item())
-            lip_impulse_events += int(new_lip_impulse.sum().item())
-            lip_commitment_events += int(new_lip_commitment.sum().item())
-            lip_checkpoint_progress_events += int(
-                new_lip_checkpoint_progress.sum().item()
+            episode_event_flags["contact_release"] |= new_contact_release
+            episode_event_flags["lip_impulse"] |= new_lip_impulse
+            episode_event_flags["lip_commitment"] |= new_lip_commitment
+            episode_event_flags["lip_checkpoint_progress"] |= (
+                new_lip_checkpoint_progress
             )
-            lip_checkpoint_target_events += int(new_lip_checkpoint_target.sum().item())
-            coupled_raw_gain10_events += int(new_coupled_raw_gain10.sum().item())
-            coupled_raw_gain25_events += int(new_coupled_raw_gain25.sum().item())
-            coupled_gain10_events += int(new_coupled_gain10.sum().item())
-            coupled_gain25_events += int(new_coupled_gain25.sum().item())
-            coupled_target_events += int(new_coupled_target.sum().item())
-            coupled_bypass_events += int(new_coupled_bypass.sum().item())
-            stage1_policy_events += int(new_stage1_policy.sum().item())
-            stage2_policy_events += int(new_stage2_policy.sum().item())
-            face_contact_events += int(new_face_contact.sum().item())
-            tread_contact_events += int(new_tread_contact.sum().item())
+            episode_event_flags["lip_checkpoint_target"] |= (
+                new_lip_checkpoint_target
+            )
+            episode_event_flags["coupled_raw_gain10"] |= new_coupled_raw_gain10
+            episode_event_flags["coupled_raw_gain25"] |= new_coupled_raw_gain25
+            episode_event_flags["coupled_gain10"] |= new_coupled_gain10
+            episode_event_flags["coupled_gain25"] |= new_coupled_gain25
+            episode_event_flags["coupled_target"] |= new_coupled_target
+            episode_event_flags["coupled_bypass"] |= new_coupled_bypass
+            episode_event_flags["stage1_policy"] |= new_stage1_policy
+            episode_event_flags["stage15_policy"] |= new_stage15_policy
+            episode_event_flags["stage2_policy"] |= new_stage2_policy
+            episode_event_flags["stage15_without_stage1"] |= (
+                stage15_without_stage1
+            )
+            episode_event_flags["stage2_without_stage15"] |= (
+                stage2_without_stage15
+            )
+            episode_event_flags["face_contact"] |= new_face_contact
+            episode_event_flags["tread_contact"] |= new_tread_contact
             source_steps = getattr(base_env, "_stair_walker_bank_source_step", None)
             if source_steps is not None:
                 roll_tread = new_tread_contact & (episode_mode == 3)
-                tread_contact_source_steps.extend(
-                    int(step)
-                    for step in source_steps[roll_tread].detach().cpu().tolist()
-                    if int(step) >= 0
-                )
-            completed_trials += int(dones.sum().item())
+                episode_tread_contact_source_step[roll_tread] = source_steps[
+                    roll_tread
+                ].to(dtype=torch.long)
             done_mask = dones.bool()
+            remaining_trials = args.episodes - completed_trials
+            completed_mask = done_mask.clone()
+            completed_indices = torch.where(done_mask)[0]
+            if completed_indices.numel() > remaining_trials:
+                completed_mask.zero_()
+                completed_mask[
+                    completed_indices[:remaining_trials]
+                ] = True
+            completed_now = int(completed_mask.sum().item())
+            completed_trials += completed_now
             (
                 completed_progress,
                 completed_best_x,
                 completed_best_z,
                 completed_milestones,
-            ) = joint_frontier_metrics.complete(done_mask)
+            ) = joint_frontier_metrics.complete(completed_mask)
             joint_frontier_progress.extend(completed_progress)
             joint_frontier_best_x.extend(completed_best_x)
             joint_frontier_best_z.extend(completed_best_z)
@@ -881,7 +973,7 @@ def main() -> int:
                 )
             ]
             terminal_position_scores.extend(
-                terminal_position_metrics.complete(done_mask)
+                terminal_position_metrics.complete(completed_mask)
             )
             origins = base_env.scene.terrain.env_origins
             for body_part, sensor_name in BODY_PART_CONTACT_SENSORS.items():
@@ -907,9 +999,7 @@ def main() -> int:
                 new_body_tread = body_part_tread_metrics[body_part].observe(
                     current_body_tread, base_env.episode_length_buf
                 )
-                body_part_tread_events[body_part] += int(
-                    new_body_tread.sum().item()
-                )
+                episode_body_part_tread_flags[body_part] |= new_body_tread
                 eligible = (
                     base_env.episode_length_buf
                     >= A12_IGNORE_INITIAL_CONTROL_STEPS
@@ -945,72 +1035,167 @@ def main() -> int:
                 body_part_power_max[body_part] = torch.maximum(
                     body_part_power_max[body_part], pitch_power
                 )
-                if torch.any(done_mask):
+                if torch.any(completed_mask):
                     body_part_trial_forces[body_part].extend(
-                        body_part_force_max[body_part][done_mask]
+                        body_part_force_max[body_part][completed_mask]
                         .detach()
                         .cpu()
                         .tolist()
                     )
                     body_part_trial_powers[body_part].extend(
-                        body_part_power_max[body_part][done_mask]
+                        body_part_power_max[body_part][completed_mask]
                         .detach()
                         .cpu()
                         .tolist()
                     )
-                    body_part_force_max[body_part][done_mask] = 0.0
-                    body_part_power_max[body_part][done_mask] = 0.0
+                body_part_force_max[body_part][done_mask] = 0.0
+                body_part_power_max[body_part][done_mask] = 0.0
+
+            completed_event_counts = {
+                name: int(flags[completed_mask].sum().item())
+                for name, flags in episode_event_flags.items()
+            }
+            clearance_events += completed_event_counts["clearance"]
+            stable_events += completed_event_counts["stable"]
+            secured_events += completed_event_counts["secured"]
+            secured_before_clearance_events += completed_event_counts[
+                "secured_before_clearance"
+            ]
+            face_contact_events += completed_event_counts["face_contact"]
+            tread_contact_events += completed_event_counts["tread_contact"]
+            contact_release_events += completed_event_counts["contact_release"]
+            lip_impulse_events += completed_event_counts["lip_impulse"]
+            lip_commitment_events += completed_event_counts["lip_commitment"]
+            lip_checkpoint_progress_events += completed_event_counts[
+                "lip_checkpoint_progress"
+            ]
+            lip_checkpoint_target_events += completed_event_counts[
+                "lip_checkpoint_target"
+            ]
+            coupled_raw_gain10_events += completed_event_counts[
+                "coupled_raw_gain10"
+            ]
+            coupled_raw_gain25_events += completed_event_counts[
+                "coupled_raw_gain25"
+            ]
+            coupled_gain10_events += completed_event_counts["coupled_gain10"]
+            coupled_gain25_events += completed_event_counts["coupled_gain25"]
+            coupled_target_events += completed_event_counts["coupled_target"]
+            coupled_bypass_events += completed_event_counts["coupled_bypass"]
+            stage1_policy_events += completed_event_counts["stage1_policy"]
+            stage15_policy_events += completed_event_counts["stage15_policy"]
+            stage2_policy_events += completed_event_counts["stage2_policy"]
+            stage15_without_stage1_events += completed_event_counts[
+                "stage15_without_stage1"
+            ]
+            stage2_without_stage15_events += completed_event_counts[
+                "stage2_without_stage15"
+            ]
+            nan_termination_events += completed_event_counts["nan_termination"]
+            for metric, flags in episode_a12_event_flags.items():
+                a12_event_counts[metric] += int(
+                    flags[completed_mask].sum().item()
+                )
+            for body_part, flags in episode_body_part_tread_flags.items():
+                body_part_tread_events[body_part] += int(
+                    flags[completed_mask].sum().item()
+                )
+            completed_source_steps = episode_tread_contact_source_step[
+                completed_mask
+            ].detach().cpu().tolist()
+            tread_contact_source_steps.extend(
+                int(step) for step in completed_source_steps if int(step) >= 0
+            )
+
             for code, name in reset_modes.items():
-                mode_mask = episode_mode == code
-                mode_trials[name] += int((done_mask & mode_mask).sum().item())
-                mode_clearance[name] += int((new_clearance & mode_mask).sum().item())
-                mode_stable[name] += int((new_stable & mode_mask).sum().item())
-                mode_secured[name] += int((new_secured & mode_mask).sum().item())
+                mode_mask = completed_mask & (episode_mode == code)
+                mode_trials[name] += int(mode_mask.sum().item())
+                mode_clearance[name] += int(
+                    episode_event_flags["clearance"][mode_mask].sum().item()
+                )
+                mode_stable[name] += int(
+                    episode_event_flags["stable"][mode_mask].sum().item()
+                )
+                mode_secured[name] += int(
+                    episode_event_flags["secured"][mode_mask].sum().item()
+                )
                 mode_face_contact[name] += int(
-                    (new_face_contact & mode_mask).sum().item()
+                    episode_event_flags["face_contact"][mode_mask].sum().item()
                 )
                 mode_tread_contact[name] += int(
-                    (new_tread_contact & mode_mask).sum().item()
+                    episode_event_flags["tread_contact"][mode_mask].sum().item()
                 )
                 mode_contact_release[name] += int(
-                    (new_contact_release & mode_mask).sum().item()
+                    episode_event_flags["contact_release"][mode_mask].sum().item()
                 )
                 mode_lip_impulse[name] += int(
-                    (new_lip_impulse & mode_mask).sum().item()
+                    episode_event_flags["lip_impulse"][mode_mask].sum().item()
                 )
                 mode_lip_commitment[name] += int(
-                    (new_lip_commitment & mode_mask).sum().item()
+                    episode_event_flags["lip_commitment"][mode_mask].sum().item()
                 )
                 mode_lip_checkpoint_progress[name] += int(
-                    (new_lip_checkpoint_progress & mode_mask).sum().item()
+                    episode_event_flags["lip_checkpoint_progress"][mode_mask]
+                    .sum()
+                    .item()
                 )
                 mode_lip_checkpoint_target[name] += int(
-                    (new_lip_checkpoint_target & mode_mask).sum().item()
+                    episode_event_flags["lip_checkpoint_target"][mode_mask]
+                    .sum()
+                    .item()
                 )
                 mode_coupled_raw_gain10[name] += int(
-                    (new_coupled_raw_gain10 & mode_mask).sum().item()
+                    episode_event_flags["coupled_raw_gain10"][mode_mask]
+                    .sum()
+                    .item()
                 )
                 mode_coupled_raw_gain25[name] += int(
-                    (new_coupled_raw_gain25 & mode_mask).sum().item()
+                    episode_event_flags["coupled_raw_gain25"][mode_mask]
+                    .sum()
+                    .item()
                 )
                 mode_coupled_gain10[name] += int(
-                    (new_coupled_gain10 & mode_mask).sum().item()
+                    episode_event_flags["coupled_gain10"][mode_mask].sum().item()
                 )
                 mode_coupled_gain25[name] += int(
-                    (new_coupled_gain25 & mode_mask).sum().item()
+                    episode_event_flags["coupled_gain25"][mode_mask].sum().item()
                 )
                 mode_coupled_target[name] += int(
-                    (new_coupled_target & mode_mask).sum().item()
+                    episode_event_flags["coupled_target"][mode_mask].sum().item()
                 )
                 mode_coupled_bypass[name] += int(
-                    (new_coupled_bypass & mode_mask).sum().item()
+                    episode_event_flags["coupled_bypass"][mode_mask].sum().item()
                 )
                 mode_stage1_policy[name] += int(
-                    (new_stage1_policy & mode_mask).sum().item()
+                    episode_event_flags["stage1_policy"][mode_mask].sum().item()
+                )
+                mode_stage15_policy[name] += int(
+                    episode_event_flags["stage15_policy"][mode_mask].sum().item()
                 )
                 mode_stage2_policy[name] += int(
-                    (new_stage2_policy & mode_mask).sum().item()
+                    episode_event_flags["stage2_policy"][mode_mask].sum().item()
                 )
+                mode_stage15_without_stage1[name] += int(
+                    episode_event_flags["stage15_without_stage1"][mode_mask]
+                    .sum()
+                    .item()
+                )
+                mode_stage2_without_stage15[name] += int(
+                    episode_event_flags["stage2_without_stage15"][mode_mask]
+                    .sum()
+                    .item()
+                )
+                for metric, flags in episode_a12_event_flags.items():
+                    mode_a12_event_counts[name][metric] += int(
+                        flags[mode_mask].sum().item()
+                    )
+            for flags in episode_event_flags.values():
+                flags[done_mask] = False
+            for flags in episode_a12_event_flags.values():
+                flags[done_mask] = False
+            for flags in episode_body_part_tread_flags.values():
+                flags[done_mask] = False
+            episode_tread_contact_source_step[done_mask] = -1
             previous_clearance = clearance.clone()
             previous_stable = stable.clone()
             previous_secured = secured.clone()
@@ -1026,6 +1211,7 @@ def main() -> int:
             previous_coupled_target = coupled_target.clone()
             previous_coupled_bypass = coupled_bypass.clone()
             previous_stage1_policy = stage1_policy.clone()
+            previous_stage15_policy = stage15_policy.clone()
             previous_stage2_policy = stage2_policy.clone()
             previous_clearance[done_mask] = False
             previous_stable[done_mask] = False
@@ -1042,6 +1228,7 @@ def main() -> int:
             previous_coupled_target[done_mask] = False
             previous_coupled_bypass[done_mask] = False
             previous_stage1_policy[done_mask] = False
+            previous_stage15_policy[done_mask] = False
             previous_stage2_policy[done_mask] = False
             face_contact_metrics.reset(done_mask)
             tread_contact_metrics.reset(done_mask)
@@ -1145,7 +1332,7 @@ def main() -> int:
             "side_bypass_rate": mode_a12_event_counts[name]["side_bypass"]
             / max(trials, 1),
         }
-        if is_a30:
+        if is_contact_transfer:
             mode_report[name].update(
                 {
                     "contact_transfer_stage1_policy_achieved_events": (
@@ -1159,6 +1346,23 @@ def main() -> int:
                     ),
                     "contact_transfer_stage2_policy_achieved_rate": (
                         mode_stage2_policy[name] / max(trials, 1)
+                    ),
+                }
+            )
+        if is_a31:
+            mode_report[name].update(
+                {
+                    "contact_transfer_stage15_policy_achieved_events": (
+                        mode_stage15_policy[name]
+                    ),
+                    "contact_transfer_stage15_policy_achieved_rate": (
+                        mode_stage15_policy[name] / max(trials, 1)
+                    ),
+                    "stage15_without_stage1_event_violations": (
+                        mode_stage15_without_stage1[name]
+                    ),
+                    "stage2_without_stage15_event_violations": (
+                        mode_stage2_without_stage15[name]
                     ),
                 }
             )
@@ -1329,7 +1533,7 @@ def main() -> int:
         "maxima_include_assisted_reset_state": True,
         "promotion_eligible": False,
     }
-    if is_a30:
+    if is_contact_transfer:
         report.update(
             {
                 "schema_version": 11,
@@ -1354,6 +1558,24 @@ def main() -> int:
                 ),
                 "secured_before_true_shell_clearance_events": (
                     secured_before_clearance_events
+                ),
+            }
+        )
+    if is_a31:
+        report.update(
+            {
+                "schema_version": 12,
+                "contact_transfer_stage15_policy_achieved_events": (
+                    stage15_policy_events
+                ),
+                "contact_transfer_stage15_policy_achieved_rate": (
+                    stage15_policy_events / denominator
+                ),
+                "stage15_without_stage1_event_violations": (
+                    stage15_without_stage1_events
+                ),
+                "stage2_without_stage15_event_violations": (
+                    stage2_without_stage15_events
                 ),
             }
         )

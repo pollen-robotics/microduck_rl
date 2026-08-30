@@ -12,6 +12,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     VIRTUAL_LIP_CURRICULUM_LEVELS,
     VIRTUAL_LIP_MAX_FACE_OFFSET,
     BoxStandardStaircaseTerrainCfg,
+    make_microduck_stair_contact_stage_rsi_env_cfg,
     make_microduck_stair_forward_propagation_rsi_env_cfg,
     make_microduck_stair_virtual_lip_transfer_rsi_env_cfg,
 )
@@ -243,6 +244,80 @@ def test_stage2_needs_two_consecutive_tread_no_face_frames_after_stage1(monkeypa
     )
 
 
+def test_stage15_is_ordered_one_shot_and_reset_safe(monkeypatch):
+    monkeypatch.setattr(
+        microduck_mdp,
+        "_virtual_lip_union_contact_state",
+        _fake_virtual_union,
+    )
+    env = _contact_env(3)
+    env.episode_length_buf[:] = torch.tensor([3, 3, 1])
+    env.test_tread[:] = True
+    env.test_face[:] = torch.tensor([False, True, False])
+    env._stair_contact_transfer_stage1_policy_achieved = torch.tensor(
+        [True, True, True]
+    )
+    env._stair_contact_transfer_face_seen = torch.ones(3, dtype=torch.bool)
+
+    reward = microduck_mdp.stair_loaded_tread_no_face_first_frame(
+        env, min_policy_steps=1
+    )
+
+    assert torch.equal(reward, torch.tensor([1.0, 0.0, 0.0]))
+    assert torch.equal(
+        env._stair_contact_transfer_stage15_reset_baseline,
+        torch.tensor([False, False, True]),
+    )
+    assert torch.equal(
+        env._stair_contact_transfer_stage15_policy_achieved,
+        torch.tensor([True, False, False]),
+    )
+    assert torch.equal(
+        microduck_mdp.stair_loaded_tread_no_face_first_frame(
+            env, min_policy_steps=1
+        ),
+        torch.zeros(3),
+    )
+
+
+def test_stage2_two_frame_release_follows_stage15_first_frame(monkeypatch):
+    monkeypatch.setattr(
+        microduck_mdp,
+        "_virtual_lip_union_contact_state",
+        _fake_virtual_union,
+    )
+    env = _contact_env(1)
+    env.test_face[:] = True
+    assert microduck_mdp.stair_new_tread_contact_after_reset(env).item() == 0.0
+    assert microduck_mdp.stair_loaded_tread_face_release(env).item() == 0.0
+
+    env.episode_length_buf[:] = 2
+    env.test_face[:] = False
+    env.test_tread[:] = False
+    assert microduck_mdp.stair_new_tread_contact_after_reset(env).item() == 0.0
+
+    env.episode_length_buf[:] = 3
+    env.test_tread[:] = True
+    assert microduck_mdp.stair_new_tread_contact_after_reset(env).item() == 1.0
+    assert microduck_mdp.stair_loaded_tread_no_face_first_frame(env).item() == 1.0
+    assert (
+        microduck_mdp.stair_loaded_tread_face_release(
+            env, require_stage15=True
+        ).item()
+        == 0.0
+    )
+
+    env.episode_length_buf[:] = 4
+    assert (
+        microduck_mdp.stair_loaded_tread_face_release(
+            env, require_stage15=True
+        ).item()
+        == 1.0
+    )
+    assert env._stair_contact_transfer_stage15_policy_achieved.item()
+    assert env._stair_contact_transfer_stage2_policy_achieved.item()
+
+
 def test_penetration_cost_is_gated_before_arming_and_on_hard_level():
     robot = SimpleNamespace(
         indexing=SimpleNamespace(geom_ids=torch.tensor([0])),
@@ -471,3 +546,32 @@ def test_a30_cfg_wires_reset_families_rewards_contract_and_hard_play():
     assert "terrain_levels" not in play_cfg.curriculum
     hard_view = play_cfg.events["a30_hard_viewer"].params
     assert hard_view == {"terrain_levels": (2,), "terrain_types": (0,)}
+
+
+def test_a31_adds_only_ordered_stage15_reward_and_keeps_fixed_level0():
+    a30 = make_microduck_stair_virtual_lip_transfer_rsi_env_cfg()
+    cfg = make_microduck_stair_contact_stage_rsi_env_cfg()
+    play_cfg = make_microduck_stair_contact_stage_rsi_env_cfg(play=True)
+
+    assert "stair_loaded_tread_no_face_first_frame" not in a30.rewards
+    stage15 = cfg.rewards["stair_loaded_tread_no_face_first_frame"]
+    stage2 = cfg.rewards["stair_loaded_tread_face_release"]
+    assert stage15.func is microduck_mdp.stair_loaded_tread_no_face_first_frame
+    assert stage15.weight == 20.0
+    assert stage15.params["min_policy_steps"] == 3
+    assert stage15.params["min_normal_force"] == 2.0
+    assert stage15.params["sensor_names"] == stage2.params["sensor_names"]
+    assert "hold_steps" not in stage15.params
+    assert stage2.params["hold_steps"] == 2
+    assert stage2.params["min_normal_force"] == 2.0
+    assert stage2.params["require_stage15"] is True
+    reward_names = list(cfg.rewards)
+    assert reward_names.index("stair_loaded_tread_no_face_first_frame") < (
+        reward_names.index("stair_loaded_tread_face_release")
+    )
+    assert "terrain_levels" not in cfg.curriculum
+    assert cfg.scene.terrain.max_init_terrain_level == 0
+    assert play_cfg.events["a30_hard_viewer"].params == {
+        "terrain_levels": (2,),
+        "terrain_types": (0,),
+    }

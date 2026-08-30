@@ -2119,6 +2119,77 @@ def stair_new_tread_contact_after_reset(
     return newly_contacted.to(torch.float32)
 
 
+def stair_loaded_tread_no_face_first_frame(
+    env: ManagerBasedRlEnv,
+    nominal_stair_face_x: float = 0.66,
+    max_face_offset: float = 0.04,
+    num_terrain_levels: int = 3,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.36,
+    min_policy_steps: int = 3,
+    min_normal_force: float = 0.40,
+    sensor_names: tuple[str, ...] = (
+        "head_ground_contact",
+        "trunk_ground_contact",
+        "legs_ground_contact",
+        "feet_stair_contact",
+    ),
+) -> torch.Tensor:
+    """Pay once for the first loaded tread frame after releasing the face.
+
+    This is the dense contact-stage bridge between the one-frame Stage 1 tread
+    edge and the two-frame Stage 2 hold. Reset-born states are recorded as a
+    baseline and never pay, and the separate latch prevents one-frame contact
+    oscillations from farming the reward.
+    """
+
+    if min_policy_steps < 1 or min_normal_force <= 0.0:
+        raise ValueError("Policy steps and tread normal force must be positive")
+    face_contact, tread_contact, tread_force = _virtual_lip_union_contact_state(
+        env,
+        sensor_names,
+        nominal_stair_face_x=nominal_stair_face_x,
+        max_face_offset=max_face_offset,
+        num_terrain_levels=num_terrain_levels,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    stage1 = getattr(env, "_stair_contact_transfer_stage1_policy_achieved", None)
+    prior_face = getattr(env, "_stair_contact_transfer_face_seen", None)
+    if stage1 is None:
+        stage1 = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    if prior_face is None:
+        prior_face = torch.zeros_like(stage1)
+    candidate = (
+        (env.episode_length_buf >= min_policy_steps)
+        & stage1
+        & prior_face
+        & tread_contact
+        & (tread_force >= min_normal_force)
+        & ~face_contact
+    )
+    if not hasattr(env, "_stair_contact_transfer_stage15_latched"):
+        env._stair_contact_transfer_stage15_reset_baseline = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._stair_contact_transfer_stage15_latched = torch.zeros_like(
+            env._stair_contact_transfer_stage15_reset_baseline
+        )
+        env._stair_contact_transfer_stage15_policy_achieved = torch.zeros_like(
+            env._stair_contact_transfer_stage15_reset_baseline
+        )
+    fresh = env.episode_length_buf <= 1
+    env._stair_contact_transfer_stage15_reset_baseline[fresh] = candidate[fresh]
+    env._stair_contact_transfer_stage15_latched[fresh] = candidate[fresh]
+    env._stair_contact_transfer_stage15_policy_achieved[fresh] = False
+    newly_reached = candidate & ~env._stair_contact_transfer_stage15_latched
+    env._stair_contact_transfer_stage15_latched |= candidate
+    env._stair_contact_transfer_stage15_policy_achieved |= newly_reached
+    return newly_reached.to(torch.float32)
+
+
 def stair_loaded_tread_face_release(
     env: ManagerBasedRlEnv,
     nominal_stair_face_x: float = 0.66,
@@ -2130,6 +2201,7 @@ def stair_loaded_tread_face_release(
     hold_steps: int = 2,
     min_policy_steps: int = 3,
     min_normal_force: float = 0.40,
+    require_stage15: bool = False,
     sensor_names: tuple[str, ...] = (
         "head_ground_contact",
         "trunk_ground_contact",
@@ -2188,9 +2260,20 @@ def stair_loaded_tread_face_release(
     stage1 = getattr(env, "_stair_contact_transfer_stage1_policy_achieved", None)
     if stage1 is None:
         stage1 = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    if require_stage15:
+        stage15 = getattr(
+            env,
+            "_stair_contact_transfer_stage15_policy_achieved",
+            None,
+        )
+        if stage15 is None:
+            stage15 = torch.zeros_like(stage1)
+    else:
+        stage15 = torch.ones_like(stage1)
     candidate = (
         (env.episode_length_buf >= min_policy_steps)
         & stage1
+        & stage15
         & env._stair_contact_transfer_face_seen
         & tread_contact
         & (tread_force >= min_normal_force)
