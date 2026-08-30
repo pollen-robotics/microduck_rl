@@ -27,10 +27,14 @@ TASK_ID = "Mjlab-Roll-Sprint-Flat-MicroDuck"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RACE_LANE_SPACING = 0.28
 TARGET_DISTANCE_M = 20.0
-RACE_CAMERA_LOOKAT = (TARGET_DISTANCE_M / 2.0, 0.0, 0.05)
-RACE_CAMERA_DISTANCE = 17.0
+RACE_CAMERA_LOOKAT = (0.60, 0.0, 0.08)
+RACE_CAMERA_DISTANCE = 3.2
+RACE_CAMERA_FOVY = 45.0
 RACE_CAMERA_AZIMUTH = 90.0
-RACE_CAMERA_ELEVATION = -62.0
+RACE_CAMERA_ELEVATION = -45.0
+RACE_CAMERA_LEAD_M = 0.60
+RACE_CAMERA_FOLLOW_ALPHA = 0.25
+RACE_CAMERA_MAX_STEP_M = 0.08
 RACE_LINE_HEIGHT = 0.008
 RACE_LINE_RADIUS = 0.018
 SPEED_WINDOW_S = 1.0
@@ -327,6 +331,44 @@ def _project_world_points(
     return pixels, visible
 
 
+def _camera_follow_x(previous_x_m: float, robot_x_m: float) -> float:
+    """Advance a smooth, non-retreating camera target behind robot 1."""
+    if not np.isfinite(robot_x_m):
+        return previous_x_m
+    target_x_m = float(
+        np.clip(
+            robot_x_m + RACE_CAMERA_LEAD_M,
+            RACE_CAMERA_LOOKAT[0],
+            TARGET_DISTANCE_M,
+        )
+    )
+    step_m = float(
+        np.clip(
+            (target_x_m - previous_x_m) * RACE_CAMERA_FOLLOW_ALPHA,
+            0.0,
+            RACE_CAMERA_MAX_STEP_M,
+        )
+    )
+    return previous_x_m + step_m
+
+
+def _follow_first_robot(base_env: ManagerBasedRlEnv, previous_x_m: float) -> float:
+    """Travel with robot 1 in x while keeping all four lanes centered in y."""
+    renderer = base_env._offline_renderer
+    if renderer is None:
+        raise RuntimeError("Offline renderer is not initialized")
+    first_robot_x_m = float(
+        base_env.scene["robot"].data.root_link_pos_w[0, 0].item()
+    )
+    camera_x_m = _camera_follow_x(previous_x_m, first_robot_x_m)
+    renderer._cam.lookat[:] = (
+        camera_x_m,
+        RACE_CAMERA_LOOKAT[1],
+        RACE_CAMERA_LOOKAT[2],
+    )
+    return camera_x_m
+
+
 def _overlay_race_labels(
     frame: np.ndarray,
     base_env: ManagerBasedRlEnv,
@@ -363,7 +405,7 @@ def _overlay_race_labels(
         header_font = ImageFont.load_default(size=20)
 
     header = (
-        f"20 m ROLL RACE  |  t {elapsed_s:05.1f} s / 40.0 s  |  full four-lane corridor"
+        f"20 m ROLL RACE  |  t {elapsed_s:05.1f} s / 40.0 s  |  camera follows R1"
     )
     header_box = draw.textbbox((0, 0), header, font=header_font)
     header_width = header_box[2] - header_box[0]
@@ -447,6 +489,7 @@ def main() -> int:
     env_cfg.viewer.origin_type = type(env_cfg.viewer).OriginType.WORLD
     env_cfg.viewer.lookat = RACE_CAMERA_LOOKAT
     env_cfg.viewer.distance = RACE_CAMERA_DISTANCE
+    env_cfg.viewer.fovy = RACE_CAMERA_FOVY
     env_cfg.viewer.azimuth = RACE_CAMERA_AZIMUTH
     env_cfg.viewer.elevation = RACE_CAMERA_ELEVATION
     env_cfg.viewer.max_extra_envs = 3
@@ -483,6 +526,7 @@ def main() -> int:
     forward_position_history: deque[torch.Tensor] = deque(
         [previous_forward_position_m], maxlen=speed_window_steps + 1
     )
+    camera_x_m = RACE_CAMERA_LOOKAT[0]
 
     writer: subprocess.Popen[bytes] | None = None
     try:
@@ -512,6 +556,7 @@ def main() -> int:
                     base_env._roll_sprint_forward_frontier
                     - base_env._roll_sprint_forward_origin
                 ).clamp_min(0.0)
+            camera_x_m = _follow_first_robot(base_env, camera_x_m)
             if (step + 1) % args.frame_stride != 0:
                 continue
             rendered = base_env.render()

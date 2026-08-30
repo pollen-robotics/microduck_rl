@@ -116,12 +116,23 @@ def test_canonical_video_arranges_four_parallel_deterministic_race_lanes() -> No
     assert torch.allclose(projected_advance, torch.full((4,), 0.25), atol=1.0e-7)
 
 
-def test_race_camera_is_centered_down_the_shared_forward_axis() -> None:
-    assert MODULE.RACE_CAMERA_LOOKAT[0] == MODULE.TARGET_DISTANCE_M / 2.0
+def test_race_camera_is_close_and_keeps_all_lanes_centered() -> None:
+    assert MODULE.RACE_CAMERA_LOOKAT[0] == pytest.approx(0.60)
     assert MODULE.RACE_CAMERA_LOOKAT[1] == 0.0
-    assert MODULE.RACE_CAMERA_DISTANCE >= 15.0
+    assert 2.5 <= MODULE.RACE_CAMERA_DISTANCE <= 3.5
+    assert MODULE.RACE_CAMERA_FOVY == 45.0
     assert MODULE.RACE_CAMERA_AZIMUTH == 90.0
-    assert MODULE.RACE_CAMERA_ELEVATION <= -60.0
+    assert MODULE.RACE_CAMERA_ELEVATION == -45.0
+
+
+def test_follow_camera_advances_smoothly_without_retreating() -> None:
+    first = MODULE._camera_follow_x(0.60, 1.00)
+    second = MODULE._camera_follow_x(first, 1.50)
+
+    assert 0.60 < first <= 0.60 + MODULE.RACE_CAMERA_MAX_STEP_M
+    assert first < second <= first + MODULE.RACE_CAMERA_MAX_STEP_M
+    assert MODULE._camera_follow_x(second, -5.0) == second
+    assert MODULE._camera_follow_x(second, float("nan")) == second
 
 
 def test_corridor_has_four_lanes_and_spans_exactly_twenty_meters() -> None:
