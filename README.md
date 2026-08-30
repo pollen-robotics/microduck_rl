@@ -183,6 +183,20 @@ uv run --with pytest pytest tests/
 CPU-only config-invariant and reward-function regression tests — they lock in
 joint-index mappings, reward sign conventions, and NaN guards.
 
+## Blender motion validation
+
+Open Duck Blender exports native 50 Hz Microduck `.npz` motion archives. Before
+using one for imitation or reference-motion work, validate its exact 14-joint/
+15-body contract and forward kinematics against `robot_walk.xml`:
+
+```bash
+uv run scripts/validate_blender_motion.py /path/to/motion.npz
+```
+
+The command rejects reordered names, malformed or non-finite arrays, incorrect
+metadata, and body transforms that do not match a MuJoCo replay of the exported
+root pose and joint positions.
+
 ## Related projects
 
 - [microduck](https://github.com/pollen-robotics/microduck) — the Microduck project home, including the onboard runtime that runs the exported policies
