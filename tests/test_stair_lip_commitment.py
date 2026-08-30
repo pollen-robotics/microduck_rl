@@ -124,6 +124,54 @@ def test_terminal_position_objective_integrates_exactly_one_at_target():
     assert torch.isclose(rewards.sum() * env.step_dt, torch.tensor(1.0)).item()
 
 
+def test_delayed_frontier_tiers_require_new_held_post_control_crossing():
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            root_link_pos_w=torch.tensor([[0.648, 0.0, 0.190]]),
+        )
+    )
+    env = SimpleNamespace(
+        num_envs=1,
+        device="cpu",
+        episode_length_buf=torch.tensor([1]),
+        scene=_Scene(robot),
+    )
+
+    assert microduck_mdp.stair_delayed_frontier_tiers(env).item() == 0.0
+    robot.data.root_link_pos_w[:] = torch.tensor([[0.666, 0.0, 0.190]])
+    env.episode_length_buf[:] = 2
+    assert microduck_mdp.stair_delayed_frontier_tiers(env).item() == 0.0
+    env.episode_length_buf[:] = 3
+    assert microduck_mdp.stair_delayed_frontier_tiers(env).item() == 0.0
+    env.episode_length_buf[:] = 4
+    assert microduck_mdp.stair_delayed_frontier_tiers(env).item() == 250.0
+    env.episode_length_buf[:] = 5
+    assert microduck_mdp.stair_delayed_frontier_tiers(env).item() == 0.0
+
+
+def test_delayed_frontier_tiers_permanently_reject_lateral_bypass():
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            root_link_pos_w=torch.tensor([[0.640, 0.0, 0.190]]),
+        )
+    )
+    env = SimpleNamespace(
+        num_envs=1,
+        device="cpu",
+        episode_length_buf=torch.tensor([1]),
+        scene=_Scene(robot),
+    )
+
+    microduck_mdp.stair_delayed_frontier_tiers(env)
+    env.episode_length_buf[:] = 3
+    robot.data.root_link_pos_w[:] = torch.tensor([[0.661, 0.37, 0.190]])
+    assert microduck_mdp.stair_delayed_frontier_tiers(env).item() == 0.0
+    robot.data.root_link_pos_w[:] = torch.tensor([[0.666, 0.0, 0.190]])
+    for step in (4, 5, 6):
+        env.episode_length_buf[:] = step
+        assert microduck_mdp.stair_delayed_frontier_tiers(env).item() == 0.0
+
+
 def test_lip_commitment_requires_delayed_spatial_hold(monkeypatch):
     robot = SimpleNamespace(
         data=SimpleNamespace(

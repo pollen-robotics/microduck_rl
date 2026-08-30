@@ -108,6 +108,11 @@ STAIR_TARGETS = {
         "experiment": "microduck_stair_terminal_position_rsi_specialist",
         "iterations": 75,
     },
+    "specialist-frontier-tier-rsi": {
+        "task": "Mjlab-Stairs-Frontier-Tier-RSI-Specialist-MicroDuck",
+        "experiment": "microduck_stair_frontier_tier_rsi_specialist",
+        "iterations": 75,
+    },
     "specialist-tread-contact-bank": {
         "task": "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
         "experiment": "microduck_stair_tread_contact_bank_specialist",

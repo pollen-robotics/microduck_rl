@@ -2705,6 +2705,91 @@ def stair_terminal_position_objective(
     )
 
 
+def stair_delayed_frontier_tiers(
+    env: ManagerBasedRlEnv,
+    x_thresholds: tuple[float, ...] = (0.650, 0.660, 0.665),
+    tier_rewards: tuple[float, ...] = (25.0, 75.0, 150.0),
+    min_height: float = 0.175,
+    corridor_half_width: float = 0.20,
+    hold_steps: int = 2,
+    min_policy_steps: int = 3,
+    bypass_x: float = 0.660,
+    bypass_half_width: float = 0.36,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay once for held, post-control progress beyond a replay frontier.
+
+    Frontier replay rows are deliberately below the first threshold. The
+    control-step delay and per-tier latches prevent PPO from collecting a
+    reset jackpot, while cumulative tiers preserve credit for a motion that
+    crosses more than one threshold in a single control interval. A lateral
+    bypass permanently disables every unpaid tier for that episode.
+    """
+
+    if len(x_thresholds) == 0 or len(x_thresholds) != len(tier_rewards):
+        raise ValueError(
+            "Frontier thresholds and rewards must be non-empty and aligned"
+        )
+    if tuple(sorted(x_thresholds)) != x_thresholds:
+        raise ValueError("Frontier x thresholds must be ascending")
+    if any(reward <= 0.0 for reward in tier_rewards):
+        raise ValueError("Frontier tier rewards must be positive")
+    if hold_steps < 1 or min_policy_steps < 1:
+        raise ValueError("Frontier hold and policy-step delays must be positive")
+    if min(corridor_half_width, bypass_half_width) <= 0.0:
+        raise ValueError("Frontier lateral widths must be positive")
+
+    asset: Entity = env.scene[asset_cfg.name]
+    local = asset.data.root_link_pos_w - env.scene.terrain.env_origins
+    x = local[:, 0]
+    z = local[:, 2]
+    abs_y = local[:, 1].abs()
+    finite = torch.isfinite(local).all(dim=-1)
+    tier_count = len(x_thresholds)
+
+    if not hasattr(env, "_stair_delayed_frontier_tier_hold"):
+        env._stair_delayed_frontier_tier_hold = torch.zeros(
+            (env.num_envs, tier_count), dtype=torch.long, device=env.device
+        )
+        env._stair_delayed_frontier_tier_paid = torch.zeros(
+            (env.num_envs, tier_count), dtype=torch.bool, device=env.device
+        )
+        env._stair_delayed_frontier_bypassed = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+
+    fresh = env.episode_length_buf <= 1
+    env._stair_delayed_frontier_tier_hold[fresh] = 0
+    env._stair_delayed_frontier_tier_paid[fresh] = False
+    env._stair_delayed_frontier_bypassed[fresh] = False
+
+    bypass = finite & (x >= bypass_x) & (abs_y > bypass_half_width)
+    env._stair_delayed_frontier_bypassed |= bypass
+    armed = (
+        finite
+        & (env.episode_length_buf >= min_policy_steps)
+        & ~env._stair_delayed_frontier_bypassed
+    )
+    thresholds = torch.tensor(x_thresholds, dtype=x.dtype, device=x.device)
+    candidates = (
+        armed[:, None]
+        & (x[:, None] >= thresholds[None, :])
+        & (z[:, None] >= min_height)
+        & (abs_y[:, None] <= corridor_half_width)
+    )
+    env._stair_delayed_frontier_tier_hold = torch.where(
+        candidates,
+        env._stair_delayed_frontier_tier_hold + 1,
+        torch.zeros_like(env._stair_delayed_frontier_tier_hold),
+    )
+    newly_reached = (
+        env._stair_delayed_frontier_tier_hold >= hold_steps
+    ) & ~env._stair_delayed_frontier_tier_paid
+    env._stair_delayed_frontier_tier_paid |= newly_reached
+    rewards = torch.tensor(tier_rewards, dtype=x.dtype, device=x.device)
+    return torch.sum(newly_reached.to(x.dtype) * rewards[None, :], dim=-1)
+
+
 def stair_apex_or_mantle_frontier(
     env: ManagerBasedRlEnv,
     approach_start_x: float = 0.40,

@@ -453,6 +453,9 @@ class WalkerStateBankReset:
         self._late_source_episode_step_range = cfg.params.get(
             "late_source_episode_step_range"
         )
+        self._replay_fraction = float(cfg.params.get("replay_fraction", 1.0))
+        if not 0.0 <= self._replay_fraction <= 1.0:
+            raise ValueError("replay_fraction must be between zero and one")
         if not 0.0 <= self._late_fraction <= 1.0:
             raise ValueError("late_fraction must be between zero and one")
         self._eligible_rows = eligible_walk_state_rows(
@@ -544,6 +547,7 @@ class WalkerStateBankReset:
         phase_aligned_x_jitter: float = 0.0,
         late_fraction: float = 0.0,
         late_source_episode_step_range: tuple[int, int] | None = None,
+        replay_fraction: float = 1.0,
     ) -> None:
         del (
             bank_path,
@@ -566,12 +570,19 @@ class WalkerStateBankReset:
             phase_aligned_x_jitter,
             late_fraction,
             late_source_episode_step_range,
+            replay_fraction,
         )
         mode = getattr(env, "_stair_assisted_reset_mode", None)
         if mode is None:
             raise RuntimeError("Walker-state replay requires assisted reset mode tracking")
         env_ids = env_ids.to(env.device, dtype=torch.long)
         selected_ids = env_ids[mode[env_ids] == 3]
+        if self._replay_fraction < 1.0 and len(selected_ids) > 0:
+            replay_mask = (
+                torch.rand(len(selected_ids), device=env.device)
+                < self._replay_fraction
+            )
+            selected_ids = selected_ids[replay_mask]
         if not hasattr(env, "_stair_walker_bank_row"):
             env._stair_walker_bank_row = torch.full(
                 (env.num_envs,), -1, dtype=torch.long, device=env.device

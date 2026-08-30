@@ -1448,6 +1448,46 @@ def make_microduck_stair_terminal_position_rsi_env_cfg(
     return cfg
 
 
+def make_microduck_stair_frontier_tier_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A28: learn new held crossings from the measured A27 frontier."""
+
+    cfg = make_microduck_stair_terminal_position_rsi_env_cfg(play=play)
+
+    # Preserve 25% of A27's broad manufacturer-roll RSI. On the other 75%,
+    # replay exact, policy-continued frontier rows after the broad bank event so
+    # their complete physics, actuator, action, command, and delay state wins.
+    # No relocation or jitter is applied to these rows.
+    cfg.events["frontier_state_bank"] = EventTermCfg(
+        func=WalkerStateBankReset,
+        mode="reset",
+        params={
+            "bank_path": ".tmp/codex/full170-a27-frontier-diverse-state-bank.pt",
+            "replay_fraction": 0.75,
+        },
+    )
+
+    cfg.rewards["stair_terminal_position_objective"].weight = 0.0
+    cfg.rewards["stair_coupled_frontier_collocation"].weight = 0.0
+    cfg.rewards["stair_delayed_frontier_tiers"] = RewardTermCfg(
+        func=microduck_mdp.stair_delayed_frontier_tiers,
+        weight=1.0,
+        params={
+            "x_thresholds": (0.650, 0.660, 0.665),
+            "tier_rewards": (25.0, 75.0, 150.0),
+            "min_height": 0.175,
+            "corridor_half_width": 0.20,
+            "hold_steps": 2,
+            "min_policy_steps": 3,
+            "bypass_x": 0.660,
+            "bypass_half_width": 0.36,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    return cfg
+
+
 def make_microduck_stair_tread_contact_bank_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -1815,6 +1855,30 @@ MicroduckStairTerminalPositionRsiRlCfg.save_interval = 25
 MicroduckStairTerminalPositionRsiRlCfg.num_steps_per_env = 48
 MicroduckStairTerminalPositionRsiRlCfg.actor.distribution_cfg["init_std"] = 0.22
 MicroduckStairTerminalPositionRsiRlCfg.algorithm.learning_rate = 1.0e-5
+
+MicroduckStairFrontierTierRsiRlCfg = deepcopy(
+    MicroduckStairTerminalPositionRsiRlCfg
+)
+MicroduckStairFrontierTierRsiRlCfg.experiment_name = (
+    "microduck_stair_frontier_tier_rsi_specialist"
+)
+MicroduckStairFrontierTierRsiRlCfg.run_name = (
+    "microduck_stair_frontier_tier_rsi_specialist"
+)
+MicroduckStairFrontierTierRsiRlCfg.max_iterations = 75
+MicroduckStairFrontierTierRsiRlCfg.save_interval = 25
+MicroduckStairFrontierTierRsiRlCfg.num_steps_per_env = 48
+MicroduckStairFrontierTierRsiRlCfg.actor.distribution_cfg["init_std"] = 0.22
+MicroduckStairFrontierTierRsiRlCfg.algorithm.learning_rate = 1.0e-5
+MicroduckStairFrontierTierRsiRlCfg.algorithm.schedule = "fixed"
+MicroduckStairFrontierTierRsiRlCfg.algorithm.entropy_coef = 0.0002
+MicroduckStairFrontierTierRsiRlCfg.algorithm.gamma = 0.99
+MicroduckStairFrontierTierRsiRlCfg.algorithm.lam = 0.95
+MicroduckStairFrontierTierRsiRlCfg.algorithm.clip_param = 0.1
+MicroduckStairFrontierTierRsiRlCfg.algorithm.num_learning_epochs = 5
+MicroduckStairFrontierTierRsiRlCfg.algorithm.num_mini_batches = 4
+MicroduckStairFrontierTierRsiRlCfg.algorithm.desired_kl = 0.01
+MicroduckStairFrontierTierRsiRlCfg.algorithm.max_grad_norm = 0.5
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)
 MicroduckStairTreadContactBankRlCfg.experiment_name = (

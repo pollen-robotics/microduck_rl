@@ -59,6 +59,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--num-envs", type=int, default=64)
     parser.add_argument("--min-local-x", type=float, default=0.56)
     parser.add_argument("--max-local-x", type=float, default=0.64)
+    parser.add_argument(
+        "--min-local-z",
+        type=float,
+        help="Optional minimum root height for frontier-state capture.",
+    )
+    parser.add_argument(
+        "--max-abs-local-y",
+        type=float,
+        default=0.25,
+        help="Maximum absolute lateral root offset for capture.",
+    )
     parser.add_argument("--max-steps", type=int, default=8_000)
     parser.add_argument(
         "--capture-every-n-steps",
@@ -73,6 +84,14 @@ def _parse_args() -> argparse.Namespace:
         "--zero-all-command-observations",
         action="store_true",
         help="Zero actor observation slots 52:61 for manufacturer episodic policies.",
+    )
+    parser.add_argument(
+        "--preserve-command-observations",
+        action="store_true",
+        help=(
+            "Preserve all actor command observations. Required when collecting "
+            "from a stair policy that consumes route or time cues."
+        ),
     )
     parser.add_argument(
         "--standing-only-reset",
@@ -131,6 +150,11 @@ def main() -> int:
         or args.capture_every_n_steps < 0
         or args.min_tread_normal_force < 0.0
         or args.min_local_x >= args.max_local_x
+        or args.max_abs_local_y <= 0.0
+        or (
+            args.zero_all_command_observations
+            and args.preserve_command_observations
+        )
     ):
         raise SystemExit("State count, environment count, steps, and capture band are invalid")
 
@@ -170,8 +194,12 @@ def main() -> int:
             with torch.inference_mode():
                 walker_observations = observations.clone()
                 actor_observations = walker_observations["actor"].clone()
-                command_start = 52 if args.zero_all_command_observations else 55
-                actor_observations[:, command_start:61] = 0.0
+                command_start = None
+                if not args.preserve_command_observations:
+                    command_start = (
+                        52 if args.zero_all_command_observations else 55
+                    )
+                    actor_observations[:, command_start:61] = 0.0
                 walker_observations["actor"] = actor_observations
                 actions = walker(walker_observations)
                 observations, _, dones, _ = env.step(actions)
@@ -180,7 +208,7 @@ def main() -> int:
             origins = base_env.scene.terrain.env_origins
             local = robot.data.root_link_pos_w - origins
             best_local_x = max(best_local_x, float(local[:, 0].max().item()))
-            in_corridor = torch.abs(local[:, 1]) <= 0.25
+            in_corridor = torch.abs(local[:, 1]) <= args.max_abs_local_y
             if torch.any(in_corridor):
                 best_corridor_x = max(
                     best_corridor_x,
@@ -235,8 +263,10 @@ def main() -> int:
                 & (base_env.episode_length_buf > 2)
                 & (local[:, 0] >= args.min_local_x)
                 & (local[:, 0] <= args.max_local_x)
-                & (torch.abs(local[:, 1]) <= 0.25)
+                & (torch.abs(local[:, 1]) <= args.max_abs_local_y)
             )
+            if args.min_local_z is not None:
+                eligible &= local[:, 2] >= args.min_local_z
             ids = eligible.nonzero(as_tuple=False).squeeze(-1)
             remaining = args.target_states - sum(
                 int(chunk["root_qpos_local"].shape[0]) for chunk in chunks
@@ -305,6 +335,8 @@ def main() -> int:
             "walker_checkpoint": str(checkpoint),
             "walker_checkpoint_sha256": _sha256(checkpoint),
             "capture_local_x_m": [args.min_local_x, args.max_local_x],
+            "capture_min_local_z_m": args.min_local_z,
+            "capture_max_abs_local_y_m": args.max_abs_local_y,
             "riser_height_m": STANDARD_RISER_HEIGHT_M,
             "tread_depth_m": STANDARD_TREAD_DEPTH_M,
             "num_steps": STANDARD_NUM_STEPS,
@@ -316,10 +348,11 @@ def main() -> int:
             "step_dt": base_env.step_dt,
             "decimation": base_env.cfg.decimation,
             "mjlab_version": version("mjlab"),
-            "actor_command_slice_zeroed": [
-                52 if args.zero_all_command_observations else 55,
-                61,
-            ],
+            "actor_command_slice_zeroed": (
+                None
+                if args.preserve_command_observations
+                else [52 if args.zero_all_command_observations else 55, 61]
+            ),
             "capture_every_n_steps": args.capture_every_n_steps,
             "standing_only_reset": args.standing_only_reset,
             "capture_first_tread_contact": args.capture_first_tread_contact,

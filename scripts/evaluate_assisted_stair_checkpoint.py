@@ -42,6 +42,7 @@ TASK_IDS = (
     "Mjlab-Stairs-Lip-Checkpoint-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Frontier-Collocation-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Terminal-Position-RSI-Specialist-MicroDuck",
+    "Mjlab-Stairs-Frontier-Tier-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
     "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
@@ -423,6 +424,7 @@ def main() -> int:
         "Mjlab-Stairs-Lip-Checkpoint-RSI-Specialist-MicroDuck",
         "Mjlab-Stairs-Frontier-Collocation-RSI-Specialist-MicroDuck",
         "Mjlab-Stairs-Terminal-Position-RSI-Specialist-MicroDuck",
+        "Mjlab-Stairs-Frontier-Tier-RSI-Specialist-MicroDuck",
     }:
         reset_modes = ROULADE_BANK_RESET_MODES
     elif args.task == "Mjlab-Stairs-Apex-Mantle-Specialist-MicroDuck":
@@ -887,6 +889,8 @@ def main() -> int:
             local = robot.data.root_link_pos_w - origins
             max_x = torch.maximum(max_x, torch.nan_to_num(local[:, 0], nan=-torch.inf))
             max_z = torch.maximum(max_z, torch.nan_to_num(local[:, 2], nan=-torch.inf))
+            if completed_trials >= args.episodes:
+                break
     finally:
         env.close()
 
