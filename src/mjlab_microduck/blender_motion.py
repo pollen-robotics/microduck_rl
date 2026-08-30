@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 
 import mujoco
@@ -65,6 +66,9 @@ def validate_motion(
         missing = REQUIRED_KEYS - set(archive.files)
         if missing:
             raise MotionValidationError(f"archive is missing keys: {sorted(missing)}")
+        extra = set(archive.files) - REQUIRED_KEYS
+        if extra:
+            raise MotionValidationError(f"archive has unexpected keys: {sorted(extra)}")
         if _scalar(archive["fps"], "fps") != 50:
             raise MotionValidationError("fps must be 50")
         if _scalar(archive["schema_version"], "schema_version") != 1:
@@ -79,6 +83,18 @@ def validate_motion(
             raise MotionValidationError(
                 f"body_names do not match canonical order: {body_names!r}"
             )
+        hashes = np.asarray(archive["source_hashes_json"])
+        if hashes.shape != (1,) or hashes.dtype.kind not in "US":
+            raise MotionValidationError("source_hashes_json must contain one JSON string")
+        try:
+            hash_payload = json.loads(str(hashes[0]))
+        except json.JSONDecodeError as exc:
+            raise MotionValidationError("source_hashes_json is not valid JSON") from exc
+        if not isinstance(hash_payload, dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in hash_payload.items()
+        ):
+            raise MotionValidationError("source_hashes_json must encode a string map")
         joint_pos = np.asarray(archive["joint_pos"], dtype=np.float64)
         body_pos = np.asarray(archive["body_pos_w"], dtype=np.float64)
         body_quat = np.asarray(archive["body_quat_w"], dtype=np.float64)
@@ -97,6 +113,12 @@ def validate_motion(
                 raise MotionValidationError(f"{name} must have shape {shape}, got {values.shape}")
             if not np.isfinite(values).all():
                 raise MotionValidationError(f"{name} contains non-finite values")
+        quaternion_norms = np.linalg.norm(body_quat, axis=2)
+        if np.any(quaternion_norms < 1e-12):
+            frame, body = (int(value) for value in np.argwhere(quaternion_norms < 1e-12)[0])
+            raise MotionValidationError(
+                f"body_quat_w has zero quaternion at frame {frame}, body {body}"
+            )
 
     data = mujoco.MjData(model)
     max_position_error = 0.0
@@ -106,10 +128,7 @@ def validate_motion(
         data.qpos[:] = 0.0
         data.qpos[:3] = body_pos[frame, 0]
         root_quat = body_quat[frame, 0]
-        norm = np.linalg.norm(root_quat)
-        if norm < 1e-12:
-            raise MotionValidationError(f"body_quat_w has zero root quaternion at frame {frame}")
-        data.qpos[3:7] = root_quat / norm
+        data.qpos[3:7] = root_quat / np.linalg.norm(root_quat)
         data.qpos[joint_qpos_addresses] = joint_pos[frame]
         mujoco.mj_forward(model, data)
         position_error = np.linalg.norm(data.xpos[1:] - body_pos[frame], axis=1)

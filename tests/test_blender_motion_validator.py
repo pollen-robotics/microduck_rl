@@ -69,3 +69,32 @@ def test_rejects_wrong_joint_order(tmp_path):
     np.savez_compressed(invalid, **archive)
     with pytest.raises(MotionValidationError, match="joint_names"):
         validate_motion(invalid)
+
+
+def test_rejects_nonroot_zero_quaternion(tmp_path):
+    source = _valid_archive(tmp_path / "valid.npz")
+    with np.load(source) as loaded:
+        archive = {key: loaded[key] for key in loaded.files}
+    archive["body_quat_w"] = archive["body_quat_w"].copy()
+    archive["body_quat_w"][0, -1] = 0.0
+    invalid = tmp_path / "zero-quat.npz"
+    np.savez_compressed(invalid, **archive)
+    with pytest.raises(MotionValidationError, match="zero quaternion"):
+        validate_motion(invalid)
+
+
+def test_rejects_extra_keys_and_invalid_source_hash_metadata(tmp_path):
+    source = _valid_archive(tmp_path / "valid.npz")
+    with np.load(source) as loaded:
+        archive = {key: loaded[key] for key in loaded.files}
+    archive["surprise"] = np.array([1])
+    extra = tmp_path / "extra.npz"
+    np.savez_compressed(extra, **archive)
+    with pytest.raises(MotionValidationError, match="unexpected keys"):
+        validate_motion(extra)
+    archive.pop("surprise")
+    archive["source_hashes_json"] = np.asarray(["not-json"])
+    malformed = tmp_path / "bad-hashes.npz"
+    np.savez_compressed(malformed, **archive)
+    with pytest.raises(MotionValidationError, match="source_hashes_json"):
+        validate_motion(malformed)
