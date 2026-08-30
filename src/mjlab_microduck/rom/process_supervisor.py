@@ -104,8 +104,14 @@ class RuntimeProcessSupervisor:
         terminate_timeout_s: float = 0.25,
         queue_size: int = 8,
         terminal_callback: Callable[[TerminalPayload], None] | None = None,
+        terminal_retry_delay_s: float = 0.05,
+        terminal_retry_limit: int = 3,
     ) -> None:
-        if min(operation_timeout_s, terminate_timeout_s) <= 0 or queue_size <= 0:
+        if (
+            min(operation_timeout_s, terminate_timeout_s, terminal_retry_delay_s) <= 0
+            or queue_size <= 0
+            or terminal_retry_limit <= 0
+        ):
             raise ValueError("supervisor bounds must be positive")
         self._bundle_root = str(bundle_root)
         self._bundle_digest = bundle_digest
@@ -113,6 +119,12 @@ class RuntimeProcessSupervisor:
         self._operation_timeout = operation_timeout_s
         self._terminate_timeout = terminate_timeout_s
         self._terminal_callback = terminal_callback
+        self._terminal_retry_delay = terminal_retry_delay_s
+        self._terminal_retry_limit = terminal_retry_limit
+        # One callback, one queued delivery, and one owner-held pending delivery
+        # bound the number of acknowledgements that can race owner scheduling.
+        self._terminal_ack_queue: queue.Queue[tuple[int, bool]] = queue.Queue(maxsize=3)
+        self._owner_shutdown = threading.Event()
         self._terminal_queue: queue.Queue[_TerminalDelivery | None] | None = None
         self._terminal_thread: threading.Thread | None = None
         self._terminal_shutdown_sent = False
@@ -139,8 +151,15 @@ class RuntimeProcessSupervisor:
         self._terminal_delivery_sequence = 0
         self._terminal_delivery_outstanding: int | None = None
         self._pending_terminal_delivery: _TerminalDelivery | None = None
+        self._outstanding_terminal_delivery: _TerminalDelivery | None = None
+        self._terminal_delivery_attempts = 0
+        self._terminal_retry_not_before = 0.0
         self._trace: list[str] = []
         self._closed = False
+        self._closing = threading.Event()
+        self._close_lock = threading.Lock()
+        self._submission_lock = threading.Lock()
+        self._close_intent: _Intent | None = None
         self._thread = threading.Thread(
             target=self._run, name="microduck-runtime-supervisor", daemon=True
         )
@@ -159,7 +178,13 @@ class RuntimeProcessSupervisor:
                 success = False
             else:
                 success = True
-            self._queue.put(_Intent(kind="delivery", args=(delivery.sequence, success)))
+            if self._owner_shutdown.is_set():
+                return
+            try:
+                self._terminal_ack_queue.put_nowait((delivery.sequence, success))
+            except queue.Full:
+                self._record("TERMINAL_ACK_CAPACITY_VIOLATION")
+                return
 
     def _default_launch(self, socket_fd: int) -> ChildLaunch:
         allowed = {
@@ -237,18 +262,26 @@ class RuntimeProcessSupervisor:
         ):
             return
         if self._thread.is_alive():
-            try:
-                self._submit("close")
-            except SupervisorUnavailable as exc:
-                raise SupervisorUnavailable(
-                    "close could not reach the process owner"
-                ) from exc
+            self._claim_close()
             self._thread.join(self._operation_timeout + self._terminate_timeout + 1)
             if self._thread.is_alive() or self.snapshot().pid is not None:
                 raise SupervisorUnavailable(
                     "close did not prove owner termination and exact reap"
                 )
         self._shutdown_terminal_delivery()
+
+    def _claim_close(self) -> None:
+        with self._submission_lock, self._close_lock:
+            intent = self._close_intent
+            if intent is None:
+                intent = _Intent(kind="close")
+                self._close_intent = intent
+                self._closing.set()
+        wait_bound = self._operation_timeout * 3 + self._terminate_timeout * 2 + 1
+        if not intent.done.wait(wait_bound):
+            raise SupervisorUnavailable("close could not reach the process owner")
+        if intent.error is not None:
+            raise SupervisorUnavailable("close process containment failed") from intent.error
 
     def _shutdown_terminal_delivery(self) -> None:
         thread = self._terminal_thread
@@ -271,13 +304,14 @@ class RuntimeProcessSupervisor:
         self._record("TERMINAL_WORKER_TERMINATED")
 
     def _submit(self, kind: IntentKind, *args: object) -> Any:
-        if self._closed and kind != "close":
-            raise SupervisorUnavailable("supervisor is closed")
-        intent = _Intent(kind=kind, args=args)  # type: ignore[arg-type]
-        try:
-            self._queue.put(intent, timeout=self._operation_timeout)
-        except queue.Full as exc:
-            raise SupervisorUnavailable("supervisor intent queue is full") from exc
+        with self._submission_lock:
+            if (self._closed or self._closing.is_set()) and kind != "close":
+                raise SupervisorUnavailable("supervisor is closed")
+            intent = _Intent(kind=kind, args=args)  # type: ignore[arg-type]
+            try:
+                self._queue.put(intent, timeout=self._operation_timeout)
+            except queue.Full as exc:
+                raise SupervisorUnavailable("supervisor intent queue is full") from exc
         wait_bound = self._operation_timeout * 3 + self._terminate_timeout * 2 + 1
         if not intent.done.wait(wait_bound):
             raise SupervisorUnavailable(
@@ -324,6 +358,19 @@ class RuntimeProcessSupervisor:
 
     def _run(self) -> None:
         while True:
+            self._drain_terminal_acks()
+            if self._closing.is_set():
+                intent = self._close_intent
+                assert intent is not None
+                try:
+                    intent.result = self._dispatch(intent)
+                except Exception as exc:  # noqa: BLE001 - close wakes its owner
+                    intent.error = exc
+                finally:
+                    intent.done.set()
+                    self._fail_queued_intents()
+                    self._owner_shutdown.set()
+                return
             try:
                 intent = self._queue.get(timeout=0.01)
             except queue.Empty:
@@ -336,8 +383,23 @@ class RuntimeProcessSupervisor:
                 intent.error = exc
             finally:
                 intent.done.set()
-            if intent.kind == "close":
+
+    def _fail_queued_intents(self) -> None:
+        while True:
+            try:
+                intent = self._queue.get_nowait()
+            except queue.Empty:
                 return
+            intent.error = SupervisorUnavailable("supervisor close claimed ownership")
+            intent.done.set()
+
+    def _drain_terminal_acks(self) -> None:
+        while True:
+            try:
+                sequence, success = self._terminal_ack_queue.get_nowait()
+            except queue.Empty:
+                return
+            self._complete_terminal_delivery(sequence, success)
 
     def _dispatch(self, intent: _Intent) -> Any:
         if intent.kind == "ready":
@@ -642,6 +704,9 @@ class RuntimeProcessSupervisor:
         self._terminal_delivery_sequence += 1
         delivery = _TerminalDelivery(self._terminal_delivery_sequence, terminal)
         self._terminal_delivery_outstanding = delivery.sequence
+        self._outstanding_terminal_delivery = delivery
+        self._terminal_delivery_attempts = 0
+        self._terminal_retry_not_before = 0.0
         self._pending_terminal_delivery = delivery
         self._flush_pending_terminal()
 
@@ -650,20 +715,31 @@ class RuntimeProcessSupervisor:
         terminal_queue = self._terminal_queue
         if delivery is None or terminal_queue is None:
             return
+        if time.monotonic() < self._terminal_retry_not_before:
+            return
         try:
             terminal_queue.put_nowait(delivery)
         except queue.Full:
             return
         self._pending_terminal_delivery = None
+        self._terminal_delivery_attempts += 1
 
     def _complete_terminal_delivery(self, sequence: int, success: bool) -> None:
         if sequence != self._terminal_delivery_outstanding:
             self._flush_pending_terminal()
             return
         if not success:
-            self._record("TERMINAL_DELIVERY_REQUIRED")
+            self._record("TERMINAL_DELIVERY_RETRY")
+            delivery = self._outstanding_terminal_delivery
+            if delivery is None or self._terminal_delivery_attempts >= self._terminal_retry_limit:
+                self._record("TERMINAL_DELIVERY_PERMANENT_FAILURE")
+                return
+            self._pending_terminal_delivery = delivery
+            self._terminal_retry_not_before = time.monotonic() + self._terminal_retry_delay
             return
         self._terminal_delivery_outstanding = None
+        self._outstanding_terminal_delivery = None
+        self._pending_terminal_delivery = None
         self._publish(
             self.snapshot().state, slot=True, delivery_outstanding=False
         )

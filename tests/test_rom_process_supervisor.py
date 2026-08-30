@@ -24,6 +24,7 @@ from mjlab_microduck.rom.process_supervisor import (
     SupervisorOperationError,
     SupervisorTaskTerminalized,
     SupervisorUnavailable,
+    _Intent,
     _TerminalDelivery,
 )
 from mjlab_microduck.rom.supervisor_state import SupervisorState
@@ -284,6 +285,124 @@ def test_terminal_callback_saturation_blocks_next_task_until_delivery_ack() -> N
     finally:
         release.set()
         supervisor.close()
+
+
+def test_throw_once_terminal_callback_retries_identical_payload_before_reuse() -> None:
+    received: list[TerminalPayload] = []
+    first_failed = threading.Event()
+
+    def callback(payload: TerminalPayload) -> None:
+        received.append(payload)
+        if len(received) == 1:
+            first_failed.set()
+            raise RuntimeError("transient")
+
+    supervisor, launch = _supervisor(
+        "terminal-event", terminal_callback=callback, terminal_retry_delay_s=0.05
+    )
+    try:
+        supervisor.ensure_ready()
+        supervisor.start(_request())
+        peer = _receive_gate(launch, b"STARTED")
+        peer.sendall(b"EMIT")
+        assert first_failed.wait(timeout=1)
+        assert supervisor.readiness() is False
+        with pytest.raises(SupervisorUnavailable):
+            supervisor.start(_request())
+        deadline = time.monotonic() + 2
+        while not supervisor.readiness() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(received) == 2
+        assert received[0] == received[1] == supervisor.snapshot().cached_terminal
+        assert supervisor.snapshot().terminal_delivery_outstanding is False
+        assert supervisor.readiness() is True
+    finally:
+        supervisor.close()
+
+
+def test_permanent_terminal_callback_failure_remains_bounded_and_fail_closed() -> None:
+    received: list[TerminalPayload] = []
+
+    def callback(payload: TerminalPayload) -> None:
+        received.append(payload)
+        raise RuntimeError("permanent")
+
+    supervisor, launch = _supervisor(
+        "terminal-event",
+        terminal_callback=callback,
+        terminal_retry_delay_s=0.02,
+        terminal_retry_limit=2,
+    )
+    try:
+        supervisor.ensure_ready()
+        supervisor.start(_request())
+        peer = _receive_gate(launch, b"STARTED")
+        peer.sendall(b"EMIT")
+        deadline = time.monotonic() + 2
+        while "TERMINAL_DELIVERY_PERMANENT_FAILURE" not in supervisor.trace and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(received) == 2
+        assert received[0] == received[1] == supervisor.snapshot().cached_terminal
+        assert supervisor.snapshot().terminal_delivery_outstanding is True
+        assert supervisor.readiness() is False
+        with pytest.raises(SupervisorUnavailable):
+            supervisor.start(_request())
+    finally:
+        supervisor.close()
+
+
+def test_full_intent_queue_concurrent_close_cannot_strand_callback_ack() -> None:
+    callback_entered = threading.Event()
+    callback_release = threading.Event()
+    owner_blocked = threading.Event()
+    owner_release = threading.Event()
+
+    def callback(_payload: TerminalPayload) -> None:
+        callback_entered.set()
+        callback_release.wait(timeout=2)
+
+    supervisor, launch = _supervisor(
+        "normal", queue_size=1, operation_timeout_s=2.0, terminal_callback=callback
+    )
+    supervisor.start(_request())
+    supervisor.stop(TASK_ID, "CANCELLED")
+    assert callback_entered.wait(timeout=1)
+    original = supervisor._complete_terminal_delivery
+
+    def gated(sequence: int, success: bool) -> None:
+        if sequence == 999:
+            owner_blocked.set()
+            owner_release.wait(timeout=2)
+            return
+        original(sequence, success)
+
+    supervisor._complete_terminal_delivery = gated  # type: ignore[method-assign]
+    blocker = _Intent(kind="delivery", args=(999, True))
+    supervisor._queue.put_nowait(blocker)
+    assert owner_blocked.wait(timeout=1)
+    queued = _Intent(kind="ready")
+    supervisor._queue.put_nowait(queued)
+    errors: list[BaseException] = []
+
+    def close() -> None:
+        try:
+            supervisor.close()
+        except BaseException as exc:  # noqa: BLE001 - test captures close failure
+            errors.append(exc)
+
+    closer = threading.Thread(target=close)
+    closer.start()
+    callback_release.set()
+    owner_release.set()
+    closer.join(timeout=4)
+    assert not closer.is_alive()
+    assert errors == []
+    assert queued.done.wait(timeout=1)
+    assert isinstance(queued.error, SupervisorUnavailable)
+    assert not supervisor.terminal_delivery_alive
+    assert supervisor.snapshot().pid is None
+    assert launch.test_peer is not None
+    launch.test_peer.close()
 
 
 @pytest.mark.parametrize("mode", ["duplicate-event", "stale-event", "malformed-event"])
