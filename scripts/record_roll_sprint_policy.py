@@ -193,6 +193,46 @@ def _arrange_recovery_montage(
     )
 
 
+def _refresh_manual_start_state(base_env: ManagerBasedRlEnv) -> None:
+    """Refresh sensors and delayed observations after a manual pose."""
+    env_ids = torch.arange(
+        base_env.num_envs, device=base_env.device, dtype=torch.long
+    )
+    base_env.sim.sense()
+    base_env.observation_manager.reset(env_ids)
+    base_env.obs_buf = base_env.observation_manager.compute(update_history=True)
+
+
+def _load_policy_then_arrange_start(
+    *,
+    base_env: ManagerBasedRlEnv,
+    agent_cfg,
+    task_id: str,
+    checkpoint: Path,
+    device: str,
+    recovery_montage: bool,
+    seed: int,
+):
+    """Load inference first, then apply the final deterministic rollout state."""
+    env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
+    runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
+    runner = runner_cls(env, asdict(agent_cfg), device=device)
+    runner.load(
+        str(checkpoint),
+        load_cfg={"actor": True},
+        strict=True,
+        map_location=device,
+    )
+    policy = runner.get_inference_policy(device=device)
+    if recovery_montage:
+        _arrange_recovery_montage(base_env, seed=seed)
+    else:
+        _arrange_race_start(base_env)
+        _install_race_corridor_visualizer(base_env)
+    _refresh_manual_start_state(base_env)
+    return env, policy
+
+
 def _credited_average_speed_mps(valid_distance_m: float, elapsed_s: float) -> float:
     """Return finish-relevant average speed from credited frontier only."""
     if not math.isfinite(valid_distance_m) or not math.isfinite(elapsed_s):
@@ -660,21 +700,15 @@ def main() -> int:
         device=args.device,
         render_mode="rgb_array",
     )
-    if args.recovery_montage:
-        _arrange_recovery_montage(base_env, seed=args.seed)
-    else:
-        _arrange_race_start(base_env)
-        _install_race_corridor_visualizer(base_env)
-    env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
-    runner_cls = load_runner_cls(args.task_id) or MjlabOnPolicyRunner
-    runner = runner_cls(env, asdict(agent_cfg), device=args.device)
-    runner.load(
-        str(checkpoint),
-        load_cfg={"actor": True},
-        strict=True,
-        map_location=args.device,
+    env, policy = _load_policy_then_arrange_start(
+        base_env=base_env,
+        agent_cfg=agent_cfg,
+        task_id=args.task_id,
+        checkpoint=checkpoint,
+        device=args.device,
+        recovery_montage=args.recovery_montage,
+        seed=args.seed,
     )
-    policy = runner.get_inference_policy(device=args.device)
     camera_state = CameraFollowState(RACE_CAMERA_LOOKAT[0])
     leader_index = 0
 

@@ -1112,15 +1112,11 @@ def _run_recovery_battery(
         # active, so subsequent resets must mutate those buffers in the same
         # mode.  Keeping the deterministic recovery arrangement in the scope
         # also avoids mixing inference and normal tensors between cases.
-        with torch.inference_mode():
-            env.reset()
-            microduck_mdp.arrange_roll_sprint_recovery_start(
-                base_env,
-                RACE_LANE_SPACING,
-                seed=seed,
-                orientations=RECOVERY_ORIENTATIONS,
-            )
-            initial_course_lateral = base_env.scene.terrain.env_origins[:, 1].clone()
+        initial_course_lateral = _reset_and_arrange_recovery_case(
+            base_env=base_env,
+            env=env,
+            seed=seed,
+        )
         alive = torch.ones(4, dtype=torch.bool, device=base_env.device)
         nan_seen = torch.zeros_like(alive)
         out_of_bounds = torch.zeros_like(alive)
@@ -1231,6 +1227,25 @@ def _run_recovery_battery(
     return cases
 
 
+def _reset_and_arrange_recovery_case(
+    *,
+    base_env: ManagerBasedRlEnv,
+    env: RslRlVecEnvWrapper,
+    seed: int,
+) -> torch.Tensor:
+    """Reset, arrange, and refresh one deterministic recovery battery seed."""
+    with torch.inference_mode():
+        env.reset()
+        microduck_mdp.arrange_roll_sprint_recovery_start(
+            base_env,
+            RACE_LANE_SPACING,
+            seed=seed,
+            orientations=RECOVERY_ORIENTATIONS,
+        )
+        _refresh_manual_start_state(base_env)
+        return base_env.scene.terrain.env_origins[:, 1].clone()
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", type=Path)
@@ -1247,6 +1262,81 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--recovery-duration", type=float, default=RECOVERY_DURATION_S)
     return parser.parse_args()
+
+
+def _refresh_manual_start_state(base_env: ManagerBasedRlEnv) -> None:
+    """Refresh sensors and delayed observations after a manual pose."""
+    env_ids = torch.arange(
+        base_env.num_envs, device=base_env.device, dtype=torch.long
+    )
+    base_env.sim.sense()
+    base_env.observation_manager.reset(env_ids)
+    base_env.obs_buf = base_env.observation_manager.compute(update_history=True)
+
+
+def _load_policy_then_arrange_race(
+    *,
+    base_env: ManagerBasedRlEnv,
+    agent_cfg,
+    checkpoint: Path,
+    device: str,
+):
+    """Load inference first, then apply the final canonical race state."""
+    env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
+    runner_cls = load_runner_cls(TASK_ID) or MjlabOnPolicyRunner
+    runner = runner_cls(env, asdict(agent_cfg), device=device)
+    runner.load(
+        str(checkpoint),
+        load_cfg={"actor": True},
+        strict=True,
+        map_location=device,
+    )
+    policy = runner.get_inference_policy(device=device)
+    race_origins = microduck_mdp.arrange_roll_sprint_race_start(
+        base_env, RACE_LANE_SPACING
+    )
+    _refresh_manual_start_state(base_env)
+    return env, policy, race_origins
+
+
+def _canonical_race_alignment_pass(
+    *,
+    forward_starts: torch.Tensor,
+    lateral_starts: torch.Tensor,
+    race_origins: torch.Tensor,
+    reward_headings: torch.Tensor,
+    body_yaws: torch.Tensor,
+    reward_forward_origins: torch.Tensor,
+    reward_course_lateral: torch.Tensor,
+    reward_course_centers: torch.Tensor,
+) -> bool:
+    """Validate the actual post-wrapper robot state used by the race rollout."""
+    expected_lateral = torch.tensor(
+        [-0.42, -0.14, 0.14, 0.42],
+        device=race_origins.device,
+        dtype=race_origins.dtype,
+    )
+    expected_headings = torch.tensor(
+        [[1.0, 0.0]] * 4,
+        device=reward_headings.device,
+        dtype=reward_headings.dtype,
+    )
+    return bool(
+        torch.allclose(
+            forward_starts, torch.zeros_like(forward_starts), atol=1.0e-7
+        )
+        and torch.allclose(race_origins[:, 1], expected_lateral, atol=1.0e-7)
+        and torch.allclose(lateral_starts, expected_lateral, atol=1.0e-7)
+        and torch.allclose(reward_headings, expected_headings, atol=1.0e-7)
+        and torch.allclose(body_yaws, torch.zeros_like(body_yaws), atol=1.0e-7)
+        and torch.allclose(reward_forward_origins, forward_starts, atol=1.0e-7)
+        and torch.allclose(reward_course_lateral, expected_lateral, atol=1.0e-7)
+        and torch.allclose(
+            reward_course_centers,
+            torch.zeros_like(reward_course_centers),
+            atol=1.0e-7,
+        )
+    )
 
 
 def main() -> int:
@@ -1282,49 +1372,35 @@ def main() -> int:
     reset_cfg.params["yaw_range"] = (0.0, 0.0)
 
     base_env = ManagerBasedRlEnv(cfg=env_cfg, device=args.device, render_mode=None)
-    race_origins = microduck_mdp.arrange_roll_sprint_race_start(
-        base_env, RACE_LANE_SPACING
+    env, policy, race_origins = _load_policy_then_arrange_race(
+        base_env=base_env,
+        agent_cfg=agent_cfg,
+        checkpoint=checkpoint,
+        device=args.device,
     )
     robot = base_env.scene["robot"]
     race_headings = base_env._roll_sprint_heading_w.clone()
     race_forward_starts = microduck_mdp._roll_sprint_forward_position(
         base_env, robot, race_headings
     )
-    expected_lane_centers = torch.tensor(
-        [-0.42, -0.14, 0.14, 0.42],
-        device=race_origins.device,
-        dtype=race_origins.dtype,
+    race_lateral_starts = microduck_mdp._roll_sprint_lateral_position(
+        base_env, robot, race_headings
     )
+    race_forward_origins = base_env._roll_sprint_forward_origin.clone()
+    race_course_lateral = base_env._roll_sprint_course_lateral_position.clone()
+    race_course_centers = base_env._roll_sprint_course_center_xy_w.clone()
     race_body_headings = heading_from_quat(robot.data.root_link_quat_w)
     race_yaws = torch.atan2(race_body_headings[:, 1], race_body_headings[:, 0])
-    race_alignment_pass = bool(
-        torch.allclose(
-            race_forward_starts,
-            torch.zeros_like(race_forward_starts),
-            atol=1.0e-7,
-        )
-        and torch.allclose(race_origins[:, 1], expected_lane_centers, atol=1.0e-7)
-        and torch.allclose(
-            race_headings,
-            torch.tensor(
-                [[1.0, 0.0]] * 4,
-                device=race_headings.device,
-                dtype=race_headings.dtype,
-            ),
-            atol=1.0e-7,
-        )
-        and torch.allclose(race_yaws, torch.zeros_like(race_yaws), atol=1.0e-7)
+    race_alignment_pass = _canonical_race_alignment_pass(
+        forward_starts=race_forward_starts,
+        lateral_starts=race_lateral_starts,
+        race_origins=race_origins,
+        reward_headings=race_headings,
+        body_yaws=race_yaws,
+        reward_forward_origins=race_forward_origins,
+        reward_course_lateral=race_course_lateral,
+        reward_course_centers=race_course_centers,
     )
-    env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
-    runner_cls = load_runner_cls(TASK_ID) or MjlabOnPolicyRunner
-    runner = runner_cls(env, asdict(agent_cfg), device=args.device)
-    runner.load(
-        str(checkpoint),
-        load_cfg={"actor": True},
-        strict=True,
-        map_location=args.device,
-    )
-    policy = runner.get_inference_policy(device=args.device)
     head_ids, _ = robot.find_bodies("jaw_soft")
     head_id = head_ids[0]
     auditor = RollCycleAuditor(
@@ -1384,7 +1460,7 @@ def main() -> int:
 
     race_summary = auditor.summary(args.duration)
     report: dict[str, object] = {
-        "schema_version": 6,
+        "schema_version": 7,
         "task": TASK_ID,
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": _sha256(checkpoint),
@@ -1395,8 +1471,12 @@ def main() -> int:
             "seed": env_cfg.seed,
             "projected_forward_start_m": race_forward_starts.cpu().tolist(),
             "lane_center_y_m": race_origins[:, 1].cpu().tolist(),
+            "projected_lateral_start_m": race_lateral_starts.cpu().tolist(),
             "body_yaw_rad": race_yaws.cpu().tolist(),
             "reward_heading_xy": race_headings.cpu().tolist(),
+            "reward_forward_origin_m": race_forward_origins.cpu().tolist(),
+            "reward_course_lateral_m": race_course_lateral.cpu().tolist(),
+            "reward_course_center_xy_m": race_course_centers.cpu().tolist(),
             "shared_road_boundary_y_m": [-ROAD_HALF_WIDTH_M, ROAD_HALF_WIDTH_M],
             "shared_road_width_m": 2.0 * ROAD_HALF_WIDTH_M,
             "alignment_pass": race_alignment_pass,

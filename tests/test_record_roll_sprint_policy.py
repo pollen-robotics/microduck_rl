@@ -116,6 +116,130 @@ def test_canonical_video_arranges_four_parallel_deterministic_race_lanes() -> No
     assert torch.allclose(projected_advance, torch.full((4,), 0.25), atol=1.0e-7)
 
 
+def test_policy_load_precedes_final_race_arrangement_and_observation_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    base_env = SimpleNamespace(
+        forward=torch.full((4,), 9.0),
+        lateral=torch.full((4,), 9.0),
+        yaw=torch.full((4,), 1.0),
+        heading=torch.zeros((4, 2)),
+        reward_heading=torch.zeros((4, 2)),
+    )
+
+    class FakeWrapper:
+        def __init__(self, env, *, clip_actions) -> None:
+            assert env is base_env
+            assert clip_actions == 1.0
+            events.append("wrapper_reset")
+            env.forward.fill_(7.0)
+            env.lateral.fill_(7.0)
+            env.yaw.fill_(0.7)
+
+    class FakeRunner:
+        def __init__(self, env, cfg, *, device) -> None:
+            assert isinstance(env, FakeWrapper)
+            assert cfg == {}
+            assert device == "cpu"
+
+        def load(self, path, *, load_cfg, strict, map_location) -> None:
+            assert Path(path).name == "model_0.pt"
+            assert load_cfg == {"actor": True}
+            assert strict
+            assert map_location == "cpu"
+            events.append("policy_load")
+
+        def get_inference_policy(self, *, device):
+            assert device == "cpu"
+            events.append("policy_ready")
+            return "policy"
+
+    expected_lateral = torch.tensor([-0.42, -0.14, 0.14, 0.42])
+
+    def arrange(env) -> None:
+        events.append("arrange")
+        env.forward.zero_()
+        env.lateral.copy_(expected_lateral)
+        env.yaw.zero_()
+        env.heading[:] = torch.tensor([1.0, 0.0])
+
+    def refresh(env) -> None:
+        events.append("refresh")
+        env.reward_heading.copy_(env.heading)
+
+    checkpoint = tmp_path / "model_0.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    monkeypatch.setattr(MODULE, "RslRlVecEnvWrapper", FakeWrapper)
+    monkeypatch.setattr(MODULE, "load_runner_cls", lambda _task: FakeRunner)
+    monkeypatch.setattr(MODULE, "asdict", lambda _cfg: {})
+    monkeypatch.setattr(MODULE, "_arrange_race_start", arrange)
+    monkeypatch.setattr(
+        MODULE,
+        "_install_race_corridor_visualizer",
+        lambda _env: events.append("corridor"),
+    )
+    monkeypatch.setattr(MODULE, "_refresh_manual_start_state", refresh)
+
+    env, policy = MODULE._load_policy_then_arrange_start(
+        base_env=base_env,
+        agent_cfg=SimpleNamespace(clip_actions=1.0),
+        task_id="task",
+        checkpoint=checkpoint,
+        device="cpu",
+        recovery_montage=False,
+        seed=0,
+    )
+
+    assert isinstance(env, FakeWrapper)
+    assert policy == "policy"
+    assert events == [
+        "wrapper_reset",
+        "policy_load",
+        "policy_ready",
+        "arrange",
+        "corridor",
+        "refresh",
+    ]
+    assert torch.equal(base_env.forward, torch.zeros(4))
+    assert torch.allclose(base_env.lateral, expected_lateral)
+    assert torch.equal(base_env.yaw, torch.zeros(4))
+    assert torch.equal(base_env.heading, torch.tensor([[1.0, 0.0]] * 4))
+    assert torch.equal(base_env.reward_heading, base_env.heading)
+
+
+def test_manual_start_refresh_rebuilds_cached_observations() -> None:
+    events: list[str] = []
+
+    class Sim:
+        def sense(self) -> None:
+            events.append("sense")
+
+    class ObservationManager:
+        def reset(self, env_ids) -> None:
+            assert torch.equal(env_ids, torch.arange(4))
+            events.append("obs_reset")
+
+        def compute(self, *, update_history):
+            assert update_history
+            events.append("obs_compute")
+            return {"actor": torch.ones(4, 61)}
+
+    env = SimpleNamespace(
+        num_envs=4,
+        device=torch.device("cpu"),
+        sim=Sim(),
+        observation_manager=ObservationManager(),
+        obs_buf={"actor": torch.zeros(4, 61)},
+    )
+
+    MODULE._refresh_manual_start_state(env)
+
+    assert events == ["sense", "obs_reset", "obs_compute"]
+    assert torch.equal(env.obs_buf["actor"], torch.ones(4, 61))
+
+
 def test_race_camera_is_close_and_keeps_all_lanes_centered() -> None:
     assert MODULE.RACE_CAMERA_LOOKAT[0] == pytest.approx(0.60)
     assert MODULE.RACE_CAMERA_LOOKAT[1] == 0.0
@@ -202,6 +326,66 @@ def test_recovery_montage_uses_all_four_deterministic_orientations(
     assert MODULE._recovery_header_text(11.5, 12.0) == (
         "SELF-RIGHT -> REPOSITION -> REROLL  |  t 011.5 s / 12.0 s"
     )
+
+
+def test_recovery_montage_is_arranged_after_policy_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    base_env = object()
+
+    class FakeWrapper:
+        def __init__(self, env, *, clip_actions) -> None:
+            assert env is base_env
+            assert clip_actions == 1.0
+            events.append("wrapper_reset")
+
+    class FakeRunner:
+        def __init__(self, env, cfg, *, device) -> None:
+            assert isinstance(env, FakeWrapper)
+            assert cfg == {}
+            assert device == "cpu"
+
+        def load(self, *_args, **_kwargs) -> None:
+            events.append("policy_load")
+
+        def get_inference_policy(self, *, device):
+            assert device == "cpu"
+            return "policy"
+
+    checkpoint = tmp_path / "model_0.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    monkeypatch.setattr(MODULE, "RslRlVecEnvWrapper", FakeWrapper)
+    monkeypatch.setattr(MODULE, "load_runner_cls", lambda _task: FakeRunner)
+    monkeypatch.setattr(MODULE, "asdict", lambda _cfg: {})
+    monkeypatch.setattr(
+        MODULE,
+        "_arrange_recovery_montage",
+        lambda _env, *, seed: events.append(f"arrange_recovery_{seed}"),
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "_refresh_manual_start_state",
+        lambda _env: events.append("refresh"),
+    )
+
+    MODULE._load_policy_then_arrange_start(
+        base_env=base_env,
+        agent_cfg=SimpleNamespace(clip_actions=1.0),
+        task_id="task",
+        checkpoint=checkpoint,
+        device="cpu",
+        recovery_montage=True,
+        seed=3,
+    )
+
+    assert events == [
+        "wrapper_reset",
+        "policy_load",
+        "arrange_recovery_3",
+        "refresh",
+    ]
 
 
 def test_camera_follows_furthest_credited_standing_robot_anywhere_on_road(

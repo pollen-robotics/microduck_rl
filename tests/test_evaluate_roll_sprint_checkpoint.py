@@ -4,6 +4,7 @@ import importlib.util
 import math
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -47,6 +48,156 @@ def test_canonical_evaluation_rejects_forty_second_race(
 
     with pytest.raises(SystemExit, match="--duration 20"):
         MODULE.main()
+
+
+def test_evaluator_arranges_and_refreshes_after_wrapper_reset_and_policy_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    base_env = SimpleNamespace(state="initial")
+
+    class FakeWrapper:
+        def __init__(self, env, *, clip_actions) -> None:
+            assert env is base_env
+            assert clip_actions == 1.0
+            env.state = "scrambled_by_wrapper_reset"
+            events.append("wrapper_reset")
+
+    class FakeRunner:
+        def __init__(self, env, cfg, *, device) -> None:
+            assert isinstance(env, FakeWrapper)
+            assert cfg == {}
+            assert device == "cpu"
+
+        def load(self, *_args, **_kwargs) -> None:
+            events.append("policy_load")
+
+        def get_inference_policy(self, *, device):
+            assert device == "cpu"
+            return "policy"
+
+    expected_origins = torch.tensor(
+        [
+            [0.0, -0.42, 0.0],
+            [0.0, -0.14, 0.0],
+            [0.0, 0.14, 0.0],
+            [0.0, 0.42, 0.0],
+        ]
+    )
+
+    def arrange(env, lane_spacing):
+        assert env.state == "scrambled_by_wrapper_reset"
+        assert lane_spacing == MODULE.RACE_LANE_SPACING
+        env.state = "canonical"
+        events.append("arrange")
+        return expected_origins
+
+    def refresh(env) -> None:
+        assert env.state == "canonical"
+        events.append("refresh")
+
+    checkpoint = tmp_path / "model_0.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    monkeypatch.setattr(MODULE, "RslRlVecEnvWrapper", FakeWrapper)
+    monkeypatch.setattr(MODULE, "load_runner_cls", lambda _task: FakeRunner)
+    monkeypatch.setattr(MODULE, "asdict", lambda _cfg: {})
+    monkeypatch.setattr(
+        MODULE.microduck_mdp,
+        "arrange_roll_sprint_race_start",
+        arrange,
+    )
+    monkeypatch.setattr(MODULE, "_refresh_manual_start_state", refresh)
+
+    env, policy, origins = MODULE._load_policy_then_arrange_race(
+        base_env=base_env,
+        agent_cfg=SimpleNamespace(clip_actions=1.0),
+        checkpoint=checkpoint,
+        device="cpu",
+    )
+
+    assert isinstance(env, FakeWrapper)
+    assert policy == "policy"
+    assert torch.equal(origins, expected_origins)
+    assert events == ["wrapper_reset", "policy_load", "arrange", "refresh"]
+    assert base_env.state == "canonical"
+
+
+def test_canonical_alignment_checks_actual_state_and_reward_projection() -> None:
+    lateral = torch.tensor([-0.42, -0.14, 0.14, 0.42])
+    origins = torch.stack((torch.zeros(4), lateral, torch.zeros(4)), dim=-1)
+    headings = torch.tensor([[1.0, 0.0]] * 4)
+    centers = torch.zeros(4, 2)
+    kwargs = {
+        "forward_starts": torch.zeros(4),
+        "lateral_starts": lateral,
+        "race_origins": origins,
+        "reward_headings": headings,
+        "body_yaws": torch.zeros(4),
+        "reward_forward_origins": torch.zeros(4),
+        "reward_course_lateral": lateral,
+        "reward_course_centers": centers,
+    }
+
+    assert MODULE._canonical_race_alignment_pass(**kwargs)
+
+    wrong_lateral = {**kwargs, "lateral_starts": lateral + 0.01}
+    assert not MODULE._canonical_race_alignment_pass(**wrong_lateral)
+
+    wrong_heading = {**kwargs, "reward_headings": headings.roll(1, dims=1)}
+    assert not MODULE._canonical_race_alignment_pass(**wrong_heading)
+
+    wrong_reward_origin = {
+        **kwargs,
+        "reward_forward_origins": torch.full((4,), 0.01),
+    }
+    assert not MODULE._canonical_race_alignment_pass(**wrong_reward_origin)
+
+
+def test_recovery_case_refreshes_after_reset_and_final_arrangement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    terrain = SimpleNamespace(env_origins=torch.full((4, 3), 9.0))
+    base_env = SimpleNamespace(scene=SimpleNamespace(terrain=terrain))
+
+    class FakeEnv:
+        def reset(self) -> None:
+            events.append("reset")
+            terrain.env_origins.fill_(7.0)
+
+    expected_lateral = torch.tensor([-0.42, -0.14, 0.14, 0.42])
+
+    def arrange(env, lane_spacing, *, seed, orientations) -> None:
+        assert env is base_env
+        assert lane_spacing == MODULE.RACE_LANE_SPACING
+        assert seed == 3
+        assert orientations == MODULE.RECOVERY_ORIENTATIONS
+        assert torch.equal(terrain.env_origins, torch.full((4, 3), 7.0))
+        events.append("arrange")
+        terrain.env_origins.zero_()
+        terrain.env_origins[:, 1].copy_(expected_lateral)
+
+    def refresh(env) -> None:
+        assert env is base_env
+        assert torch.allclose(terrain.env_origins[:, 1], expected_lateral)
+        events.append("refresh")
+
+    monkeypatch.setattr(
+        MODULE.microduck_mdp,
+        "arrange_roll_sprint_recovery_start",
+        arrange,
+    )
+    monkeypatch.setattr(MODULE, "_refresh_manual_start_state", refresh)
+
+    initial_lateral = MODULE._reset_and_arrange_recovery_case(
+        base_env=base_env,
+        env=FakeEnv(),
+        seed=3,
+    )
+
+    assert events == ["reset", "arrange", "refresh"]
+    assert torch.allclose(initial_lateral, expected_lateral)
 
 
 def _auditor(initial_course_y: float = 0.0) -> object:

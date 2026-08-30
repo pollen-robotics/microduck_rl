@@ -49,7 +49,7 @@ def test_defaults_record_long_race_every_150_seconds() -> None:
         == 20.0
     )
     assert sampler.EVALUATION_DURATION == 20.0
-    assert sampler.EVALUATION_SCHEMA_VERSION == 6
+    assert sampler.EVALUATION_SCHEMA_VERSION == 7
     assert args.parent_frontier_m is None
 
 
@@ -123,7 +123,7 @@ def test_sample_once_records_four_robot_video_and_persists_state(
     state = json.loads(args.state_file.read_text(encoding="utf-8"))
     assert state["last_checkpoint"]["iteration"] == 25
     assert Path(state["last_evaluation"]).is_file()
-    assert "race-20s-v6" in Path(state["last_evaluation"]).name
+    assert "race-20s-v7" in Path(state["last_evaluation"]).name
     assert state["last_video"] == str(output.resolve())
     assert Path(state["last_recovery_montage"]).is_file()
 
