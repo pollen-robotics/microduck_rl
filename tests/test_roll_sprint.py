@@ -175,7 +175,20 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert cfg.rewards["roll_sprint_flatness"].weight == -0.25
     assert cfg.rewards["roll_sprint_lateral_vel"].weight == -0.35
     assert cfg.rewards["roll_sprint_straightness"].weight == -3.0
-    assert cfg.rewards["roll_sprint_road_return"].weight == 4.0
+    road_return_weight = cfg.rewards["roll_sprint_road_return"].weight
+    distance_weight = cfg.rewards["roll_sprint_distance"].weight
+    assert road_return_weight == 16.0
+    assert road_return_weight < distance_weight
+    full_edge_cost = (
+        mdp._ROLL_SPRINT_ROAD_HALF_WIDTH
+        - mdp._ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH
+    ) * road_return_weight
+    maximum_valid_cycle_reward = (
+        mdp._ROLL_SPRINT_TARGET_ANGLE
+        * mdp._ROLL_SPRINT_MAX_DISTANCE_PER_RAD
+        * distance_weight
+    )
+    assert full_edge_cost < 0.1 * maximum_valid_cycle_reward
     assert cfg.rewards["roll_sprint_heading_alignment"].weight == 1.0
     for name in (
         "roll_sprint_overspeed",
@@ -1385,10 +1398,12 @@ def test_road_return_progress_has_no_center_pull_and_no_idle_annuity(
     mdp._update_roll_sprint_state(env, asset)
 
     env.common_step_counter += 1
+    asset.data.root_link_lin_vel_w[:, 0] = 25.0
     asset.data.root_link_pos_w[:, 1] = 0.49
     departure = mdp.roll_sprint_road_return_progress(env)
 
     env.common_step_counter += 1
+    asset.data.root_link_lin_vel_w[:, 0] = -25.0
     asset.data.root_link_pos_w[:, 1] = 0.44
     correction = mdp.roll_sprint_road_return_progress(env)
 
