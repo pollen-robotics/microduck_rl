@@ -688,6 +688,23 @@ def test_roll_progress_reward_fades_to_zero_at_lane_edge_without_idle_annuity():
     )
 
 
+def test_roll_progress_uses_active_training_lane_width_curriculum():
+    env, _asset = _fake_env(3)
+    mdp._roll_sprint_state(env)
+    env._roll_sprint_last_update_step[:] = env.common_step_counter
+    env._roll_sprint_progress_delta[:] = env.step_dt * mdp._ROLL_SPRINT_TARGET_ANGLE
+    env._roll_sprint_lateral_displacement[:] = torch.tensor([0.0, 0.20, 0.40])
+    env._roll_sprint_lane_half_width_m = 0.40
+
+    reward = mdp.roll_sprint_progress(
+        env,
+        max_paid_rate=10.0,
+        lane_half_width=0.14,
+    )
+
+    assert reward.tolist() == pytest.approx([1.0, 0.75, 0.0])
+
+
 def test_lane_centering_progress_penalizes_departure_rewards_correction_and_not_idle(
     monkeypatch,
 ):

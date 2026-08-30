@@ -12122,8 +12122,14 @@ def roll_sprint_progress(
         env._roll_sprint_progress_delta,
         max=max_paid_rate * env.step_dt,
     )
+    active_lane_half_width = getattr(
+        env,
+        "_roll_sprint_lane_half_width_m",
+        lane_half_width,
+    )
     lane_quality = torch.clamp(
-        1.0 - (env._roll_sprint_lateral_displacement / lane_half_width).square(),
+        1.0
+        - (env._roll_sprint_lateral_displacement / active_lane_half_width).square(),
         min=0.0,
         max=1.0,
     )
