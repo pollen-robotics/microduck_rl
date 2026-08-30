@@ -22,6 +22,7 @@ from mjlab_microduck.rom.process_supervisor import (
     ChildLaunch,
     RuntimeProcessSupervisor,
     SupervisorOperationError,
+    SupervisorSnapshot,
     SupervisorTaskTerminalized,
     SupervisorUnavailable,
     _Intent,
@@ -347,6 +348,60 @@ def test_permanent_terminal_callback_failure_remains_bounded_and_fail_closed() -
         assert supervisor.readiness() is False
         with pytest.raises(SupervisorUnavailable):
             supervisor.start(_request())
+    finally:
+        supervisor.close()
+
+
+def test_terminal_retry_has_priority_under_continuously_populated_intent_queue() -> None:
+    first_failed = threading.Event()
+    redelivered = threading.Event()
+    dispatch_count = 0
+    count_lock = threading.Lock()
+
+    def callback(_payload: TerminalPayload) -> None:
+        if not first_failed.is_set():
+            first_failed.set()
+            raise RuntimeError("transient")
+        redelivered.set()
+
+    supervisor, launch = _supervisor(
+        "terminal-event",
+        queue_size=64,
+        terminal_callback=callback,
+        terminal_retry_delay_s=0.03,
+    )
+    try:
+        supervisor.ensure_ready()
+        supervisor.start(_request())
+        peer = _receive_gate(launch, b"STARTED")
+        peer.sendall(b"EMIT")
+        assert first_failed.wait(timeout=1)
+        original = supervisor._dispatch
+
+        def counted(intent: _Intent) -> object:
+            nonlocal dispatch_count
+            with count_lock:
+                dispatch_count += 1
+            time.sleep(0.005)
+            return original(intent)
+
+        supervisor._dispatch = counted  # type: ignore[method-assign]
+        queued = [_Intent(kind="ready") for _ in range(40)]
+        for intent in queued:
+            supervisor._queue.put_nowait(intent)
+        assert redelivered.wait(timeout=0.25)
+        with count_lock:
+            assert dispatch_count <= 10
+        deadline = time.monotonic() + 2
+        while not all(intent.done.is_set() for intent in queued) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert all(intent.done.is_set() for intent in queued)
+        assert all(
+            isinstance(intent.error, SupervisorUnavailable)
+            or isinstance(intent.result, SupervisorSnapshot)
+            for intent in queued
+        )
+        assert supervisor.readiness() is True
     finally:
         supervisor.close()
 

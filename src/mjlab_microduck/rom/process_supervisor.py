@@ -371,10 +371,12 @@ class RuntimeProcessSupervisor:
                     self._fail_queued_intents()
                     self._owner_shutdown.set()
                 return
+            # Terminal durability has priority over public traffic once close is
+            # ruled out. The monotonic retry deadline prevents hot retry loops.
+            self._flush_pending_terminal()
             try:
                 intent = self._queue.get(timeout=0.01)
             except queue.Empty:
-                self._flush_pending_terminal()
                 self._poll_unsolicited()
                 continue
             try:
