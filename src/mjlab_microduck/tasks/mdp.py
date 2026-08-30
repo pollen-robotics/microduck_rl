@@ -2537,6 +2537,27 @@ def _stair_shell_corner_state(
     return corners, root_y
 
 
+def stair_true_shell_clearance_candidate(
+    env: ManagerBasedRlEnv,
+    nominal_stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    corridor_half_width: float = 0.36,
+    shell_half_extents: tuple[float, float, float] = (0.034, 0.031, 0.022),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Return the instantaneous eight-corner hard-shell geometry gate."""
+
+    corners, root_y = _stair_shell_corner_state(
+        env, shell_half_extents, asset_cfg
+    )
+    return (
+        torch.isfinite(corners).all(dim=(-1, -2, -3))
+        & (corners[..., 0] >= nominal_stair_face_x).all(dim=(-1, -2))
+        & (corners[..., 2] >= riser_height).all(dim=(-1, -2))
+        & (root_y <= corridor_half_width)
+    )
+
+
 def stair_true_shell_clearance_frontier(
     env: ManagerBasedRlEnv,
     start_x: float = 0.625,
@@ -2604,9 +2625,6 @@ def stair_true_shell_clearance(
 
     if hold_steps < 1:
         raise ValueError("Shell hold must be positive")
-    corners, root_y = _stair_shell_corner_state(
-        env, shell_half_extents, asset_cfg
-    )
     required = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
     if required_latch_name is not None:
         required = getattr(env, required_latch_name, None)
@@ -2614,13 +2632,15 @@ def stair_true_shell_clearance(
             required = torch.zeros(
                 env.num_envs, dtype=torch.bool, device=env.device
             )
-    candidate = (
-        torch.isfinite(corners).all(dim=(-1, -2, -3))
-        & (corners[..., 0] >= nominal_stair_face_x).all(dim=(-1, -2))
-        & (corners[..., 2] >= riser_height).all(dim=(-1, -2))
-        & (root_y <= corridor_half_width)
-        & required
+    candidate = stair_true_shell_clearance_candidate(
+        env=env,
+        nominal_stair_face_x=nominal_stair_face_x,
+        riser_height=riser_height,
+        corridor_half_width=corridor_half_width,
+        shell_half_extents=shell_half_extents,
+        asset_cfg=asset_cfg,
     )
+    candidate &= required
     if not hasattr(env, "_stair_true_shell_clearance_hold"):
         env._stair_true_shell_clearance_hold = torch.zeros(
             env.num_envs, dtype=torch.long, device=env.device

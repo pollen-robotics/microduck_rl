@@ -24,6 +24,7 @@ from mjlab_microduck.policies import load_frozen_actor
 from mjlab_microduck.tasks.mdp import (
     _virtual_lip_stair_contact_masks,
     classify_standard_stair_contacts,
+    stair_true_shell_clearance_candidate,
 )
 from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     STANDARD_RISER_HEIGHT,
@@ -385,6 +386,7 @@ def _stage2_capture_eligibility(
     stage15: torch.Tensor,
     stage2: torch.Tensor,
     shell_clearance: torch.Tensor,
+    raw_shell_candidate: torch.Tensor,
     face_contact: torch.Tensor,
     tread_contact: torch.Tensor,
     strongest_tread_force: torch.Tensor,
@@ -403,6 +405,7 @@ def _stage2_capture_eligibility(
         & stage15
         & stage2
         & ~shell_clearance
+        & ~raw_shell_candidate
         & ~face_contact
         & tread_contact
         & (strongest_tread_force >= min_normal_force)
@@ -486,6 +489,19 @@ def _required_env_tensor(env: ManagerBasedRlEnv, name: str) -> torch.Tensor:
     if value is None or not isinstance(value, torch.Tensor):
         raise RuntimeError(f"Contact-transfer tracking tensor is unavailable: {name}")
     return value
+
+
+def _raw_hard_shell_candidate(env: ManagerBasedRlEnv) -> torch.Tensor:
+    shell_cfg = env.reward_manager.get_term_cfg("stair_true_shell_clearance")
+    params = shell_cfg.params
+    return stair_true_shell_clearance_candidate(
+        env=env,
+        nominal_stair_face_x=params["nominal_stair_face_x"],
+        riser_height=params["riser_height"],
+        corridor_half_width=params["corridor_half_width"],
+        shell_half_extents=tuple(params["shell_half_extents"]),
+        asset_cfg=params["asset_cfg"],
+    )
 
 
 def main() -> int:
@@ -687,12 +703,14 @@ def main() -> int:
                         max_abs_local_y=args.contact_transfer_max_abs_local_y,
                     )
                 else:
+                    raw_shell_candidate = _raw_hard_shell_candidate(base_env)
                     eligible = _stage2_capture_eligibility(
                         stage2_edge=stage2_edge,
                         stage1=stage1,
                         stage15=stage15,
                         stage2=stage2,
                         shell_clearance=shell_clearance,
+                        raw_shell_candidate=raw_shell_candidate,
                         face_contact=face_any,
                         tread_contact=tread_any,
                         strongest_tread_force=strongest_tread_force,
@@ -739,6 +757,10 @@ def main() -> int:
                         chunk["source_state_bank_row"] = _required_env_tensor(
                             base_env, "_stair_walker_bank_row"
                         )[ids].detach().cpu().clone()
+                        if args.capture_contact_transfer_stage2:
+                            chunk["captured_raw_shell_candidate"] = (
+                                raw_shell_candidate[ids].detach().cpu().clone()
+                            )
                         chunk["source_state_bank_source_step"] = _required_env_tensor(
                             base_env, "_stair_walker_bank_source_step"
                         )[ids].detach().cpu().clone()
@@ -996,6 +1018,9 @@ def main() -> int:
             ),
             "contact_transfer_exact_state_deduplication": (
                 capture_contact_transfer
+            ),
+            "contact_transfer_raw_shell_candidate_excluded": (
+                args.capture_contact_transfer_stage2
             ),
             "duplicate_states_rejected": duplicate_states_rejected,
             "nonfinite_states_rejected": nonfinite_states_rejected,

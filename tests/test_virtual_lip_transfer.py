@@ -489,6 +489,31 @@ def test_true_shell_clearance_requires_every_corner_and_pays_once():
     ).item() == 0.0
 
 
+def test_true_shell_candidate_exposes_single_clear_frame():
+    geom_pos = torch.tensor([[[0.700, 0.0, 0.205]]])
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            geom_pos_w=geom_pos,
+            geom_quat_w=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]]),
+            root_link_pos_w=geom_pos[:, 0],
+        )
+    )
+    env = SimpleNamespace(
+        num_envs=1,
+        device="cpu",
+        scene=_AssetScene(robot, torch.zeros(1, dtype=torch.long)),
+    )
+    asset_cfg = SimpleNamespace(name="robot", geom_ids=torch.tensor([0]))
+
+    assert microduck_mdp.stair_true_shell_clearance_candidate(
+        env, asset_cfg=asset_cfg
+    ).item()
+    geom_pos[..., 0] = 0.690
+    assert not microduck_mdp.stair_true_shell_clearance_candidate(
+        env, asset_cfg=asset_cfg
+    ).item()
+
+
 def test_shell_frontier_is_bounded_reset_safe_and_worst_corner_aligned():
     geom_pos = torch.tensor([[[0.665, 0.0, 0.175]]])
     robot = SimpleNamespace(
