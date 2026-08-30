@@ -24,7 +24,7 @@ from mjlab_microduck.rom.process_protocol import (
     decode_packet,
     encode_packet,
 )
-from mjlab_microduck.rom.runtime import RuntimeEvidence, RuntimeHandle
+from mjlab_microduck.rom.runtime import RuntimeEvidence, RuntimeHandle, RuntimeSample
 from mjlab_microduck.rom.runtime_child import RuntimeChildHost
 from mjlab_microduck.rom.runtime_identity import runtime_revision
 from tests.fakes.fake_microduck_runtime import FakeMicroduckRuntime
@@ -162,6 +162,137 @@ def test_discrete_sample_is_safely_stopped_then_emitted_with_metrics(
     host._put_message(None)
     thread.join(timeout=1)
     parent.close()
+
+
+@pytest.mark.parametrize("reason", ["FALLEN", "CONTROL_LOOP_OVERRUN"])
+def test_continuous_runtime_fault_is_safely_stopped_then_emitted_before_lease(
+    reason: str,
+) -> None:
+    host, runtime, parent, thread = _active_host()
+    with host._state_lock:
+        host._lease_deadline = time.monotonic() + 10
+    runtime.complete_next(state="FAILED", metrics={"fault": reason}, stop_reason=reason)
+
+    host._start_runtime_monitor()
+
+    terminal = decode_packet(parent.recv(65_537))
+    assert terminal.kind is RuntimeMessageKind.TERMINAL_EVENT
+    assert terminal.payload.eventSequence == 1
+    assert terminal.payload.terminal.outcome == "FAILED"
+    assert terminal.payload.terminal.evidence.stopReason == reason
+    assert terminal.payload.terminal.evidence.metrics == {
+        "fault": reason,
+        "safeStop": True,
+    }
+    assert runtime.safe_stop_calls == [(RuntimeHandle(taskId="1" * 32), reason)]
+    assert not host.sample_monitor_alive
+    host._stop.set()
+    host._put_message(None)
+    thread.join(timeout=1)
+    parent.close()
+
+
+def test_continuous_running_samples_allow_commands_until_terminal_fault() -> None:
+    host, runtime, parent, thread = _active_host()
+    with host._state_lock:
+        host._lease_deadline = time.monotonic() + 10
+    host._start_runtime_monitor()
+    assert runtime.sample_started.wait(timeout=1)
+
+    command = RuntimeMessage(
+        kind="COMMAND", generation=7, operationSequence=1, taskId="1" * 32,
+        payload=CommandPayload(
+            parameters={"vxMps": 0.1, "vyMps": 0.0, "yawRateRadps": 0.0},
+            leaseMs=1000,
+        ),
+    )
+    assert _exchange(parent, command).kind is RuntimeMessageKind.ACK
+    assert runtime.command_calls[-1]["vxMps"] == 0.1
+
+    runtime.complete_next(state="FAILED", metrics={}, stop_reason="FALLEN")
+    terminal = decode_packet(parent.recv(65_537))
+    assert terminal.kind is RuntimeMessageKind.TERMINAL_EVENT
+    assert terminal.payload.terminal.evidence.stopReason == "FALLEN"
+    host._stop.set()
+    host._put_message(None)
+    thread.join(timeout=1)
+    parent.close()
+
+
+def test_continuous_normal_sample_is_bounded_evidence_on_operator_stop() -> None:
+    host, runtime, parent, thread = _active_host()
+    # First prove the monitor has observed a normal sample without emitting high-rate IPC.
+    runtime._samples.append(RuntimeSample(running=True, metrics={"tiltRad": 0.1}))
+    host._start_runtime_monitor()
+    assert runtime.sample_started.wait(timeout=1)
+    deadline = time.monotonic() + 1
+    while host._latest_sample_metrics != {"tiltRad": 0.1} and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert host._latest_sample_metrics == {"tiltRad": 0.1}
+    stop = RuntimeMessage(
+        kind="ZERO_AND_STOP", generation=7, operationSequence=1, taskId="1" * 32,
+        payload=ZeroAndStopPayload(reason="OPERATOR_CANCELLED"),
+    )
+    terminal = _exchange(parent, stop)
+    assert terminal.kind is RuntimeMessageKind.TERMINAL
+    assert terminal.payload.evidence.metrics["tiltRad"] == 0.1
+    host._stop.set()
+    host._put_message(None)
+    thread.join(timeout=1)
+    parent.close()
+
+
+def test_blocked_continuous_sample_retires_transport_on_normal_stop() -> None:
+    host, runtime, parent, thread = _active_host()
+    runtime.sample_release.clear()
+    host._start_runtime_monitor()
+    assert runtime.sample_started.wait(timeout=1)
+    parent.sendall(encode_packet(RuntimeMessage(
+        kind="ZERO_AND_STOP", generation=7, operationSequence=1, taskId="1" * 32,
+        payload=ZeroAndStopPayload(reason="OPERATOR_CANCELLED"),
+    )))
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert host._cleanup_timed_out.is_set()
+    assert runtime.emergency_stop_calls == ["RUNTIME_UNRESPONSIVE"]
+    parent.settimeout(1)
+    assert parent.recv(65_537) == b""
+    runtime.sample_release.set()
+    parent.close()
+
+
+def test_continuous_fault_wins_stop_race_without_poisoning_same_child_reuse() -> None:
+    host, runtime, parent, thread = _active_host()
+    runtime.complete_next(state="FAILED", metrics={}, stop_reason="FALLEN")
+    host._completion_claim.acquire()
+    try:
+        host._start_runtime_monitor()
+        assert runtime.sample_started.wait(timeout=1)
+        parent.sendall(encode_packet(RuntimeMessage(
+            kind="ZERO_AND_STOP", generation=7, operationSequence=1,
+            taskId="1" * 32, payload=ZeroAndStopPayload(reason="OPERATOR_CANCELLED"),
+        )))
+    finally:
+        host._completion_claim.release()
+    terminal = decode_packet(parent.recv(65_537))
+    assert terminal.kind is RuntimeMessageKind.TERMINAL_EVENT
+
+    start = RuntimeMessage(
+        kind="START", generation=8, operationSequence=2, taskId="2" * 32,
+        payload=StartPayload(
+            actionCode="WALK_VELOCITY", bundleDigest="sha256:" + "a" * 64,
+            parameters={"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0},
+            scenario={"terrain": "flat", "seed": 8}, leaseMs=1000,
+        ),
+    )
+    assert _exchange(parent, start).kind is RuntimeMessageKind.ACK
+    deadline = time.monotonic() + 1
+    while not host.sample_monitor_alive and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert host.sample_monitor_alive
+    assert thread.is_alive()
+    parent.close()
+    thread.join(timeout=1)
 
 
 def test_discrete_safe_stop_failure_withholds_terminal_and_exits_transport() -> None:

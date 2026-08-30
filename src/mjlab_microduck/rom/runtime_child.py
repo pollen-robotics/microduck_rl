@@ -67,7 +67,7 @@ _FATAL_CLEANUP_TIMEOUT_S = 0.25
 
 
 @dataclass(frozen=True, slots=True)
-class _DiscreteCompletion:
+class _RuntimeCompletion:
     handle: RuntimeHandle
     sample: RuntimeSample
     outcome: str
@@ -101,7 +101,7 @@ class RuntimeChildHost:
         if fatal_cleanup_timeout_s <= 0:
             raise ValueError("fatal cleanup timeout must be positive")
         self._fatal_cleanup_timeout_s = fatal_cleanup_timeout_s
-        self._messages: queue.Queue[RuntimeMessage | _DiscreteCompletion | None] = queue.Queue(maxsize=8)
+        self._messages: queue.Queue[RuntimeMessage | _RuntimeCompletion | None] = queue.Queue(maxsize=8)
         self._send_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._stop = threading.Event()
@@ -123,6 +123,9 @@ class RuntimeChildHost:
         self._event_sequence = 0
         self._completion_claim = threading.Lock()
         self._sample_thread: threading.Thread | None = None
+        self._sample_stop = threading.Event()
+        self._latest_sample_metrics: dict[str, object] = {}
+        self._completed_identity: tuple[int, str] | None = None
 
     @property
     def sample_monitor_alive(self) -> bool:
@@ -203,7 +206,7 @@ class RuntimeChildHost:
             self._put_message(message)
 
     def _put_message(
-        self, message: RuntimeMessage | _DiscreteCompletion | None
+        self, message: RuntimeMessage | _RuntimeCompletion | None
     ) -> None:
         try:
             self._messages.put_nowait(message)
@@ -298,11 +301,16 @@ class RuntimeChildHost:
                 self._cleanup_timed_out.set()
                 return
             evidence = cleanup_result[0]
-            if self.sample_monitor_alive:
+            self._sample_stop.set()
+            monitor = self._sample_thread
+            if monitor is not None:
+                monitor.join(timeout=self._fatal_cleanup_timeout_s)
+            if monitor is not None and monitor.is_alive():
                 self._cleanup_timed_out.set()
                 return
             with self._state_lock:
                 self._handle = None
+                self._sample_thread = None
         if (
             request is not None
             and request.taskId is not None
@@ -339,23 +347,34 @@ class RuntimeChildHost:
             outcome = "CANCELLED"
         else:
             outcome = "FAILED"
+        metrics = dict(self._latest_sample_metrics)
+        for key in sorted(evidence.metrics):
+            candidate = metrics | {key: evidence.metrics[key]}
+            try:
+                RuntimeEvidence(metrics=candidate)
+            except (TypeError, ValueError):
+                break
+            metrics = candidate
         payload = TerminalPayload(
             outcome=outcome,
             evidence=TaskEvidence(
                 bundleDigest=self._bundle.bundleDigest,
                 policyDigest=policy.digest,
                 modelDigest=self._bundle.model.digest,
-                metrics=dict(evidence.metrics),
+                metrics=metrics,
                 stopReason=reason,
             ),
         )
         return self._response(request, RuntimeMessageKind.TERMINAL, payload)
 
-    def _start_discrete_monitor(self) -> None:
+    def _start_runtime_monitor(self) -> None:
         template = action_template(self._active_action_code)
-        if template.completion is None:
-            return
-        deadline = self._clock() + template.completion.maxDurationMs / 1000
+        deadline = (
+            self._clock() + template.completion.maxDurationMs / 1000
+            if template.completion is not None
+            else None
+        )
+        self._sample_stop.clear()
 
         def monitor() -> None:
             assert self._runtime is not None and self._handle is not None
@@ -364,34 +383,45 @@ class RuntimeChildHost:
             reason = "MAX_DURATION_EXCEEDED"
             outcome = "TIMED_OUT"
             try:
-                while self._clock() < deadline and not self._safety_requested.is_set():
+                while (
+                    (deadline is None or self._clock() < deadline)
+                    and not self._safety_requested.is_set()
+                    and not self._sample_stop.is_set()
+                ):
                     sample = runtime.sample(handle)
+                    if sample.metrics:
+                        with self._state_lock:
+                            self._latest_sample_metrics = dict(sample.metrics)
                     if sample.terminalState is not None:
                         reason = sample.stopReason or (
                             "TASK_COMPLETE" if sample.terminalState == "SUCCEEDED" else "RUNTIME_FAILED"
                         )
                         outcome = sample.terminalState
                         break
-                    self._stop.wait(0.02)
+                    self._sample_stop.wait(0.02)
                 else:
-                    if self._safety_requested.is_set():
+                    if self._safety_requested.is_set() or self._sample_stop.is_set():
                         return
             except Exception:  # noqa: BLE001 - runtime detail is never serialized
                 sample = RuntimeSample(running=False, terminalState="FAILED")
                 reason, outcome = "RUNTIME_EXCEPTION", "FAILED"
-            self._put_message(_DiscreteCompletion(handle, sample, outcome, reason))
+            self._put_message(_RuntimeCompletion(handle, sample, outcome, reason))
 
         self._sample_thread = threading.Thread(
-            target=monitor, name="runtime-child-discrete-monitor", daemon=True
+            target=monitor, name="runtime-child-sample-monitor", daemon=True
         )
         self._sample_thread.start()
+
+    def _start_discrete_monitor(self) -> None:
+        """Compatibility shim for focused tests; every active action is monitored."""
+        self._start_runtime_monitor()
 
     def _retire_uncertain_cleanup(self) -> None:
         self._cleanup_timed_out.set()
         self._stop.set()
         self._put_message(None)
 
-    def _handle_discrete_completion(self, completion: _DiscreteCompletion) -> None:
+    def _handle_runtime_completion(self, completion: _RuntimeCompletion) -> None:
         monitor = self._sample_thread
         if monitor is None:
             self._retire_uncertain_cleanup()
@@ -446,10 +476,29 @@ class RuntimeChildHost:
                 payload=TerminalEventPayload(eventSequence=event_sequence, terminal=terminal),
             ))
             with self._state_lock:
+                self._completed_identity = (generation, task_id)
                 self._generation = None
                 self._task_id = None
                 self._last_request = None
                 self._sample_thread = None
+
+    def _retire_sample_monitor(self) -> bool:
+        """Stop and join the task monitor before allowing this child to be reused."""
+        monitor = self._sample_thread
+        if monitor is None:
+            return True
+        self._sample_stop.set()
+        monitor.join(timeout=self._fatal_cleanup_timeout_s)
+        if monitor.is_alive():
+            assert self._runtime is not None
+            try:
+                self._runtime.emergency_stop("RUNTIME_UNRESPONSIVE")
+            except Exception:  # noqa: BLE001, S110 - exact reap remains the cleanup barrier
+                pass
+            self._retire_uncertain_cleanup()
+            return False
+        self._sample_thread = None
+        return True
 
     def _handle_message(self, message: RuntimeMessage) -> bool:
         self._last_request = message
@@ -457,6 +506,22 @@ class RuntimeChildHost:
             self._error(message)
             return False
         self._last_sequence = message.operationSequence
+        with self._state_lock:
+            completed_identity = self._completed_identity
+            active_handle = self._handle
+        if (
+            active_handle is None
+            and completed_identity == (message.generation, message.taskId)
+            and message.kind in {
+                RuntimeMessageKind.COMMAND,
+                RuntimeMessageKind.STATUS,
+                RuntimeMessageKind.ZERO_AND_STOP,
+            }
+        ):
+            # The unsolicited terminal won the race. The supervisor aborts the
+            # pending operation when it consumes that event, so a late correlated
+            # response would only poison the next exchange on this reusable socket.
+            return True
         try:
             if message.kind is RuntimeMessageKind.HELLO:
                 assert isinstance(message.payload, HelloPayload)
@@ -504,6 +569,8 @@ class RuntimeChildHost:
     def _normal_stop(self, message: RuntimeMessage, reason: str) -> None:
         with self._completion_claim:
             assert self._runtime is not None and self._handle is not None
+            if not self._retire_sample_monitor():
+                return
             template = action_template(self._active_action_code)
             zero: Mapping[str, object] = template.lease.zeroCommand if template.lease else {}
             self._runtime.command(self._handle, zero)
@@ -552,6 +619,8 @@ class RuntimeChildHost:
             self._task_id = message.taskId
             self._active_action_code = message.payload.actionCode
             self._lease_deadline = self._clock() + message.payload.leaseMs / 1000
+            self._latest_sample_metrics = {}
+            self._completed_identity = None
         self._runtime.validate(action, request)
         handle = self._runtime.start(action, request)
         with self._state_lock:
@@ -561,7 +630,7 @@ class RuntimeChildHost:
             self._handle = handle
         self._send(self._response(message, RuntimeMessageKind.ACK, AckPayload(acknowledgedKind="START")))
         self._event_sequence = 0
-        self._start_discrete_monitor()
+        self._start_runtime_monitor()
 
     def _command(self, message: RuntimeMessage) -> None:
         assert isinstance(message.payload, CommandPayload)
@@ -586,8 +655,8 @@ class RuntimeChildHost:
             message = self._messages.get()
             if message is None:
                 break
-            if isinstance(message, _DiscreteCompletion):
-                self._handle_discrete_completion(message)
+            if isinstance(message, _RuntimeCompletion):
+                self._handle_runtime_completion(message)
                 continue
             result: list[bool] = []
 
