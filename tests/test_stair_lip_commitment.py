@@ -10,7 +10,9 @@ class _Scene:
         self._robot = robot
         self.terrain = SimpleNamespace(env_origins=torch.zeros(1, 3))
         self.sensors = {
-            name: object()
+            name: SimpleNamespace(
+                data=SimpleNamespace(found=torch.zeros(1, 1))
+            )
             for name in (
                 "robot_ground_contact",
                 "head_ground_contact",
@@ -22,6 +24,104 @@ class _Scene:
     def __getitem__(self, name):
         assert name == "robot"
         return self._robot
+
+
+def test_stair_route_cues_expose_raw_time_to_go():
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            root_link_pos_w=torch.tensor([[0.100, 0.0, 0.100]]),
+            root_link_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
+        )
+    )
+    scene = _Scene(robot)
+    scene.terrain.terrain_levels = torch.zeros(1, dtype=torch.long)
+    env = SimpleNamespace(
+        max_episode_length=150,
+        episode_length_buf=torch.tensor([0]),
+        scene=scene,
+    )
+    params = {
+        "stair_start_distance": 0.60,
+        "goal_distance": 2.0,
+        "min_riser_height": 0.17,
+        "max_riser_height": 0.17,
+        "num_terrain_levels": 1,
+        "tread_depth": 0.28,
+        "num_steps": 5,
+        "include_time_to_go": True,
+    }
+
+    reset_cues = microduck_mdp.stair_route_cues(env, **params)
+    assert reset_cues.shape == (1, 6)
+    assert torch.isclose(reset_cues[0, 3], torch.tensor(1.0)).item()
+    assert reset_cues[0, 0].item() < 1.0e-4
+
+    env.episode_length_buf[:] = 75
+    halfway_cues = microduck_mdp.stair_route_cues(env, **params)
+    assert torch.isclose(halfway_cues[0, 3], torch.tensor(0.5)).item()
+
+    env.episode_length_buf[:] = 150
+    final_cues = microduck_mdp.stair_route_cues(env, **params)
+    assert final_cues[0, 3].item() == 0.0
+
+
+def test_terminal_position_objective_only_pays_in_final_window():
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            root_link_pos_w=torch.tensor([[0.720, 0.0, 0.205]]),
+        )
+    )
+    env = SimpleNamespace(
+        step_dt=0.02,
+        max_episode_length=150,
+        episode_length_buf=torch.tensor([119]),
+        scene=_Scene(robot),
+    )
+
+    early = microduck_mdp.stair_terminal_position_objective(env)
+    assert early.item() == 0.0
+
+    env.episode_length_buf[:] = 125
+    at_target = microduck_mdp.stair_terminal_position_objective(env)
+    assert torch.isclose(at_target, torch.tensor([1.0 / 0.50])).item()
+
+    robot.data.root_link_pos_w[:] = torch.tensor([[0.620, 0.0, 0.138]])
+    partial = microduck_mdp.stair_terminal_position_objective(env)
+    assert 0.0 < partial.item() < at_target.item()
+
+    env.episode_length_buf[:] = 150
+    robot.data.root_link_pos_w[:] = torch.tensor([[0.720, 0.0, 0.205]])
+    assert microduck_mdp.stair_terminal_position_objective(env).item() == 0.0
+
+    env.episode_length_buf[:] = 125
+    robot.data.root_link_pos_w[:] = torch.tensor([[0.720, 0.201, 0.205]])
+    assert microduck_mdp.stair_terminal_position_objective(env).item() == 0.0
+
+    robot.data.root_link_pos_w[:] = torch.tensor([[float("nan"), 0.0, 0.205]])
+    assert microduck_mdp.stair_terminal_position_objective(env).item() == 0.0
+
+
+def test_terminal_position_objective_integrates_exactly_one_at_target():
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            root_link_pos_w=torch.tensor([[0.720, 0.0, 0.205]]),
+        )
+    )
+    env = SimpleNamespace(
+        step_dt=0.02,
+        max_episode_length=150,
+        episode_length_buf=torch.tensor([0]),
+        scene=_Scene(robot),
+    )
+
+    payments = []
+    for episode_step in range(151):
+        env.episode_length_buf[:] = episode_step
+        payments.append(microduck_mdp.stair_terminal_position_objective(env))
+    rewards = torch.cat(payments)
+
+    assert torch.count_nonzero(rewards).item() == 25
+    assert torch.isclose(rewards.sum() * env.step_dt, torch.tensor(1.0)).item()
 
 
 def test_lip_commitment_requires_delayed_spatial_hold(monkeypatch):

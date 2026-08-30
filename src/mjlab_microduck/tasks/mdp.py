@@ -780,14 +780,15 @@ def stair_route_cues(
     trunk_sensor_name: str = "trunk_ground_contact",
     cue_distance: float = 0.18,
     cue_width: float = 0.025,
+    include_time_to_go: bool = False,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Six real-sensor-compatible route cues in the dormant body-command slot.
 
     The physical robot can derive the first-riser distance and obstacle height
-    from its head ToF/camera. Keeping the cue zero on the runway preserves the
-    manufacturer gait, then gives the fine-tuned feed-forward actor an explicit
-    signal that it is time to switch into a contact-rich maneuver.
+    from its head ToF/camera. Spatial cues stay near zero on the runway to
+    preserve the manufacturer gait. Finite-horizon specialists may replace the
+    redundant route-progress slot with a raw time-to-go countdown.
     """
     x, _, _ = _stair_local_state(env, asset_cfg)
     passed_faces = torch.where(
@@ -804,6 +805,15 @@ def stair_route_cues(
         distance / max(cue_distance, 1e-6), min=-1.0, max=1.0
     )
     route_progress = torch.clamp(x / max(goal_distance, 1e-6), 0.0, 1.0)
+    if include_time_to_go:
+        route_or_time = torch.clamp(
+            (env.max_episode_length - env.episode_length_buf.to(x.dtype))
+            / max(env.max_episode_length, 1),
+            min=0.0,
+            max=1.0,
+        )
+    else:
+        route_or_time = route_progress
     levels = env.scene.terrain.terrain_levels.to(dtype=x.dtype)
     level_fraction = torch.clamp(
         levels / max(num_terrain_levels - 1, 1), 0.0, 1.0
@@ -823,7 +833,7 @@ def stair_route_cues(
             mode,
             mode * signed_distance,
             mode * height_fraction,
-            mode * route_progress,
+            route_or_time if include_time_to_go else mode * route_or_time,
             contact_bit(head_sensor_name),
             contact_bit(trunk_sensor_name),
         ),
@@ -2644,6 +2654,55 @@ def stair_coupled_frontier_collocation(
     env._stair_coupled_frontier_target_latched |= reached_target
     env._stair_coupled_frontier_bypass_latched |= newly_bypassed
     return payout / env.step_dt
+
+
+def stair_terminal_position_objective(
+    env: ManagerBasedRlEnv,
+    target_x: float = 0.720,
+    target_y: float = 0.0,
+    target_z: float = 0.205,
+    reward_window_s: float = 0.50,
+    x_scale: float = 0.08,
+    y_scale: float = 0.12,
+    z_scale: float = 0.06,
+    max_abs_y: float = 0.20,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward absolute goal arrival only during the terminal time window.
+
+    This is a robot-scale version of the final-position objective from Rudin
+    et al. (IROS 2022). The policy is free to jump, roll, or use its shell
+    before the final window. A reciprocal distance score remains visible from
+    the measured near-lip frontier, while the fixed target prevents partial
+    progress followed by a crash from becoming the objective.
+    """
+
+    if reward_window_s <= 0.0:
+        raise ValueError("Terminal-position reward window must be positive")
+    if min(x_scale, y_scale, z_scale) <= 0.0:
+        raise ValueError("Terminal-position scales must be positive")
+    if max_abs_y <= 0.0:
+        raise ValueError("Terminal-position lateral corridor must be positive")
+
+    asset: Entity = env.scene[asset_cfg.name]
+    local = asset.data.root_link_pos_w - env.scene.terrain.env_origins
+    finite = torch.isfinite(local).all(dim=-1)
+    dx = (local[:, 0] - target_x) / x_scale
+    dy = (local[:, 1] - target_y) / y_scale
+    dz = (local[:, 2] - target_z) / z_scale
+    score = 1.0 / (1.0 + dx.square() + dy.square() + dz.square())
+
+    reward_window_steps = max(1, int(round(reward_window_s / env.step_dt)))
+    remaining_steps = env.max_episode_length - env.episode_length_buf
+    terminal_window = (remaining_steps >= 1) & (
+        remaining_steps <= reward_window_steps
+    )
+    lateral_corridor = local[:, 1].abs() <= max_abs_y
+    return torch.where(
+        terminal_window & lateral_corridor & finite,
+        score / reward_window_s,
+        torch.zeros_like(score),
+    )
 
 
 def stair_apex_or_mantle_frontier(

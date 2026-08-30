@@ -20,6 +20,7 @@ SPEC.loader.exec_module(MODULE)
 A12TrajectoryMetrics = MODULE.A12TrajectoryMetrics
 ContactTrajectoryMetrics = MODULE.ContactTrajectoryMetrics
 JointFrontierTrajectoryMetrics = MODULE.JointFrontierTrajectoryMetrics
+TerminalPositionTrajectoryMetrics = MODULE.TerminalPositionTrajectoryMetrics
 
 
 def _observe(
@@ -128,3 +129,36 @@ def test_joint_frontier_reports_conjunctive_milestones_and_resets() -> None:
     progress, _, _, milestones = metrics.complete(torch.tensor([True]))
     assert progress == [0.0]
     assert milestones == [0] * len(MODULE.JOINT_FRONTIER_MILESTONES)
+
+
+def test_terminal_position_metric_integrates_exactly_one_and_resets() -> None:
+    metrics = TerminalPositionTrajectoryMetrics(
+        num_envs=1,
+        device="cpu",
+        max_episode_length=150,
+        step_dt=0.02,
+    )
+    target = torch.tensor([[0.720, 0.0, 0.205]], dtype=torch.float32)
+
+    for episode_step in range(151):
+        metrics.observe(target, torch.tensor([episode_step]))
+    completed = metrics.complete(torch.tensor([True]))
+    assert completed == pytest.approx([1.0])
+
+    assert metrics.complete(torch.tensor([True])) == pytest.approx([0.0])
+
+
+def test_terminal_position_metric_rejects_endpoint_and_lateral_bypass() -> None:
+    metrics = TerminalPositionTrajectoryMetrics(
+        num_envs=1,
+        device="cpu",
+        max_episode_length=150,
+        step_dt=0.02,
+    )
+    outside = torch.tensor([[0.720, 0.201, 0.205]], dtype=torch.float32)
+    target = torch.tensor([[0.720, 0.0, 0.205]], dtype=torch.float32)
+
+    metrics.observe(outside, torch.tensor([149]))
+    metrics.observe(target, torch.tensor([150]))
+
+    assert metrics.complete(torch.tensor([True])) == pytest.approx([0.0])

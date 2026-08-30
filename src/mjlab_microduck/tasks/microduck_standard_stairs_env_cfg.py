@@ -1412,6 +1412,42 @@ def make_microduck_stair_frontier_collocation_rsi_env_cfg(
     return cfg
 
 
+def make_microduck_stair_terminal_position_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A27: reach and hold an absolute first-riser goal on time."""
+
+    cfg = make_microduck_stair_frontier_collocation_rsi_env_cfg(play=play)
+    cfg.episode_length_s = 3.0
+
+    # The final-position task removes the incentive to collect partial progress
+    # early and then crash. The fourth route cue becomes a real-time countdown;
+    # the other five keep the existing obstacle and contact information.
+    cfg.rewards["stair_coupled_frontier_collocation"].weight = 0.0
+    cfg.rewards["stair_terminal_position_objective"] = RewardTermCfg(
+        func=microduck_mdp.stair_terminal_position_objective,
+        weight=30.0,
+        params={
+            "target_x": 0.720,
+            "target_y": 0.0,
+            "target_z": 0.205,
+            "reward_window_s": 0.50,
+            "x_scale": 0.08,
+            "y_scale": 0.12,
+            "z_scale": 0.06,
+            "max_abs_y": 0.20,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    for observation_group in ("actor", "critic"):
+        cfg.observations[observation_group].terms["body_command"].params[
+            "include_time_to_go"
+        ] = True
+    # A finite-horizon value function must not bootstrap past the known end.
+    cfg.terminations["time_out"].time_out = False
+    return cfg
+
+
 def make_microduck_stair_tread_contact_bank_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -1764,6 +1800,21 @@ MicroduckStairFrontierCollocationRsiRlCfg.max_iterations = 75
 MicroduckStairFrontierCollocationRsiRlCfg.save_interval = 25
 MicroduckStairFrontierCollocationRsiRlCfg.actor.distribution_cfg["init_std"] = 0.22
 MicroduckStairFrontierCollocationRsiRlCfg.algorithm.learning_rate = 1.0e-5
+
+MicroduckStairTerminalPositionRsiRlCfg = deepcopy(
+    MicroduckStairFrontierCollocationRsiRlCfg
+)
+MicroduckStairTerminalPositionRsiRlCfg.experiment_name = (
+    "microduck_stair_terminal_position_rsi_specialist"
+)
+MicroduckStairTerminalPositionRsiRlCfg.run_name = (
+    "microduck_stair_terminal_position_rsi_specialist"
+)
+MicroduckStairTerminalPositionRsiRlCfg.max_iterations = 75
+MicroduckStairTerminalPositionRsiRlCfg.save_interval = 25
+MicroduckStairTerminalPositionRsiRlCfg.num_steps_per_env = 48
+MicroduckStairTerminalPositionRsiRlCfg.actor.distribution_cfg["init_std"] = 0.22
+MicroduckStairTerminalPositionRsiRlCfg.algorithm.learning_rate = 1.0e-5
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)
 MicroduckStairTreadContactBankRlCfg.experiment_name = (

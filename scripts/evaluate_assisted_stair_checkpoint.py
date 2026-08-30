@@ -41,6 +41,7 @@ TASK_IDS = (
     "Mjlab-Stairs-Lip-Commitment-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Lip-Checkpoint-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Frontier-Collocation-RSI-Specialist-MicroDuck",
+    "Mjlab-Stairs-Terminal-Position-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
     "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
@@ -100,6 +101,64 @@ JOINT_FRONTIER_MILESTONES = (
     (0.665, 0.175),
     (0.700, 0.198),
 )
+TERMINAL_TARGET_X_M = 0.720
+TERMINAL_TARGET_Y_M = 0.0
+TERMINAL_TARGET_Z_M = 0.205
+TERMINAL_X_SCALE_M = 0.08
+TERMINAL_Y_SCALE_M = 0.12
+TERMINAL_Z_SCALE_M = 0.06
+TERMINAL_MAX_ABS_Y_M = 0.20
+TERMINAL_WINDOW_S = 0.50
+
+
+class TerminalPositionTrajectoryMetrics:
+    """Accumulate the unweighted A27 terminal score per trajectory."""
+
+    def __init__(
+        self,
+        num_envs: int,
+        device: torch.device | str,
+        max_episode_length: int,
+        step_dt: float,
+    ):
+        self._score = torch.zeros(num_envs, dtype=torch.float32, device=device)
+        self._max_episode_length = max_episode_length
+        self._step_dt = step_dt
+        self._window_steps = max(1, int(round(TERMINAL_WINDOW_S / step_dt)))
+
+    def observe(
+        self,
+        local_root_pos: torch.Tensor,
+        episode_steps: torch.Tensor,
+    ) -> None:
+        if local_root_pos.shape != (self._score.numel(), 3):
+            raise ValueError("local_root_pos must have shape (num_envs, 3)")
+        if episode_steps.shape != self._score.shape:
+            raise ValueError("episode_steps must have shape (num_envs,)")
+
+        finite = torch.isfinite(local_root_pos).all(dim=-1)
+        dx = (local_root_pos[:, 0] - TERMINAL_TARGET_X_M) / TERMINAL_X_SCALE_M
+        dy = (local_root_pos[:, 1] - TERMINAL_TARGET_Y_M) / TERMINAL_Y_SCALE_M
+        dz = (local_root_pos[:, 2] - TERMINAL_TARGET_Z_M) / TERMINAL_Z_SCALE_M
+        score = 1.0 / (1.0 + dx.square() + dy.square() + dz.square())
+        remaining_steps = self._max_episode_length - episode_steps
+        eligible = (
+            finite
+            & (local_root_pos[:, 1].abs() <= TERMINAL_MAX_ABS_Y_M)
+            & (remaining_steps >= 1)
+            & (remaining_steps <= self._window_steps)
+        )
+        payout = torch.where(
+            eligible,
+            score / TERMINAL_WINDOW_S,
+            torch.zeros_like(score),
+        )
+        self._score += payout * self._step_dt
+
+    def complete(self, done_mask: torch.Tensor) -> list[float]:
+        completed = self._score[done_mask].detach().cpu().tolist()
+        self._score[done_mask] = 0.0
+        return completed
 
 
 class A12TrajectoryMetrics:
@@ -363,6 +422,7 @@ def main() -> int:
         "Mjlab-Stairs-Lip-Commitment-RSI-Specialist-MicroDuck",
         "Mjlab-Stairs-Lip-Checkpoint-RSI-Specialist-MicroDuck",
         "Mjlab-Stairs-Frontier-Collocation-RSI-Specialist-MicroDuck",
+        "Mjlab-Stairs-Terminal-Position-RSI-Specialist-MicroDuck",
     }:
         reset_modes = ROULADE_BANK_RESET_MODES
     elif args.task == "Mjlab-Stairs-Apex-Mantle-Specialist-MicroDuck":
@@ -473,6 +533,13 @@ def main() -> int:
     joint_frontier_best_x: list[float] = []
     joint_frontier_best_z: list[float] = []
     joint_frontier_milestone_counts = [0] * len(JOINT_FRONTIER_MILESTONES)
+    terminal_position_metrics = TerminalPositionTrajectoryMetrics(
+        args.num_envs,
+        args.device,
+        base_env.max_episode_length,
+        base_env.step_dt,
+    )
+    terminal_position_scores: list[float] = []
     max_x = torch.full((args.num_envs,), -torch.inf, device=args.device)
     max_z = torch.full_like(max_x, -torch.inf)
     steps = base_env.max_episode_length * args.episodes
@@ -490,6 +557,10 @@ def main() -> int:
                 base_env.episode_length_buf,
             )
             joint_frontier_metrics.observe(
+                local_pre_step,
+                base_env.episode_length_buf,
+            )
+            terminal_position_metrics.observe(
                 local_pre_step,
                 base_env.episode_length_buf,
             )
@@ -654,6 +725,9 @@ def main() -> int:
                     strict=True,
                 )
             ]
+            terminal_position_scores.extend(
+                terminal_position_metrics.complete(done_mask)
+            )
             origins = base_env.scene.terrain.env_origins
             for body_part, sensor_name in BODY_PART_CONTACT_SENSORS.items():
                 if body_part not in body_part_tread_metrics:
@@ -906,7 +980,7 @@ def main() -> int:
         }
     iteration_match = re.search(r"model_(\d+)$", checkpoint.stem)
     report: dict[str, object] = {
-        "schema_version": 9,
+        "schema_version": 10,
         "task": args.task,
         "checkpoint": str(checkpoint),
         "checkpoint_iteration": (
@@ -938,6 +1012,35 @@ def main() -> int:
         / denominator,
         "side_bypass_events": a12_event_counts["side_bypass"],
         "side_bypass_rate": a12_event_counts["side_bypass"] / denominator,
+        "terminal_position_objective": {
+            "definition": (
+                "per-trial integrated unweighted reciprocal position score "
+                "during the final 0.5 seconds"
+            ),
+            "target_m": {
+                "x": TERMINAL_TARGET_X_M,
+                "y": TERMINAL_TARGET_Y_M,
+                "z": TERMINAL_TARGET_Z_M,
+            },
+            "scales_m": {
+                "x": TERMINAL_X_SCALE_M,
+                "y": TERMINAL_Y_SCALE_M,
+                "z": TERMINAL_Z_SCALE_M,
+            },
+            "max_abs_y_m": TERMINAL_MAX_ABS_Y_M,
+            "window_s": TERMINAL_WINDOW_S,
+            "window_control_steps": int(
+                round(TERMINAL_WINDOW_S / base_env.step_dt)
+            ),
+            "integrated_raw_score_mean": (
+                sum(terminal_position_scores)
+                / max(len(terminal_position_scores), 1)
+            ),
+            "integrated_raw_score_quantiles": quantiles(
+                terminal_position_scores
+            ),
+            "per_trial_integrated_raw_scores": terminal_position_scores,
+        },
         "a12_metric_definitions": {
             "ignored_initial_control_steps": A12_IGNORE_INITIAL_CONTROL_STEPS,
             "sampling": "pre_step_reset_safe",

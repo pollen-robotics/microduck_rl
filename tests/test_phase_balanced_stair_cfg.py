@@ -5,6 +5,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     MicroduckStairLipCommitmentRsiRlCfg,
     MicroduckStairLipCheckpointRsiRlCfg,
     MicroduckStairFrontierCollocationRsiRlCfg,
+    MicroduckStairTerminalPositionRsiRlCfg,
     MicroduckStairMediumDynamicsRsiRlCfg,
     MicroduckStairPhaseBalancedRsiRlCfg,
     MicroduckStairSoftDynamicsRsiRlCfg,
@@ -19,6 +20,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     make_microduck_stair_lip_commitment_rsi_env_cfg,
     make_microduck_stair_lip_checkpoint_rsi_env_cfg,
     make_microduck_stair_frontier_collocation_rsi_env_cfg,
+    make_microduck_stair_terminal_position_rsi_env_cfg,
     make_microduck_stair_medium_dynamics_rsi_env_cfg,
     make_microduck_stair_phase_balanced_rsi_env_cfg,
     make_microduck_stair_soft_dynamics_rsi_env_cfg,
@@ -257,3 +259,34 @@ def test_frontier_collocation_retains_measured_near_lip_reset_distribution():
     assert cfg.rewards["stair_first_tread_secured"].weight == 600.0
     assert MicroduckStairFrontierCollocationRsiRlCfg.max_iterations == 75
     assert MicroduckStairFrontierCollocationRsiRlCfg.save_interval == 25
+
+
+def test_terminal_position_rsi_uses_clocked_finite_horizon_goal():
+    baseline = make_microduck_stair_frontier_collocation_rsi_env_cfg()
+    cfg = make_microduck_stair_terminal_position_rsi_env_cfg()
+    objective = cfg.rewards["stair_terminal_position_objective"]
+
+    assert tuple(cfg.observations["actor"].terms) == tuple(
+        baseline.observations["actor"].terms
+    )
+    assert cfg.episode_length_s == 3.0
+    assert cfg.rewards["stair_coupled_frontier_collocation"].weight == 0.0
+    assert objective.weight == 30.0
+    assert objective.params["target_x"] == 0.720
+    assert objective.params["target_y"] == 0.0
+    assert objective.params["target_z"] == 0.205
+    assert objective.params["reward_window_s"] == 0.50
+    assert objective.params["x_scale"] == 0.08
+    assert objective.params["y_scale"] == 0.12
+    assert objective.params["z_scale"] == 0.06
+    assert objective.params["max_abs_y"] == 0.20
+    assert cfg.observations["actor"].terms["body_command"].params[
+        "include_time_to_go"
+    ] is True
+    assert cfg.observations["critic"].terms["body_command"].params[
+        "include_time_to_go"
+    ] is True
+    assert cfg.terminations["time_out"].time_out is False
+    assert MicroduckStairTerminalPositionRsiRlCfg.max_iterations == 75
+    assert MicroduckStairTerminalPositionRsiRlCfg.save_interval == 25
+    assert MicroduckStairTerminalPositionRsiRlCfg.num_steps_per_env == 48
