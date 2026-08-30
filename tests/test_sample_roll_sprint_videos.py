@@ -28,6 +28,7 @@ def _args(tmp_path: Path, checkpoint_root: Path) -> argparse.Namespace:
         allow_repeats=False,
         video_only=False,
         audit_only=False,
+        montage_only=False,
         once=True,
     )
 
@@ -203,11 +204,41 @@ def test_video_only_keeps_recording_independent_from_audit(
     monkeypatch.setattr(sampler.subprocess, "run", fake_run)
 
     assert sampler.sample_once(args) is True
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert all(command[1] == str(sampler.RECORDER) for command in calls)
-    assert sum("--recovery-montage" in command for command in calls) == 1
+    assert "--recovery-montage" not in calls[0]
     state = json.loads(args.state_file.read_text(encoding="utf-8"))
     assert state["last_evaluation"] is None
+    assert state["last_recovery_montage"] is None
+
+
+def test_montage_only_records_one_unique_checkpoint_without_race_or_audit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    checkpoint_root = tmp_path / "run"
+    checkpoint_root.mkdir()
+    (checkpoint_root / "model_100.pt").write_bytes(b"checkpoint")
+    args = _args(tmp_path, checkpoint_root)
+    args.montage_only = True
+    calls: list[list[str]] = []
+
+    def fake_run(command, *, cwd, check):
+        del cwd, check
+        calls.append(command)
+        Path(command[3]).parent.mkdir(parents=True, exist_ok=True)
+        Path(command[3]).write_bytes(b"video")
+        return argparse.Namespace(returncode=0)
+
+    monkeypatch.setattr(sampler.subprocess, "run", fake_run)
+
+    assert sampler.sample_once(args) is True
+    assert len(calls) == 1
+    assert calls[0][1] == str(sampler.RECORDER)
+    assert "--recovery-montage" in calls[0]
+    assert sampler.sample_once(args) is False
+    state = json.loads(args.state_file.read_text(encoding="utf-8"))
+    assert state["last_video"] is None
+    assert Path(state["last_recovery_montage"]).is_file()
 
 
 def test_audit_only_skips_video_recording(tmp_path: Path, monkeypatch) -> None:

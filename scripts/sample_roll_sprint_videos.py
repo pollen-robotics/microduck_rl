@@ -215,7 +215,8 @@ def sample_once(args: argparse.Namespace) -> bool:
         return False
 
     evaluation = _evaluation_path(args.output_dir, identity)
-    if not args.video_only and not evaluation.is_file():
+    skip_evaluation = args.video_only or args.montage_only
+    if not skip_evaluation and not evaluation.is_file():
         evaluation.parent.mkdir(parents=True, exist_ok=True)
         evaluation_command = _evaluator_command(
             checkpoint=checkpoint,
@@ -239,10 +240,53 @@ def sample_once(args: argparse.Namespace) -> bool:
         if not evaluation.is_file():
             _log("evaluator returned success without JSON; state unchanged")
             return False
-    elif not args.video_only:
+    elif not skip_evaluation:
         _log(f"reusing completed audit: {evaluation}")
 
     if args.audit_only:
+        return True
+
+    recovery_montage = _recovery_montage_path(args.output_dir, identity)
+    if args.montage_only:
+        if not recovery_montage.is_file():
+            recovery_montage.parent.mkdir(parents=True, exist_ok=True)
+            recovery_command = _recorder_command(
+                checkpoint=checkpoint,
+                output=recovery_montage,
+                task_id=args.task_id,
+                device=args.device,
+                recovery_montage=True,
+            )
+            _log(
+                "recording one recovery montage for checkpoint iteration "
+                f"{identity.iteration}: {recovery_montage}"
+            )
+            recovery_result = subprocess.run(
+                recovery_command, cwd=REPO_ROOT, check=False
+            )
+            if recovery_result.returncode != 0:
+                _log(
+                    "recovery montage failed with exit code "
+                    f"{recovery_result.returncode}; state unchanged"
+                )
+                return False
+            if not recovery_montage.is_file():
+                _log("recovery recorder returned success without video; state unchanged")
+                return False
+        else:
+            _log(f"reusing unique recovery montage: {recovery_montage}")
+        _write_state(
+            args.state_file,
+            {
+                "version": 3,
+                "last_checkpoint": asdict(identity),
+                "last_evaluation": None,
+                "last_video": None,
+                "last_recovery_montage": str(recovery_montage.resolve()),
+                "sampled_at_utc": datetime.now(UTC).isoformat(),
+            },
+        )
+        _log(f"recovery montage complete: {recovery_montage}")
         return True
 
     output = _output_path(args.output_dir, identity)
@@ -265,8 +309,7 @@ def sample_once(args: argparse.Namespace) -> bool:
         _log("recorder returned success without an output video; state unchanged")
         return False
 
-    recovery_montage = _recovery_montage_path(args.output_dir, identity)
-    if not recovery_montage.is_file():
+    if not args.video_only and not recovery_montage.is_file():
         recovery_montage.parent.mkdir(parents=True, exist_ok=True)
         recovery_command = _recorder_command(
             checkpoint=checkpoint,
@@ -291,7 +334,7 @@ def sample_once(args: argparse.Namespace) -> bool:
         if not recovery_montage.is_file():
             _log("recovery recorder returned success without video; state unchanged")
             return False
-    else:
+    elif not args.video_only:
         _log(f"reusing unique recovery montage: {recovery_montage}")
     _write_state(
         args.state_file,
@@ -302,7 +345,11 @@ def sample_once(args: argparse.Namespace) -> bool:
                 str(evaluation.resolve()) if evaluation.is_file() else None
             ),
             "last_video": str(output.resolve()),
-            "last_recovery_montage": str(recovery_montage.resolve()),
+            "last_recovery_montage": (
+                str(recovery_montage.resolve())
+                if recovery_montage.is_file()
+                else None
+            ),
             "sampled_at_utc": datetime.now(UTC).isoformat(),
         },
     )
@@ -337,6 +384,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Audit each unique checkpoint without recording a video.",
     )
+    mode.add_argument(
+        "--montage-only",
+        action="store_true",
+        help="Record one recovery montage per unique checkpoint on its own cadence.",
+    )
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
     args.checkpoint_root = args.checkpoint_root.expanduser().resolve()
@@ -355,7 +407,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     if not args.audit_only and not RECORDER.is_file():
         raise SystemExit(f"Recorder not found: {RECORDER}")
-    if not args.video_only and not EVALUATOR.is_file():
+    if not args.video_only and not args.montage_only and not EVALUATOR.is_file():
         raise SystemExit(f"Evaluator not found: {EVALUATOR}")
     if not args.checkpoint_root.is_dir():
         raise SystemExit(f"Checkpoint root not found: {args.checkpoint_root}")
