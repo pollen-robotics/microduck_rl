@@ -12126,13 +12126,20 @@ def roll_sprint_straightness_penalty(
     deadband: float = 0.01,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Lane-offset cost; lateral travel never contributes to forward credit."""
+    """Charge lane offset only while supported forward roll progress is active."""
     asset = env.scene[asset_cfg.name]
     _update_roll_sprint_state(env, asset)
-    return torch.clamp(
+    lane_offset = torch.clamp(
         env._roll_sprint_lateral_displacement.abs() - deadband,
         min=0.0,
     )
+    roll_activity = torch.clamp(
+        env._roll_sprint_progress_delta
+        / (env.step_dt * _ROLL_SPRINT_TARGET_ANGLE),
+        min=0.0,
+        max=1.0,
+    )
+    return lane_offset * roll_activity
 
 
 def roll_sprint_cycle_rate(

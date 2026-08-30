@@ -582,11 +582,14 @@ def test_roll_sprint_lateral_displacement_has_no_credit_and_costs_straightness(
     _enable_flat_valid_roll(monkeypatch, env)
     _prime_roll_heading(env, asset)
     _complete_valid_roll(env, asset, forward=0.0, lateral=0.25)
+    env._roll_sprint_progress_delta[:] = env.step_dt * mdp._ROLL_SPRINT_TARGET_ANGLE
 
     penalty = mdp.roll_sprint_straightness_penalty(env, deadband=0.01)
 
     assert env._roll_sprint_completed_distance[0] == 0.0
     assert penalty[0] == pytest.approx(0.24)
+    env._roll_sprint_progress_delta.zero_()
+    assert mdp.roll_sprint_straightness_penalty(env, deadband=0.01)[0] == 0.0
 
 
 def test_roll_progress_reward_fades_to_zero_at_lane_edge_without_idle_annuity():
