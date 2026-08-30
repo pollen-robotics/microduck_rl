@@ -6,8 +6,6 @@ objective.  Each cycle must still be a supported sagittal roll with a flat
 head-top contact before its distance is released to PPO.
 """
 
-import math
-
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers import (
     CurriculumTermCfg,
@@ -29,11 +27,7 @@ from mjlab_microduck.tasks.microduck_roulade_env_cfg import (
     ENABLE_JOINT_FRICTION_RANDOMIZATION,
     ENABLE_MASS_INERTIA_RANDOMIZATION,
     ENABLE_SYMMETRY,
-    ENCODER_BIAS_RANGE,
     HEAD_COM_RANDOMIZATION_RANGE,
-    IMU_ORIENTATION_RANDOMIZATION_ANGLE,
-    JOINT_FRICTION_RANDOMIZATION_RANGE,
-    MASS_INERTIA_RANDOMIZATION_RANGE,
     MIDROLL_OMEGA_RANGE,
     MIDROLL_PITCH_MAX,
     MIDROLL_PITCH_MIN,
@@ -41,8 +35,7 @@ from mjlab_microduck.tasks.microduck_roulade_env_cfg import (
     TUCK_OVERRIDES,
     make_microduck_roulade_env_cfg,
 )
-from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg, SYMMETRY_CFG
-
+from mjlab_microduck.tasks.symmetry import SYMMETRY_CFG, PpoWithSymmetryCfg
 
 EPISODE_LENGTH_S = 6.0
 
@@ -73,43 +66,50 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     )
     cfg.rewards["roll_sprint_distance"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_distance,
-        weight=25.0,
+        weight=32.0,
     )
     cfg.rewards["roll_sprint_cycle_rate"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_cycle_rate,
-        weight=0.10,
+        weight=1.0,
+    )
+    cfg.rewards["roll_sprint_head_pivot"] = RewardTermCfg(
+        func=microduck_mdp.roll_sprint_head_pivot,
+        weight=0.25,
+        params={"rate_norm": 2.0},
+    )
+    cfg.rewards["roll_sprint_invalid_cycle"] = RewardTermCfg(
+        func=microduck_mdp.roll_sprint_invalid_cycle_rate,
+        weight=-2.0,
     )
     cfg.rewards["roll_sprint_overspeed"] = RewardTermCfg(
         func=microduck_mdp.roulade_overspeed_penalty,
-        weight=-0.05,
+        weight=0.0,
         params={"omega_max": 7.0},
     )
     cfg.rewards["roll_sprint_sagittal"] = RewardTermCfg(
         func=microduck_mdp.roulade_sagittal_penalty,
-        weight=-0.03,
+        weight=-0.05,
     )
     cfg.rewards["roll_sprint_lateral_vel"] = RewardTermCfg(
         func=microduck_mdp.roulade_lateral_velocity_penalty,
-        weight=-0.25,
+        weight=-0.20,
     )
     cfg.rewards["roll_sprint_flatness"] = RewardTermCfg(
         func=microduck_mdp.roulade_flatness_penalty,
-        weight=-0.15,
+        weight=-0.25,
     )
     cfg.rewards["roll_sprint_impact"] = RewardTermCfg(
         func=microduck_mdp.trunk_vertical_accel_penalty,
-        weight=0.001,
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",))
-        },
+        weight=0.0,
+        params={"asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",))},
     )
 
-    cfg.rewards["action_rate_l2"].weight = -0.05
+    cfg.rewards["action_rate_l2"].weight = 0.0
     cfg.rewards["joint_torque_rate_l2"].weight = 0.0
     cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("trunk_base",)
-    cfg.rewards["body_ang_vel"].weight = -0.0005
-    cfg.rewards["angular_momentum"].weight = -0.0002
-    cfg.rewards["self_collisions"].weight = -0.03
+    cfg.rewards["body_ang_vel"].weight = 0.0
+    cfg.rewards["angular_momentum"].weight = 0.0
+    cfg.rewards["self_collisions"].weight = 0.0
 
     # The cyclic reset wraps the existing reverse-roll pose sampler but owns
     # all sprint counters, including the reset heading and completed count.
@@ -168,17 +168,24 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                     },
                 },
                 {
-                    "step": 1500 * 24,
+                    "step": 500 * 24,
                     "params": {
                         "standing_prob": 0.65,
                         "midroll_prob": 0.35,
                     },
                 },
                 {
-                    "step": 3000 * 24,
+                    "step": 1500 * 24,
                     "params": {
-                        "standing_prob": 0.80,
-                        "midroll_prob": 0.20,
+                        "standing_prob": 0.85,
+                        "midroll_prob": 0.15,
+                    },
+                },
+                {
+                    "step": 2500 * 24,
+                    "params": {
+                        "standing_prob": 1.0,
+                        "midroll_prob": 0.0,
                     },
                 },
             ],
@@ -216,31 +223,31 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         params={
             "reward_name": "roll_sprint_distance",
             "weight_stages": [
-                {"step": 0, "weight": 8.0},
-                {"step": 500 * 24, "weight": 18.0},
-                {"step": 1500 * 24, "weight": 25.0},
+                {"step": 0, "weight": 12.0},
+                {"step": 250 * 24, "weight": 24.0},
+                {"step": 750 * 24, "weight": 32.0},
             ],
         },
     )
-    cfg.curriculum["action_rate_weight"] = CurriculumTermCfg(
+    cfg.curriculum["roll_sprint_progress_weight"] = CurriculumTermCfg(
         func=microduck_mdp.reward_weight,
         params={
-            "reward_name": "action_rate_l2",
+            "reward_name": "roll_sprint_progress",
             "weight_stages": [
-                {"step": 0, "weight": -0.05},
-                {"step": 1500 * 24, "weight": -0.10},
-                {"step": 3000 * 24, "weight": -0.20},
+                {"step": 0, "weight": 1.5},
+                {"step": 250 * 24, "weight": 0.75},
+                {"step": 750 * 24, "weight": 0.25},
+                {"step": 1500 * 24, "weight": 0.0},
             ],
         },
     )
-    cfg.curriculum["impact_weight"] = CurriculumTermCfg(
+    cfg.curriculum["roll_sprint_head_pivot_weight"] = CurriculumTermCfg(
         func=microduck_mdp.reward_weight,
         params={
-            "reward_name": "roll_sprint_impact",
+            "reward_name": "roll_sprint_head_pivot",
             "weight_stages": [
-                {"step": 0, "weight": 0.001},
-                {"step": 1500 * 24, "weight": 0.002},
-                {"step": 3000 * 24, "weight": 0.003},
+                {"step": 0, "weight": 0.25},
+                {"step": 1500 * 24, "weight": 0.10},
             ],
         },
     )
@@ -296,7 +303,8 @@ MicroduckRollSprintRlCfg = RslRlOnPolicyRunnerCfg(
     wandb_project="mjlab_microduck",
     experiment_name="microduck_roll_sprint",
     run_name="microduck_roll_sprint",
-    save_interval=100,
+    # A checkpoint every ~2.5 minutes feeds the dashboard video sampler.
+    save_interval=25,
     num_steps_per_env=24,
     max_iterations=4_000,
 )
