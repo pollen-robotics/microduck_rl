@@ -1807,6 +1807,30 @@ def make_microduck_stair_contact_stage_rsi_env_cfg(
     return cfg
 
 
+def make_microduck_stair_stage15_reverse_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A32: reverse-reset from exact policy-created Stage 1.5 states."""
+
+    cfg = make_microduck_stair_contact_stage_rsi_env_cfg(play=play)
+    cfg.events["state_bank_family"].params["family_weights"] = (1, 1)
+    stage15_bank = deepcopy(cfg.events.pop("tread_contact_state_bank"))
+    cfg.events.pop("manufacturer_roulade_state_bank")
+    stage15_bank.params.update(
+        {
+            "bank_path": ".tmp/codex/full170-a32-model14-stage15-state-bank.pt",
+            "reset_family": 1,
+        }
+    )
+    cfg.events["stage15_reverse_state_bank"] = stage15_bank
+    cfg.events["stage15_reverse_context"] = EventTermCfg(
+        func=microduck_mdp.seed_stair_contact_transfer_reverse_context,
+        mode="reset",
+        params={"reverse_family": 1},
+    )
+    return cfg
+
+
 def make_microduck_stair_tread_contact_bank_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -2235,6 +2259,16 @@ MicroduckStairContactStageRsiRlCfg.run_name = (
     "microduck_stair_contact_stage_rsi_specialist"
 )
 MicroduckStairContactStageRsiRlCfg.save_interval = 5
+
+MicroduckStairStage15ReverseRsiRlCfg = deepcopy(
+    MicroduckStairContactStageRsiRlCfg
+)
+MicroduckStairStage15ReverseRsiRlCfg.experiment_name = (
+    "microduck_stair_stage15_reverse_rsi_specialist"
+)
+MicroduckStairStage15ReverseRsiRlCfg.run_name = (
+    "microduck_stair_stage15_reverse_rsi_specialist"
+)
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)
 MicroduckStairTreadContactBankRlCfg.experiment_name = (

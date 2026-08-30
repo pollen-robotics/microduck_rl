@@ -13,6 +13,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     VIRTUAL_LIP_MAX_FACE_OFFSET,
     BoxStandardStaircaseTerrainCfg,
     make_microduck_stair_contact_stage_rsi_env_cfg,
+    make_microduck_stair_stage15_reverse_rsi_env_cfg,
     make_microduck_stair_forward_propagation_rsi_env_cfg,
     make_microduck_stair_virtual_lip_transfer_rsi_env_cfg,
 )
@@ -318,6 +319,56 @@ def test_stage2_two_frame_release_follows_stage15_first_frame(monkeypatch):
     assert env._stair_contact_transfer_stage2_policy_achieved.item()
 
 
+def test_reverse_stage15_seed_prepays_no_prefix_reward_and_unlocks_hold(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        microduck_mdp,
+        "_virtual_lip_union_contact_state",
+        _fake_virtual_union,
+    )
+    env = _contact_env(1)
+    env._stair_contact_transfer_reverse_stage15_seed = torch.ones(
+        1, dtype=torch.bool
+    )
+    env._stair_state_bank_family = torch.ones(1, dtype=torch.long)
+    env.test_face[:] = False
+    env.test_tread[:] = True
+    env.test_force[:] = 7.0
+
+    assert microduck_mdp.stair_new_tread_contact_after_reset(env).item() == 0.0
+    assert (
+        microduck_mdp.stair_loaded_tread_no_face_first_frame(
+            env, min_normal_force=2.0
+        ).item()
+        == 0.0
+    )
+    assert (
+        microduck_mdp.stair_loaded_tread_face_release(
+            env, min_normal_force=2.0, require_stage15=True
+        ).item()
+        == 0.0
+    )
+    assert env._stair_contact_transfer_stage1_policy_achieved.item()
+    assert env._stair_contact_transfer_stage15_policy_achieved.item()
+    assert not env._stair_contact_transfer_stage2_latched.item()
+
+    env.episode_length_buf[:] = 3
+    assert (
+        microduck_mdp.stair_loaded_tread_face_release(
+            env, min_normal_force=2.0, require_stage15=True
+        ).item()
+        == 0.0
+    )
+    env.episode_length_buf[:] = 4
+    assert (
+        microduck_mdp.stair_loaded_tread_face_release(
+            env, min_normal_force=2.0, require_stage15=True
+        ).item()
+        == 1.0
+    )
+
+
 def test_penetration_cost_is_gated_before_arming_and_on_hard_level():
     robot = SimpleNamespace(
         indexing=SimpleNamespace(geom_ids=torch.tensor([0])),
@@ -571,6 +622,29 @@ def test_a31_adds_only_ordered_stage15_reward_and_keeps_fixed_level0():
     )
     assert "terrain_levels" not in cfg.curriculum
     assert cfg.scene.terrain.max_init_terrain_level == 0
+    assert play_cfg.events["a30_hard_viewer"].params == {
+        "terrain_levels": (2,),
+        "terrain_types": (0,),
+    }
+
+
+def test_a32_replaces_generic_banks_with_exact_two_family_reverse_mix():
+    cfg = make_microduck_stair_stage15_reverse_rsi_env_cfg()
+    play_cfg = make_microduck_stair_stage15_reverse_rsi_env_cfg(play=True)
+
+    assert cfg.events["state_bank_family"].params["family_weights"] == (1, 1)
+    assert "tread_contact_state_bank" not in cfg.events
+    assert "manufacturer_roulade_state_bank" not in cfg.events
+    reverse_bank = cfg.events["stage15_reverse_state_bank"]
+    assert reverse_bank.params["reset_family"] == 1
+    assert reverse_bank.params["bank_path"].endswith(
+        "full170-a32-model14-stage15-state-bank.pt"
+    )
+    assert cfg.events["root_over_lip_state_bank"].params["reset_family"] == 0
+    event_names = tuple(cfg.events)
+    assert event_names.index("stage15_reverse_state_bank") < event_names.index(
+        "stage15_reverse_context"
+    )
     assert play_cfg.events["a30_hard_viewer"].params == {
         "terrain_levels": (2,),
         "terrain_types": (0,),

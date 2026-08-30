@@ -1575,6 +1575,35 @@ def assign_stair_state_bank_family(
         start = stop
 
 
+def seed_stair_contact_transfer_reverse_context(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    reverse_family: int = 1,
+) -> None:
+    """Mark policy-generated Stage 1.5 replay rows as a proven prefix.
+
+    The reset itself never pays a stage reward. Reward terms use this marker
+    only to prequalify the already-observed Stage 1 and Stage 1.5 history so
+    PPO can learn the missing loaded-support hold from that exact state.
+    """
+
+    if env_ids is None or len(env_ids) == 0:
+        return
+    family = getattr(env, "_stair_state_bank_family", None)
+    if family is None:
+        raise RuntimeError(
+            "Reverse contact context requires preceding state-bank assignment"
+        )
+    env_ids = env_ids.to(device=env.device, dtype=torch.long)
+    if not hasattr(env, "_stair_contact_transfer_reverse_stage15_seed"):
+        env._stair_contact_transfer_reverse_stage15_seed = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    env._stair_contact_transfer_reverse_stage15_seed[env_ids] = (
+        family[env_ids] == reverse_family
+    )
+
+
 def stair_preload_frontier(
     env: ManagerBasedRlEnv,
     start_x: float = 0.42,
@@ -2100,12 +2129,19 @@ def stair_new_tread_contact_after_reset(
             env._stair_contact_transfer_stage1_latched
         )
     fresh = env.episode_length_buf <= 1
+    reverse_seed = getattr(
+        env,
+        "_stair_contact_transfer_reverse_stage15_seed",
+        torch.zeros_like(current),
+    )
     # Existing replay-bank contact is a baseline, never an achievement. Track
     # the live contact edge separately so a baseline contact that releases and
     # is later re-created by the policy can still count exactly once.
-    env._stair_contact_transfer_stage1_latched[fresh] = False
+    env._stair_contact_transfer_stage1_latched[fresh] = reverse_seed[fresh]
     env._stair_contact_transfer_stage1_previous[fresh] = current[fresh]
-    env._stair_contact_transfer_stage1_policy_achieved[fresh] = False
+    env._stair_contact_transfer_stage1_policy_achieved[fresh] = reverse_seed[
+        fresh
+    ]
     armed = env.episode_length_buf >= min_policy_steps
     newly_contacted = (
         armed
@@ -2181,9 +2217,18 @@ def stair_loaded_tread_no_face_first_frame(
             env._stair_contact_transfer_stage15_reset_baseline
         )
     fresh = env.episode_length_buf <= 1
+    reverse_seed = getattr(
+        env,
+        "_stair_contact_transfer_reverse_stage15_seed",
+        torch.zeros_like(candidate),
+    )
     env._stair_contact_transfer_stage15_reset_baseline[fresh] = candidate[fresh]
-    env._stair_contact_transfer_stage15_latched[fresh] = candidate[fresh]
-    env._stair_contact_transfer_stage15_policy_achieved[fresh] = False
+    env._stair_contact_transfer_stage15_latched[fresh] = (
+        candidate[fresh] | reverse_seed[fresh]
+    )
+    env._stair_contact_transfer_stage15_policy_achieved[fresh] = reverse_seed[
+        fresh
+    ]
     newly_reached = candidate & ~env._stair_contact_transfer_stage15_latched
     env._stair_contact_transfer_stage15_latched |= candidate
     env._stair_contact_transfer_stage15_policy_achieved |= newly_reached
@@ -2239,10 +2284,17 @@ def stair_loaded_tread_face_release(
             env._stair_contact_transfer_stage2_latched
         )
     fresh = env.episode_length_buf <= 1
+    reverse_seed = getattr(
+        env,
+        "_stair_contact_transfer_reverse_stage15_seed",
+        torch.zeros_like(tread_contact),
+    )
     env._stair_contact_transfer_hold[fresh] = 0
     # A tread-contact bank state is useful for downstream clearance but cannot
     # claim discovery of the transfer that already existed at reset.
-    env._stair_contact_transfer_stage2_latched[fresh] = tread_contact[fresh]
+    env._stair_contact_transfer_stage2_latched[fresh] = (
+        tread_contact[fresh] & ~reverse_seed[fresh]
+    )
     env._stair_contact_transfer_stage2_policy_achieved[fresh] = False
     reset_family = getattr(env, "_stair_state_bank_family", None)
     validated_face_source = (
@@ -2254,7 +2306,9 @@ def stair_loaded_tread_face_release(
     # no-tread states. The recessed level deliberately removes that contact,
     # so retain the validated source fact as the prior-face condition.
     env._stair_contact_transfer_face_seen[fresh] = (
-        face_contact[fresh] | validated_face_source[fresh]
+        face_contact[fresh]
+        | validated_face_source[fresh]
+        | reverse_seed[fresh]
     )
     env._stair_contact_transfer_face_seen |= face_contact
     stage1 = getattr(env, "_stair_contact_transfer_stage1_policy_achieved", None)

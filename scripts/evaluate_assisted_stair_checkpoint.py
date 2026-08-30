@@ -28,7 +28,9 @@ from mjlab_microduck.tasks.mdp import classify_standard_stair_contacts
 
 A30_TASK_ID = "Mjlab-Stairs-Virtual-Lip-Transfer-RSI-Specialist-MicroDuck"
 A31_TASK_ID = "Mjlab-Stairs-Contact-Stage-RSI-Specialist-MicroDuck"
-CONTACT_TRANSFER_TASK_IDS = (A30_TASK_ID, A31_TASK_ID)
+A32_TASK_ID = "Mjlab-Stairs-Stage15-Reverse-RSI-Specialist-MicroDuck"
+CONTACT_TRANSFER_TASK_IDS = (A30_TASK_ID, A31_TASK_ID, A32_TASK_ID)
+STAGE15_TASK_IDS = (A31_TASK_ID, A32_TASK_ID)
 TASK_IDS = (
     "Mjlab-Stairs-Assisted-Specialist-MicroDuck",
     "Mjlab-Stairs-Bridge-Specialist-MicroDuck",
@@ -49,6 +51,7 @@ TASK_IDS = (
     "Mjlab-Stairs-Forward-Propagation-RSI-Specialist-MicroDuck",
     A30_TASK_ID,
     A31_TASK_ID,
+    A32_TASK_ID,
     "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
     "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
@@ -87,6 +90,15 @@ A30_RESET_FAMILY_OVERRIDES = {
     "face-no-tread": 0,
     "tread-contact": 1,
     "manufacturer": 2,
+}
+A32_RESET_MODES = {
+    0: "face_no_tread_bank",
+    1: "stage15_reverse_bank",
+}
+A32_RESET_FAMILY_OVERRIDES = {
+    "mixed": None,
+    "face-no-tread": 0,
+    "stage15-reverse": 1,
 }
 BODY_PART_CONTACT_SENSORS = {
     "head": "head_ground_contact",
@@ -405,7 +417,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--terrain-level", type=int, choices=(0, 1, 2))
     parser.add_argument(
         "--reset-family",
-        choices=tuple(A30_RESET_FAMILY_OVERRIDES),
+        choices=tuple(
+            dict.fromkeys(
+                (*A30_RESET_FAMILY_OVERRIDES, *A32_RESET_FAMILY_OVERRIDES)
+            )
+        ),
         default="mixed",
     )
     parser.add_argument("--output", type=Path)
@@ -434,7 +450,8 @@ def _sha256(path: Path) -> str:
 def main() -> int:
     args = _parse_args()
     is_contact_transfer = args.task in CONTACT_TRANSFER_TASK_IDS
-    is_a31 = args.task == A31_TASK_ID
+    is_stage15_task = args.task in STAGE15_TASK_IDS
+    is_a32 = args.task == A32_TASK_ID
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_file():
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
@@ -446,13 +463,22 @@ def main() -> int:
         raise SystemExit("--root-over-lip-replay-fraction must be within [0, 1]")
     if not is_contact_transfer and args.terrain_level is not None:
         raise SystemExit(
-            "--terrain-level is supported only for the A30/A31 tasks"
+            "--terrain-level is supported only for contact-transfer tasks"
         )
     if not is_contact_transfer and args.reset_family != "mixed":
         raise SystemExit(
-            "--reset-family is supported only for the A30/A31 tasks"
+            "--reset-family is supported only for contact-transfer tasks"
         )
-    if is_contact_transfer:
+    reset_family_overrides = (
+        A32_RESET_FAMILY_OVERRIDES if is_a32 else A30_RESET_FAMILY_OVERRIDES
+    )
+    if is_contact_transfer and args.reset_family not in reset_family_overrides:
+        raise SystemExit(
+            f"--reset-family {args.reset_family!r} is invalid for {args.task}"
+        )
+    if is_a32:
+        reset_modes = A32_RESET_MODES
+    elif is_contact_transfer:
         reset_modes = A30_RESET_MODES
     elif args.task in {
         "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
@@ -507,7 +533,7 @@ def main() -> int:
             effective_terrain_level,
         ) * args.num_envs
         hard_viewer.params["terrain_types"] = (0,) * args.num_envs
-        forced_reset_family = A30_RESET_FAMILY_OVERRIDES[args.reset_family]
+        forced_reset_family = reset_family_overrides[args.reset_family]
         state_bank_family = env_cfg.events.get("state_bank_family")
         if state_bank_family is None:
             raise RuntimeError(
@@ -833,7 +859,7 @@ def main() -> int:
             else:
                 stage1_policy = previous_stage1_policy
                 stage2_policy = previous_stage2_policy
-            if is_a31:
+            if is_stage15_task:
                 stage15_policy = getattr(
                     base_env,
                     "_stair_contact_transfer_stage15_policy_achieved",
@@ -841,7 +867,7 @@ def main() -> int:
                 )
                 if stage15_policy is None:
                     raise RuntimeError(
-                        "A31 Stage 1.5 policy-achievement tracking is unavailable"
+                        "Stage 1.5 policy-achievement tracking is unavailable"
                     )
             else:
                 stage15_policy = previous_stage15_policy
@@ -893,7 +919,14 @@ def main() -> int:
             new_stage1_policy = stage1_policy & ~previous_stage1_policy
             new_stage15_policy = stage15_policy & ~previous_stage15_policy
             new_stage2_policy = stage2_policy & ~previous_stage2_policy
-            if is_a31:
+            if is_a32:
+                # Reverse-bank rows prequalify the proven Stage 1/1.5 prefix.
+                # Their reset-created flags appear before two policy steps and
+                # must not be reported as newly discovered live events.
+                live_prefix_edge = episode_control_steps >= 2
+                new_stage1_policy &= live_prefix_edge
+                new_stage15_policy &= live_prefix_edge
+            if is_stage15_task:
                 stage15_without_stage1 = new_stage15_policy & ~stage1_policy
                 stage2_without_stage15 = new_stage2_policy & ~stage15_policy
             else:
@@ -1349,7 +1382,7 @@ def main() -> int:
                     ),
                 }
             )
-        if is_a31:
+        if is_stage15_task:
             mode_report[name].update(
                 {
                     "contact_transfer_stage15_policy_achieved_events": (
@@ -1561,7 +1594,7 @@ def main() -> int:
                 ),
             }
         )
-    if is_a31:
+    if is_stage15_task:
         report.update(
             {
                 "schema_version": 12,
@@ -1579,6 +1612,8 @@ def main() -> int:
                 ),
             }
         )
+    if is_a32:
+        report["schema_version"] = 13
     output = args.output or checkpoint.with_suffix(".assisted-eval.json")
     _write_json_atomic(output.resolve(), report)
     print(json.dumps(report, indent=2, sort_keys=True))
