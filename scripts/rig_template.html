@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MicroDuck Rig — hardware signals → policy I/O</title>
+<style>
+  :root {
+    --bg:#0f141b; --panel:#182030; --panel2:#1f2a3d; --line:#2c3a52;
+    --txt:#dbe4f0; --dim:#8ea1bb; --duck:#ffce3d; --accent:#4fc3f7;
+    --pos:#66bb6a; --vel:#ab47bc; --act:#ff7043;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt);
+         font:14px/1.45 -apple-system,"Segoe UI",Roboto,sans-serif; }
+  header { padding:12px 18px; border-bottom:1px solid var(--line);
+           display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  header h1 { font-size:17px; margin:0; color:var(--duck); }
+  header .sub { color:var(--dim); font-size:12px; }
+  #controls { display:flex; align-items:center; gap:10px; margin-left:auto; }
+  button { background:var(--panel2); color:var(--txt); border:1px solid var(--line);
+           border-radius:6px; padding:6px 14px; cursor:pointer; font-size:13px; }
+  button:hover { border-color:var(--accent); }
+  #scrub { width:280px; accent-color:var(--duck); }
+  #tlabel { font-variant-numeric:tabular-nums; color:var(--dim); min-width:90px; }
+  main { display:grid; grid-template-columns:460px 1fr; gap:14px; padding:14px 18px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .card h2 { margin:0 0 8px; font-size:13px; text-transform:uppercase;
+             letter-spacing:.08em; color:var(--dim); }
+  #rig { display:block; margin:auto; }
+  .joint-row { display:grid; grid-template-columns:130px 1fr 64px; gap:8px;
+               align-items:center; padding:3px 6px; border-radius:6px; cursor:pointer; }
+  .joint-row:hover { background:var(--panel2); }
+  .joint-row.sel { background:#27344c; outline:1px solid var(--duck); }
+  .joint-row .nm { font-size:12px; }
+  .joint-row .bar { height:8px; background:#0c1119; border-radius:4px; position:relative; overflow:hidden; }
+  .joint-row .bar i { position:absolute; top:0; bottom:0; background:var(--accent); border-radius:4px; }
+  .joint-row .vl { font-size:11px; color:var(--dim); text-align:right; font-variant-numeric:tabular-nums; }
+  #lower { display:grid; grid-template-columns:1fr 1fr; gap:14px; padding:0 18px 14px; }
+  #obsbar { display:flex; gap:1px; height:54px; margin-top:6px; }
+  #obsbar div { border-radius:2px; position:relative; cursor:default; }
+  #obslegend { display:flex; gap:12px; flex-wrap:wrap; margin-top:8px; font-size:11px; color:var(--dim); }
+  #obslegend b { font-weight:600; }
+  canvas.chart { width:100%; height:120px; background:#0c1119; border-radius:8px; }
+  .chlabel { font-size:11px; margin:8px 0 3px; color:var(--dim); }
+  #mapinfo { font-size:12.5px; }
+  #mapinfo .flow { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin:8px 0; }
+  #mapinfo .node { background:var(--panel2); border:1px solid var(--line); border-radius:6px; padding:4px 9px; }
+  #mapinfo .arrow { color:var(--duck); }
+  #mapinfo code { color:var(--accent); }
+  .tag { display:inline-block; background:#0c1119; border:1px solid var(--line); border-radius:4px;
+         padding:1px 6px; margin:1px 2px; font-size:11px; color:var(--dim); }
+  .tooltip { position:fixed; pointer-events:none; background:#000a; border:1px solid var(--line);
+             border-radius:6px; padding:5px 9px; font-size:11.5px; display:none; z-index:10; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🦆 MicroDuck Rig</h1>
+  <div class="sub">hardware signals → policy input/output &nbsp;·&nbsp; __SUB__</div>
+  <div id="controls">
+    <button id="playbtn">⏸ Pause</button>
+    <input id="scrub" type="range" min="0" max="599" value="0">
+    <span id="tlabel">0.00 s</span>
+  </div>
+</header>
+<main>
+  <div class="card">
+    <h2>Rig — click a joint (side view animated · roll/yaw as gauges)</h2>
+    <svg id="rig" width="440" height="470" viewBox="0 0 440 470"></svg>
+  </div>
+  <div class="card">
+    <h2>Joints — live position</h2>
+    <div id="jointlist"></div>
+    <div id="mapinfo" style="margin-top:12px"></div>
+  </div>
+</main>
+<div id="lower">
+  <div class="card">
+    <h2>Selected joint — signals over the rollout</h2>
+    <div class="chlabel" style="color:var(--pos)">present_position (rad) — encoder reading the policy sees (with bias/noise)</div>
+    <canvas class="chart" id="ch_pos" width="900" height="120"></canvas>
+    <div class="chlabel" style="color:var(--vel)">present_velocity (rad/s) — 1-control-step lag (Dynamixel moving average)</div>
+    <canvas class="chart" id="ch_vel" width="900" height="120"></canvas>
+    <div class="chlabel" style="color:var(--act)">policy action (rad) — target position written back to the servo</div>
+    <canvas class="chart" id="ch_act" width="900" height="120"></canvas>
+  </div>
+  <div class="card">
+    <h2>Policy input vector (61D) — live</h2>
+    <div id="obsbar"></div>
+    <div id="obslegend"></div>
+    <p style="font-size:12px;color:var(--dim)">
+      Layout: <code>base_ang_vel(3) · projected_gravity(3) · joint_pos(14) · joint_vel(14) · actions(14) · command(3) · head_command(4) · body_command(6)</code>.
+      Actor obs carry sim2real corruptions (IMU misalignment, encoder bias, noise, velocity lag); the critic sees clean values.
+      Vector is obs-normalized before the MLP — the normalizer is baked into the exported ONNX.
+    </p>
+  </div>
+</div>
+<div class="tooltip" id="tip"></div>
+<script id="rig-data" type="application/json">/*__DATA__*/</script>
+<script>
+const DATA = JSON.parse(document.getElementById('rig-data').textContent);
+const JN = DATA.joint_names, D = DATA.data, N = D.t.length, FPS = DATA.fps;
+// obs layout offsets
+const TERMS = DATA.obs_terms; let off = []; TERMS.reduce((a,t,i)=>(off.push(a),a+t.dim),0);
+const termColor = { base_ang_vel:'#4fc3f7', projected_gravity:'#26a69a', joint_pos:'#66bb6a',
+  joint_vel:'#ab47bc', actions:'#ff7043', command:'#ffce3d', head_command:'#7e57c2', body_command:'#5c6bc0' };
+
+let sel = 5; // neck_pitch by default — the star of the ground pick
+let frame = 0, playing = true, lastT = 0;
+
+// ── rig drawing (side view, sagittal chain + gauges) ─────────────────────────
+const svg = document.getElementById('rig');
+const NS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs, parent) { const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]); (parent||svg).appendChild(e); return e; }
+
+const S = 900; // px per meter
+const ORIGIN = {x: 220, y: 200}; // hip center
+// link lengths (m)
+const L = { trunk: 0.10, neck: 0.055, head: 0.065, thigh: 0.055, shank: 0.05, foot: 0.035 };
+
+// structure: groups per leg so rotation composes
+function makeLeg(dx, shade) {
+  const hip = el('g', {}, svg);
+  const thigh = el('line', {x1:0,y1:0,x2:0,y2:L.thigh*S, stroke:shade?'#9aa7ba':'#dbe4f0', 'stroke-width':13, 'stroke-linecap':'round'}, hip);
+  const kneeG = el('g', {transform:`translate(0,${L.thigh*S})`}, hip);
+  const shank = el('line', {x1:0,y1:0,x2:0,y2:L.shank*S, stroke:shade?'#8b98ac':'#c4cedd', 'stroke-width':11, 'stroke-linecap':'round'}, kneeG);
+  const ankG = el('g', {transform:`translate(0,${L.shank*S})`}, kneeG);
+  const foot = el('line', {x1:-L.foot*S*0.5,y1:0,x2:L.foot*S*0.6,y2:0, stroke:'#ffce3d', 'stroke-width':9, 'stroke-linecap':'round'}, ankG);
+  const hipJ = el('circle', {r:8, fill:'#182030', stroke:'#4fc3f7','stroke-width':2, cursor:'pointer'}, hip);
+  const kneeJ = el('circle', {r:7, fill:'#182030', stroke:'#4fc3f7','stroke-width':2, cursor:'pointer'}, kneeG);
+  const ankJ = el('circle', {r:6, fill:'#182030', stroke:'#4fc3f7','stroke-width':2, cursor:'pointer'}, ankG);
+  return {hip, kneeG, ankG, hipJ, kneeJ, ankJ, dx};
+}
+// right leg behind (slightly offset, darker)
+const legR = makeLeg(14, true), legL = makeLeg(0, false);
+const trunk = el('rect', {x:ORIGIN.x-34, y:ORIGIN.y-L.trunk*S, width:68, height:L.trunk*S, rx:16, fill:'#f4f7fb', stroke:'#c4cedd'}, svg);
+// neck chain from top of trunk
+const neckG = el('g', {transform:`translate(0,${-L.trunk*S})`}, svg);
+const neckL = el('line', {x1:0,y1:0,x2:0,y2:-L.neck*S, stroke:'#c4cedd','stroke-width':10,'stroke-linecap':'round'}, neckG);
+const neckJ = el('circle', {r:7, fill:'#182030', stroke:'#4fc3f7','stroke-width':2, cursor:'pointer'}, neckG);
+const headG = el('g', {transform:`translate(0,${-L.neck*S})`}, neckG);
+const headJ = el('circle', {r:6, fill:'#182030', stroke:'#4fc3f7','stroke-width':2, cursor:'pointer'}, headG);
+const head = el('ellipse', {cx:6, cy:-L.head*S*0.55, rx:30, ry:22, fill:'#f4f7fb', stroke:'#c4cedd'}, headG);
+const brim = el('rect', {x:-24, y:-L.head*S*0.55+14, width:60, height:6, rx:3, fill:'#ffce3d'}, headG);
+const eye  = el('circle', {cx:16, cy:-L.head*S*0.55-4, r:5, fill:'#333'}, headG);
+const beak = el('path', {d:`M 30 ${-L.head*S*0.55+8} L 46 ${-L.head*S*0.55+14} L 30 ${-L.head*S*0.55+18} Z`, fill:'#ffce3d'}, headG);
+
+// ground
+el('line', {x1:10, y1:ORIGIN.y+(L.thigh+L.shank)*S, x2:430, y2:ORIGIN.y+(L.thigh+L.shank)*S, stroke:'#2c3a52','stroke-width':2}, svg);
+el('text', {x:16, y:ORIGIN.y+(L.thigh+L.shank)*S+18, fill:'#8ea1bb','font-size':11}, svg).textContent = 'ground';
+
+// gauges for roll/yaw joints (bottom row)
+const gauges = {};
+function makeGauge(x, y, label) {
+  const g = el('g', {transform:`translate(${x},${y})`}, svg);
+  el('circle', {r:22, fill:'#0c1119', stroke:'#2c3a52'}, g);
+  const needle = el('line', {x1:0,y1:0,x2:0,y2:-18, stroke:'#ffce3d','stroke-width':3,'stroke-linecap':'round'}, g);
+  const dot = el('circle', {r:22, fill:'transparent', cursor:'pointer'}, g);
+  el('text', {x:0, y:38, fill:'#8ea1bb','font-size':10,'text-anchor':'middle'}, g).textContent = label;
+  return {needle, dot};
+}
+[['left_hip_yaw',60],['left_hip_roll',130],['head_yaw',300],['head_roll',370]].forEach(([n,x]) => gauges[n] = makeGauge(x, 425, n));
+
+// joint name → rig element (for click + highlight)
+const rigTargets = {
+  left_hip_pitch: legL.hipJ, left_knee: legL.kneeJ, left_ankle: legL.ankJ,
+  right_hip_pitch: legR.hipJ, right_knee: legR.kneeJ, right_ankle: legR.ankJ,
+  neck_pitch: neckJ, head_pitch: headJ,
+  left_hip_yaw: gauges.left_hip_yaw.dot, left_hip_roll: gauges.left_hip_roll.dot,
+  head_yaw: gauges.head_yaw.dot, head_roll: gauges.head_roll.dot,
+};
+
+// ── joint list ───────────────────────────────────────────────────────────────
+const list = document.getElementById('jointlist');
+const rows = JN.map((n, i) => {
+  const r = document.createElement('div'); r.className = 'joint-row'; r.dataset.i = i;
+  r.innerHTML = `<span class="nm">${i}: ${n}</span><span class="bar"><i></i></span><span class="vl"></span>`;
+  r.onclick = () => select(i);
+  list.appendChild(r); return r;
+});
+
+// ── obs bar ──────────────────────────────────────────────────────────────────
+const obsbar = document.getElementById('obsbar');
+const cells = [];
+TERMS.forEach(t => { for (let k = 0; k < t.dim; k++) {
+  const c = document.createElement('div');
+  c.style.background = termColor[t.name]; c.style.flex = '1'; c.style.opacity = .45;
+  obsbar.appendChild(c); cells.push(c);
+}});
+document.getElementById('obslegend').innerHTML = TERMS.map(t =>
+  `<span><b style="color:${termColor[t.name]}">■</b> ${t.name} [${off[TERMS.indexOf(t)]}..${off[TERMS.indexOf(t)]+t.dim-1}]</span>`).join('');
+
+// tooltip for obs cells
+const tip = document.getElementById('tip');
+cells.forEach((c, idx) => {
+  c.onmousemove = e => { tip.style.display='block'; tip.style.left=e.clientX+12+'px'; tip.style.top=e.clientY+12+'px';
+    const t = TERMS.find((t,j)=> idx>=off[j] && idx<off[j]+t.dim);
+    tip.textContent = `obs[${idx}] ${t.name}[${idx-off[TERMS.indexOf(t)]}] = ${D.obs[frame][idx].toFixed(3)}`; };
+  c.onmouseleave = () => tip.style.display='none';
+});
+
+// ── map info ─────────────────────────────────────────────────────────────────
+function mapHTML(i) {
+  const n = JN[i];
+  return `<h2 style="margin-top:0">Signal path — <span style="color:var(--duck)">${n}</span> (joint ${i})</h2>
+  <div class="flow">
+    <span class="node">XL330 servo<br><small>present_position / present_velocity</small></span><span class="arrow">→</span>
+    <span class="node">obs builder<br><small>+encoder bias · +noise · vel lag 1 step</small></span><span class="arrow">→</span>
+    <span class="node">obs[${off[2]+i}], obs[${off[3]+i}]<br><small>joint_pos[${i}] · joint_vel[${i}]</small></span><span class="arrow">→</span>
+    <span class="node">obs normalizer<br><small>baked into ONNX</small></span><span class="arrow">→</span>
+    <span class="node">MLP 512·256·128</span><span class="arrow">→</span>
+    <span class="node">action[${i}]<br><small>target pos, scale 1.0</small></span><span class="arrow">→</span>
+    <span class="node">XL330 goal_position</span>
+  </div>
+  <div>
+    <span class="tag">feedback: obs[${off[4]+i}] = last action</span>
+    <span class="tag">encoder bias ±0.015 rad (per-env, DR)</span>
+    <span class="tag">pos noise ±0.001 rad</span>
+    <span class="tag">vel noise ±0.25 rad/s</span>
+    <span class="tag">vel lag: 1 ctrl step (20 ms)</span>
+    <span class="tag">IMU misalignment ±6° affects base obs, not this joint</span>
+  </div>`;
+}
+
+// ── charts ───────────────────────────────────────────────────────────────────
+function drawChart(id, series, color) {
+  const cv = document.getElementById(id), ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height;
+  ctx.clearRect(0,0,W,H);
+  let mn = Math.min(...series), mx = Math.max(...series);
+  if (mx-mn < 1e-6) { mn -= 1; mx += 1; }
+  const pad = (mx-mn)*0.12; mn -= pad; mx += pad;
+  // zero line
+  if (mn < 0 && mx > 0) { const zy = H*(1-(0-mn)/(mx-mn));
+    ctx.strokeStyle='#2c3a52'; ctx.beginPath(); ctx.moveTo(0,zy); ctx.lineTo(W,zy); ctx.stroke(); }
+  ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.beginPath();
+  series.forEach((v,i) => { const x=i/(N-1)*W, y=H*(1-(v-mn)/(mx-mn)); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+  ctx.stroke();
+  // playhead
+  const px = frame/(N-1)*W;
+  ctx.strokeStyle='#ffce3d'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(px,0); ctx.lineTo(px,H); ctx.stroke();
+  // min/max labels
+  ctx.fillStyle='#8ea1bb'; ctx.font='10px sans-serif';
+  ctx.fillText(mx.toFixed(3), 4, 11); ctx.fillText(mn.toFixed(3), 4, H-4);
+}
+function drawCharts() {
+  drawChart('ch_pos', D.joint_pos.map(r=>r[sel]), '#66bb6a');
+  drawChart('ch_vel', D.joint_vel.map(r=>r[sel]), '#ab47bc');
+  drawChart('ch_act', D.action.map(r=>r[sel]), '#ff7043');
+}
+
+// ── per-frame update ─────────────────────────────────────────────────────────
+function update() {
+  const q = D.joint_pos[frame];
+  const gi = n => JN.indexOf(n);
+  // legs: hip_pitch, knee, ankle (positive = forward swing, sign tuned visually)
+  function poseLeg(leg, pre) {
+    const hp = -q[gi(pre+'hip_pitch')], kn = q[gi(pre+'knee')], an = -q[gi(pre+'ankle')];
+    leg.hip.setAttribute('transform', `translate(${ORIGIN.x+leg.dx},${ORIGIN.y}) rotate(${hp*57.3})`);
+    leg.kneeG.setAttribute('transform', `translate(0,${L.thigh*S}) rotate(${kn*57.3})`);
+    leg.ankG.setAttribute('transform', `translate(0,${L.shank*S}) rotate(${an*57.3})`);
+  }
+  poseLeg(legL, 'left_'); poseLeg(legR, 'right_');
+  // head chain: neck_pitch + head_pitch (positive pitch = face down toward ground)
+  const np = -q[gi('neck_pitch')], hpt = -q[gi('head_pitch')];
+  neckG.setAttribute('transform', `translate(${ORIGIN.x},${ORIGIN.y-L.trunk*S}) rotate(${np*57.3})`);
+  headG.setAttribute('transform', `translate(0,${-L.neck*S}) rotate(${hpt*57.3})`);
+  // gauges
+  for (const n in gauges) gauges[n].needle.setAttribute('transform', `rotate(${q[gi(n)]*57.3})`);
+
+  // joint list bars
+  rows.forEach((r,i) => {
+    const v = q[i], lim = 1.6;
+    const pct = Math.max(-1, Math.min(1, v/lim));
+    const bar = r.querySelector('i');
+    bar.style.left = pct < 0 ? (50+pct*50)+'%' : '50%';
+    bar.style.width = Math.abs(pct)*50+'%';
+    bar.style.background = i===sel ? 'var(--duck)' : 'var(--accent)';
+    r.querySelector('.vl').textContent = v.toFixed(3);
+    r.classList.toggle('sel', i===sel);
+  });
+
+  // obs bar live values
+  const o = D.obs[frame];
+  cells.forEach((c,idx) => { c.style.opacity = .25 + .7*Math.min(1, Math.abs(o[idx])/2);
+    c.style.outline = (idx===off[2]+sel || idx===off[3]+sel || idx===off[4]+sel) ? '1.5px solid #ffce3d' : 'none'; });
+
+  document.getElementById('tlabel').textContent = (frame/FPS).toFixed(2)+' s';
+  document.getElementById('scrub').value = frame;
+}
+
+function select(i) { sel = i;
+  document.getElementById('mapinfo').innerHTML = mapHTML(i);
+  drawCharts(); update(); }
+
+Object.entries(rigTargets).forEach(([n,e]) => e && (e.onclick = () => select(JN.indexOf(n))));
+
+// playback
+const scrub = document.getElementById('scrub');
+scrub.max = N-1;
+scrub.oninput = () => { frame = +scrub.value; update(); };
+document.getElementById('playbtn').onclick = function() {
+  playing = !playing; this.textContent = playing ? '⏸ Pause' : '▶ Play'; };
+function tick(ts) {
+  if (playing && ts - lastT > 1000/FPS) { lastT = ts; frame = (frame+1)%N; update(); }
+  requestAnimationFrame(tick);
+}
+select(5);
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

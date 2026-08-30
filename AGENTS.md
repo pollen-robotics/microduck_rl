@@ -17,6 +17,8 @@ uv run train <TASK_ID> --env.scene.num-envs 64 --agent.max_iterations 5   # SMOK
 uv run play <TASK_ID> --wandb-run-path <entity/project/run_id>
 uv run scripts/export.py <TASK_ID> --wandb-run-path <...>   # → ONNX (bakes obs normalizer — mandatory path)
 uv run scripts/infer_policy.py --walking out.onnx   # CPU MuJoCo deployment rehearsal
+uv run scripts/progress_video.py --run-dir logs/rsl_rl/<exp>/<run> --out /tmp/progress.mp4   # checkpoint progress grid
+uv run scripts/make_rig_page.py --checkpoint logs/.../model_12250.pt --out /tmp/rig.html     # interactive rig + policy I/O page
 uv run --with pytest pytest tests/
 ```
 
@@ -36,7 +38,8 @@ Never launch a long run without one.
 - `src/mjlab_microduck/robot/microduck/` — MJCF exports from Onshape
   (onshape-to-robot, one `config_mjcf_*.json` per model) + scenes + `add_backlash.py`.
 - `src/mjlab_microduck/actuator/friction_dr_bam.py` — BAM actuator + friction DR + backlash encoder.
-- `scripts/` — export, infer, sim2real comparison, wandb helpers.
+- `scripts/` — export, infer, sim2real comparison, wandb helpers, progress
+  videos + rig pages (below).
 - `tests/` — cfg-invariant and mdp-function regression tests (CPU, no GPU needed).
 
 ## Invariants — do not break these
@@ -215,6 +218,23 @@ Never launch a long run without one.
   fails the human eye — watch the video AND check which geom/axis touches.
 - Report what rollouts actually show ("rolls but face-plants 1 in 3"), not
   "it works!". The user decides when it's good enough.
+
+## Progress videos & rig pages — showing, not claiming
+
+- **After any training milestone, make the progress grid and watch it.**
+  `progress_video.py --run-dir <run>` auto-discovers `model_<iter>.pt`
+  checkpoints, picks 4 evenly spaced (first→last), rolls each out from the
+  same seed with the phase-aligned reset, and tiles them labeled into one mp4.
+  Sim metrics can pass while the video fails the human eye — attach the grid
+  to your report instead of claiming "it works".
+- Hand-pick tiles with repeated `--checkpoint` flags; `--three-views` gives
+  the front/45°/side strip per tile; `--seconds` sets per-tile length.
+- `make_rig_page.py --checkpoint <model.pt>` bakes one rollout into a
+  self-contained interactive HTML (animated rig, per-joint pos/vel/action
+  traces, live 61D obs vector, XL330→policy→servo signal-path map). Use it
+  when debugging *why* a policy misbehaves, not whether.
+- Both need a GPU and default to `Mjlab-GroundPick-Flat-MicroDuck`; pass
+  `--task` for other envs.
 
 ## Sim2real footguns (cost real debugging weeks)
 
