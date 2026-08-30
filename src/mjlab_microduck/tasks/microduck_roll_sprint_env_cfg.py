@@ -155,7 +155,9 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         # A65 checkpoints 300 and 400 were already physically fast enough but
         # repeatedly left the shared road. This signed potential charges the
         # departure and only repays a real return, with no centering annuity.
-        weight=16.0,
+        # Ramp it gradually so the recovery and reroll skills can adapt before
+        # the full road-return pressure is applied.
+        weight=4.0,
     )
     cfg.rewards["roll_sprint_heading_alignment"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_heading_alignment_progress,
@@ -354,6 +356,18 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     cfg.curriculum["roll_sprint_road_half_width"] = CurriculumTermCfg(
         func=microduck_mdp.roll_sprint_lane_half_width_curriculum,
         params={"width_stages": road_width_stages},
+    )
+    cfg.curriculum["roll_sprint_road_return_weight"] = CurriculumTermCfg(
+        func=microduck_mdp.reward_weight,
+        params={
+            "reward_name": "roll_sprint_road_return",
+            "weight_stages": [
+                {"step": 0, "weight": 4.0},
+                {"step": 200 * 24, "weight": 8.0},
+                {"step": 500 * 24, "weight": 12.0},
+                {"step": 1000 * 24, "weight": 16.0},
+            ],
+        },
     )
     cfg.curriculum["roll_sprint_invalid_cycle_weight"] = CurriculumTermCfg(
         func=microduck_mdp.reward_weight,

@@ -177,7 +177,7 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert cfg.rewards["roll_sprint_straightness"].weight == -3.0
     road_return_weight = cfg.rewards["roll_sprint_road_return"].weight
     distance_weight = cfg.rewards["roll_sprint_distance"].weight
-    assert road_return_weight == 16.0
+    assert road_return_weight == 4.0
     assert road_return_weight < distance_weight
     full_edge_cost = (
         mdp._ROLL_SPRINT_ROAD_HALF_WIDTH
@@ -338,6 +338,20 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
         "roll_sprint_mean_self_right_latency_s",
         "roll_sprint_frontier_after_self_right_m",
     }.issubset(cfg.metrics)
+
+
+def test_roll_sprint_road_return_weight_curriculum_has_exact_stages():
+    cfg = make_microduck_roll_sprint_env_cfg()
+    term = cfg.curriculum["roll_sprint_road_return_weight"]
+
+    assert term.func is mdp.reward_weight
+    assert term.params["reward_name"] == "roll_sprint_road_return"
+    assert term.params["weight_stages"] == [
+        {"step": 0, "weight": 4.0},
+        {"step": 4800, "weight": 8.0},
+        {"step": 12000, "weight": 12.0},
+        {"step": 24000, "weight": 16.0},
+    ]
 
 
 def test_roll_sprint_and_backlash_tasks_are_registered():
