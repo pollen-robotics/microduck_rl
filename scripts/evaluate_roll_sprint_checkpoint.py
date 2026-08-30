@@ -30,6 +30,7 @@ FLAT_FULL = 0.5
 FLAT_ZERO = math.sin(math.radians(60.0))
 MIN_FORWARD_RATE = 0.5
 MAX_DISTANCE_PER_RAD = 0.12
+LANE_HALF_WIDTH_M = 0.14
 RECOVERY_MAX_FORWARD_RATE = 3.0
 RECOVERY_UPRIGHT_COS = math.cos(math.radians(50.0))
 RECOVERY_LATERAL_Z = math.sin(math.radians(35.0))
@@ -243,22 +244,28 @@ class RollCycleAuditor:
             recovered, torch.zeros_like(self.head_latch), self.head_latch
         )
         new_head_latch = old_head_latch | top_contact
-        lateral_violation = (
+        displacement = position_xy - self.start_position
+        forward_position = (displacement * self.heading).sum(dim=-1)
+        lateral_position = (displacement * self.lateral).sum(dim=-1)
+        orientation_violation = (
             active
             & ~awaiting_before
             & support
             & (omega >= MIN_FORWARD_RATE)
             & (lateral_z > FLAT_ZERO)
         )
+        corridor_violation = (
+            active
+            & ~awaiting_before
+            & (lateral_position.abs() > LANE_HALF_WIDTH_M)
+        )
+        lateral_violation = orientation_violation | corridor_violation
         old_lateral_invalid = torch.where(
             recovered,
             torch.zeros_like(self.lateral_invalid),
             self.lateral_invalid,
         )
         new_lateral_invalid = old_lateral_invalid | lateral_violation
-
-        displacement = position_xy - self.start_position
-        forward_position = (displacement * self.heading).sum(dim=-1)
 
         completed = active & ~awaiting_before & (new_accum >= TARGET_ANGLE)
         valid = completed & new_head_latch & ~new_lateral_invalid

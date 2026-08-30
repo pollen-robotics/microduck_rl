@@ -117,7 +117,9 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
         cfg.rewards["roll_sprint_distance"].weight
         > cfg.rewards["roll_sprint_progress"].weight
     )
-    assert cfg.rewards["roll_sprint_progress"].params["lane_half_width"] == 0.14
+    assert cfg.rewards["roll_sprint_progress"].params["lane_half_width"] == (
+        mdp._ROLL_SPRINT_LANE_HALF_WIDTH
+    )
     assert cfg.rewards["roll_sprint_cycle_rate"].weight == 1.0
     assert cfg.rewards["roll_sprint_recovery"].weight == 0.25
     assert cfg.rewards["roll_sprint_invalid_cycle"].weight == -2.0
@@ -591,6 +593,31 @@ def test_roll_sprint_lateral_displacement_has_no_credit_and_costs_straightness(
     assert penalty[0] == pytest.approx(0.24)
     env._roll_sprint_progress_delta.zero_()
     assert mdp.roll_sprint_straightness_penalty(env, deadband=0.01)[0] == 0.0
+
+
+def test_roll_sprint_forward_cycle_outside_lane_cannot_credit_frontier(monkeypatch):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    _prime_roll_heading(env, asset)
+
+    asset.data.root_link_pos_w[:, 1] = mdp._ROLL_SPRINT_LANE_HALF_WIDTH + 0.01
+    asset.data.root_link_ang_vel_b[:, 1] = 1.0
+    mdp._update_roll_sprint_state(env, asset)
+
+    env.common_step_counter += 1
+    asset.data.root_link_pos_w[:, 0] = 0.35
+    asset.data.root_link_pos_w[:, 1] = 0.0
+    asset.data.root_link_ang_vel_b[:, 1] = 1.0
+    env._roll_sprint_accum[:] = 2.0 * torch.pi - 0.01
+    env._roll_sprint_phase_frontier[:] = env._roll_sprint_accum
+    env._roll_sprint_head_latch[:] = True
+    mdp._update_roll_sprint_state(env, asset)
+
+    assert env._roll_sprint_invalid_now[0]
+    assert not env._roll_sprint_completed_now[0]
+    assert env._roll_sprint_completed[0] == 0.0
+    assert env._roll_sprint_completed_distance[0] == 0.0
+    assert env._roll_sprint_forward_frontier[0] == 0.0
 
 
 def test_roll_progress_reward_fades_to_zero_at_lane_edge_without_idle_annuity():

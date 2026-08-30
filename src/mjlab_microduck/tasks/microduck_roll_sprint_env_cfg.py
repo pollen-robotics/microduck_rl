@@ -65,7 +65,10 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     cfg.rewards["roll_sprint_progress"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_progress,
         weight=1.5,
-        params={"max_paid_rate": 5.0, "lane_half_width": 0.14},
+        params={
+            "max_paid_rate": 5.0,
+            "lane_half_width": microduck_mdp._ROLL_SPRINT_LANE_HALF_WIDTH,
+        },
     )
     # Primary race score: signed net forward frontier released only after a
     # valid full roll. The MDP term rejects revisits, backward travel, and

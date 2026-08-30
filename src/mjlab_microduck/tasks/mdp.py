@@ -11486,6 +11486,7 @@ _ROLL_SPRINT_HEAD_SENSOR = _ROULADE_HEAD_SENSOR
 _ROLL_SPRINT_FEET_SENSOR = "feet_ground_contact"
 _ROLL_SPRINT_MIN_FORWARD_RATE = 0.5
 _ROLL_SPRINT_MAX_DISTANCE_PER_RAD = 0.12
+_ROLL_SPRINT_LANE_HALF_WIDTH = 0.14
 _ROLL_SPRINT_LATERAL_INVALID_Z = math.sin(math.radians(60.0))
 # A launch-ready recovery is deliberately dynamic. Normal MicroDuck roll
 # transit is 3.5--5.5 rad/s (and the A35 diagnostic reached still higher
@@ -11769,13 +11770,19 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
         & _head_top_down(env, asset)
     )
 
-    lateral_violation = (
+    orientation_violation = (
         active
         & ~awaiting_before
         & support
         & (positive_rate >= _ROLL_SPRINT_MIN_FORWARD_RATE)
         & (lateral_z > _ROLL_SPRINT_LATERAL_INVALID_Z)
     )
+    corridor_violation = (
+        active
+        & ~awaiting_before
+        & (lateral_displacement.abs() > _ROLL_SPRINT_LANE_HALF_WIDTH)
+    )
+    lateral_violation = orientation_violation | corridor_violation
     old_lateral_invalid = torch.where(
         recovered_now,
         torch.zeros_like(env._roll_sprint_lateral_invalid),

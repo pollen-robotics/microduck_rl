@@ -101,6 +101,29 @@ def test_auditor_releases_only_rotation_capped_distance_on_valid_cycle() -> None
     assert auditor.linked_distance.item() == pytest.approx(expected_cap)
 
 
+def test_auditor_rejects_forward_cycle_that_leaves_lane() -> None:
+    auditor = _auditor()
+    _observe(
+        auditor,
+        omega=1.0,
+        lateral_position=MODULE.LANE_HALF_WIDTH_M + 0.01,
+    )
+    auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
+    auditor.head_latch[:] = True
+
+    _observe(
+        auditor,
+        omega=1.0,
+        forward_position=0.35,
+        lateral_position=0.0,
+    )
+
+    assert auditor.valid_count.item() == 0
+    assert auditor.invalid_count.item() == 1
+    assert auditor.linked_distance.item() == 0.0
+    assert auditor.forward_frontier.item() == 0.0
+
+
 def test_auditor_uses_net_cycle_advance_and_global_frontier() -> None:
     auditor = _auditor()
     _observe(auditor, omega=1.0, forward_position=0.40)
