@@ -158,9 +158,9 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert cfg.rewards["roll_sprint_progress"].params["road_half_width"] == (
         mdp._ROLL_SPRINT_ROAD_HALF_WIDTH
     )
-    assert cfg.rewards["roll_sprint_cycle_rate"].weight == 1.0
+    assert cfg.rewards["roll_sprint_cycle_rate"].weight == 4.0
     assert cfg.rewards["roll_sprint_recovery"].weight == 1.0
-    assert cfg.rewards["roll_sprint_recovered_reroll"].weight == 4.0
+    assert cfg.rewards["roll_sprint_recovered_reroll"].weight == 8.0
     assert cfg.rewards["roll_sprint_self_right_upright"].weight == 5.0
     assert cfg.rewards["roll_sprint_self_right_height"].weight == 30.0
     assert cfg.rewards["roll_sprint_self_right_upward"].weight == 1.0
@@ -340,7 +340,7 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     }.issubset(cfg.metrics)
 
 
-def test_roll_sprint_road_return_weight_curriculum_has_exact_stages():
+def test_roll_sprint_road_return_weight_stays_fixed_at_proven_level():
     cfg = make_microduck_roll_sprint_env_cfg()
     term = cfg.curriculum["roll_sprint_road_return_weight"]
 
@@ -348,9 +348,6 @@ def test_roll_sprint_road_return_weight_curriculum_has_exact_stages():
     assert term.params["reward_name"] == "roll_sprint_road_return"
     assert term.params["weight_stages"] == [
         {"step": 0, "weight": 4.0},
-        {"step": 4800, "weight": 8.0},
-        {"step": 12000, "weight": 12.0},
-        {"step": 24000, "weight": 16.0},
     ]
 
 

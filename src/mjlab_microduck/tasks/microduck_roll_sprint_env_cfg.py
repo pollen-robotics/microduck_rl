@@ -84,7 +84,10 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     )
     cfg.rewards["roll_sprint_cycle_rate"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_cycle_rate,
-        weight=1.0,
+        # A67 checkpoint 100 reached only 8.75 valid cycles in 20 seconds;
+        # the 10 m gate needs at least 14. Keep this one-shot completion
+        # reward meaningful without displacing the dominant frontier term.
+        weight=4.0,
     )
     cfg.rewards["roll_sprint_recovery"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_recovery_rate,
@@ -97,7 +100,10 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         func=microduck_mdp.roll_sprint_recovered_reroll_rate,
         # One-shot only: reward the missing recovery-to-reroll transition,
         # never standing or merely remaining upright after recovery.
-        weight=4.0,
+        # A67 checkpoint 100 self-righted 16/16 times but only 5/16 recovery
+        # cases rerolled, so strengthen the transition rather than recovery
+        # pose shaping or forward speed.
+        weight=8.0,
     )
     cfg.rewards["roll_sprint_self_right_upright"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_self_right_upright_progress,
@@ -155,8 +161,9 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         # A65 checkpoints 300 and 400 were already physically fast enough but
         # repeatedly left the shared road. This signed potential charges the
         # departure and only repays a real return, with no centering annuity.
-        # Ramp it gradually so the recovery and reroll skills can adapt before
-        # the full road-return pressure is applied.
+        # A67 checkpoints 200 and 300 showed that increasing this to 8 reduced
+        # frontier, recovery, heading, and drift together. Keep the proven
+        # weight 4 while cadence and rerolling improve.
         weight=4.0,
     )
     cfg.rewards["roll_sprint_heading_alignment"] = RewardTermCfg(
@@ -363,9 +370,6 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
             "reward_name": "roll_sprint_road_return",
             "weight_stages": [
                 {"step": 0, "weight": 4.0},
-                {"step": 200 * 24, "weight": 8.0},
-                {"step": 500 * 24, "weight": 12.0},
-                {"step": 1000 * 24, "weight": 16.0},
             ],
         },
     )
