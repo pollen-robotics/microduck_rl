@@ -37,6 +37,7 @@ def test_defaults_record_long_race_every_150_seconds() -> None:
     assert args.interval_seconds == 150.0
     assert args.task_id == "Mjlab-Roll-Sprint-Flat-MicroDuck"
     assert sampler.RECORDING_STEPS == 1000
+    assert sampler.RECOVERY_RECORDING_STEPS == 600
     assert sampler.RECORDING_FRAME_STRIDE == 4
     assert (
         sampler.RECORDING_STEPS
@@ -87,7 +88,7 @@ def test_sample_once_records_four_robot_video_and_persists_state(
     monkeypatch.setattr(sampler.subprocess, "run", fake_run)
 
     assert sampler.sample_once(args) is True
-    evaluation_command, command = observed["commands"]
+    evaluation_command, command, recovery_command = observed["commands"]
     assert evaluation_command[2] == str(checkpoint)
     assert evaluation_command[evaluation_command.index("--num-envs") + 1] == "4"
     assert evaluation_command[evaluation_command.index("--duration") + 1] == "40"
@@ -95,6 +96,9 @@ def test_sample_once_records_four_robot_video_and_persists_state(
     assert command[command.index("--steps") + 1] == "1000"
     assert command[command.index("--frame-stride") + 1] == "4"
     assert command[command.index("--task-id") + 1] == args.task_id
+    assert "--recovery-montage" not in command
+    assert "--recovery-montage" in recovery_command
+    assert recovery_command[recovery_command.index("--steps") + 1] == "600"
     output = Path(command[3])
     assert "checkpoint-000025" in output.name
     assert output.suffix == ".mp4"
@@ -105,6 +109,7 @@ def test_sample_once_records_four_robot_video_and_persists_state(
     assert state["last_checkpoint"]["iteration"] == 25
     assert Path(state["last_evaluation"]).is_file()
     assert state["last_video"] == str(output.resolve())
+    assert Path(state["last_recovery_montage"]).is_file()
 
 
 def test_duplicate_checkpoint_is_skipped(tmp_path: Path, monkeypatch) -> None:
@@ -131,7 +136,7 @@ def test_duplicate_checkpoint_is_skipped(tmp_path: Path, monkeypatch) -> None:
 
     assert sampler.sample_once(args) is True
     assert sampler.sample_once(args) is False
-    assert len(calls) == 2
+    assert len(calls) == 3
 
 
 def test_allow_repeats_records_every_interval_but_audits_checkpoint_once(
@@ -161,7 +166,8 @@ def test_allow_repeats_records_every_interval_but_audits_checkpoint_once(
     assert sampler.sample_once(args) is True
     assert sampler.sample_once(args) is True
     assert sum(command[1] == str(sampler.EVALUATOR) for command in calls) == 1
-    assert sum(command[1] == str(sampler.RECORDER) for command in calls) == 2
+    assert sum(command[1] == str(sampler.RECORDER) for command in calls) == 3
+    assert sum("--recovery-montage" in command for command in calls) == 1
 
 
 def test_video_only_keeps_recording_independent_from_audit(
@@ -184,8 +190,9 @@ def test_video_only_keeps_recording_independent_from_audit(
     monkeypatch.setattr(sampler.subprocess, "run", fake_run)
 
     assert sampler.sample_once(args) is True
-    assert len(calls) == 1
-    assert calls[0][1] == str(sampler.RECORDER)
+    assert len(calls) == 2
+    assert all(command[1] == str(sampler.RECORDER) for command in calls)
+    assert sum("--recovery-montage" in command for command in calls) == 1
     state = json.loads(args.state_file.read_text(encoding="utf-8"))
     assert state["last_evaluation"] is None
 

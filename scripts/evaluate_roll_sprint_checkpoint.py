@@ -34,6 +34,7 @@ LANE_HALF_WIDTH_M = 0.14
 RECOVERY_MAX_FORWARD_RATE = microduck_mdp._ROLL_SPRINT_RECOVERY_MAX_FORWARD_RATE
 RECOVERY_UPRIGHT_COS = microduck_mdp._ROLL_SPRINT_RECOVERY_UPRIGHT_COS
 RECOVERY_LATERAL_Z = microduck_mdp._ROLL_SPRINT_RECOVERY_LATERAL_Z
+RECOVERY_MIN_HEIGHT_M = microduck_mdp._ROLL_SPRINT_RECOVERY_MIN_HEIGHT_M
 RECOVERY_HOLD_STEPS = microduck_mdp._ROLL_SPRINT_RECOVERY_HOLD_STEPS
 REPOSITION_TRIGGER_M = microduck_mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M
 REPOSITION_REARM_M = microduck_mdp._ROLL_SPRINT_REPOSITION_REARM_M
@@ -51,6 +52,13 @@ PROMOTION = {
     "p95_lateral_drift_m": 0.40,
     "mean_uncredited_positive_displacement_m": 0.08,
 }
+RECOVERY_ORIENTATIONS = ("face_down", "face_up", "left", "right")
+RECOVERY_SEEDS = (0, 1, 2, 3)
+RECOVERY_DURATION_S = 12.0
+RECOVERY_MIN_OVERALL_RATE = 0.75
+RECOVERY_MIN_ORIENTATION_RATE = 0.50
+RECOVERY_MAX_P95_LATENCY_S = 7.0
+RECOVERY_MIN_REROLL_RATE = 0.50
 
 
 def _sha256(path: Path) -> str:
@@ -196,6 +204,7 @@ class RollCycleAuditor:
         support: torch.Tensor,
         foot_support: torch.Tensor,
         head_contact: torch.Tensor,
+        root_height: torch.Tensor | None = None,
         active: torch.Tensor | None = None,
     ) -> None:
         if active is None:
@@ -214,6 +223,9 @@ class RollCycleAuditor:
         head_quat = torch.nan_to_num(head_quat, nan=0.0)
         linear_velocity_w = torch.nan_to_num(linear_velocity_w, nan=0.0)
         angular_velocity_b = torch.nan_to_num(angular_velocity_b, nan=0.0)
+        if root_height is None:
+            root_height = torch.full_like(support, RECOVERY_MIN_HEIGHT_M)
+        root_height = torch.nan_to_num(root_height, nan=0.0)
 
         lateral_z = lateral_axis_z(root_quat).abs()
         flat_u = torch.clamp(
@@ -238,7 +250,8 @@ class RollCycleAuditor:
         foot_release = awaiting_active & foot_support & ~head_contact
         upright_ready = foot_release & (upright_cos >= RECOVERY_UPRIGHT_COS)
         sagittal_ready = upright_ready & (lateral_z <= RECOVERY_LATERAL_Z)
-        rate_ready = sagittal_ready & (omega <= RECOVERY_MAX_FORWARD_RATE)
+        height_ready = sagittal_ready & (root_height >= RECOVERY_MIN_HEIGHT_M)
+        rate_ready = height_ready & (omega.abs() <= RECOVERY_MAX_FORWARD_RATE)
         recovery_candidate = rate_ready & (lateral_position.abs() <= REPOSITION_REARM_M)
         transition_foot_release = active & waiting_before & foot_support & ~head_contact
         transition_upright = transition_foot_release & (
@@ -249,7 +262,8 @@ class RollCycleAuditor:
         )
         transition_candidate = (
             transition_sagittal
-            & (omega <= RECOVERY_MAX_FORWARD_RATE)
+            & (root_height >= RECOVERY_MIN_HEIGHT_M)
+            & (omega.abs() <= RECOVERY_MAX_FORWARD_RATE)
             & (lateral_position.abs() <= REPOSITION_REARM_M)
         )
         self.awaiting_recovery_steps += awaiting_active.to(torch.long)
@@ -642,6 +656,222 @@ def promotion_pass(report: dict[str, object]) -> bool:
     )
 
 
+def _p95(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return float(torch.quantile(torch.tensor(values, dtype=torch.float64), 0.95).item())
+
+
+def summarize_recovery_battery(
+    cases: list[dict[str, object]],
+    *,
+    race_report: dict[str, object],
+    parent_frontier_m: float | None,
+) -> dict[str, object]:
+    """Aggregate deterministic recovery cases into acceptance-oriented metrics."""
+
+    def summarize(selected: list[dict[str, object]]) -> dict[str, object]:
+        attempts = len(selected)
+        successes = sum(bool(case["success"]) for case in selected)
+        latencies = [
+            float(case["recovery_latency_s"])
+            for case in selected
+            if case["recovery_latency_s"] is not None
+        ]
+        rerolls = sum(bool(case["self_right_then_reroll"]) for case in selected)
+        return {
+            "attempts": attempts,
+            "successes": successes,
+            "success_rate": successes / max(attempts, 1),
+            "recovery_latency_mean_s": (
+                sum(latencies) / len(latencies) if latencies else None
+            ),
+            "recovery_latency_p95_s": _p95(latencies),
+            "self_right_then_reroll_count": rerolls,
+            "frontier_after_recovery_m": sum(
+                float(case["frontier_after_recovery_m"]) for case in selected
+            ),
+        }
+
+    by_orientation: dict[str, dict[str, object]] = {}
+    for orientation in RECOVERY_ORIENTATIONS:
+        orientation_cases = [
+            case for case in cases if case["orientation"] == orientation
+        ]
+        orientation_report = summarize(orientation_cases)
+        p95 = orientation_report["recovery_latency_p95_s"]
+        orientation_report["pass"] = bool(
+            float(orientation_report["success_rate"])
+            >= RECOVERY_MIN_ORIENTATION_RATE
+            and p95 is not None
+            and float(p95) <= RECOVERY_MAX_P95_LATENCY_S
+            and not any(bool(case["nan_seen"]) for case in orientation_cases)
+            and not any(bool(case["out_of_bounds"]) for case in orientation_cases)
+        )
+        by_orientation[orientation] = orientation_report
+
+    aggregate = summarize(cases)
+    successes = int(aggregate["successes"])
+    rerolls = int(aggregate["self_right_then_reroll_count"])
+    reroll_rate = rerolls / max(successes, 1)
+    aggregate_p95 = aggregate["recovery_latency_p95_s"]
+    lane_reposition_count = sum(int(case["lane_reposition_count"]) for case in cases)
+    reposition_latencies = [
+        float(case["lane_reposition_latency_s"])
+        for case in cases
+        if case["lane_reposition_latency_s"] is not None
+    ]
+    recovery_drift = [float(case["maximum_lateral_drift_m"]) for case in cases]
+    recovery_p95_drift = _p95(recovery_drift) or 0.0
+    race_frontier = float(race_report["mean_credited_forward_frontier_m"])
+    parent_ratio = (
+        None
+        if parent_frontier_m is None or parent_frontier_m <= 0.0
+        else race_frontier / parent_frontier_m
+    )
+    race_frontier_pass = parent_ratio is None or parent_ratio >= 0.90
+    nan_count = int(race_report["nan_env_count"]) + sum(
+        bool(case["nan_seen"]) for case in cases
+    )
+    out_of_bounds_count = int(race_report["out_of_bounds_env_count"]) + sum(
+        bool(case["out_of_bounds"]) for case in cases
+    )
+    overall_pass = bool(
+        float(aggregate["success_rate"]) >= RECOVERY_MIN_OVERALL_RATE
+        and aggregate_p95 is not None
+        and float(aggregate_p95) <= RECOVERY_MAX_P95_LATENCY_S
+        and reroll_rate >= RECOVERY_MIN_REROLL_RATE
+        and all(bool(report["pass"]) for report in by_orientation.values())
+        and race_frontier_pass
+        and float(race_report["p95_lateral_drift_m"]) <= 0.40
+        and nan_count == 0
+        and out_of_bounds_count == 0
+    )
+    return {
+        "total_attempts": int(aggregate["attempts"]),
+        "total_successes": successes,
+        "success_rate": aggregate["success_rate"],
+        "recovery_latency_mean_s": aggregate["recovery_latency_mean_s"],
+        "recovery_latency_p95_s": aggregate_p95,
+        "self_right_then_reroll_count": rerolls,
+        "self_right_then_reroll_rate": reroll_rate,
+        "frontier_after_recovery_m": aggregate["frontier_after_recovery_m"],
+        "lane_reposition_count": lane_reposition_count,
+        "lane_reposition_latency_mean_s": (
+            sum(reposition_latencies) / len(reposition_latencies)
+            if reposition_latencies
+            else None
+        ),
+        "p95_lateral_drift_m": recovery_p95_drift,
+        "nan_case_count": nan_count - int(race_report["nan_env_count"]),
+        "out_of_bounds_case_count": out_of_bounds_count
+        - int(race_report["out_of_bounds_env_count"]),
+        "parent_frontier_m": parent_frontier_m,
+        "race_frontier_ratio_to_parent": parent_ratio,
+        "race_frontier_at_least_90pct_parent": race_frontier_pass,
+        "by_orientation": by_orientation,
+        "cases": cases,
+        "overall_pass": overall_pass,
+    }
+
+
+def _run_recovery_battery(
+    *,
+    base_env: ManagerBasedRlEnv,
+    env: RslRlVecEnvWrapper,
+    policy,
+    robot,
+    duration_s: float,
+) -> list[dict[str, object]]:
+    """Run four deterministic orientation starts for each of four seeds."""
+    cases: list[dict[str, object]] = []
+    steps = round(duration_s / base_env.step_dt)
+    for seed in RECOVERY_SEEDS:
+        env.reset()
+        microduck_mdp.arrange_roll_sprint_recovery_start(
+            base_env,
+            RACE_LANE_SPACING,
+            seed=seed,
+            orientations=RECOVERY_ORIENTATIONS,
+        )
+        alive = torch.ones(4, dtype=torch.bool, device=base_env.device)
+        nan_seen = torch.zeros_like(alive)
+        out_of_bounds = torch.zeros_like(alive)
+        first_latency = torch.full(
+            (4,), float("nan"), device=base_env.device, dtype=torch.float32
+        )
+        max_lateral_drift = torch.zeros(4, device=base_env.device)
+        for step in range(steps):
+            with torch.inference_mode():
+                observations = env.get_observations()
+                actions = policy(observations)
+                _, _, dones, _ = env.step(actions)
+            finite = (
+                torch.isfinite(robot.data.root_link_pos_w).all(dim=-1)
+                & torch.isfinite(robot.data.root_link_quat_w).all(dim=-1)
+                & torch.isfinite(robot.data.root_link_lin_vel_w).all(dim=-1)
+                & torch.isfinite(robot.data.root_link_ang_vel_b).all(dim=-1)
+            )
+            nan_seen |= alive & ~finite
+            max_lateral_drift = torch.maximum(
+                max_lateral_drift,
+                torch.nan_to_num(
+                    base_env._roll_sprint_lateral_displacement.abs(),
+                    nan=float("inf"),
+                ),
+            )
+            self_righted = base_env._roll_sprint_self_righted_now & alive
+            first_edge = self_righted & torch.isnan(first_latency)
+            first_latency = torch.where(
+                first_edge,
+                torch.full_like(first_latency, (step + 1) * base_env.step_dt),
+                first_latency,
+            )
+            out_of_bounds |= alive & base_env.termination_manager.get_term(
+                "out_of_terrain_bounds"
+            )
+            alive &= ~dones
+            if not bool(alive.any()):
+                break
+
+        successes = ~torch.isnan(first_latency)
+        rerolled = base_env._roll_sprint_recovered_and_rerolled > 0
+        frontier_after = base_env._roll_sprint_frontier_after_self_right
+        reposition_count = base_env._roll_sprint_reposition_count
+        reposition_latency_total = (
+            base_env._roll_sprint_reposition_latency_total_steps * base_env.step_dt
+        )
+        for index, orientation in enumerate(RECOVERY_ORIENTATIONS):
+            reposition_events = int(reposition_count[index].item())
+            cases.append(
+                {
+                    "orientation": orientation,
+                    "seed": seed,
+                    "success": bool(successes[index].item()),
+                    "recovery_latency_s": (
+                        float(first_latency[index].item())
+                        if bool(successes[index].item())
+                        else None
+                    ),
+                    "self_right_then_reroll": bool(rerolled[index].item()),
+                    "frontier_after_recovery_m": float(frontier_after[index].item()),
+                    "lane_reposition_count": reposition_events,
+                    "lane_reposition_latency_s": (
+                        float(reposition_latency_total[index].item())
+                        / reposition_events
+                        if reposition_events
+                        else None
+                    ),
+                    "maximum_lateral_drift_m": float(
+                        max_lateral_drift[index].item()
+                    ),
+                    "nan_seen": bool(nan_seen[index].item()),
+                    "out_of_bounds": bool(out_of_bounds[index].item()),
+                }
+            )
+    return cases
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", type=Path)
@@ -651,6 +881,12 @@ def _parse_args() -> argparse.Namespace:
         "--device", default="cuda:0" if torch.cuda.is_available() else "cpu"
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--parent-frontier-m",
+        type=float,
+        help="Optional selected-parent mean credited frontier for the 90%% gate.",
+    )
+    parser.add_argument("--recovery-duration", type=float, default=RECOVERY_DURATION_S)
     return parser.parse_args()
 
 
@@ -659,7 +895,7 @@ def main() -> int:
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_file():
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
-    if args.num_envs != 4 or args.duration <= 0.0:
+    if args.num_envs != 4 or args.duration <= 0.0 or args.recovery_duration <= 0.0:
         raise SystemExit(
             "canonical evaluation requires --num-envs 4 and positive duration"
         )
@@ -677,6 +913,8 @@ def main() -> int:
     reset_cfg.params["standing_prob"] = 1.0
     reset_cfg.params["midroll_prob"] = 0.0
     reset_cfg.params["postroll_prob"] = 0.0
+    reset_cfg.params["crouch_prob"] = 0.0
+    reset_cfg.params["ground_recovery_prob"] = 0.0
     reset_cfg.params["yaw_range"] = (0.0, 0.0)
 
     base_env = ManagerBasedRlEnv(cfg=env_cfg, device=args.device, render_mode=None)
@@ -729,6 +967,7 @@ def main() -> int:
     }
     steps = round(args.duration / base_env.step_dt)
 
+    recovery_cases: list[dict[str, object]] = []
     try:
         for _ in range(steps):
             with torch.inference_mode():
@@ -744,6 +983,10 @@ def main() -> int:
                 support=sensor_contact(base_env, "robot_ground_contact"),
                 foot_support=sensor_contact(base_env, "feet_ground_contact"),
                 head_contact=sensor_contact(base_env, "head_ground_contact"),
+                root_height=(
+                    robot.data.root_link_pos_w[:, 2]
+                    - base_env.scene.terrain.env_origins[:, 2]
+                ),
                 active=alive,
             )
             for name in termination_seen:
@@ -755,11 +998,19 @@ def main() -> int:
                 alive[done] = False
             if not bool(alive.any()):
                 break
+        recovery_cases = _run_recovery_battery(
+            base_env=base_env,
+            env=env,
+            policy=policy,
+            robot=robot,
+            duration_s=args.recovery_duration,
+        )
     finally:
         env.close()
 
+    race_summary = auditor.summary(args.duration)
     report: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "task": TASK_ID,
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": _sha256(checkpoint),
@@ -773,7 +1024,7 @@ def main() -> int:
             "reward_heading_xy": race_headings.cpu().tolist(),
             "alignment_pass": race_alignment_pass,
         },
-        **auditor.summary(args.duration),
+        **race_summary,
         "termination_counts": {
             name: int(values.sum().item()) for name, values in termination_seen.items()
         },
@@ -784,7 +1035,36 @@ def main() -> int:
         ),
         "promotion_thresholds": PROMOTION,
     }
+    recovery_battery = summarize_recovery_battery(
+        recovery_cases,
+        race_report=report,
+        parent_frontier_m=args.parent_frontier_m,
+    )
+    report["recovery_battery"] = recovery_battery
     report["promotion_pass"] = promotion_pass(report)
+    report["race_frontier_retention_pass"] = recovery_battery[
+        "race_frontier_at_least_90pct_parent"
+    ]
+    report["straight_lane_batch_pass"] = report[
+        "four_robot_batch_straight_lane_pass"
+    ]
+    report["p95_lateral_drift_pass"] = report["p95_lateral_drift_m"] <= 0.40
+    final_recovery_pass = bool(
+        float(recovery_battery["success_rate"]) >= 0.90
+        and all(
+            float(orientation["success_rate"]) >= 0.80
+            for orientation in recovery_battery["by_orientation"].values()
+        )
+        and float(recovery_battery["self_right_then_reroll_rate"]) >= 0.75
+    )
+    report["final_recovery_pass"] = final_recovery_pass
+    report["acceptance_pass"] = bool(
+        report["promotion_pass"]
+        and final_recovery_pass
+        and report["straight_lane_batch_pass"]
+        and report["race_frontier_retention_pass"]
+        and report["p95_lateral_drift_pass"]
+    )
     output = args.output or checkpoint.with_suffix(".roll-sprint-eval.json")
     _write_json_atomic(output.resolve(), report)
     print(json.dumps(report, indent=2, sort_keys=True))

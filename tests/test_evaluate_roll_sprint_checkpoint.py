@@ -145,7 +145,9 @@ def test_auditor_requires_lane_reposition_before_roll_restart() -> None:
     assert auditor.linked_distance.item() == pytest.approx(0.20)
     report = auditor.summary(6.0)
     assert report["mean_lane_reposition_count"] == pytest.approx(1.0)
-    assert report["mean_lane_reposition_latency_s"] == pytest.approx(0.10)
+    assert report["mean_lane_reposition_latency_s"] == pytest.approx(
+        (2 * MODULE.RECOVERY_HOLD_STEPS + 1) * 0.02
+    )
 
 
 def test_auditor_uses_net_cycle_advance_and_global_frontier() -> None:
@@ -200,7 +202,9 @@ def test_auditor_requires_recovery_before_second_credited_roll() -> None:
     assert auditor.recovery_count.item() == 1
     assert auditor.recovered_and_rerolled_count.item() == 1
     report = auditor.summary(6.0)
-    assert report["mean_recovery_latency_s"] == pytest.approx(0.04)
+    assert report["mean_recovery_latency_s"] == pytest.approx(
+        MODULE.RECOVERY_HOLD_STEPS * 0.02
+    )
     assert report["repeated_roll_rate"] == pytest.approx(1.0)
     assert report["maximum_forward_speed_mps"] == pytest.approx(1.25)
     assert report["per_robot"][0]["maximum_forward_speed_mps"] == pytest.approx(1.25)
@@ -208,13 +212,13 @@ def test_auditor_requires_recovery_before_second_credited_roll() -> None:
     assert report["target_distance_reach_rate"] == pytest.approx(0.0)
     assert not report["four_robot_batch_target_20m_pass"]
     assert report["recovery_gate_diagnostics"] == {
-        "awaiting_steps": 2,
-        "foot_supported_head_released_steps": 2,
-        "upright_ready_steps": 2,
-        "sagittal_ready_steps": 2,
-        "rate_ready_steps": 2,
-        "candidate_steps": 2,
-        "max_consecutive_candidate_steps": 2,
+            "awaiting_steps": MODULE.RECOVERY_HOLD_STEPS,
+            "foot_supported_head_released_steps": MODULE.RECOVERY_HOLD_STEPS,
+            "upright_ready_steps": MODULE.RECOVERY_HOLD_STEPS,
+            "sagittal_ready_steps": MODULE.RECOVERY_HOLD_STEPS,
+            "rate_ready_steps": MODULE.RECOVERY_HOLD_STEPS,
+            "candidate_steps": MODULE.RECOVERY_HOLD_STEPS,
+            "max_consecutive_candidate_steps": MODULE.RECOVERY_HOLD_STEPS,
         "foot_release_fraction": 1.0,
         "upright_given_foot_release_fraction": 1.0,
         "sagittal_given_upright_fraction": 1.0,
@@ -255,3 +259,91 @@ def test_promotion_requires_every_gate() -> None:
         failing = dict(report)
         failing[key] = 1
         assert not MODULE.promotion_pass(failing), key
+
+
+def _recovery_case(
+    orientation: str,
+    seed: int,
+    *,
+    success: bool = True,
+    rerolled: bool = True,
+    latency_s: float | None = 2.0,
+) -> dict[str, object]:
+    return {
+        "orientation": orientation,
+        "seed": seed,
+        "success": success,
+        "recovery_latency_s": latency_s if success else None,
+        "self_right_then_reroll": rerolled if success else False,
+        "frontier_after_recovery_m": 0.25 if rerolled else 0.0,
+        "lane_reposition_count": 1,
+        "lane_reposition_latency_s": 0.4,
+        "maximum_lateral_drift_m": 0.10,
+        "nan_seen": False,
+        "out_of_bounds": False,
+    }
+
+
+def _race_report() -> dict[str, object]:
+    return {
+        "mean_credited_forward_frontier_m": 10.0,
+        "p95_lateral_drift_m": 0.30,
+        "nan_env_count": 0,
+        "out_of_bounds_env_count": 0,
+    }
+
+
+def test_recovery_battery_reports_sixteen_orientation_seed_cases() -> None:
+    cases = [
+        _recovery_case(orientation, seed)
+        for orientation in MODULE.RECOVERY_ORIENTATIONS
+        for seed in MODULE.RECOVERY_SEEDS
+    ]
+
+    report = MODULE.summarize_recovery_battery(
+        cases,
+        race_report=_race_report(),
+        parent_frontier_m=10.5,
+    )
+
+    assert report["total_attempts"] == 16
+    assert report["total_successes"] == 16
+    assert report["success_rate"] == pytest.approx(1.0)
+    assert report["self_right_then_reroll_count"] == 16
+    assert report["self_right_then_reroll_rate"] == pytest.approx(1.0)
+    assert report["frontier_after_recovery_m"] == pytest.approx(4.0)
+    assert report["lane_reposition_count"] == 16
+    assert report["lane_reposition_latency_mean_s"] == pytest.approx(0.4)
+    assert report["race_frontier_ratio_to_parent"] == pytest.approx(10 / 10.5)
+    assert report["overall_pass"]
+    assert set(report["by_orientation"]) == set(MODULE.RECOVERY_ORIENTATIONS)
+    assert all(
+        orientation_report["attempts"] == 4
+        and orientation_report["successes"] == 4
+        and orientation_report["pass"]
+        for orientation_report in report["by_orientation"].values()
+    )
+
+
+def test_recovery_battery_fails_weak_orientation_and_parent_regression() -> None:
+    cases = [
+        _recovery_case(
+            orientation,
+            seed,
+            success=not (orientation == "left" and seed >= 1),
+            rerolled=not (orientation == "left" and seed >= 1),
+        )
+        for orientation in MODULE.RECOVERY_ORIENTATIONS
+        for seed in MODULE.RECOVERY_SEEDS
+    ]
+
+    report = MODULE.summarize_recovery_battery(
+        cases,
+        race_report=_race_report(),
+        parent_frontier_m=12.0,
+    )
+
+    assert report["by_orientation"]["left"]["success_rate"] == pytest.approx(0.25)
+    assert not report["by_orientation"]["left"]["pass"]
+    assert not report["race_frontier_at_least_90pct_parent"]
+    assert not report["overall_pass"]

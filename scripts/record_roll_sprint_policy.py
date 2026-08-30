@@ -44,6 +44,7 @@ LABEL_COLORS = (
     (119, 221, 119),
     (255, 200, 74),
 )
+RECOVERY_ORIENTATIONS = ("face_down", "face_up", "left", "right")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -62,6 +63,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--width", type=int, default=960)
     parser.add_argument("--height", type=int, default=540)
+    parser.add_argument(
+        "--recovery-montage",
+        action="store_true",
+        help="Record deterministic face-down, face-up, left, and right recovery starts.",
+    )
     return parser.parse_args()
 
 
@@ -126,6 +132,13 @@ def _race_header_text(elapsed_s: float, total_s: float, leader_index: int) -> st
     )
 
 
+def _recovery_header_text(elapsed_s: float, total_s: float) -> str:
+    return (
+        "SELF-RIGHT -> REPOSITION -> REROLL"
+        f"  |  t {elapsed_s:05.1f} s / {total_s:.1f} s"
+    )
+
+
 def _race_lane_origins(
     num_lanes: int,
     lane_spacing: float,
@@ -147,6 +160,21 @@ def _arrange_race_start(
 ) -> None:
     """Place all robots on one deterministic start line facing world +x."""
     microduck_mdp.arrange_roll_sprint_race_start(base_env, lane_spacing)
+
+
+def _arrange_recovery_montage(
+    base_env: ManagerBasedRlEnv,
+    *,
+    seed: int,
+    lane_spacing: float = RACE_LANE_SPACING,
+) -> None:
+    """Place one deterministic recovery orientation in each visible lane."""
+    microduck_mdp.arrange_roll_sprint_recovery_start(
+        base_env,
+        lane_spacing,
+        seed=seed,
+        orientations=RECOVERY_ORIENTATIONS,
+    )
 
 
 def _race_label_text(
@@ -435,6 +463,7 @@ def _overlay_race_labels(
     elapsed_s: float,
     total_s: float,
     leader_index: int,
+    recovery_montage: bool = False,
 ) -> np.ndarray:
     """Draw per-robot metrics at the rendered screen position of each robot."""
     renderer = base_env._offline_renderer
@@ -463,7 +492,11 @@ def _overlay_race_labels(
         font = ImageFont.load_default(size=18)
         header_font = ImageFont.load_default(size=20)
 
-    header = _race_header_text(elapsed_s, total_s, leader_index)
+    header = (
+        _recovery_header_text(elapsed_s, total_s)
+        if recovery_montage
+        else _race_header_text(elapsed_s, total_s, leader_index)
+    )
     header_box = draw.textbbox((0, 0), header, font=header_font)
     header_width = header_box[2] - header_box[0]
     draw.rounded_rectangle(
@@ -477,10 +510,22 @@ def _overlay_race_labels(
 
     max_speeds = max_speeds_mps.detach().cpu().tolist()
     valid_distances = valid_distances_m.detach().cpu().tolist()
-    labels = [
-        _race_label_text(index, max_speeds[index], valid_distances[index])
-        for index in range(len(pixels))
-    ]
+    if recovery_montage:
+        self_righting = base_env._roll_sprint_self_righting.detach().cpu().tolist()
+        rerolled = (
+            base_env._roll_sprint_recovered_and_rerolled.detach().cpu().tolist()
+        )
+        labels = [
+            f"{RECOVERY_ORIENTATIONS[index].replace('_', ' ')}"
+            f"  |  {'self-righting' if self_righting[index] else 'upright'}"
+            f"  |  rerolls {int(rerolled[index])}"
+            for index in range(len(pixels))
+        ]
+    else:
+        labels = [
+            _race_label_text(index, max_speeds[index], valid_distances[index])
+            for index in range(len(pixels))
+        ]
     label_sizes = []
     for label in labels:
         text_box = draw.textbbox((0, 0), label, font=font)
@@ -556,6 +601,8 @@ def main() -> int:
     reset_cfg.params["standing_prob"] = 1.0
     reset_cfg.params["midroll_prob"] = 0.0
     reset_cfg.params["postroll_prob"] = 0.0
+    reset_cfg.params["crouch_prob"] = 0.0
+    reset_cfg.params["ground_recovery_prob"] = 0.0
     reset_cfg.params["yaw_range"] = (0.0, 0.0)
 
     base_env = ManagerBasedRlEnv(
@@ -563,8 +610,11 @@ def main() -> int:
         device=args.device,
         render_mode="rgb_array",
     )
-    _arrange_race_start(base_env)
-    _install_race_corridor_visualizer(base_env)
+    if args.recovery_montage:
+        _arrange_recovery_montage(base_env, seed=args.seed)
+    else:
+        _arrange_race_start(base_env)
+        _install_race_corridor_visualizer(base_env)
     env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
     runner_cls = load_runner_cls(args.task_id) or MjlabOnPolicyRunner
     runner = runner_cls(env, asdict(agent_cfg), device=args.device)
@@ -615,11 +665,12 @@ def main() -> int:
                     base_env._roll_sprint_forward_frontier
                     - base_env._roll_sprint_forward_origin
                 ).clamp_min(0.0)
-            camera_x_m, camera_y_m, leader_index = _follow_lane_leader(
-                base_env,
-                camera_x_m,
-                camera_y_m,
-            )
+            if not args.recovery_montage:
+                camera_x_m, camera_y_m, leader_index = _follow_lane_leader(
+                    base_env,
+                    camera_x_m,
+                    camera_y_m,
+                )
             if (step + 1) % args.frame_stride != 0:
                 continue
             rendered = base_env.render()
@@ -634,6 +685,7 @@ def main() -> int:
                 elapsed_s=(step + 1) * policy_dt,
                 total_s=args.steps * policy_dt,
                 leader_index=leader_index,
+                recovery_montage=args.recovery_montage,
             )
             if writer is None:
                 frame_height, frame_width = frame.shape[:2]

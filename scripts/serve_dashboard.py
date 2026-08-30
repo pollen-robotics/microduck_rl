@@ -22,14 +22,14 @@ import mimetypes
 import os
 import re
 import struct
-from threading import Lock, Thread
 import time
+from collections.abc import Iterable
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Iterable
+from threading import Lock
+from typing import Any
 from urllib.parse import unquote, urlparse
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_ROOT = REPO_ROOT / "dashboard"
@@ -43,6 +43,9 @@ MEDIA_ROOTS = {
     "artifacts": REPO_ROOT / "artifacts",
     "dashboard-media": REPO_ROOT / "dashboard" / "media",
 }
+ROLL_SPRINT_EVALUATION_ROOT = (
+    REPO_ROOT / "artifacts" / "training" / "roll-sprint-samples" / "evaluations"
+)
 EVENT_NAME = re.compile(r"(?:events?\.out\.)?tfevents\.")
 MEDIA_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".mp4", ".webm",
@@ -308,6 +311,252 @@ def _metric_payload(series: dict[str, list[list[float | int]]]) -> dict[str, Any
     return payload
 
 
+def _nested_value(payload: dict[str, Any], *paths: str) -> Any:
+    """Return the first non-null value from a list of dotted JSON paths."""
+
+    for path in paths:
+        value: Any = payload
+        for key in path.split("."):
+            if not isinstance(value, dict) or key not in value:
+                value = None
+                break
+            value = value[key]
+        if value is not None:
+            return value
+    return None
+
+
+def _dashboard_number(payload: dict[str, Any], *paths: str) -> float | int | None:
+    value = _nested_value(payload, *paths)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(float(value)):
+        return None
+    return value
+
+
+def _dashboard_bool(payload: dict[str, Any], *paths: str) -> bool | None:
+    value = _nested_value(payload, *paths)
+    return value if isinstance(value, bool) else None
+
+
+def _orientation_dashboard_metrics(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    source = _nested_value(
+        payload,
+        "self_right_by_orientation",
+        "self_righting_by_orientation",
+        "recovery_by_orientation",
+        "recovery_battery.by_orientation",
+        "recovery.orientation_results",
+    )
+    if isinstance(source, list):
+        entries = {
+            str(item.get("orientation", item.get("name", index))): item
+            for index, item in enumerate(source)
+            if isinstance(item, dict)
+        }
+    elif isinstance(source, dict):
+        entries = {str(name): item for name, item in source.items() if isinstance(item, dict)}
+    else:
+        return []
+
+    preferred_order = ("face_down", "face_up", "left_side", "right_side")
+    aliases = {
+        "facedown": "face_down",
+        "face-down": "face_down",
+        "faceup": "face_up",
+        "face-up": "face_up",
+        "left": "left_side",
+        "left-side": "left_side",
+        "right": "right_side",
+        "right-side": "right_side",
+    }
+    normalized = {
+        aliases.get(name.lower(), name.lower().replace(" ", "_")): item
+        for name, item in entries.items()
+    }
+    ordered_names = [name for name in preferred_order if name in normalized]
+    ordered_names.extend(sorted(set(normalized) - set(ordered_names)))
+    results: list[dict[str, Any]] = []
+    for name in ordered_names:
+        item = normalized[name]
+        results.append({
+            "id": name,
+            "label": name.replace("_", " ").title(),
+            "attempts": _dashboard_number(
+                item, "attempts", "self_right_attempts", "self_righting_attempts"
+            ),
+            "successes": _dashboard_number(
+                item, "successes", "self_right_successes", "self_righting_successes"
+            ),
+            "successRate": _dashboard_number(
+                item, "success_rate", "self_right_success_rate", "recovery_rate"
+            ),
+            "latencyMeanS": _dashboard_number(
+                item, "recovery_latency_mean_s", "mean_recovery_latency_s", "latency_mean_s"
+            ),
+            "latencyP95S": _dashboard_number(
+                item, "recovery_latency_p95_s", "p95_recovery_latency_s", "latency_p95_s"
+            ),
+            "rerollCount": _dashboard_number(
+                item,
+                "self_right_then_reroll_count",
+                "recovered_then_rerolled_count",
+                "reroll_count",
+            ),
+            "frontierAfterRecoveryM": _dashboard_number(
+                item,
+                "frontier_after_recovery_m",
+                "frontier_distance_after_recovery_m",
+            ),
+            "pass": _dashboard_bool(item, "pass", "recovery_pass", "acceptance_pass"),
+        })
+    return results
+
+
+def _roll_sprint_evaluation_payload(payload: dict[str, Any], path: Path) -> dict[str, Any]:
+    passes = {
+        "overall": _dashboard_bool(
+            payload, "acceptance_pass", "evaluation_pass", "promotion_pass"
+        ),
+        "recovery": _dashboard_bool(
+            payload,
+            "recovery_battery.overall_pass",
+            "self_right_recovery_pass",
+            "recovery_pass",
+            "recovery.overall_pass",
+        ),
+        "reroll": _dashboard_bool(
+            payload, "self_right_then_reroll_pass", "recovery.reroll_pass"
+        ),
+        "raceFrontier": _dashboard_bool(
+            payload, "race_frontier_retention_pass", "race.frontier_retention_pass"
+        ),
+        "straightLane": _dashboard_bool(
+            payload, "straight_lane_batch_pass", "four_robot_batch_straight_lane_pass"
+        ),
+        "target20m": _dashboard_bool(payload, "four_robot_batch_target_20m_pass"),
+        "lateralDrift": _dashboard_bool(
+            payload, "p95_lateral_drift_pass", "lateral_drift_pass"
+        ),
+    }
+    nan_count = _dashboard_number(payload, "nan_env_count")
+    out_of_bounds_count = _dashboard_number(payload, "out_of_bounds_env_count")
+    reroll_rate = _dashboard_number(
+        payload,
+        "self_right_then_reroll_rate",
+        "recovery_battery.self_right_then_reroll_rate",
+    )
+    if passes["reroll"] is None and reroll_rate is not None:
+        passes["reroll"] = reroll_rate >= 0.5
+    passes["finite"] = (
+        nan_count == 0 and out_of_bounds_count == 0
+        if nan_count is not None and out_of_bounds_count is not None
+        else None
+    )
+    return {
+        "available": True,
+        "file": path.name,
+        "modified": _iso_timestamp(path.stat().st_mtime),
+        "checkpoint": Path(str(payload.get("checkpoint", ""))).name or None,
+        "checkpointIteration": _dashboard_number(payload, "checkpoint_iteration"),
+        "checkpointSha256": payload.get("checkpoint_sha256"),
+        "selfRightAttempts": _dashboard_number(
+            payload,
+            "total_self_right_attempt_count",
+            "self_right_attempt_count",
+            "self_right_attempts",
+            "recovery_battery.total_attempts",
+            "self_righting.attempts",
+            "recovery.attempts",
+        ),
+        "selfRightSuccesses": _dashboard_number(
+            payload,
+            "total_self_right_success_count",
+            "self_right_success_count",
+            "self_right_successes",
+            "recovery_battery.total_successes",
+            "self_righting.successes",
+            "recovery.successes",
+        ),
+        "selfRightSuccessRate": _dashboard_number(
+            payload,
+            "self_right_success_rate",
+            "recovery_battery.success_rate",
+            "self_righting.success_rate",
+            "recovery.success_rate",
+        ),
+        "recoveryLatencyMeanS": _dashboard_number(
+            payload,
+            "recovery_latency_mean_s",
+            "recovery_battery.recovery_latency_mean_s",
+            "mean_self_right_latency_s",
+            "mean_recovery_latency_s",
+            "self_righting.latency_mean_s",
+        ),
+        "recoveryLatencyP95S": _dashboard_number(
+            payload,
+            "recovery_latency_p95_s",
+            "recovery_battery.recovery_latency_p95_s",
+            "p95_self_right_latency_s",
+            "p95_recovery_latency_s",
+            "self_righting.latency_p95_s",
+        ),
+        "selfRightThenRerollCount": _dashboard_number(
+            payload,
+            "total_self_right_then_reroll_count",
+            "self_right_then_reroll_count",
+            "recovery_battery.self_right_then_reroll_count",
+            "total_recovered_and_rerolled_count",
+        ),
+        "selfRightThenRerollRate": reroll_rate,
+        "frontierAfterRecoveryM": _dashboard_number(
+            payload,
+            "frontier_distance_after_recovery_m",
+            "credited_frontier_after_recovery_m",
+            "recovery_battery.frontier_after_recovery_m",
+            "self_righting.frontier_after_recovery_m",
+        ),
+        "laneRepositionCount": _dashboard_number(
+            payload,
+            "recovery_battery.lane_reposition_count",
+            "total_lane_reposition_count",
+            "lane_reposition_count",
+        ),
+        "laneRepositionLatencyMeanS": _dashboard_number(
+            payload,
+            "recovery_battery.lane_reposition_latency_mean_s",
+            "mean_lane_reposition_latency_s",
+            "lane_reposition_latency_mean_s",
+        ),
+        "orientations": _orientation_dashboard_metrics(payload),
+        "passes": passes,
+    }
+
+
+def _latest_roll_sprint_evaluation() -> dict[str, Any]:
+    """Load the newest valid roll-sprint evaluator JSON for the live summary."""
+
+    if not ROLL_SPRINT_EVALUATION_ROOT.is_dir():
+        return {"available": False}
+    try:
+        candidates = sorted(
+            ROLL_SPRINT_EVALUATION_ROOT.glob("*.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return {"available": False}
+    for path in candidates:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return _roll_sprint_evaluation_payload(payload, path)
+        except (OSError, ValueError):
+            continue
+    return {"available": False}
+
+
 def _featured_media_config() -> tuple[set[str] | None, tuple[str, ...], bool]:
     """Return exact videos, video prefixes, and whether images are visible."""
 
@@ -431,7 +680,6 @@ def _media_collection(source: str, relative_path: str) -> str:
 
 
 def dashboard_state(*, include_metrics: bool = True) -> dict[str, Any]:
-    del include_metrics
     media = _discover_media()
     video_counts = {
         collection_id: sum(
@@ -454,6 +702,11 @@ def dashboard_state(*, include_metrics: bool = True) -> dict[str, Any]:
         "media": media,
         "videoCollections": video_collections,
         "defaultVideoCollection": "roll-sprint",
+        "rollSprintEvaluation": (
+            _latest_roll_sprint_evaluation()
+            if include_metrics
+            else {"available": False}
+        ),
         "summary": {
             "media": len(media),
         },
@@ -475,7 +728,7 @@ def _refresh_state_in_background() -> None:
 def cached_dashboard_state() -> dict[str, Any]:
     """Build the retained video snapshot once per browser request."""
 
-    return dashboard_state(include_metrics=False)
+    return dashboard_state(include_metrics=True)
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
@@ -483,7 +736,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
     server_version = "MicroDuckDashboard/1.0"
 
-    def do_GET(self) -> None:  # noqa: N802, inherited HTTP API
+    def do_GET(self) -> None:
         route = urlparse(self.path).path
         if route == "/api/state":
             self._send_json(cached_dashboard_state())

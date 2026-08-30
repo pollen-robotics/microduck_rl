@@ -25,6 +25,7 @@ DEFAULT_OUTPUT_DIR = REPO_ROOT / "artifacts" / "training" / "roll-sprint-samples
 DEFAULT_TASK_ID = "Mjlab-Roll-Sprint-Flat-MicroDuck"
 DEFAULT_INTERVAL_SECONDS = 150.0
 RECORDING_STEPS = 1000
+RECOVERY_RECORDING_STEPS = 600
 SIMULATION_HZ = 50
 OUTPUT_FPS = 12.5
 OUTPUT_VIDEO_SECONDS = 20.0
@@ -136,6 +137,16 @@ def _evaluation_path(output_dir: Path, identity: CheckpointIdentity) -> Path:
     )
 
 
+def _recovery_montage_path(
+    output_dir: Path, identity: CheckpointIdentity
+) -> Path:
+    return (
+        output_dir
+        / "recovery-montages"
+        / f"checkpoint-{identity.iteration:06d}-{identity.sha256[:12]}.mp4"
+    )
+
+
 def _evaluator_command(*, checkpoint: Path, output: Path, device: str) -> list[str]:
     return [
         sys.executable,
@@ -153,9 +164,14 @@ def _evaluator_command(*, checkpoint: Path, output: Path, device: str) -> list[s
 
 
 def _recorder_command(
-    *, checkpoint: Path, output: Path, task_id: str, device: str
+    *,
+    checkpoint: Path,
+    output: Path,
+    task_id: str,
+    device: str,
+    recovery_montage: bool = False,
 ) -> list[str]:
-    return [
+    command = [
         sys.executable,
         str(RECORDER),
         str(checkpoint),
@@ -163,12 +179,15 @@ def _recorder_command(
         "--task-id",
         task_id,
         "--steps",
-        str(RECORDING_STEPS),
+        str(RECOVERY_RECORDING_STEPS if recovery_montage else RECORDING_STEPS),
         "--frame-stride",
         str(RECORDING_FRAME_STRIDE),
         "--device",
         device,
     ]
+    if recovery_montage:
+        command.append("--recovery-montage")
+    return command
 
 
 def sample_once(args: argparse.Namespace) -> bool:
@@ -235,15 +254,45 @@ def sample_once(args: argparse.Namespace) -> bool:
     if not output.is_file():
         _log("recorder returned success without an output video; state unchanged")
         return False
+
+    recovery_montage = _recovery_montage_path(args.output_dir, identity)
+    if not recovery_montage.is_file():
+        recovery_montage.parent.mkdir(parents=True, exist_ok=True)
+        recovery_command = _recorder_command(
+            checkpoint=checkpoint,
+            output=recovery_montage,
+            task_id=args.task_id,
+            device=args.device,
+            recovery_montage=True,
+        )
+        _log(
+            "recording one recovery montage for checkpoint iteration "
+            f"{identity.iteration}: {recovery_montage}"
+        )
+        recovery_result = subprocess.run(
+            recovery_command, cwd=REPO_ROOT, check=False
+        )
+        if recovery_result.returncode != 0:
+            _log(
+                "recovery montage failed with exit code "
+                f"{recovery_result.returncode}; state unchanged"
+            )
+            return False
+        if not recovery_montage.is_file():
+            _log("recovery recorder returned success without video; state unchanged")
+            return False
+    else:
+        _log(f"reusing unique recovery montage: {recovery_montage}")
     _write_state(
         args.state_file,
         {
-            "version": 2,
+            "version": 3,
             "last_checkpoint": asdict(identity),
             "last_evaluation": (
                 str(evaluation.resolve()) if evaluation.is_file() else None
             ),
             "last_video": str(output.resolve()),
+            "last_recovery_montage": str(recovery_montage.resolve()),
             "sampled_at_utc": datetime.now(UTC).isoformat(),
         },
     )

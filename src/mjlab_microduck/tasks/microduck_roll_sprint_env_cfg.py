@@ -75,7 +75,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     # positive-path integration within a cycle.
     cfg.rewards["roll_sprint_distance"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_distance,
-        weight=32.0,
+        weight=24.0,
     )
     cfg.rewards["roll_sprint_cycle_rate"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_cycle_rate,
@@ -91,6 +91,26 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     cfg.rewards["roll_sprint_recovered_reroll"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_recovered_reroll_rate,
         weight=0.5,
+    )
+    cfg.rewards["roll_sprint_self_right_upright"] = RewardTermCfg(
+        func=microduck_mdp.roll_sprint_self_right_upright_progress,
+        weight=5.0,
+    )
+    cfg.rewards["roll_sprint_self_right_height"] = RewardTermCfg(
+        func=microduck_mdp.roll_sprint_self_right_height_progress,
+        weight=30.0,
+    )
+    cfg.rewards["roll_sprint_self_right_upward"] = RewardTermCfg(
+        func=microduck_mdp.roll_sprint_self_right_upward_velocity,
+        weight=0.0,
+    )
+    cfg.rewards["roll_sprint_self_right_fallen_tax"] = RewardTermCfg(
+        func=microduck_mdp.roll_sprint_self_right_fallen_tax,
+        weight=0.0,
+    )
+    cfg.rewards["roll_sprint_self_right_success"] = RewardTermCfg(
+        func=microduck_mdp.roll_sprint_self_right_success_rate,
+        weight=0.0,
     )
     cfg.rewards["roll_sprint_head_pivot"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_head_pivot,
@@ -147,9 +167,15 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         func=microduck_mdp.reset_roll_sprint_state,
         mode=old_reset.mode,
         params={
-            "standing_prob": 1.0 if play else 0.70,
-            "midroll_prob": 0.0 if play else 0.15,
+            "standing_prob": 1.0 if play else 0.45,
+            "midroll_prob": 0.0 if play else 0.10,
             "postroll_prob": 0.0 if play else 0.15,
+            "crouch_prob": 0.0 if play else 0.15,
+            "ground_recovery_prob": 0.0 if play else 0.15,
+            "ground_face_down_prob": 0.70,
+            "ground_face_up_prob": 0.10,
+            "ground_left_prob": 0.10,
+            "ground_right_prob": 0.10,
             "standing_z_min": old_reset.params["standing_z_min"],
             "standing_z_max": old_reset.params["standing_z_max"],
             "standing_tilt_max": old_reset.params["standing_tilt_max"],
@@ -207,6 +233,26 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         func=microduck_mdp.roll_sprint_mean_reposition_latency,
         reduce="last",
     )
+    cfg.metrics["roll_sprint_self_right_attempt_count"] = MetricsTermCfg(
+        func=microduck_mdp.roll_sprint_self_right_attempt_count,
+        reduce="last",
+    )
+    cfg.metrics["roll_sprint_self_right_success_count"] = MetricsTermCfg(
+        func=microduck_mdp.roll_sprint_self_right_success_count,
+        reduce="last",
+    )
+    cfg.metrics["roll_sprint_self_right_success_rate"] = MetricsTermCfg(
+        func=microduck_mdp.roll_sprint_self_right_success_fraction,
+        reduce="last",
+    )
+    cfg.metrics["roll_sprint_mean_self_right_latency_s"] = MetricsTermCfg(
+        func=microduck_mdp.roll_sprint_mean_self_right_latency,
+        reduce="last",
+    )
+    cfg.metrics["roll_sprint_frontier_after_self_right_m"] = MetricsTermCfg(
+        func=microduck_mdp.roll_sprint_frontier_after_self_right,
+        reduce="last",
+    )
 
     # Rebuild curricula so no one-roll landing weights or old reward names can
     # silently remain active. DR stages are retained from the roulade recipe.
@@ -221,33 +267,57 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                 {
                     "step": 0,
                     "params": {
-                        "standing_prob": 0.70,
-                        "midroll_prob": 0.15,
-                        "postroll_prob": 0.15,
-                    },
-                },
-                {
-                    "step": 250 * 24,
-                    "params": {
-                        "standing_prob": 0.80,
+                        "standing_prob": 0.45,
                         "midroll_prob": 0.10,
-                        "postroll_prob": 0.10,
+                        "postroll_prob": 0.15,
+                        "crouch_prob": 0.15,
+                        "ground_recovery_prob": 0.15,
+                        "ground_face_down_prob": 0.70,
+                        "ground_face_up_prob": 0.10,
+                        "ground_left_prob": 0.10,
+                        "ground_right_prob": 0.10,
                     },
                 },
                 {
-                    "step": 500 * 24,
+                    "step": 400 * 24,
                     "params": {
-                        "standing_prob": 0.90,
+                        "standing_prob": 0.45,
                         "midroll_prob": 0.05,
-                        "postroll_prob": 0.05,
+                        "postroll_prob": 0.15,
+                        "crouch_prob": 0.15,
+                        "ground_recovery_prob": 0.20,
+                        "ground_face_down_prob": 0.55,
+                        "ground_face_up_prob": 0.15,
+                        "ground_left_prob": 0.15,
+                        "ground_right_prob": 0.15,
                     },
                 },
                 {
-                    "step": 750 * 24,
+                    "step": 1000 * 24,
                     "params": {
-                        "standing_prob": 1.0,
+                        "standing_prob": 0.55,
+                        "midroll_prob": 0.05,
+                        "postroll_prob": 0.10,
+                        "crouch_prob": 0.10,
+                        "ground_recovery_prob": 0.20,
+                        "ground_face_down_prob": 0.25,
+                        "ground_face_up_prob": 0.25,
+                        "ground_left_prob": 0.25,
+                        "ground_right_prob": 0.25,
+                    },
+                },
+                {
+                    "step": 2000 * 24,
+                    "params": {
+                        "standing_prob": 0.65,
                         "midroll_prob": 0.0,
-                        "postroll_prob": 0.0,
+                        "postroll_prob": 0.10,
+                        "crouch_prob": 0.05,
+                        "ground_recovery_prob": 0.20,
+                        "ground_face_down_prob": 0.25,
+                        "ground_face_up_prob": 0.25,
+                        "ground_left_prob": 0.25,
+                        "ground_right_prob": 0.25,
                     },
                 },
             ],
@@ -323,13 +393,44 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         params={
             "reward_name": "roll_sprint_distance",
             "weight_stages": [
-                {"step": 0, "weight": 12.0},
-                {"step": 750 * 24, "weight": 16.0},
-                {"step": 1500 * 24, "weight": 24.0},
-                {"step": 2500 * 24, "weight": 32.0},
+                {"step": 0, "weight": 24.0},
+                {"step": 500 * 24, "weight": 32.0},
             ],
         },
     )
+    for curriculum_name, reward_name, weight_stages in (
+        (
+            "roll_sprint_self_right_upward_weight",
+            "roll_sprint_self_right_upward",
+            [
+                {"step": 0, "weight": 0.0},
+                {"step": 400 * 24, "weight": 1.0},
+                {"step": 1000 * 24, "weight": 2.0},
+            ],
+        ),
+        (
+            "roll_sprint_self_right_fallen_tax_weight",
+            "roll_sprint_self_right_fallen_tax",
+            [
+                {"step": 0, "weight": 0.0},
+                {"step": 400 * 24, "weight": -0.25},
+                {"step": 1000 * 24, "weight": -0.5},
+            ],
+        ),
+        (
+            "roll_sprint_self_right_success_weight",
+            "roll_sprint_self_right_success",
+            [
+                {"step": 0, "weight": 0.0},
+                {"step": 400 * 24, "weight": 5.0},
+                {"step": 1000 * 24, "weight": 10.0},
+            ],
+        ),
+    ):
+        cfg.curriculum[curriculum_name] = CurriculumTermCfg(
+            func=microduck_mdp.reward_weight,
+            params={"reward_name": reward_name, "weight_stages": weight_stages},
+        )
     cfg.curriculum["roll_sprint_progress_weight"] = CurriculumTermCfg(
         func=microduck_mdp.reward_weight,
         params={

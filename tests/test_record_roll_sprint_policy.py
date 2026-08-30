@@ -148,6 +148,38 @@ def test_race_header_uses_requested_rollout_duration() -> None:
     )
 
 
+def test_recovery_montage_uses_all_four_deterministic_orientations(
+    monkeypatch,
+) -> None:
+    observed = {}
+
+    def arrange(env, lane_spacing, *, seed, orientations):
+        observed.update(
+            env=env,
+            lane_spacing=lane_spacing,
+            seed=seed,
+            orientations=orientations,
+        )
+
+    monkeypatch.setattr(
+        MODULE.microduck_mdp,
+        "arrange_roll_sprint_recovery_start",
+        arrange,
+    )
+    env = object()
+    MODULE._arrange_recovery_montage(env, seed=3)
+
+    assert observed == {
+        "env": env,
+        "lane_spacing": MODULE.RACE_LANE_SPACING,
+        "seed": 3,
+        "orientations": ("face_down", "face_up", "left", "right"),
+    }
+    assert MODULE._recovery_header_text(11.5, 12.0) == (
+        "SELF-RIGHT -> REPOSITION -> REROLL  |  t 011.5 s / 12.0 s"
+    )
+
+
 def test_camera_follows_furthest_forward_robot_that_remains_in_lane() -> None:
     camera = SimpleNamespace(lookat=MODULE.np.zeros(3))
     env = SimpleNamespace(

@@ -14,7 +14,7 @@
       <div class="brand-lockup">
         <div class="brand-mark" aria-hidden="true">M</div>
         <div>
-          <p class="eyebrow">MicroDuck / stair policies</p>
+          <p class="eyebrow">MicroDuck / policy training</p>
           <h1>Policy evolution</h1>
         </div>
       </div>
@@ -25,6 +25,64 @@
 
     <main id="main-content" class="page-shell video-only-shell">
       <div id="error-banner" class="notice notice-error" hidden role="alert"></div>
+      <section id="roll-audit" class="panel audit-panel" aria-labelledby="roll-audit-title">
+        <div class="section-heading audit-heading">
+          <div>
+            <p class="eyebrow">Latest checkpoint audit</p>
+            <h2 id="roll-audit-title">Self-righting race readiness</h2>
+            <p id="audit-checkpoint" class="gallery-copy">Waiting for evaluator results.</p>
+          </div>
+          <span id="audit-overall" class="gate-badge is-unknown">Pending</span>
+        </div>
+        <div id="audit-empty" class="empty-state">No self-righting evaluation has been recorded yet.</div>
+        <div id="audit-content" hidden>
+          <dl class="audit-metrics" aria-label="Recovery and lane metrics">
+            <div class="audit-metric">
+              <dt>Self-right</dt>
+              <dd id="metric-self-right">Not reported</dd>
+              <dd id="metric-self-right-rate" class="audit-metric-note">Attempts / successes</dd>
+            </div>
+            <div class="audit-metric">
+              <dt>Recovery latency</dt>
+              <dd id="metric-recovery-latency">Not reported</dd>
+              <dd class="audit-metric-note">Mean / p95</dd>
+            </div>
+            <div class="audit-metric">
+              <dt>Recovered rerolls</dt>
+              <dd id="metric-recovered-rerolls">Not reported</dd>
+              <dd id="metric-recovered-rerolls-rate" class="audit-metric-note">Self-right then valid roll</dd>
+            </div>
+            <div class="audit-metric">
+              <dt>Post-recovery frontier</dt>
+              <dd id="metric-frontier-after-recovery">Not reported</dd>
+              <dd class="audit-metric-note">New credited distance</dd>
+            </div>
+            <div class="audit-metric">
+              <dt>Lane reposition</dt>
+              <dd id="metric-lane-reposition">Not reported</dd>
+              <dd class="audit-metric-note">Count / mean latency</dd>
+            </div>
+          </dl>
+          <div id="audit-gates" class="gate-list" aria-label="Acceptance gates"></div>
+          <div class="orientation-table-wrap">
+            <table class="orientation-table">
+              <caption>Recovery by deterministic start orientation</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Start</th>
+                  <th scope="col">Recovered</th>
+                  <th scope="col">Rate</th>
+                  <th scope="col">Latency mean / p95</th>
+                  <th scope="col">Rerolls</th>
+                  <th scope="col">Frontier</th>
+                  <th scope="col">Gate</th>
+                </tr>
+              </thead>
+              <tbody id="orientation-results"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
       <section class="panel media-panel" aria-labelledby="media-title">
         <div class="section-heading media-heading">
           <div>

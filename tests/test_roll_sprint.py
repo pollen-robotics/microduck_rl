@@ -93,6 +93,7 @@ def _recover(env, asset) -> None:
     env.scene.sensors["head_ground_contact"].data.found[:] = 0.0
     env.scene.sensors["feet_ground_contact"].data.found[:] = 1.0
     asset.data.root_link_quat_w[:] = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    asset.data.root_link_pos_w[:, 2] = 0.115
     asset.data.root_link_ang_vel_b[:] = 0.0
     for _ in range(mdp._ROLL_SPRINT_RECOVERY_HOLD_STEPS):
         env.common_step_counter += 1
@@ -106,7 +107,9 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert cfg.episode_length_s == EPISODE_LENGTH_S == 40.0
     assert TARGET_DISTANCE_M == 20.0
     assert mdp._ROLL_SPRINT_RECOVERY_MAX_FORWARD_RATE == 6.0
-    assert mdp._ROLL_SPRINT_RECOVERY_HOLD_STEPS == 2
+    assert mdp._ROLL_SPRINT_RECOVERY_HOLD_STEPS == 5
+    assert mdp._ROLL_SPRINT_RECOVERY_MIN_HEIGHT_M == 0.09
+    assert mdp._ROLL_SPRINT_SELF_RIGHT_STALL_SECONDS == 0.30
     assert mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M == 0.14
     assert mdp._ROLL_SPRINT_REPOSITION_REARM_M == 0.07
     assert mdp._ROLL_SPRINT_REPOSITION_LATERAL_COMMAND_MPS == 0.20
@@ -138,6 +141,11 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert cfg.rewards["roll_sprint_cycle_rate"].weight == 1.0
     assert cfg.rewards["roll_sprint_recovery"].weight == 1.0
     assert cfg.rewards["roll_sprint_recovered_reroll"].weight == 0.5
+    assert cfg.rewards["roll_sprint_self_right_upright"].weight == 5.0
+    assert cfg.rewards["roll_sprint_self_right_height"].weight == 30.0
+    assert cfg.rewards["roll_sprint_self_right_upward"].weight == 0.0
+    assert cfg.rewards["roll_sprint_self_right_fallen_tax"].weight == 0.0
+    assert cfg.rewards["roll_sprint_self_right_success"].weight == 0.0
     assert (
         cfg.rewards["roll_sprint_recovered_reroll"].weight
         < cfg.rewards["roll_sprint_distance"].weight
@@ -169,9 +177,11 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert MicroduckRollSprintRlCfg.save_interval == 100
     assert MicroduckRollSprintRlCfg.algorithm.entropy_coef == 0.0
     reset_params = cfg.events["set_roll_sprint_state"].params
-    assert reset_params["standing_prob"] == 0.70
-    assert reset_params["midroll_prob"] == 0.15
+    assert reset_params["standing_prob"] == 0.45
+    assert reset_params["midroll_prob"] == 0.10
     assert reset_params["postroll_prob"] == 0.15
+    assert reset_params["crouch_prob"] == 0.15
+    assert reset_params["ground_recovery_prob"] == 0.15
     assert cfg.curriculum["roll_sprint_lane_half_width"].params[
         "width_stages"
     ] == [
@@ -194,23 +204,44 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
         {"step": 3000 * 24, "weight": -1.0},
         {"step": 3750 * 24, "weight": -2.0},
     ]
+    spawn_stages = cfg.curriculum["roll_sprint_spawn_mix"].params["param_stages"]
+    assert [stage["step"] for stage in spawn_stages] == [
+        0,
+        400 * 24,
+        1000 * 24,
+        2000 * 24,
+    ]
     assert [
-        (stage["step"], stage["params"])
-        for stage in cfg.curriculum["roll_sprint_spawn_mix"].params["param_stages"]
+        (
+            stage["params"]["standing_prob"],
+            stage["params"]["midroll_prob"],
+            stage["params"]["postroll_prob"],
+            stage["params"]["crouch_prob"],
+            stage["params"]["ground_recovery_prob"],
+        )
+        for stage in spawn_stages
     ] == [
-        (0, {"standing_prob": 0.70, "midroll_prob": 0.15, "postroll_prob": 0.15}),
-        (
-            250 * 24,
-            {"standing_prob": 0.80, "midroll_prob": 0.10, "postroll_prob": 0.10},
-        ),
-        (
-            500 * 24,
-            {"standing_prob": 0.90, "midroll_prob": 0.05, "postroll_prob": 0.05},
-        ),
-        (
-            750 * 24,
-            {"standing_prob": 1.0, "midroll_prob": 0.0, "postroll_prob": 0.0},
-        ),
+        (0.45, 0.10, 0.15, 0.15, 0.15),
+        (0.45, 0.05, 0.15, 0.15, 0.20),
+        (0.55, 0.05, 0.10, 0.10, 0.20),
+        (0.65, 0.00, 0.10, 0.05, 0.20),
+    ]
+    assert [
+        tuple(
+            stage["params"][name]
+            for name in (
+                "ground_face_down_prob",
+                "ground_face_up_prob",
+                "ground_left_prob",
+                "ground_right_prob",
+            )
+        )
+        for stage in spawn_stages
+    ] == [
+        (0.70, 0.10, 0.10, 0.10),
+        (0.55, 0.15, 0.15, 0.15),
+        (0.25, 0.25, 0.25, 0.25),
+        (0.25, 0.25, 0.25, 0.25),
     ]
     assert cfg.curriculum["roll_sprint_progress_weight"].params[
         "weight_stages"
@@ -223,11 +254,22 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert cfg.curriculum["roll_sprint_distance_weight"].params[
         "weight_stages"
     ] == [
-        {"step": 0, "weight": 12.0},
-        {"step": 750 * 24, "weight": 16.0},
-        {"step": 1500 * 24, "weight": 24.0},
-        {"step": 2500 * 24, "weight": 32.0},
+        {"step": 0, "weight": 24.0},
+        {"step": 500 * 24, "weight": 32.0},
     ]
+    assert cfg.curriculum["roll_sprint_self_right_upward_weight"].params[
+        "weight_stages"
+    ] == [
+        {"step": 0, "weight": 0.0},
+        {"step": 400 * 24, "weight": 1.0},
+        {"step": 1000 * 24, "weight": 2.0},
+    ]
+    assert cfg.curriculum["roll_sprint_self_right_fallen_tax_weight"].params[
+        "weight_stages"
+    ][-1] == {"step": 1000 * 24, "weight": -0.5}
+    assert cfg.curriculum["roll_sprint_self_right_success_weight"].params[
+        "weight_stages"
+    ][-1] == {"step": 1000 * 24, "weight": 10.0}
     assert cfg.curriculum["roll_sprint_head_pivot_weight"].params[
         "weight_stages"
     ] == [
@@ -251,6 +293,11 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
         "roll_sprint_mean_recovery_latency_s",
         "roll_sprint_reposition_count",
         "roll_sprint_mean_reposition_latency_s",
+        "roll_sprint_self_right_attempt_count",
+        "roll_sprint_self_right_success_count",
+        "roll_sprint_self_right_success_rate",
+        "roll_sprint_mean_self_right_latency_s",
+        "roll_sprint_frontier_after_self_right_m",
     }.issubset(cfg.metrics)
 
 
@@ -443,6 +490,8 @@ def test_valid_roll_enters_recovery_required_and_blocks_second_roll(monkeypatch)
     _complete_valid_roll(env, asset, forward=0.20)
 
     assert env._roll_sprint_awaiting_recovery[0]
+    assert env._roll_sprint_self_righting[0]
+    assert env._roll_sprint_self_right_attempt_count[0] == 1.0
     assert not env._roll_sprint_cycle_eligible[0]
     assert env._roll_sprint_completed[0] == 1.0
 
@@ -484,6 +533,124 @@ def test_standing_without_completed_roll_cannot_farm_recovery_reward(monkeypatch
         env.common_step_counter += 1
 
     assert env._roll_sprint_recovery_count[0] == 0.0
+
+
+def test_stalled_fall_enters_self_righting_after_point_three_seconds(monkeypatch):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    asset.data.root_link_quat_w[:] = torch.tensor(
+        [[2.0**-0.5, 0.0, 2.0**-0.5, 0.0]]
+    )
+    asset.data.root_link_ang_vel_b.zero_()
+    stall_steps = round(mdp._ROLL_SPRINT_SELF_RIGHT_STALL_SECONDS / env.step_dt)
+
+    for step in range(stall_steps - 1):
+        env.common_step_counter = step
+        mdp._update_roll_sprint_state(env, asset)
+        assert not env._roll_sprint_self_righting[0]
+
+    env.common_step_counter = stall_steps - 1
+    mdp._update_roll_sprint_state(env, asset)
+
+    assert env._roll_sprint_self_righting[0]
+    assert env._roll_sprint_self_right_started_now[0]
+    assert env._roll_sprint_awaiting_recovery[0]
+    assert not env._roll_sprint_cycle_eligible[0]
+
+
+def test_actively_progressing_roll_never_triggers_stalled_fall(monkeypatch):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    asset.data.root_link_quat_w[:] = torch.tensor(
+        [[2.0**-0.5, 0.0, 2.0**-0.5, 0.0]]
+    )
+    asset.data.root_link_ang_vel_b[:, 1] = 2.0
+
+    for step in range(25):
+        env.common_step_counter = step
+        mdp._update_roll_sprint_state(env, asset)
+
+    assert env._roll_sprint_phase_frontier[0] > 0.0
+    assert not env._roll_sprint_self_righting[0]
+    assert env._roll_sprint_self_right_attempt_count[0] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("kind", "quaternion"),
+    [
+        (1, [2.0**-0.5, 0.0, 2.0**-0.5, 0.0]),
+        (2, [2.0**-0.5, 0.0, -(2.0**-0.5), 0.0]),
+        (3, [2.0**-0.5, 2.0**-0.5, 0.0, 0.0]),
+        (4, [2.0**-0.5, -(2.0**-0.5), 0.0, 0.0]),
+    ],
+)
+def test_each_lying_orientation_is_an_ineligible_self_right_start(
+    monkeypatch, kind, quaternion
+):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    asset.data.root_link_quat_w[:] = torch.tensor([quaternion])
+    mdp._reset_roll_sprint_buffers(
+        env,
+        torch.tensor([0]),
+        spawn_cycle_eligible=torch.tensor([False]),
+        spawn_awaiting_recovery=torch.tensor([True]),
+        spawn_self_righting=torch.tensor([True]),
+        spawn_recovery_kind=torch.tensor([kind]),
+    )
+
+    mdp._update_roll_sprint_state(env, asset)
+    assert env._roll_sprint_self_righting[0]
+    assert not env._roll_sprint_cycle_eligible[0]
+    assert env._roll_sprint_completed_distance[0] == 0.0
+
+    _recover(env, asset)
+    assert env._roll_sprint_self_right_success_count[0] == 1.0
+    assert env._roll_sprint_recovery_count[0] == 1.0
+    assert env._roll_sprint_cycle_eligible[0]
+
+
+def test_self_right_rewards_are_one_shot_and_lying_cannot_farm(monkeypatch):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    asset.data.root_link_quat_w[:] = torch.tensor(
+        [[2.0**-0.5, 0.0, 2.0**-0.5, 0.0]]
+    )
+    asset.data.root_link_pos_w[:, 2] = 0.06
+    mdp._reset_roll_sprint_buffers(
+        env,
+        torch.tensor([0]),
+        spawn_cycle_eligible=torch.tensor([False]),
+        spawn_awaiting_recovery=torch.tensor([True]),
+        spawn_self_righting=torch.tensor([True]),
+    )
+
+    for _ in range(8):
+        assert mdp.roll_sprint_self_right_upright_progress(env)[0] == 0.0
+        assert mdp.roll_sprint_self_right_height_progress(env)[0] == 0.0
+        assert mdp.roll_sprint_self_right_success_rate(env)[0] == 0.0
+        assert mdp.roll_sprint_distance(env)[0] == 0.0
+        env.common_step_counter += 1
+
+    env.scene.sensors["head_ground_contact"].data.found[:] = 0.0
+    env.scene.sensors["feet_ground_contact"].data.found[:] = 1.0
+    asset.data.root_link_quat_w[:] = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    asset.data.root_link_pos_w[:, 2] = 0.115
+    asset.data.root_link_ang_vel_b.zero_()
+    upright_progress = 0.0
+    for _ in range(mdp._ROLL_SPRINT_RECOVERY_HOLD_STEPS):
+        env.common_step_counter += 1
+        upright_progress += float(
+            mdp.roll_sprint_self_right_upright_progress(env)[0].item()
+        )
+    assert mdp.roll_sprint_self_right_success_rate(env)[0] == pytest.approx(
+        1.0 / env.step_dt
+    )
+    assert upright_progress > 0.0
+    env.common_step_counter += 1
+    assert mdp.roll_sprint_self_right_success_rate(env)[0] == 0.0
+    assert mdp.roll_sprint_self_right_upright_progress(env)[0] == 0.0
+    assert mdp.roll_sprint_self_right_height_progress(env)[0] == 0.0
 
 
 def test_roll_recover_reroll_credits_two_cycles(monkeypatch):
@@ -766,7 +933,7 @@ def test_roll_sprint_reposition_command_points_back_to_lane_center(monkeypatch):
 
     assert torch.allclose(command[0], torch.tensor([0.0, -0.20, 0.0]))
     assert torch.allclose(command[1], torch.tensor([0.0, 0.20, 0.0]))
-    assert torch.allclose(command[2], base_command[2])
+    assert torch.allclose(command[2], torch.zeros(3))
 
 
 def test_roll_recovery_waits_for_lane_reposition_before_reroll(monkeypatch):
@@ -779,10 +946,13 @@ def test_roll_recovery_waits_for_lane_reposition_before_reroll(monkeypatch):
     asset.data.root_link_pos_w[:, 1] = mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M + 0.01
     mdp._update_roll_sprint_state(env, asset)
     assert env._roll_sprint_awaiting_recovery[0]
-    assert env._roll_sprint_awaiting_reposition[0]
+    assert env._roll_sprint_self_righting[0]
+    assert not env._roll_sprint_awaiting_reposition[0]
 
     _recover(env, asset)
     assert env._roll_sprint_awaiting_recovery[0]
+    assert not env._roll_sprint_self_righting[0]
+    assert env._roll_sprint_awaiting_reposition[0]
     assert env._roll_sprint_recovery_count[0] == 0.0
 
     asset.data.root_link_pos_w[:, 1] = 0.0
