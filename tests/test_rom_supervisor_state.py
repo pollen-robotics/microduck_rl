@@ -64,6 +64,7 @@ def test_every_state_event_pair_is_explicit_or_quarantines() -> None:
         (SupervisorState.STARTING, SupervisorEvent.START_ACK),
         (SupervisorState.RUNNING, SupervisorEvent.STOP_CLAIMED),
         (SupervisorState.STOPPING, SupervisorEvent.TERMINAL_ACK),
+        (SupervisorState.RUNNING, SupervisorEvent.TERMINAL_ACK),
         (SupervisorState.STARTING, SupervisorEvent.OPERATION_TIMEOUT),
         *(
             (state, SupervisorEvent.TERMINATION_CLAIMED)

@@ -29,6 +29,7 @@ from .process_protocol import (
     StartPayload,
     StatusPayload,
     StatusRequestPayload,
+    TerminalEventPayload,
     TerminalPayload,
     ZeroAndStopPayload,
     decode_packet,
@@ -54,6 +55,7 @@ class SupervisorSnapshot:
     cached_status: RobotStatus | None
     quarantine_reason: str | None
     slot_releasable: bool
+    cached_terminal: TerminalPayload | None = None
     pid: int | None = None
 
 
@@ -122,6 +124,7 @@ class RuntimeProcessSupervisor:
         self._generation = 0
         self._sequence = 0
         self._active_task: str | None = None
+        self._last_event_sequence = 0
         self._trace: list[str] = []
         self._closed = False
         self._thread = threading.Thread(
@@ -272,6 +275,7 @@ class RuntimeProcessSupervisor:
         *,
         healthy: bool | None = None,
         status: RobotStatus | None | object = ...,
+        terminal: TerminalPayload | None | object = ...,
         reason: str | None | object = ...,
         slot: bool | None = None,
     ) -> None:
@@ -283,6 +287,7 @@ class RuntimeProcessSupervisor:
             cached_status=old.cached_status if status is ... else status,  # type: ignore[arg-type]
             quarantine_reason=old.quarantine_reason if reason is ... else reason,  # type: ignore[arg-type]
             slot_releasable=old.slot_releasable if slot is None else slot,
+            cached_terminal=old.cached_terminal if terminal is ... else terminal,  # type: ignore[arg-type]
             pid=self._process.pid if self._process is not None else None,
         )
         with self._snapshot_lock:
@@ -295,7 +300,11 @@ class RuntimeProcessSupervisor:
 
     def _run(self) -> None:
         while True:
-            intent = self._queue.get()
+            try:
+                intent = self._queue.get(timeout=0.01)
+            except queue.Empty:
+                self._poll_unsolicited()
+                continue
             try:
                 intent.result = self._dispatch(intent)
             except Exception as exc:  # noqa: BLE001 - owner must wake callers
@@ -386,7 +395,7 @@ class RuntimeProcessSupervisor:
                 or ready.payload.runtimeRevision != runtime_revision()
             ):  # type: ignore[union-attr]
                 raise SupervisorOperationError("wrong child readiness identity")
-        except BaseException as exc:
+        except Exception as exc:
             self._record(
                 "OPERATION_TIMEOUT"
                 if isinstance(exc, TimeoutError)
@@ -402,7 +411,8 @@ class RuntimeProcessSupervisor:
         if self.snapshot().state is not SupervisorState.IDLE:
             raise SupervisorUnavailable("motion slot is unavailable")
         self._active_task = request.taskId
-        self._advance(SupervisorEvent.START_SENT, slot=False)
+        self._last_event_sequence = 0
+        self._advance(SupervisorEvent.START_SENT, slot=False, terminal=None)
         payload = StartPayload(
             actionCode=request.actionCode,
             bundleDigest=request.bundleDigest,
@@ -474,7 +484,12 @@ class RuntimeProcessSupervisor:
             except queue.Full as exc:
                 self._quarantine("TERMINAL_DELIVERY_BACKPRESSURE")
                 raise SupervisorOperationError("terminal handoff unavailable") from exc
-        self._advance(SupervisorEvent.TERMINAL_ACK, healthy=True, slot=True)
+        self._advance(
+            SupervisorEvent.TERMINAL_ACK,
+            healthy=True,
+            slot=True,
+            terminal=response.payload,
+        )
         return response.payload
 
     def _require_active(self, task_id: str) -> None:
@@ -531,6 +546,9 @@ class RuntimeProcessSupervisor:
             if not packet or flags & socket.MSG_TRUNC:
                 raise ConnectionError("child transport closed or truncated")
             response = decode_packet(packet)
+            if response.kind is RuntimeMessageKind.TERMINAL_EVENT:
+                self._accept_terminal_event(response)
+                continue
             if (
                 response.generation != self._generation
                 or response.operationSequence != self._sequence
@@ -539,6 +557,48 @@ class RuntimeProcessSupervisor:
             ):
                 raise SupervisorOperationError("ambiguous child response")
             return response
+
+    def _poll_unsolicited(self) -> None:
+        if self._socket is None or self._process is None or self._process.poll() is not None:
+            return
+        readable, _, _ = select.select([self._socket], [], [], 0)
+        if not readable:
+            return
+        try:
+            packet, _ancillary, flags, _address = self._socket.recvmsg(PACKET_MAX_BYTES + 1)
+            if not packet or flags & socket.MSG_TRUNC:
+                raise ConnectionError("child transport closed or truncated")
+            message = decode_packet(packet)
+            if message.kind is not RuntimeMessageKind.TERMINAL_EVENT:
+                raise SupervisorOperationError("unexpected unsolicited response")
+            self._accept_terminal_event(message)
+        except Exception as exc:  # noqa: BLE001 - any invalid peer behavior quarantines
+            self._record("OPERATION_FAILED")
+            self._quarantine(f"UNSOLICITED:{type(exc).__name__}")
+
+    def _accept_terminal_event(self, message: RuntimeMessage) -> None:
+        payload = message.payload
+        if not isinstance(payload, TerminalEventPayload):
+            raise SupervisorOperationError("malformed terminal event")
+        if (
+            self.snapshot().state is not SupervisorState.RUNNING
+            or message.generation != self._generation
+            or message.taskId != self._active_task
+            or message.operationSequence != 0
+            or payload.eventSequence != self._last_event_sequence + 1
+        ):
+            raise SupervisorOperationError("stale or replayed terminal event")
+        terminal = payload.terminal
+        self._last_event_sequence = payload.eventSequence
+        if self._terminal_queue is not None:
+            try:
+                self._terminal_queue.put_nowait(terminal)
+            except queue.Full as exc:
+                raise SupervisorOperationError("terminal handoff unavailable") from exc
+        self._active_task = None
+        self._advance(
+            SupervisorEvent.TERMINAL_ACK, healthy=True, slot=True, terminal=terminal
+        )
 
     def _quarantine(self, reason: str, *, protocol_usable: bool = False) -> None:
         self._advance(

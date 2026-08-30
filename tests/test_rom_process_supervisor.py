@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -143,6 +144,77 @@ def test_start_command_stop_reuses_exact_healthy_child_pid() -> None:
         supervisor.stop(TASK_ID, "CANCELLED")
     finally:
         supervisor.close()
+
+
+def test_idle_owner_consumes_unsolicited_terminal_and_releases_slot() -> None:
+    delivered = threading.Event()
+    supervisor, launch = _supervisor(
+        "terminal-event", terminal_callback=lambda _payload: delivered.set()
+    )
+    try:
+        supervisor.ensure_ready()
+        supervisor.start(_request())
+        peer = _receive_gate(launch, b"STARTED")
+        peer.sendall(b"EMIT")
+        assert delivered.wait(timeout=2)
+        snapshot = supervisor.snapshot()
+        assert snapshot.cached_terminal is not None
+        assert snapshot.cached_terminal.outcome == "SUCCEEDED"
+        assert snapshot.state is SupervisorState.IDLE
+        assert snapshot.slot_releasable is True
+    finally:
+        supervisor.close()
+
+
+def test_terminal_event_interleaved_with_status_is_not_consumed_as_response() -> None:
+    delivered = threading.Event()
+    supervisor, _launch = _supervisor(
+        "event-before-status", terminal_callback=lambda _payload: delivered.set()
+    )
+    try:
+        supervisor.ensure_ready()
+        supervisor.start(_request())
+        status = supervisor.status(TASK_ID)
+        assert status.health["healthy"] is True
+        assert delivered.wait(timeout=2)
+        assert supervisor.snapshot().cached_terminal is not None
+    finally:
+        supervisor.close()
+
+
+def test_terminal_event_interleaved_with_command_is_not_consumed_as_response() -> None:
+    delivered = threading.Event()
+    supervisor, _launch = _supervisor(
+        "event-before-command", terminal_callback=lambda _payload: delivered.set()
+    )
+    try:
+        supervisor.ensure_ready()
+        supervisor.start(_request())
+        supervisor.command(
+            TASK_ID,
+            TaskCommandRequest(
+                commandSequence=1,
+                parameters={"vxMps": 0.1, "vyMps": 0.0, "yawRateRadps": 0.0},
+                leaseMs=500,
+            ),
+        )
+        assert delivered.wait(timeout=2)
+        assert supervisor.snapshot().cached_terminal is not None
+    finally:
+        supervisor.close()
+
+
+@pytest.mark.parametrize("mode", ["duplicate-event", "stale-event", "malformed-event"])
+def test_replayed_stale_or_malformed_terminal_event_quarantines(mode: str) -> None:
+    supervisor, _launch = _supervisor(mode)
+    supervisor.ensure_ready()
+    supervisor.start(_request())
+    deadline = time.monotonic() + 2
+    while supervisor.snapshot().pid is not None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert supervisor.snapshot().state is SupervisorState.NO_CHILD
+    assert "QUARANTINED" in supervisor.trace
+    supervisor.close()
 
 
 @pytest.mark.parametrize(

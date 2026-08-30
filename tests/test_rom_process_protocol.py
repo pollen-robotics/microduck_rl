@@ -16,6 +16,57 @@ from mjlab_microduck.rom.process_protocol import (
 )
 
 
+def test_terminal_event_has_distinct_bounded_unsolicited_correlation() -> None:
+    from mjlab_microduck.rom.contracts import TaskEvidence
+    from mjlab_microduck.rom.process_protocol import (
+        TerminalEventPayload,
+        TerminalPayload,
+    )
+
+    message = RuntimeMessage(
+        kind="TERMINAL_EVENT", generation=7, operationSequence=0, taskId="1" * 32,
+        payload=TerminalEventPayload(
+            eventSequence=1,
+            terminal=TerminalPayload(
+                outcome="SUCCEEDED",
+                evidence=TaskEvidence(
+                    bundleDigest="sha256:" + "a" * 64,
+                    policyDigest="sha256:" + "b" * 64,
+                    modelDigest="sha256:" + "c" * 64,
+                    metrics={"upright": True}, stopReason="TASK_COMPLETE",
+                ),
+            ),
+        ),
+    )
+    assert decode_packet(encode_packet(message)) == message
+
+
+def test_terminal_event_requires_zero_operation_sequence() -> None:
+    from mjlab_microduck.rom.contracts import TaskEvidence
+    from mjlab_microduck.rom.process_protocol import (
+        TerminalEventPayload,
+        TerminalPayload,
+    )
+
+    with pytest.raises(ValueError, match="operationSequence"):
+        RuntimeMessage(
+            kind="TERMINAL_EVENT", generation=7, operationSequence=9,
+            taskId="1" * 32,
+            payload=TerminalEventPayload(
+                eventSequence=1,
+                terminal=TerminalPayload(
+                    outcome="FAILED",
+                    evidence=TaskEvidence(
+                        bundleDigest="sha256:" + "a" * 64,
+                        policyDigest="sha256:" + "b" * 64,
+                        modelDigest="sha256:" + "c" * 64,
+                        stopReason="FALLEN",
+                    ),
+                ),
+            ),
+        )
+
+
 def _start_message() -> RuntimeMessage:
     return RuntimeMessage.start(
         generation=7,

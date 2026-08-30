@@ -19,6 +19,7 @@ from mjlab_microduck.rom.process_protocol import (
     RuntimeMessageKind,
     RuntimeOperationKind,
     StatusPayload,
+    TerminalEventPayload,
     TerminalPayload,
     decode_packet,
     encode_packet,
@@ -35,6 +36,12 @@ MODES = (
     "malformed-response",
     "late-response",
     "exit-before-ack",
+    "terminal-event",
+    "event-before-status",
+    "event-before-command",
+    "duplicate-event",
+    "stale-event",
+    "malformed-event",
 )
 
 PROOF_MODES = (
@@ -144,6 +151,25 @@ def _reply(
     )
 
 
+def _terminal_event(request: RuntimeMessage, *, generation: int | None = None) -> RuntimeMessage:
+    return RuntimeMessage(
+        kind="TERMINAL_EVENT", generation=request.generation if generation is None else generation,
+        operationSequence=0, taskId=request.taskId,
+        payload=TerminalEventPayload(
+            eventSequence=1,
+            terminal=TerminalPayload(
+                outcome="SUCCEEDED",
+                evidence=TaskEvidence(
+                    bundleDigest="sha256:" + "a" * 64,
+                    policyDigest="sha256:" + "b" * 64,
+                    modelDigest="sha256:" + "c" * 64,
+                    metrics={"upright": True}, stopReason="TASK_COMPLETE",
+                ),
+            ),
+        ),
+    )
+
+
 def main() -> int:
     global _late_control, _late_request, _late_revision, _late_test_control
     args = _args()
@@ -164,6 +190,12 @@ def main() -> int:
         if request.kind is RuntimeMessageKind.HELLO:
             revision = request.payload.runtimeRevision  # type: ignore[union-attr]
         operation = request.kind.value.lower().replace("zero_and_stop", "stop")
+        if (
+            request.kind is RuntimeMessageKind.STATUS and args.mode == "event-before-status"
+        ) or (
+            request.kind is RuntimeMessageKind.COMMAND and args.mode == "event-before-command"
+        ):
+            control.sendall(encode_packet(_terminal_event(request)))
         if args.mode in {"gate-malformed", "gate-exit"}:
             test_control.sendall(request.kind.value.encode("ascii"))
             if not test_control.recv(1):
@@ -221,6 +253,20 @@ def main() -> int:
                 )
             )
         )
+        if request.kind is RuntimeMessageKind.START and args.mode in {
+            "terminal-event", "duplicate-event", "stale-event", "malformed-event"
+        }:
+            test_control.sendall(b"STARTED")
+            if args.mode == "terminal-event":
+                if test_control.recv(4) == b"EMIT":
+                    control.sendall(encode_packet(_terminal_event(request)))
+            elif args.mode == "malformed-event":
+                control.sendall(b'{"kind":"TERMINAL_EVENT"}')
+            else:
+                event = _terminal_event(request, generation=request.generation - 1 if args.mode == "stale-event" else None)
+                control.sendall(encode_packet(event))
+                if args.mode == "duplicate-event":
+                    control.sendall(encode_packet(event))
 
 
 if __name__ == "__main__":

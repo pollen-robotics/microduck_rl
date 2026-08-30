@@ -60,6 +60,7 @@ class RuntimeMessageKind(str, Enum):
     READY = "READY"
     ACK = "ACK"
     TERMINAL = "TERMINAL"
+    TERMINAL_EVENT = "TERMINAL_EVENT"
     ERROR = "ERROR"
 
 
@@ -137,6 +138,13 @@ class TerminalPayload(ContractModel):
     evidence: TaskEvidence
 
 
+class TerminalEventPayload(ContractModel):
+    """One unsolicited, generation-local terminal notification."""
+
+    eventSequence: int = Field(strict=True, gt=0, le=_UINT64_MAX)
+    terminal: TerminalPayload
+
+
 class ErrorDetail(ContractModel):
     """Code-owned error metadata safe to expose to the supervisor."""
 
@@ -169,6 +177,7 @@ type RuntimePayload = (
     | ReadyPayload
     | AckPayload
     | TerminalPayload
+    | TerminalEventPayload
     | ErrorPayload
 )
 
@@ -182,6 +191,7 @@ _PAYLOAD_TYPES: dict[RuntimeMessageKind, type[RuntimePayload]] = {
     RuntimeMessageKind.READY: ReadyPayload,
     RuntimeMessageKind.ACK: AckPayload,
     RuntimeMessageKind.TERMINAL: TerminalPayload,
+    RuntimeMessageKind.TERMINAL_EVENT: TerminalEventPayload,
     RuntimeMessageKind.ERROR: ErrorPayload,
 }
 
@@ -260,6 +270,11 @@ class RuntimeMessage(ContractModel):
             raise ValueError("lifecycle IPC messages require taskId to be null")
         if not _is_lifecycle_scoped(self.kind, self.payload) and self.taskId is None:
             raise ValueError("task-scoped IPC messages require a taskId")
+        if (
+            self.kind is RuntimeMessageKind.TERMINAL_EVENT
+            and self.operationSequence != 0
+        ):
+            raise ValueError("TERMINAL_EVENT requires operationSequence zero")
         return self
 
     @classmethod

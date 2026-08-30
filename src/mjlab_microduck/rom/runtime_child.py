@@ -41,12 +41,13 @@ from .process_protocol import (
     ShutdownPayload,
     StartPayload,
     StatusPayload,
+    TerminalEventPayload,
     TerminalPayload,
     ZeroAndStopPayload,
     decode_packet,
     encode_packet,
 )
-from .runtime import RuntimeEvidence, RuntimeHandle, SimulationRuntime
+from .runtime import RuntimeEvidence, RuntimeHandle, RuntimeSample, SimulationRuntime
 from .runtime_identity import runtime_revision
 
 _ALLOWED_ENVIRONMENT = frozenset(
@@ -110,6 +111,8 @@ class RuntimeChildHost:
         self._last_sequence = -1
         self._last_request: RuntimeMessage | None = None
         self._operation_active = threading.Event()
+        self._event_sequence = 0
+        self._completion_claim = threading.Lock()
 
     def _send(self, message: RuntimeMessage) -> bool:
         try:
@@ -287,7 +290,21 @@ class RuntimeChildHost:
             and self._task_id is not None
             and reason != "PARENT_EOF"
         ):
-            self._send(self._terminal(request, reason, evidence))
+            terminal = self._terminal(request, reason, evidence)
+            if reason == "LEASE_EXPIRED":
+                self._event_sequence += 1
+                assert isinstance(terminal.payload, TerminalPayload)
+                terminal = RuntimeMessage(
+                    kind=RuntimeMessageKind.TERMINAL_EVENT,
+                    generation=request.generation,
+                    operationSequence=0,
+                    taskId=request.taskId,
+                    payload=TerminalEventPayload(
+                        eventSequence=self._event_sequence,
+                        terminal=terminal.payload,
+                    ),
+                )
+            self._send(terminal)
         self._safety_complete.set()
 
     def _bundle_action_code(self) -> str:
@@ -314,6 +331,84 @@ class RuntimeChildHost:
             ),
         )
         return self._response(request, RuntimeMessageKind.TERMINAL, payload)
+
+    def _start_discrete_monitor(self) -> None:
+        template = action_template(self._active_action_code)
+        if template.completion is None:
+            return
+        deadline = self._clock() + template.completion.maxDurationMs / 1000
+
+        def monitor() -> None:
+            assert self._runtime is not None and self._handle is not None
+            runtime, handle = self._runtime, self._handle
+            sample = RuntimeSample(running=True)
+            reason = "MAX_DURATION_EXCEEDED"
+            outcome = "TIMED_OUT"
+            try:
+                while self._clock() < deadline and not self._safety_requested.is_set():
+                    sample = runtime.sample(handle)
+                    if sample.terminalState is not None:
+                        reason = sample.stopReason or (
+                            "TASK_COMPLETE" if sample.terminalState == "SUCCEEDED" else "RUNTIME_FAILED"
+                        )
+                        outcome = sample.terminalState
+                        break
+                    self._stop.wait(0.02)
+                else:
+                    if self._safety_requested.is_set():
+                        return
+            except Exception:  # noqa: BLE001 - runtime detail is never serialized
+                sample = RuntimeSample(running=False, terminalState="FAILED")
+                reason, outcome = "RUNTIME_EXCEPTION", "FAILED"
+            with self._completion_claim:
+                with self._state_lock:
+                    if handle is not self._handle or self._safety_requested.is_set():
+                        return
+                try:
+                    stopped = runtime.safe_stop(handle, reason)
+                except Exception:  # noqa: BLE001
+                    stopped = RuntimeEvidence(metrics={"safetyFailure": "SAFE_STOP_FAILED"}, stopReason=reason)
+                    outcome, reason = "FAILED", "RUNTIME_EXCEPTION"
+                if self._safety_requested.is_set():
+                    return
+                metrics = dict(sample.metrics)
+                for key in sorted(stopped.metrics):
+                    candidate = metrics | {key: stopped.metrics[key]}
+                    try:
+                        RuntimeEvidence(metrics=candidate)
+                    except (TypeError, ValueError):
+                        break
+                    metrics = candidate
+                assert self._bundle is not None
+                action = next(item for item in self._bundle.actions if item.actionCode == self._active_action_code)
+                policy = next(item for item in self._bundle.policies if item.policyRef == action.policyRef)
+                terminal = TerminalPayload(
+                    outcome=outcome,
+                    evidence=TaskEvidence(
+                        bundleDigest=self._bundle.bundleDigest,
+                        policyDigest=policy.digest,
+                        modelDigest=self._bundle.model.digest,
+                        metrics=metrics, stopReason=reason,
+                    ),
+                )
+                with self._state_lock:
+                    generation, task_id = self._generation, self._task_id
+                    self._handle = None
+                    self._lease_deadline = None
+                    self._event_sequence += 1
+                    event_sequence = self._event_sequence
+                assert generation is not None and task_id is not None
+                self._send(RuntimeMessage(
+                    kind=RuntimeMessageKind.TERMINAL_EVENT,
+                    generation=generation, operationSequence=0, taskId=task_id,
+                    payload=TerminalEventPayload(eventSequence=event_sequence, terminal=terminal),
+                ))
+                with self._state_lock:
+                    self._generation = None
+                    self._task_id = None
+                    self._last_request = None
+
+        threading.Thread(target=monitor, name="runtime-child-discrete-monitor", daemon=True).start()
 
     def _handle_message(self, message: RuntimeMessage) -> bool:
         self._last_request = message
@@ -366,18 +461,19 @@ class RuntimeChildHost:
         return True
 
     def _normal_stop(self, message: RuntimeMessage, reason: str) -> None:
-        assert self._runtime is not None and self._handle is not None
-        template = action_template(self._active_action_code)
-        zero: Mapping[str, object] = template.lease.zeroCommand if template.lease else {}
-        self._runtime.command(self._handle, zero)
-        evidence = self._runtime.safe_stop(self._handle, reason)
-        self._send(self._terminal(message, reason, evidence))
-        with self._state_lock:
-            self._handle = None
-            self._generation = None
-            self._task_id = None
-            self._lease_deadline = None
-            self._last_request = None
+        with self._completion_claim:
+            assert self._runtime is not None and self._handle is not None
+            template = action_template(self._active_action_code)
+            zero: Mapping[str, object] = template.lease.zeroCommand if template.lease else {}
+            self._runtime.command(self._handle, zero)
+            evidence = self._runtime.safe_stop(self._handle, reason)
+            self._send(self._terminal(message, reason, evidence))
+            with self._state_lock:
+                self._handle = None
+                self._generation = None
+                self._task_id = None
+                self._lease_deadline = None
+                self._last_request = None
 
     def _matches_active(self, message: RuntimeMessage) -> bool:
         with self._state_lock:
@@ -423,6 +519,8 @@ class RuntimeChildHost:
                 return
             self._handle = handle
         self._send(self._response(message, RuntimeMessageKind.ACK, AckPayload(acknowledgedKind="START")))
+        self._event_sequence = 0
+        self._start_discrete_monitor()
 
     def _command(self, message: RuntimeMessage) -> None:
         assert isinstance(message.payload, CommandPayload)

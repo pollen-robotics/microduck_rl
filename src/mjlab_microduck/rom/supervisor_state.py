@@ -80,6 +80,9 @@ _TRANSITIONS = MappingProxyType({
     (SupervisorState.STOPPING, SupervisorEvent.TERMINAL_ACK): SupervisorTransition(
         SupervisorState.IDLE, (SupervisorEffect.RELEASE_SLOT,), releases_slot=True
     ),
+    (SupervisorState.RUNNING, SupervisorEvent.TERMINAL_ACK): SupervisorTransition(
+        SupervisorState.IDLE, (SupervisorEffect.RELEASE_SLOT,), releases_slot=True
+    ),
     (SupervisorState.STARTING, SupervisorEvent.OPERATION_TIMEOUT): SupervisorTransition(
         SupervisorState.QUARANTINED, (SupervisorEffect.QUARANTINE,)
     ),

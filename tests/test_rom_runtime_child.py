@@ -130,7 +130,38 @@ def test_fake_child_exposes_every_required_environment_free_mode() -> None:
         "malformed-response",
         "late-response",
         "exit-before-ack",
+        "terminal-event",
+        "event-before-status",
+        "event-before-command",
+        "duplicate-event",
+        "stale-event",
+        "malformed-event",
     )
+
+
+@pytest.mark.parametrize(
+    ("state", "reason", "outcome"),
+    [("SUCCEEDED", "TASK_COMPLETE", "SUCCEEDED"), ("FAILED", "FALLEN", "FAILED")],
+)
+def test_discrete_sample_is_safely_stopped_then_emitted_with_metrics(
+    state: str, reason: str, outcome: str
+) -> None:
+    host, runtime, parent, thread = _active_host()
+    host._active_action_code = "STAND"
+    host._bundle.actions[0].actionCode = "STAND"
+    runtime.complete_next(state=state, metrics={"upright": state == "SUCCEEDED"}, stop_reason=reason)
+    host._start_discrete_monitor()
+    terminal = decode_packet(parent.recv(65_537))
+    assert terminal.kind is RuntimeMessageKind.TERMINAL_EVENT
+    assert terminal.operationSequence == 0
+    assert terminal.payload.eventSequence == 1
+    assert terminal.payload.terminal.outcome == outcome
+    assert terminal.payload.terminal.evidence.metrics == {"safeStop": True, "upright": state == "SUCCEEDED"}
+    assert runtime.safe_stop_calls[-1][1] == reason
+    host._stop.set()
+    host._put_message(None)
+    thread.join(timeout=1)
+    parent.close()
 
 
 def _active_host() -> tuple[RuntimeChildHost, FakeMicroduckRuntime, socket.socket, threading.Thread]:
@@ -180,8 +211,10 @@ def test_lease_expiry_initiates_zero_stop_without_parent_watchdog() -> None:
     assert runtime.safe_stop_calls[-1][1] == "LEASE_EXPIRED"
     parent.settimeout(1)
     terminal = decode_packet(parent.recv(65_537))
-    assert terminal.kind is RuntimeMessageKind.TERMINAL
-    assert terminal.payload.outcome == "TIMED_OUT"
+    assert terminal.kind is RuntimeMessageKind.TERMINAL_EVENT
+    assert terminal.operationSequence == 0
+    assert terminal.payload.eventSequence == 1
+    assert terminal.payload.terminal.outcome == "TIMED_OUT"
     assert host._safety_complete.is_set()
     parent.close()
     thread.join(timeout=1)
@@ -399,7 +432,7 @@ def test_blocked_status_or_stop_cannot_defeat_local_emergency_zero(operation: st
     assert not thread.is_alive()
     if operation == "status":
         terminal = decode_packet(parent.recv(65_537))
-        assert terminal.kind is RuntimeMessageKind.TERMINAL
+        assert terminal.kind is RuntimeMessageKind.TERMINAL_EVENT
         assert host._safety_complete.is_set()
     else:
         assert not host._safety_complete.is_set()
