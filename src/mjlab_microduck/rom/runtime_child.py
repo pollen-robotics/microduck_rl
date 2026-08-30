@@ -20,7 +20,11 @@ from .action_catalog import (
 from .contracts import PolicyBundle, TaskCreateRequest, TaskEvidence
 from .main import load_qualified_bundle
 from .mujoco_runtime import MicroduckMujocoRuntime
-from .parent_death import install_parent_death_signal, verify_seqpacket_socket
+from .parent_death import (
+    close_unrelated_fds,
+    install_parent_death_signal,
+    verify_seqpacket_socket,
+)
 from .process_protocol import (
     PACKET_MAX_BYTES,
     AckPayload,
@@ -99,6 +103,7 @@ class RuntimeChildHost:
         self._lease_deadline: float | None = None
         self._last_sequence = -1
         self._last_request: RuntimeMessage | None = None
+        self._operation_active = threading.Event()
 
     def _send(self, message: RuntimeMessage) -> bool:
         try:
@@ -164,21 +169,13 @@ class RuntimeChildHost:
                 self._request_safety("PROTOCOL_ERROR")
                 self._put_message(None)
                 return
-            if message.kind is RuntimeMessageKind.ZERO_AND_STOP:
-                assert isinstance(message.payload, ZeroAndStopPayload)
+            if (
+                message.kind is RuntimeMessageKind.ZERO_AND_STOP
+                and self._operation_active.is_set()
+            ):
                 with self._state_lock:
-                    matches = (
-                        self._handle is not None
-                        and message.generation == self._generation
-                        and message.taskId == self._task_id
-                    )
-                    if matches:
-                        self._last_request = message
-                if not matches:
-                    self._error(message)
-                else:
-                    self._request_safety(message.payload.reason)
-                self._put_message(None)
+                    self._last_request = message
+                self._request_safety("RUNTIME_UNRESPONSIVE")
                 return
             self._put_message(message)
 
@@ -193,6 +190,10 @@ class RuntimeChildHost:
             if self._safety_reason is None:
                 self._safety_reason = reason
         self._safety_requested.set()
+        try:
+            self._messages.put_nowait(None)
+        except queue.Full:
+            pass
 
     def _deadman(self) -> None:
         while not self._stop.wait(0.01):
@@ -230,7 +231,10 @@ class RuntimeChildHost:
             )
         else:
             evidence = RuntimeEvidence(stopReason=reason)
-        if handle is not None:
+        def cleanup() -> None:
+            nonlocal evidence
+            if handle is None:
+                return
             try:
                 template = action_template(self._bundle_action_code())
                 zero: Mapping[str, object] = template.lease.zeroCommand if template.lease else {}
@@ -247,9 +251,19 @@ class RuntimeChildHost:
                     metrics={"safetyFailure": "SAFE_STOP_FAILED"},
                     stopReason=reason,
                 )
-        with self._state_lock:
-            self._handle = None
-        if request is not None and reason != "PARENT_EOF":
+            with self._state_lock:
+                self._handle = None
+
+        if handle is not None:
+            threading.Thread(
+                target=cleanup, name="runtime-child-best-effort-cleanup", daemon=True
+            ).start()
+        if (
+            request is not None
+            and request.taskId is not None
+            and self._task_id is not None
+            and reason != "PARENT_EOF"
+        ):
             self._send(self._terminal(request, reason, evidence))
         self._safety_complete.set()
 
@@ -260,7 +274,12 @@ class RuntimeChildHost:
         assert self._bundle is not None
         action = next(item for item in self._bundle.actions if item.actionCode == self._active_action_code)
         policy = next(item for item in self._bundle.policies if item.policyRef == action.policyRef)
-        outcome = "TIMED_OUT" if reason == "LEASE_EXPIRED" else "CANCELLED"
+        if reason == "LEASE_EXPIRED":
+            outcome = "TIMED_OUT"
+        elif reason in {"OPERATOR_CANCELLED", "CANCELLED", "USER_CANCELLED"}:
+            outcome = "CANCELLED"
+        else:
+            outcome = "FAILED"
         payload = TerminalPayload(
             outcome=outcome,
             evidence=TaskEvidence(
@@ -310,9 +329,7 @@ class RuntimeChildHost:
                 assert isinstance(message.payload, ZeroAndStopPayload)
                 if not self._matches_active(message):
                     raise ValueError
-                self._request_safety(message.payload.reason)
-                self._safety_complete.wait()
-                return False
+                self._normal_stop(message, message.payload.reason)
             elif message.kind is RuntimeMessageKind.SHUTDOWN:
                 assert isinstance(message.payload, ShutdownPayload)
                 if self._handle is not None:
@@ -324,6 +341,20 @@ class RuntimeChildHost:
             self._request_safety("RUNTIME_FAILED")
             return False
         return True
+
+    def _normal_stop(self, message: RuntimeMessage, reason: str) -> None:
+        assert self._runtime is not None and self._handle is not None
+        template = action_template(self._active_action_code)
+        zero: Mapping[str, object] = template.lease.zeroCommand if template.lease else {}
+        self._runtime.command(self._handle, zero)
+        evidence = self._runtime.safe_stop(self._handle, reason)
+        self._send(self._terminal(message, reason, evidence))
+        with self._state_lock:
+            self._handle = None
+            self._generation = None
+            self._task_id = None
+            self._lease_deadline = None
+            self._last_request = None
 
     def _matches_active(self, message: RuntimeMessage) -> bool:
         with self._state_lock:
@@ -391,7 +422,24 @@ class RuntimeChildHost:
         deadman.start()
         while not self._stop.is_set():
             message = self._messages.get()
-            if message is None or not self._handle_message(message):
+            if message is None:
+                break
+            result: list[bool] = []
+
+            def execute(
+                current: RuntimeMessage = message, outcome: list[bool] = result
+            ) -> None:
+                outcome.append(self._handle_message(current))
+
+            self._operation_active.set()
+            operation = threading.Thread(
+                target=execute, name="runtime-child-operation", daemon=True
+            )
+            operation.start()
+            while operation.is_alive() and not self._safety_requested.wait(0.01):
+                pass
+            self._operation_active.clear()
+            if self._safety_requested.is_set() or not result or not result[0]:
                 break
         if self._safety_requested.is_set() and not self._safety_complete.is_set():
             self._perform_safety_stop()
@@ -415,6 +463,7 @@ def _parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = _parser().parse_args()
     control = verify_seqpacket_socket(args.socket_fd)
+    close_unrelated_fds({args.socket_fd})
     termination = threading.Event()
     signal.signal(signal.SIGTERM, lambda _signum, _frame: termination.set())
     install_parent_death_signal()

@@ -8,7 +8,10 @@ import time
 from datetime import UTC, datetime
 
 from mjlab_microduck.rom.contracts import RobotStatus, TaskEvidence
-from mjlab_microduck.rom.parent_death import verify_seqpacket_socket
+from mjlab_microduck.rom.parent_death import (
+    close_unrelated_fds,
+    verify_seqpacket_socket,
+)
 from mjlab_microduck.rom.process_protocol import (
     AckPayload,
     ReadyPayload,
@@ -113,6 +116,7 @@ def main() -> int:
     args = _args()
     control = verify_seqpacket_socket(args.socket_fd)
     test_control = verify_seqpacket_socket(args.test_socket_fd)
+    close_unrelated_fds({args.socket_fd, args.test_socket_fd})
     if args.mode == "ignore-sigterm":
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
     revision = "fake-runtime-v1"

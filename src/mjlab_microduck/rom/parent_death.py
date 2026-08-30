@@ -24,6 +24,23 @@ def verify_seqpacket_socket(fd: int) -> socket.socket:
     return control
 
 
+def close_unrelated_fds(preserve: set[int]) -> None:
+    """Close inherited descriptors other than stdio and explicitly owned IPC."""
+    allowed = {0, 1, 2, *preserve}
+    try:
+        descriptors = [int(name) for name in os.listdir("/proc/self/fd")]
+    except OSError:
+        limit = os.sysconf("SC_OPEN_MAX")
+        descriptors = list(range(3, min(limit, 65_536)))
+    for descriptor in descriptors:
+        if descriptor in allowed:
+            continue
+        try:
+            os.close(descriptor)
+        except OSError:
+            continue
+
+
 def install_parent_death_signal() -> None:
     """Request SIGTERM on parent death and close the fork/exec race."""
     parent_before = os.getppid()
