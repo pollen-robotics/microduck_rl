@@ -21,10 +21,12 @@ GOVERNED_RUNTIME_MODULES = (
     "observation.py",
     "onnx_policy.py",
     "qualification.py",
+    "process_protocol.py",
     "runtime.py",
     "runtime_identity.py",
     "service.py",
     "store.py",
+    "supervisor_state.py",
 )
 
 
