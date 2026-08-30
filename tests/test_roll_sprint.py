@@ -122,7 +122,7 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     )
     assert cfg.rewards["roll_sprint_cycle_rate"].weight == 1.0
     assert cfg.rewards["roll_sprint_recovery"].weight == 0.25
-    assert cfg.rewards["roll_sprint_invalid_cycle"].weight == -2.0
+    assert cfg.rewards["roll_sprint_invalid_cycle"].weight == 0.0
     assert cfg.rewards["roll_sprint_sagittal"].weight == -0.05
     assert cfg.rewards["roll_sprint_flatness"].weight == -0.25
     assert cfg.rewards["roll_sprint_lateral_vel"].weight == -0.35
@@ -162,6 +162,14 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert play_cfg.curriculum["roll_sprint_lane_half_width"].params[
         "width_stages"
     ] == [{"step": 0, "width": 0.14}]
+    assert cfg.curriculum["roll_sprint_invalid_cycle_weight"].params[
+        "weight_stages"
+    ] == [
+        {"step": 0, "weight": 0.0},
+        {"step": 750 * 24, "weight": -0.5},
+        {"step": 1250 * 24, "weight": -1.0},
+        {"step": 2000 * 24, "weight": -2.0},
+    ]
     assert {
         "roll_sprint_recovery_count",
         "roll_sprint_recovered_reroll_count",

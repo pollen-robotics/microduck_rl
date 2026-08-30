@@ -92,7 +92,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     )
     cfg.rewards["roll_sprint_invalid_cycle"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_invalid_cycle_rate,
-        weight=-2.0,
+        weight=0.0,
     )
     cfg.rewards["roll_sprint_overspeed"] = RewardTermCfg(
         func=microduck_mdp.roulade_overspeed_penalty,
@@ -254,6 +254,18 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     cfg.curriculum["roll_sprint_lane_half_width"] = CurriculumTermCfg(
         func=microduck_mdp.roll_sprint_lane_half_width_curriculum,
         params={"width_stages": lane_width_stages},
+    )
+    cfg.curriculum["roll_sprint_invalid_cycle_weight"] = CurriculumTermCfg(
+        func=microduck_mdp.reward_weight,
+        params={
+            "reward_name": "roll_sprint_invalid_cycle",
+            "weight_stages": [
+                {"step": 0, "weight": 0.0},
+                {"step": 750 * 24, "weight": -0.5},
+                {"step": 1250 * 24, "weight": -1.0},
+                {"step": 2000 * 24, "weight": -2.0},
+            ],
+        },
     )
 
     if ENABLE_COM_RANDOMIZATION:
