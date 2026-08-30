@@ -6,7 +6,7 @@ import math
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from threading import Lock
+from threading import Event, Lock
 from typing import Any, Protocol
 
 from .action_catalog import (
@@ -26,6 +26,7 @@ from .contracts import (
 )
 from .process_protocol import AckPayload, TerminalPayload
 from .process_supervisor import (
+    CorrelatedTerminalDelivery,
     SupervisorOperationError,
     SupervisorSnapshot,
     SupervisorTaskTerminalized,
@@ -96,9 +97,18 @@ class ProcessSupervisor(Protocol):
 
 
 type SupervisorFactory = Callable[
-    [Callable[[TerminalPayload], None]], ProcessSupervisor
+    [Callable[[CorrelatedTerminalDelivery], None]], ProcessSupervisor
 ]
 TERMINAL = frozenset({"SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT", "UNKNOWN"})
+
+
+@dataclass(slots=True)
+class _PendingCommand:
+    sequence: int
+    digest: str
+    done: Event
+    result: Any = None
+    error: BaseException | None = None
 
 
 @dataclass(slots=True)
@@ -109,6 +119,11 @@ class _ActiveTask:
     continuous: bool
     stop_claimed: bool = False
     deadline: float | None = None
+    supervisor_generation: int | None = None
+    pending_command: _PendingCommand | None = None
+    latest_command_sequence: int | None = None
+    latest_command_digest: str | None = None
+    latest_command_result: Any = None
 
 
 class SimulatorTaskService:
@@ -127,6 +142,8 @@ class SimulatorTaskService:
         validate_bundle_action_envelope(bundle)
         if pollIntervalS <= 0 or not 0 < runtimeCallTimeoutS <= 5:
             raise ValueError("invalid service bound")
+        # `pollIntervalS` remains accepted for V1 constructor compatibility;
+        # runtime sampling now belongs exclusively to the child process.
         self._bundle, self._store, self._monotonic_clock = (
             bundle,
             store,
@@ -135,6 +152,9 @@ class SimulatorTaskService:
         self._store.mark_interrupted_unknown()
         self._lock, self._active, self._next_generation = Lock(), None, 1
         self._watchdog_healthy, self._readiness_failure_reason = True, None
+        # Compatibility argument now bounds duplicate callers waiting for the
+        # one supervisor-owned COMMAND acknowledgement.
+        self._runtime_call_timeout_s = runtimeCallTimeoutS
         self._supervisor = supervisor_factory(self._terminal_callback)
         try:
             self._supervisor.ensure_ready()
@@ -177,6 +197,7 @@ class SimulatorTaskService:
             )
         try:
             self._supervisor.start(request)
+            active.supervisor_generation = self._supervisor.snapshot().generation
             deadline = (
                 self._monotonic_clock() + request.leaseMs / 1000
                 if active.continuous and request.leaseMs
@@ -199,6 +220,7 @@ class SimulatorTaskService:
                 )
                 return snapshot
         except SupervisorTaskTerminalized:
+            active.supervisor_generation = self._supervisor.snapshot().generation
             return self._store.get(request.taskId)
         except (SupervisorUnavailable, SupervisorOperationError) as exc:
             self._persist_failure(active, "RUNTIME_UNRESPONSIVE")
@@ -242,6 +264,7 @@ class SimulatorTaskService:
 
     def command(self, task_id: str, command: TaskCommandRequest):
         self._require_motion_ready(allow_running=True)
+        owner = False
         with self._lock:
             snapshot, active = self._store.get(task_id), self._active
             if snapshot is None:
@@ -263,35 +286,79 @@ class SimulatorTaskService:
             else:
                 expired = False
             if expired:
-                accepted = None
+                pending = None
             else:
                 self._validate_command(command, active.action)
-                deadline, digest = (
-                    self._monotonic_clock() + command.leaseMs / 1000,
-                    sha256_prefixed(command),
-                )
-                try:
-                    accepted, created = self._store.record_command(
-                        task_id, command, digest, deadline
-                    )
-                except StoreStaleCommand as exc:
-                    raise StaleCommand(str(exc)) from exc
-                except StoreCommandSequenceConflict as exc:
-                    raise CommandSequenceConflict(str(exc)) from exc
-                if not created:
-                    return accepted
-                active.deadline = deadline
+                digest = sha256_prefixed(command)
+                if active.pending_command is not None:
+                    pending = active.pending_command
+                    if command.commandSequence < pending.sequence:
+                        raise StaleCommand("command sequence is stale")
+                    if command.commandSequence != pending.sequence:
+                        raise RuntimeException("another command delivery is pending")
+                    if digest != pending.digest:
+                        raise CommandSequenceConflict(
+                            "command sequence content conflicts"
+                        )
+                elif active.latest_command_sequence is not None:
+                    if command.commandSequence < active.latest_command_sequence:
+                        raise StaleCommand("command sequence is stale")
+                    if command.commandSequence == active.latest_command_sequence:
+                        if digest != active.latest_command_digest:
+                            raise CommandSequenceConflict(
+                                "command sequence content conflicts"
+                            )
+                        return active.latest_command_result
+                    pending = _PendingCommand(command.commandSequence, digest, Event())
+                    active.pending_command = pending
+                    owner = True
+                else:
+                    pending = _PendingCommand(command.commandSequence, digest, Event())
+                    active.pending_command = pending
+                    owner = True
         if expired:
             self._request_stop(active, "LEASE_EXPIRED")
             raise InvalidParameters("task is not running")
+        assert pending is not None
+        if not owner:
+            if not pending.done.wait(self._runtime_call_timeout_s):
+                raise RuntimeException("command acknowledgement is still pending")
+            if pending.error is not None:
+                raise RuntimeException("command delivery failed") from pending.error
+            return pending.result
         try:
             self._supervisor.command(task_id, command)
         except SupervisorTaskTerminalized:
-            return self._store.get(task_id) or accepted
+            pending.error = RuntimeException("task terminalized during command")
         except (SupervisorUnavailable, SupervisorOperationError) as exc:
+            pending.error = exc
             self._persist_failure(active, "RUNTIME_UNRESPONSIVE")
-            raise RuntimeException("simulator command was unresponsive") from exc
-        return accepted
+        else:
+            deadline = self._monotonic_clock() + command.leaseMs / 1000
+            try:
+                accepted, _ = self._store.record_command(
+                    task_id, command, digest, deadline
+                )
+            except (StoreStaleCommand, StoreCommandSequenceConflict) as exc:
+                pending.error = exc
+            else:
+                pending.result = accepted
+                with self._lock:
+                    if self._active is active and active.pending_command is pending:
+                        active.deadline = deadline
+                        active.latest_command_sequence = command.commandSequence
+                        active.latest_command_digest = digest
+                        active.latest_command_result = accepted
+        finally:
+            with self._lock:
+                if self._active is active and active.pending_command is pending:
+                    active.pending_command = None
+            pending.done.set()
+        if pending.error is not None:
+            raise RuntimeException(
+                "simulator command was unresponsive"
+            ) from pending.error
+        return pending.result
 
     def events_after(self, task_id: str, sequence: int, *, page_size: int = 100):
         if (
@@ -361,10 +428,8 @@ class SimulatorTaskService:
                 active.stop_claimed = True
         if expired:
             self._request_stop(active, "LEASE_EXPIRED")
-            return
-        terminal = self._supervisor.snapshot().cached_terminal
-        if terminal is not None:
-            self._terminal_callback(terminal)
+        # Unsolicited child terminals arrive only through the supervisor's
+        # correlated callback. Cached snapshots are diagnostic, never replayed.
 
     def watchdog_failed(self) -> None:
         self._watchdog_healthy, self._readiness_failure_reason = (
@@ -383,8 +448,14 @@ class SimulatorTaskService:
 
     def _request_stop(self, active: _ActiveTask, reason: str):
         try:
+            terminal = self._supervisor.stop(active.request.taskId, reason)
             self._terminal_callback(
-                self._supervisor.stop(active.request.taskId, reason)
+                CorrelatedTerminalDelivery(
+                    generation=self._supervisor.snapshot().generation,
+                    task_id=active.request.taskId,
+                    event_sequence=0,
+                    terminal=terminal,
+                )
             )
         except SupervisorTaskTerminalized:
             pass
@@ -392,11 +463,17 @@ class SimulatorTaskService:
             self._persist_failure(active, "RUNTIME_UNRESPONSIVE")
         return self._store.get(active.request.taskId)
 
-    def _terminal_callback(self, terminal: TerminalPayload) -> None:
+    def _terminal_callback(self, delivery: CorrelatedTerminalDelivery) -> None:
         with self._lock:
             active = self._active
             if active is None:
                 return
+            if (
+                delivery.task_id != active.request.taskId
+                or delivery.generation != active.supervisor_generation
+            ):
+                raise RuntimeError("terminal delivery does not match active generation")
+            terminal = delivery.terminal
             current = self._store.get(active.request.taskId)
             if current is None:
                 raise RuntimeError("active durable task is missing")
@@ -421,7 +498,6 @@ class SimulatorTaskService:
         with self._lock:
             if self._active is not active:
                 return
-            self._advance_running(active.request.taskId)
             policy = next(
                 item
                 for item in self._bundle.policies
@@ -457,6 +533,11 @@ class SimulatorTaskService:
         snap = self._supervisor.snapshot()
         if allow_running and snap.child_healthy and snap.state.value == "RUNNING":
             return
+        if snap.state.value == "NO_CHILD" and snap.slot_releasable:
+            try:
+                self._supervisor.ensure_ready()
+            except (SupervisorUnavailable, SupervisorOperationError) as exc:
+                raise NotReady("simulator is not ready for motion") from exc
         if not self.motion_readiness()[0]:
             raise NotReady("simulator is not ready for motion")
 

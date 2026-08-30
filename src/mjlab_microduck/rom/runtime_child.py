@@ -382,6 +382,9 @@ class RuntimeChildHost:
         if not _cleanup_evidence_is_truthful(evidence):
             self._retire_uncertain_cleanup()
             return
+        # Publish local completion before the terminal becomes externally
+        # observable; receipt must imply the child has crossed its safety barrier.
+        self._safety_complete.set()
         if (
             request is not None
             and request.taskId is not None
@@ -403,7 +406,6 @@ class RuntimeChildHost:
                     ),
                 )
             self._send(terminal)
-        self._safety_complete.set()
 
     def _bundle_action_code(self) -> str:
         return self._active_action_code

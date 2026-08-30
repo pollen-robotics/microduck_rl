@@ -11,7 +11,10 @@ from typing import Any
 
 from mjlab_microduck.rom.contracts import RobotStatus, TaskEvidence
 from mjlab_microduck.rom.process_protocol import AckPayload, TerminalPayload
-from mjlab_microduck.rom.process_supervisor import SupervisorSnapshot
+from mjlab_microduck.rom.process_supervisor import (
+    CorrelatedTerminalDelivery,
+    SupervisorSnapshot,
+)
 from mjlab_microduck.rom.runtime import RuntimeEvidence, RuntimeHandle, RuntimeSample
 from mjlab_microduck.rom.supervisor_state import SupervisorState
 
@@ -200,7 +203,16 @@ class FakeRuntimeProcessSupervisor:
             status,
             None,
             not running,
-            cached_terminal=self._terminal,
+            cached_terminal=(
+                CorrelatedTerminalDelivery(
+                    self._generation,
+                    self.active_request.taskId,
+                    1,
+                    self._terminal,
+                )
+                if self._terminal is not None and self.active_request is not None
+                else None
+            ),
         )
 
     def readiness(self):
@@ -319,7 +331,20 @@ class FakeRuntimeProcessSupervisor:
         )
         self.handle = None
         self._terminal = terminal
-        self.callback(terminal)
+        delivery = CorrelatedTerminalDelivery(
+            self._generation,
+            self.active_request.taskId,
+            1,
+            terminal,
+        )
+        for _ in range(20):
+            try:
+                self.callback(delivery)
+                break
+            except RuntimeError:
+                Event().wait(0.005)
+        else:
+            raise RuntimeError("terminal callback never accepted correlated delivery")
         return terminal
 
     def close(self):

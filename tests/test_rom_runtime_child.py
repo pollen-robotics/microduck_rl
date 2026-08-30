@@ -158,7 +158,12 @@ def test_fake_child_exposes_every_required_environment_free_mode() -> None:
         "malformed-response",
         "late-response",
         "exit-before-ack",
+        "exit-start",
         "terminal-event",
+        "terminal-fallen",
+        "terminal-overrun",
+        "terminal-nonfinite",
+        "terminal-runtime-exception",
         "event-before-status",
         "event-before-command",
         "duplicate-event",
@@ -178,14 +183,19 @@ def test_discrete_sample_is_safely_stopped_then_emitted_with_metrics(
     host, runtime, parent, thread = _active_host()
     host._active_action_code = "STAND"
     host._bundle.actions[0].actionCode = "STAND"
-    runtime.complete_next(state=state, metrics={"upright": state == "SUCCEEDED"}, stop_reason=reason)
+    runtime.complete_next(
+        state=state, metrics={"upright": state == "SUCCEEDED"}, stop_reason=reason
+    )
     host._start_discrete_monitor()
     terminal = decode_packet(parent.recv(65_537))
     assert terminal.kind is RuntimeMessageKind.TERMINAL_EVENT
     assert terminal.operationSequence == 0
     assert terminal.payload.eventSequence == 1
     assert terminal.payload.terminal.outcome == outcome
-    assert terminal.payload.terminal.evidence.metrics == {"safeStop": True, "upright": state == "SUCCEEDED"}
+    assert terminal.payload.terminal.evidence.metrics == {
+        "safeStop": True,
+        "upright": state == "SUCCEEDED",
+    }
     assert runtime.safe_stop_calls[-1][1] == reason
     host._stop.set()
     host._put_message(None)
@@ -229,7 +239,10 @@ def test_continuous_running_samples_allow_commands_until_terminal_fault() -> Non
     assert runtime.sample_started.wait(timeout=1)
 
     command = RuntimeMessage(
-        kind="COMMAND", generation=7, operationSequence=1, taskId="1" * 32,
+        kind="COMMAND",
+        generation=7,
+        operationSequence=1,
+        taskId="1" * 32,
         payload=CommandPayload(
             parameters={"vxMps": 0.1, "vyMps": 0.0, "yawRateRadps": 0.0},
             leaseMs=1000,
@@ -255,11 +268,16 @@ def test_continuous_normal_sample_is_bounded_evidence_on_operator_stop() -> None
     host._start_runtime_monitor()
     assert runtime.sample_started.wait(timeout=1)
     deadline = time.monotonic() + 1
-    while host._latest_sample_metrics != {"tiltRad": 0.1} and time.monotonic() < deadline:
+    while (
+        host._latest_sample_metrics != {"tiltRad": 0.1} and time.monotonic() < deadline
+    ):
         time.sleep(0.001)
     assert host._latest_sample_metrics == {"tiltRad": 0.1}
     stop = RuntimeMessage(
-        kind="ZERO_AND_STOP", generation=7, operationSequence=1, taskId="1" * 32,
+        kind="ZERO_AND_STOP",
+        generation=7,
+        operationSequence=1,
+        taskId="1" * 32,
         payload=ZeroAndStopPayload(reason="OPERATOR_CANCELLED"),
     )
     terminal = _exchange(parent, stop)
@@ -276,10 +294,17 @@ def test_blocked_continuous_sample_retires_transport_on_normal_stop() -> None:
     runtime.sample_release.clear()
     host._start_runtime_monitor()
     assert runtime.sample_started.wait(timeout=1)
-    parent.sendall(encode_packet(RuntimeMessage(
-        kind="ZERO_AND_STOP", generation=7, operationSequence=1, taskId="1" * 32,
-        payload=ZeroAndStopPayload(reason="OPERATOR_CANCELLED"),
-    )))
+    parent.sendall(
+        encode_packet(
+            RuntimeMessage(
+                kind="ZERO_AND_STOP",
+                generation=7,
+                operationSequence=1,
+                taskId="1" * 32,
+                payload=ZeroAndStopPayload(reason="OPERATOR_CANCELLED"),
+            )
+        )
+    )
     thread.join(timeout=1)
     assert not thread.is_alive()
     assert host._cleanup_timed_out.is_set()
@@ -297,21 +322,33 @@ def test_continuous_fault_wins_stop_race_without_poisoning_same_child_reuse() ->
     try:
         host._start_runtime_monitor()
         assert runtime.sample_started.wait(timeout=1)
-        parent.sendall(encode_packet(RuntimeMessage(
-            kind="ZERO_AND_STOP", generation=7, operationSequence=1,
-            taskId="1" * 32, payload=ZeroAndStopPayload(reason="OPERATOR_CANCELLED"),
-        )))
+        parent.sendall(
+            encode_packet(
+                RuntimeMessage(
+                    kind="ZERO_AND_STOP",
+                    generation=7,
+                    operationSequence=1,
+                    taskId="1" * 32,
+                    payload=ZeroAndStopPayload(reason="OPERATOR_CANCELLED"),
+                )
+            )
+        )
     finally:
         host._completion_claim.release()
     terminal = decode_packet(parent.recv(65_537))
     assert terminal.kind is RuntimeMessageKind.TERMINAL_EVENT
 
     start = RuntimeMessage(
-        kind="START", generation=8, operationSequence=2, taskId="2" * 32,
+        kind="START",
+        generation=8,
+        operationSequence=2,
+        taskId="2" * 32,
         payload=StartPayload(
-            actionCode="WALK_VELOCITY", bundleDigest="sha256:" + "a" * 64,
+            actionCode="WALK_VELOCITY",
+            bundleDigest="sha256:" + "a" * 64,
             parameters={"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0},
-            scenario={"terrain": "flat", "seed": 8}, leaseMs=1000,
+            scenario={"terrain": "flat", "seed": 8},
+            leaseMs=1000,
         ),
     )
     assert _exchange(parent, start).kind is RuntimeMessageKind.ACK
@@ -329,10 +366,17 @@ def test_continuous_stop_wins_queued_completion_and_reuses_same_child() -> None:
     runtime.sample_release.clear()
     host._start_runtime_monitor()
     assert runtime.sample_started.wait(timeout=1)
-    parent.sendall(encode_packet(RuntimeMessage(
-        kind="ZERO_AND_STOP", generation=7, operationSequence=1,
-        taskId="1" * 32, payload=ZeroAndStopPayload(reason="OPERATOR_CANCELLED"),
-    )))
+    parent.sendall(
+        encode_packet(
+            RuntimeMessage(
+                kind="ZERO_AND_STOP",
+                generation=7,
+                operationSequence=1,
+                taskId="1" * 32,
+                payload=ZeroAndStopPayload(reason="OPERATOR_CANCELLED"),
+            )
+        )
+    )
     deadline = time.monotonic() + 1
     while not host._sample_stop.is_set() and time.monotonic() < deadline:
         time.sleep(0.001)
@@ -344,11 +388,16 @@ def test_continuous_stop_wins_queued_completion_and_reuses_same_child() -> None:
     assert terminal.payload.evidence.stopReason == "OPERATOR_CANCELLED"
 
     start = RuntimeMessage(
-        kind="START", generation=8, operationSequence=2, taskId="2" * 32,
+        kind="START",
+        generation=8,
+        operationSequence=2,
+        taskId="2" * 32,
         payload=StartPayload(
-            actionCode="WALK_VELOCITY", bundleDigest="sha256:" + "a" * 64,
+            actionCode="WALK_VELOCITY",
+            bundleDigest="sha256:" + "a" * 64,
             parameters={"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0},
-            scenario={"terrain": "flat", "seed": 8}, leaseMs=1000,
+            scenario={"terrain": "flat", "seed": 8},
+            leaseMs=1000,
         ),
     )
     assert _exchange(parent, start).kind is RuntimeMessageKind.ACK
@@ -404,18 +453,30 @@ def test_blocked_discrete_sample_forces_process_retirement_on_cleanup() -> None:
     parent.settimeout(1)
     assert parent.recv(65_537) == b""
     with pytest.raises(BrokenPipeError):
-        parent.sendall(encode_packet(RuntimeMessage(
-            kind="START", generation=8, operationSequence=2, taskId="2" * 32,
-            payload=StartPayload(
-                actionCode="STAND", bundleDigest="sha256:" + "a" * 64,
-                parameters={}, scenario={"terrain": "flat", "seed": 8}, leaseMs=1000,
-            ),
-        )))
+        parent.sendall(
+            encode_packet(
+                RuntimeMessage(
+                    kind="START",
+                    generation=8,
+                    operationSequence=2,
+                    taskId="2" * 32,
+                    payload=StartPayload(
+                        actionCode="STAND",
+                        bundleDigest="sha256:" + "a" * 64,
+                        parameters={},
+                        scenario={"terrain": "flat", "seed": 8},
+                        leaseMs=1000,
+                    ),
+                )
+            )
+        )
     runtime.sample_release.set()
     parent.close()
 
 
-def _active_host() -> tuple[RuntimeChildHost, FakeMicroduckRuntime, socket.socket, threading.Thread]:
+def _active_host() -> tuple[
+    RuntimeChildHost, FakeMicroduckRuntime, socket.socket, threading.Thread
+]:
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     runtime = FakeMicroduckRuntime()
     host = RuntimeChildHost(child)
@@ -445,7 +506,10 @@ def test_lease_expiry_initiates_zero_stop_without_parent_watchdog() -> None:
     host, runtime, parent, thread = _active_host()
     host._start_runtime_monitor()
     host._last_request = RuntimeMessage(
-        kind="COMMAND", generation=7, operationSequence=1, taskId="1" * 32,
+        kind="COMMAND",
+        generation=7,
+        operationSequence=1,
+        taskId="1" * 32,
         payload=CommandPayload(
             parameters={"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0},
             leaseMs=100,
@@ -505,7 +569,10 @@ def test_lease_expiry_safe_stop_failure_withholds_event_and_retires_transport(
     else:
         runtime.safe_stop_metrics = {"safetyFailure": 7}
     host._last_request = RuntimeMessage(
-        kind="COMMAND", generation=7, operationSequence=1, taskId="1" * 32,
+        kind="COMMAND",
+        generation=7,
+        operationSequence=1,
+        taskId="1" * 32,
         payload=CommandPayload(
             parameters={"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0},
             leaseMs=100,
@@ -540,10 +607,17 @@ def test_normal_stop_unresponsive_evidence_withholds_correlated_terminal() -> No
     host, runtime, parent, thread = _active_host()
     runtime.safe_stop_metrics = {"safetyFailure": "RUNTIME_UNRESPONSIVE"}
     host._start_runtime_monitor()
-    parent.sendall(encode_packet(RuntimeMessage(
-        kind="ZERO_AND_STOP", generation=7, operationSequence=1,
-        taskId="1" * 32, payload=ZeroAndStopPayload(reason="OPERATOR_CANCELLED"),
-    )))
+    parent.sendall(
+        encode_packet(
+            RuntimeMessage(
+                kind="ZERO_AND_STOP",
+                generation=7,
+                operationSequence=1,
+                taskId="1" * 32,
+                payload=ZeroAndStopPayload(reason="OPERATOR_CANCELLED"),
+            )
+        )
+    )
     assert runtime.safe_stopped.wait(timeout=1)
     thread.join(timeout=1)
     assert not thread.is_alive()
@@ -559,7 +633,10 @@ def test_blocked_continuous_monitor_on_lease_expiry_retires_without_event() -> N
     host._start_runtime_monitor()
     assert runtime.sample_started.wait(timeout=1)
     host._last_request = RuntimeMessage(
-        kind="COMMAND", generation=7, operationSequence=1, taskId="1" * 32,
+        kind="COMMAND",
+        generation=7,
+        operationSequence=1,
+        taskId="1" * 32,
         payload=CommandPayload(
             parameters={"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0},
             leaseMs=100,
@@ -619,7 +696,10 @@ def test_deadman_initiates_emergency_zero_while_command_call_is_blocked() -> Non
 def test_normal_stop_returns_child_to_idle_for_next_generation() -> None:
     host, runtime, parent, thread = _active_host()
     stop = RuntimeMessage(
-        kind="ZERO_AND_STOP", generation=7, operationSequence=1, taskId="1" * 32,
+        kind="ZERO_AND_STOP",
+        generation=7,
+        operationSequence=1,
+        taskId="1" * 32,
         payload=ZeroAndStopPayload(reason="OPERATOR_CANCELLED"),
     )
     terminal = _exchange(parent, stop)
@@ -627,11 +707,16 @@ def test_normal_stop_returns_child_to_idle_for_next_generation() -> None:
     assert terminal.payload.outcome == "CANCELLED"
     assert thread.is_alive()
     start_request = RuntimeMessage(
-        kind="START", generation=8, operationSequence=2, taskId="2" * 32,
+        kind="START",
+        generation=8,
+        operationSequence=2,
+        taskId="2" * 32,
         payload=StartPayload(
-            actionCode="WALK_VELOCITY", bundleDigest=host._bundle.bundleDigest,
+            actionCode="WALK_VELOCITY",
+            bundleDigest=host._bundle.bundleDigest,
             parameters={"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0},
-            scenario={"terrain": "flat", "seed": 2}, leaseMs=500,
+            scenario={"terrain": "flat", "seed": 2},
+            leaseMs=500,
         ),
     )
     assert _exchange(parent, start_request).kind is RuntimeMessageKind.ACK
@@ -657,7 +742,10 @@ def test_normal_stop_returns_child_to_idle_for_next_generation() -> None:
 def test_terminal_outcome_is_truthfully_mapped(reason: str, outcome: str) -> None:
     host, _runtime, parent, _thread = _active_host()
     request = RuntimeMessage(
-        kind="ZERO_AND_STOP", generation=7, operationSequence=1, taskId="1" * 32,
+        kind="ZERO_AND_STOP",
+        generation=7,
+        operationSequence=1,
+        taskId="1" * 32,
         payload=ZeroAndStopPayload(reason="OPERATOR_CANCELLED"),
     )
     evidence = RuntimeEvidence(stopReason=reason)
@@ -697,7 +785,13 @@ def test_sigterm_wakes_child_and_extra_inherited_fd_is_closed() -> None:
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     extra_a, extra_b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     process = subprocess.Popen(
-        [sys.executable, "-m", "mjlab_microduck.rom.runtime_child", "--socket-fd", str(child.fileno())],
+        [
+            sys.executable,
+            "-m",
+            "mjlab_microduck.rom.runtime_child",
+            "--socket-fd",
+            str(child.fileno()),
+        ],
         pass_fds=(child.fileno(), extra_a.fileno()),
     )
     child.close()
@@ -707,7 +801,10 @@ def test_sigterm_wakes_child_and_extra_inherited_fd_is_closed() -> None:
         time.sleep(0.01)
     assert not extra_fd_path.exists()
     hello = RuntimeMessage(
-        kind="HELLO", generation=1, operationSequence=1, taskId=None,
+        kind="HELLO",
+        generation=1,
+        operationSequence=1,
+        taskId=None,
         payload=HelloPayload(runtimeRevision=runtime_revision()),
     )
     assert _exchange(parent, hello).kind is RuntimeMessageKind.ACK
@@ -726,7 +823,11 @@ def test_environment_filtering_removes_unrelated_platform_configuration() -> Non
     environment = os.environ.copy()
     environment["MICRODUCK_ROM_BEARER_TOKEN"] = "must-not-survive"
     completed = subprocess.run(
-        [sys.executable, "-c", script], env=environment, capture_output=True, text=True, check=True
+        [sys.executable, "-c", script],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     assert completed.stdout.strip() == "False"
 
@@ -739,11 +840,16 @@ def test_blocked_start_cannot_defeat_local_emergency_zero() -> None:
     host._bundle.actions[0].availability = "AVAILABLE"
     runtime.start_release.clear()
     request = RuntimeMessage(
-        kind="START", generation=8, operationSequence=1, taskId="2" * 32,
+        kind="START",
+        generation=8,
+        operationSequence=1,
+        taskId="2" * 32,
         payload=StartPayload(
-            actionCode="WALK_VELOCITY", bundleDigest=host._bundle.bundleDigest,
+            actionCode="WALK_VELOCITY",
+            bundleDigest=host._bundle.bundleDigest,
             parameters={"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0},
-            scenario={"terrain": "flat", "seed": 1}, leaseMs=100,
+            scenario={"terrain": "flat", "seed": 1},
+            leaseMs=100,
         ),
     )
     parent.sendall(encode_packet(request))
@@ -764,21 +870,30 @@ def test_blocked_start_cannot_defeat_local_emergency_zero() -> None:
 
 
 @pytest.mark.parametrize("operation", ["status", "stop"])
-def test_blocked_status_or_stop_cannot_defeat_local_emergency_zero(operation: str) -> None:
+def test_blocked_status_or_stop_cannot_defeat_local_emergency_zero(
+    operation: str,
+) -> None:
     host, runtime, parent, thread = _active_host()
     with host._state_lock:
         host._lease_deadline = time.monotonic() + 0.1
     if operation == "status":
         runtime.status_release.clear()
         request = RuntimeMessage(
-            kind="STATUS", generation=7, operationSequence=1, taskId="1" * 32, payload={}
+            kind="STATUS",
+            generation=7,
+            operationSequence=1,
+            taskId="1" * 32,
+            payload={},
         )
         started = runtime.status_started
         release = runtime.status_release
     else:
         runtime.command_release.clear()
         request = RuntimeMessage(
-            kind="ZERO_AND_STOP", generation=7, operationSequence=1, taskId="1" * 32,
+            kind="ZERO_AND_STOP",
+            generation=7,
+            operationSequence=1,
+            taskId="1" * 32,
             payload=ZeroAndStopPayload(reason="OPERATOR_CANCELLED"),
         )
         started = runtime.command_started

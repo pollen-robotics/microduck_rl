@@ -36,7 +36,12 @@ MODES = (
     "malformed-response",
     "late-response",
     "exit-before-ack",
+    "exit-start",
     "terminal-event",
+    "terminal-fallen",
+    "terminal-overrun",
+    "terminal-nonfinite",
+    "terminal-runtime-exception",
     "event-before-status",
     "event-before-command",
     "duplicate-event",
@@ -125,18 +130,25 @@ def _reply(
             payload=StatusPayload(status=_status()),
         )
     if request.kind is RuntimeMessageKind.ZERO_AND_STOP:
+        reason = request.payload.reason  # type: ignore[union-attr]
         return RuntimeMessage(
             kind="TERMINAL",
             generation=request.generation if generation is None else generation,
             operationSequence=request.operationSequence,
             taskId=request.taskId,
             payload=TerminalPayload(
-                outcome="CANCELLED",
+                outcome=(
+                    "TIMED_OUT"
+                    if reason == "LEASE_EXPIRED"
+                    else "CANCELLED"
+                    if reason == "CANCELLED"
+                    else "FAILED"
+                ),
                 evidence=TaskEvidence(
                     bundleDigest="sha256:" + "a" * 64,
                     policyDigest="sha256:" + "b" * 64,
                     modelDigest="sha256:" + "c" * 64,
-                    stopReason=request.payload.reason,  # type: ignore[union-attr]
+                    stopReason=reason,
                 ),
             ),
         )
@@ -152,19 +164,28 @@ def _reply(
     )
 
 
-def _terminal_event(request: RuntimeMessage, *, generation: int | None = None) -> RuntimeMessage:
+def _terminal_event(
+    request: RuntimeMessage,
+    *,
+    generation: int | None = None,
+    outcome: str = "SUCCEEDED",
+    reason: str = "TASK_COMPLETE",
+) -> RuntimeMessage:
     return RuntimeMessage(
-        kind="TERMINAL_EVENT", generation=request.generation if generation is None else generation,
-        operationSequence=0, taskId=request.taskId,
+        kind="TERMINAL_EVENT",
+        generation=request.generation if generation is None else generation,
+        operationSequence=0,
+        taskId=request.taskId,
         payload=TerminalEventPayload(
             eventSequence=1,
             terminal=TerminalPayload(
-                outcome="SUCCEEDED",
+                outcome=outcome,
                 evidence=TaskEvidence(
                     bundleDigest="sha256:" + "a" * 64,
                     policyDigest="sha256:" + "b" * 64,
                     modelDigest="sha256:" + "c" * 64,
-                    metrics={"upright": True}, stopReason="TASK_COMPLETE",
+                    metrics={"upright": outcome == "SUCCEEDED"},
+                    stopReason=reason,
                 ),
             ),
         ),
@@ -192,9 +213,11 @@ def main() -> int:
             revision = request.payload.runtimeRevision  # type: ignore[union-attr]
         operation = request.kind.value.lower().replace("zero_and_stop", "stop")
         if (
-            request.kind is RuntimeMessageKind.STATUS and args.mode == "event-before-status"
+            request.kind is RuntimeMessageKind.STATUS
+            and args.mode == "event-before-status"
         ) or (
-            request.kind is RuntimeMessageKind.COMMAND and args.mode == "event-before-command"
+            request.kind is RuntimeMessageKind.COMMAND
+            and args.mode == "event-before-command"
         ):
             control.sendall(encode_packet(_terminal_event(request)))
         if args.mode in {"gate-malformed", "gate-exit"}:
@@ -206,6 +229,8 @@ def main() -> int:
             control.sendall(b"{}")
             continue
         if args.mode == "exit-before-ack":
+            return 17
+        if args.mode == "exit-start" and request.kind is RuntimeMessageKind.START:
             return 17
         if args.mode == "malformed-response":
             control.sendall(b"{}")
@@ -256,6 +281,10 @@ def main() -> int:
         )
         if request.kind is RuntimeMessageKind.START and args.mode in {
             "terminal-event",
+            "terminal-fallen",
+            "terminal-overrun",
+            "terminal-nonfinite",
+            "terminal-runtime-exception",
             "duplicate-event",
             "stale-event",
             "malformed-event",
@@ -265,13 +294,37 @@ def main() -> int:
             if args.mode == "lease-null-cleanup-failure":
                 if test_control.recv(4) == b"EMIT":
                     return 0
-            elif args.mode == "terminal-event":
+            elif args.mode.startswith("terminal-"):
                 if test_control.recv(4) == b"EMIT":
-                    control.sendall(encode_packet(_terminal_event(request)))
+                    reason = {
+                        "terminal-event": "TASK_COMPLETE",
+                        "terminal-fallen": "FALLEN",
+                        "terminal-overrun": "CONTROL_LOOP_OVERRUN",
+                        "terminal-nonfinite": "NON_FINITE_STATE",
+                        "terminal-runtime-exception": "RUNTIME_EXCEPTION",
+                    }[args.mode]
+                    control.sendall(
+                        encode_packet(
+                            _terminal_event(
+                                request,
+                                outcome=(
+                                    "SUCCEEDED"
+                                    if args.mode == "terminal-event"
+                                    else "FAILED"
+                                ),
+                                reason=reason,
+                            )
+                        )
+                    )
             elif args.mode == "malformed-event":
                 control.sendall(b'{"kind":"TERMINAL_EVENT"}')
             else:
-                event = _terminal_event(request, generation=request.generation - 1 if args.mode == "stale-event" else None)
+                event = _terminal_event(
+                    request,
+                    generation=request.generation - 1
+                    if args.mode == "stale-event"
+                    else None,
+                )
                 control.sendall(encode_packet(event))
                 if args.mode == "duplicate-event":
                     control.sendall(encode_packet(event))

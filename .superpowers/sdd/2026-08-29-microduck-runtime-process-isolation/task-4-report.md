@@ -57,3 +57,39 @@ Ruff passed for every changed Python file and `git diff --check` passed.
 
 No parent runtime fallback remains. Cached terminal persistence is idempotent, and
 fresh generations remain blocked until acknowledged cleanup or exact reap.
+
+## Scoped-review fix round 1
+
+- Added immutable `CorrelatedTerminalDelivery` with supervisor-validated generation,
+  task ID, event sequence, and terminal payload. Service persistence exact-matches
+  active supervisor generation/task. `tick()` no longer replays cached terminals.
+- Added direct `VALIDATING -> FAILED` durability for failed START. Timeout, crash,
+  and wrong/malformed acknowledgement tests prove no `RUNNING`/`TASK_STARTED` is
+  fabricated while process containment still gates the slot.
+- Added one bounded in-memory pending command reservation. Durable command sequence,
+  event, and deadline are written only after exact COMMAND ACK. Identical concurrent
+  duplicates share the ACK/failure; blocked delivery never reports acceptance.
+- Expanded the process integration file from structural checks to 21 deterministic
+  service-plus-real-supervisor/fake-child tests: STAND completion, WALK renewal and
+  lease timeout, cancel during START, blocked START/COMMAND/STOP, crash/protocol
+  failure, cached reads during containment, reap gating/fresh generation, paging and
+  idempotency, stale callback rejection, and four continuous runtime faults.
+- Documented `runtimeCallTimeoutS` as the compatibility bound for duplicate command
+  waiters; `pollIntervalS` remains validated solely for constructor compatibility.
+- Added an explicit mapping from each removed thread-era behavior assertion to its
+  process-backed integration or supervisor replacement. The remaining skips are only
+  old implementation-shape tests; behavior is exercised through the process matrix.
+- Tightened child terminal publication so receiving a safety terminal implies the
+  child-local safety-complete barrier is already set.
+
+Verification after fixes:
+
+```text
+process service integration: 21 passed in 15.38s
+required 20x gate: 1780 passed, 280 skipped in 1749.10s (0:29:09)
+child safety publication repeat: 40 passed in 2.66s
+exact-HEAD full ROM suite: 519 passed, 21 skipped in 250.28s (0:04:10)
+final focused review regression: 80 passed in 55.75s
+Ruff: all checks passed
+git diff --check: clean
+```

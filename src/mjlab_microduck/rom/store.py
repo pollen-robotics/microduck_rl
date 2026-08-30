@@ -22,7 +22,7 @@ from .contracts import (
 _TERMINAL_STATES = frozenset({"SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT"})
 _ALLOWED_TRANSITIONS = {
     "ACCEPTED": frozenset({"VALIDATING"}),
-    "VALIDATING": frozenset({"RUNNING"}),
+    "VALIDATING": frozenset({"RUNNING", "FAILED"}),
     "RUNNING": _TERMINAL_STATES,
 }
 _INTERRUPTIBLE_STATES = frozenset({"ACCEPTED", "VALIDATING", "RUNNING"})

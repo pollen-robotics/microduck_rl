@@ -52,6 +52,24 @@ class SupervisorTaskTerminalized(SupervisorOperationError):
 
 
 @dataclass(frozen=True, slots=True)
+class CorrelatedTerminalDelivery:
+    """Supervisor-validated identity attached to every terminal callback."""
+
+    generation: int
+    task_id: str
+    event_sequence: int
+    terminal: TerminalPayload
+
+    @property
+    def outcome(self) -> str:
+        return self.terminal.outcome
+
+    @property
+    def evidence(self):
+        return self.terminal.evidence
+
+
+@dataclass(frozen=True, slots=True)
 class SupervisorSnapshot:
     state: SupervisorState
     generation: int
@@ -60,7 +78,7 @@ class SupervisorSnapshot:
     quarantine_reason: str | None
     slot_releasable: bool
     terminal_delivery_outstanding: bool = False
-    cached_terminal: TerminalPayload | None = None
+    cached_terminal: CorrelatedTerminalDelivery | None = None
     pid: int | None = None
 
 
@@ -90,7 +108,7 @@ class _Intent:
 @dataclass(frozen=True, slots=True)
 class _TerminalDelivery:
     sequence: int
-    payload: TerminalPayload
+    payload: CorrelatedTerminalDelivery
 
 
 class RuntimeProcessSupervisor:
@@ -105,7 +123,7 @@ class RuntimeProcessSupervisor:
         operation_timeout_s: float = 1.0,
         terminate_timeout_s: float = 0.25,
         queue_size: int = 8,
-        terminal_callback: Callable[[TerminalPayload], None] | None = None,
+        terminal_callback: Callable[[CorrelatedTerminalDelivery], None] | None = None,
         terminal_retry_delay_s: float = 0.05,
         terminal_retry_limit: int = 3,
         owner_thread_name: str = "microduck-runtime-supervisor",
@@ -337,7 +355,7 @@ class RuntimeProcessSupervisor:
         *,
         healthy: bool | None = None,
         status: RobotStatus | None | object = ...,
-        terminal: TerminalPayload | None | object = ...,
+        terminal: CorrelatedTerminalDelivery | None | object = ...,
         delivery_outstanding: bool | None = None,
         reason: str | None | object = ...,
         slot: bool | None = None,
@@ -585,16 +603,19 @@ class RuntimeProcessSupervisor:
             {RuntimeMessageKind.TERMINAL},
         )
         assert isinstance(response.payload, TerminalPayload)
+        delivery = CorrelatedTerminalDelivery(
+            self._generation, task_id, 0, response.payload
+        )
         self._active_task = None
         delivery_required = self._terminal_queue is not None
         self._advance(
             SupervisorEvent.TERMINAL_ACK,
             healthy=True,
             slot=not delivery_required,
-            terminal=response.payload,
+            terminal=delivery,
             delivery_outstanding=delivery_required,
         )
-        self._queue_terminal_delivery(response.payload)
+        self._queue_terminal_delivery(delivery)
         return response.payload
 
     def _require_active(self, task_id: str) -> None:
@@ -704,6 +725,10 @@ class RuntimeProcessSupervisor:
         ):
             raise SupervisorOperationError("stale or replayed terminal event")
         terminal = payload.terminal
+        assert message.taskId is not None
+        delivery = CorrelatedTerminalDelivery(
+            message.generation, message.taskId, payload.eventSequence, terminal
+        )
         self._last_event_sequence = payload.eventSequence
         self._active_task = None
         delivery_required = self._terminal_queue is not None
@@ -711,12 +736,12 @@ class RuntimeProcessSupervisor:
             SupervisorEvent.TERMINAL_ACK,
             healthy=True,
             slot=not delivery_required,
-            terminal=terminal,
+            terminal=delivery,
             delivery_outstanding=delivery_required,
         )
-        self._queue_terminal_delivery(terminal)
+        self._queue_terminal_delivery(delivery)
 
-    def _queue_terminal_delivery(self, terminal: TerminalPayload) -> None:
+    def _queue_terminal_delivery(self, terminal: CorrelatedTerminalDelivery) -> None:
         if self._terminal_queue is None:
             return
         self._terminal_delivery_sequence += 1
