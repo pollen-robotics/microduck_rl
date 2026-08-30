@@ -991,6 +991,35 @@ def test_roll_sprint_distance_is_rotation_linked_and_capped(monkeypatch):
         torch.tensor([expected_cap]),
         atol=1.0e-6,
     )
+    assert torch.allclose(
+        env._roll_sprint_credited_distance,
+        torch.tensor([expected_cap]),
+        atol=1.0e-6,
+    )
+    assert env._roll_sprint_forward_frontier[0] == pytest.approx(100.0)
+
+
+def test_roll_sprint_cumulative_credit_stays_bounded_while_raw_frontier_advances(
+    monkeypatch,
+):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    _prime_roll_heading(env, asset)
+
+    _complete_valid_roll(env, asset, forward=4.0)
+    expected_cap = 0.12 * 2.0 * torch.pi
+    assert env._roll_sprint_credited_distance[0] == pytest.approx(expected_cap)
+    assert env._roll_sprint_forward_frontier[0] == pytest.approx(4.0)
+
+    _recover(env, asset)
+    env.common_step_counter += 1
+    _complete_valid_roll(env, asset, forward=8.0)
+
+    assert env._roll_sprint_credited_distance[0] == pytest.approx(2.0 * expected_cap)
+    assert env._roll_sprint_forward_frontier[0] == pytest.approx(8.0)
+
+    mdp._reset_roll_sprint_buffers(env, torch.tensor([0]))
+    assert env._roll_sprint_credited_distance[0] == 0.0
 
 
 def test_roll_sprint_forward_then_backward_translation_credits_only_net_advance(

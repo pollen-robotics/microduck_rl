@@ -11632,6 +11632,7 @@ def _roll_sprint_state(env: ManagerBasedRlEnv) -> None:
     env._roll_sprint_heading_alignment_delta = z.clone()
     env._roll_sprint_progress_delta = z.clone()
     env._roll_sprint_completed_distance = z.clone()
+    env._roll_sprint_credited_distance = z.clone()
     env._roll_sprint_completed_now = torch.zeros(
         env.num_envs, dtype=torch.bool, device=env.device
     )
@@ -11705,6 +11706,28 @@ def _roll_sprint_lateral_position(
     )
     lateral_w = torch.stack((-heading_w[:, 1], heading_w[:, 0]), dim=-1)
     return ((position_xy - course_center_xy) * lateral_w).sum(dim=-1)
+
+
+def _roll_sprint_bounded_cycle_credit(
+    rotation_accum: torch.Tensor,
+    forward_position: torch.Tensor,
+    cycle_start_position: torch.Tensor,
+    forward_frontier: torch.Tensor,
+) -> torch.Tensor:
+    """Return the valid-cycle distance credit without advancing raw frontier state."""
+    rotation_budget = _ROLL_SPRINT_MAX_DISTANCE_PER_RAD * torch.clamp(
+        rotation_accum, min=0.0, max=_ROLL_SPRINT_TARGET_ANGLE
+    )
+    cycle_net_advance = torch.clamp(
+        forward_position - cycle_start_position, min=0.0
+    )
+    new_frontier_advance = torch.clamp(
+        forward_position - forward_frontier, min=0.0
+    )
+    return torch.minimum(
+        rotation_budget,
+        torch.minimum(cycle_net_advance, new_frontier_advance),
+    )
 
 
 def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
@@ -12112,14 +12135,11 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
     invalid_completion = completed & cycle_eligible & ~valid_completion
     any_completion = valid_completion | invalid_completion | bootstrap_completion
 
-    rotation_budget = _ROLL_SPRINT_MAX_DISTANCE_PER_RAD * torch.clamp(
-        new_accum, min=0.0, max=_ROLL_SPRINT_TARGET_ANGLE
-    )
-    cycle_net_advance = torch.clamp(position - cycle_start_position, min=0.0)
-    new_frontier_advance = torch.clamp(position - forward_frontier, min=0.0)
-    completed_distance = torch.minimum(
-        rotation_budget,
-        torch.minimum(cycle_net_advance, new_frontier_advance),
+    completed_distance = _roll_sprint_bounded_cycle_credit(
+        new_accum,
+        position,
+        cycle_start_position,
+        forward_frontier,
     )
 
     env._roll_sprint_completed_now = torch.where(
@@ -12139,6 +12159,11 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
             torch.zeros_like(completed_distance),
             env._roll_sprint_completed_distance,
         ),
+    )
+    env._roll_sprint_credited_distance += torch.where(
+        active & valid_completion,
+        completed_distance,
+        torch.zeros_like(completed_distance),
     )
     env._roll_sprint_completed += valid_completion.float()
     recovered_rerolled_now = valid_completion & env._roll_sprint_recovered_cycle_armed
@@ -12670,6 +12695,7 @@ def _reset_roll_sprint_buffers(
     env._roll_sprint_heading_alignment_delta[env_ids] = 0.0
     env._roll_sprint_progress_delta[env_ids] = 0.0
     env._roll_sprint_completed_distance[env_ids] = 0.0
+    env._roll_sprint_credited_distance[env_ids] = 0.0
     env._roll_sprint_completed_now[env_ids] = False
     env._roll_sprint_invalid_now[env_ids] = False
     env._roll_sprint_bootstrap_completed_now[env_ids] = False

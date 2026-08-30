@@ -522,6 +522,24 @@ def test_race_label_reports_credited_average_speed_and_target_distance() -> None
     assert label == "R1  VALID AVG 0.40 m/s  |  8.0/10.0 m"
 
 
+def test_video_distance_uses_bounded_credit_not_raw_frontier() -> None:
+    env = SimpleNamespace(
+        _roll_sprint_credited_distance=torch.tensor([0.754, 6.071, 2.934, 0.559]),
+        _roll_sprint_forward_frontier=torch.tensor([2.0, 9.4, 8.4, 8.0]),
+        _roll_sprint_forward_origin=torch.zeros(4),
+    )
+
+    credited = MODULE._race_credited_distances(env)
+
+    assert credited.tolist() == pytest.approx([0.754, 6.071, 2.934, 0.559])
+    assert credited.tolist() != pytest.approx(
+        (env._roll_sprint_forward_frontier - env._roll_sprint_forward_origin).tolist()
+    )
+    assert MODULE._race_label_text(1, float(credited[1]), 20.0) == (
+        "R2  VALID AVG 0.30 m/s  |  6.1/10.0 m"
+    )
+
+
 def test_credited_average_speed_matches_ten_meter_twenty_second_finish() -> None:
     assert MODULE._credited_average_speed_mps(10.0, 20.0) == pytest.approx(0.5)
     assert MODULE._credited_average_speed_mps(8.0, 20.0) == pytest.approx(0.4)

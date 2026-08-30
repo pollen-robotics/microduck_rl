@@ -242,6 +242,11 @@ def _credited_average_speed_mps(valid_distance_m: float, elapsed_s: float) -> fl
     return max(valid_distance_m, 0.0) / elapsed_s
 
 
+def _race_credited_distances(base_env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Return cumulative bounded valid-cycle credit, never the raw position frontier."""
+    return base_env._roll_sprint_credited_distance.clamp_min(0.0)
+
+
 def _race_label_text(
     robot_index: int,
     valid_distance_m: float,
@@ -719,10 +724,7 @@ def main() -> int:
                 observations = env.get_observations()
                 actions = policy(observations)
                 env.step(actions)
-                valid_distances_m = (
-                    base_env._roll_sprint_forward_frontier
-                    - base_env._roll_sprint_forward_origin
-                ).clamp_min(0.0)
+                valid_distances_m = _race_credited_distances(base_env)
             if not args.recovery_montage:
                 camera_state, _camera_y_m, leader_index = _follow_on_road_leader(
                     base_env,

@@ -507,18 +507,11 @@ class RollCycleAuditor:
             | post_self_right_reposition
             | completion_reposition
         )
-        rotation_budget = MAX_DISTANCE_PER_RAD * torch.clamp(
-            new_accum, min=0.0, max=TARGET_ANGLE
-        )
-        cycle_net_advance = torch.clamp(
-            forward_position - self.cycle_start_forward, min=0.0
-        )
-        new_frontier_advance = torch.clamp(
-            forward_position - self.forward_frontier, min=0.0
-        )
-        credited_distance = torch.minimum(
-            rotation_budget,
-            torch.minimum(cycle_net_advance, new_frontier_advance),
+        credited_distance = microduck_mdp._roll_sprint_bounded_cycle_credit(
+            new_accum,
+            forward_position,
+            self.cycle_start_forward,
+            self.forward_frontier,
         )
         self.valid_count += valid.to(torch.long)
         self.invalid_count += invalid.to(torch.long)
