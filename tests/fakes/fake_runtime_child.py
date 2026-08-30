@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import argparse
 import signal
-import time
 from datetime import UTC, datetime
 
 from mjlab_microduck.rom.contracts import RobotStatus, TaskEvidence
 from mjlab_microduck.rom.parent_death import (
     close_unrelated_fds,
+    install_parent_death_signal,
     verify_seqpacket_socket,
 )
 from mjlab_microduck.rom.process_protocol import (
@@ -37,12 +37,35 @@ MODES = (
     "exit-before-ack",
 )
 
+PROOF_MODES = (
+    "gate-malformed",
+    "gate-exit",
+    "stale-generation",
+    "wrong-hello-ack",
+    "wrong-start-ack",
+    "wrong-command-ack",
+    "wrong-shutdown-ack",
+)
+
+_late_control = None
+_late_test_control = None
+_late_request = None
+_late_revision = "fake-runtime-v1"
+
+
+def _release_late_response(_signum: int, _frame: object) -> None:
+    """Release a response only after the parent's post-deadline SIGTERM."""
+    if _late_control is None or _late_test_control is None or _late_request is None:
+        return
+    _late_control.sendall(encode_packet(_reply(_late_request, _late_revision)))
+    _late_test_control.sendall(b"LATE_SENT")
+
 
 def _args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket-fd", required=True, type=int)
     parser.add_argument("--test-socket-fd", required=True, type=int)
-    parser.add_argument("--mode", choices=MODES, required=True)
+    parser.add_argument("--mode", choices=MODES + PROOF_MODES, required=True)
     return parser.parse_args()
 
 
@@ -67,11 +90,17 @@ def _status() -> RobotStatus:
     )
 
 
-def _reply(request: RuntimeMessage, revision: str) -> RuntimeMessage:
+def _reply(
+    request: RuntimeMessage,
+    revision: str,
+    *,
+    generation: int | None = None,
+    acknowledged_kind: RuntimeOperationKind | None = None,
+) -> RuntimeMessage:
     if request.kind is RuntimeMessageKind.LOAD:
         return RuntimeMessage(
             kind="READY",
-            generation=request.generation,
+            generation=request.generation if generation is None else generation,
             operationSequence=request.operationSequence,
             taskId=None,
             payload=ReadyPayload(
@@ -82,7 +111,7 @@ def _reply(request: RuntimeMessage, revision: str) -> RuntimeMessage:
     if request.kind is RuntimeMessageKind.STATUS:
         return RuntimeMessage(
             kind="STATUS",
-            generation=request.generation,
+            generation=request.generation if generation is None else generation,
             operationSequence=request.operationSequence,
             taskId=request.taskId,
             payload=StatusPayload(status=_status()),
@@ -90,7 +119,7 @@ def _reply(request: RuntimeMessage, revision: str) -> RuntimeMessage:
     if request.kind is RuntimeMessageKind.ZERO_AND_STOP:
         return RuntimeMessage(
             kind="TERMINAL",
-            generation=request.generation,
+            generation=request.generation if generation is None else generation,
             operationSequence=request.operationSequence,
             taskId=request.taskId,
             payload=TerminalPayload(
@@ -105,20 +134,27 @@ def _reply(request: RuntimeMessage, revision: str) -> RuntimeMessage:
         )
     return RuntimeMessage(
         kind="ACK",
-        generation=request.generation,
+        generation=request.generation if generation is None else generation,
         operationSequence=request.operationSequence,
         taskId=request.taskId,
-        payload=AckPayload(acknowledgedKind=RuntimeOperationKind(request.kind.value)),
+        payload=AckPayload(
+            acknowledgedKind=acknowledged_kind
+            or RuntimeOperationKind(request.kind.value)
+        ),
     )
 
 
 def main() -> int:
+    global _late_control, _late_request, _late_revision, _late_test_control
     args = _args()
     control = verify_seqpacket_socket(args.socket_fd)
     test_control = verify_seqpacket_socket(args.test_socket_fd)
+    install_parent_death_signal()
     close_unrelated_fds({args.socket_fd, args.test_socket_fd})
     if args.mode == "ignore-sigterm":
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    elif args.mode == "late-response":
+        signal.signal(signal.SIGTERM, _release_late_response)
     revision = "fake-runtime-v1"
     while True:
         packet = control.recv(65_537)
@@ -128,18 +164,63 @@ def main() -> int:
         if request.kind is RuntimeMessageKind.HELLO:
             revision = request.payload.runtimeRevision  # type: ignore[union-attr]
         operation = request.kind.value.lower().replace("zero_and_stop", "stop")
+        if args.mode in {"gate-malformed", "gate-exit"}:
+            test_control.sendall(request.kind.value.encode("ascii"))
+            if not test_control.recv(1):
+                return 0
+            if args.mode == "gate-exit":
+                return 17
+            control.sendall(b"{}")
+            continue
         if args.mode == "exit-before-ack":
             return 17
         if args.mode == "malformed-response":
             control.sendall(b"{}")
             continue
-        if args.mode in {f"block-{operation}", "late-response"}:
+        if args.mode == "late-response":
+            _late_control = control
+            _late_test_control = test_control
+            _late_request = request
+            _late_revision = revision
+            test_control.sendall(request.kind.value.encode("ascii"))
+            # The parent releases this receive by sending SIGTERM after its deadline.
+            if not test_control.recv(1):
+                return 0
+            continue
+        if args.mode == f"block-{operation}":
             test_control.sendall(request.kind.value.encode("ascii"))
             if not test_control.recv(1):
                 return 0
-            if args.mode == "late-response":
-                time.sleep(0.05)
-        control.sendall(encode_packet(_reply(request, revision)))
+        wrong_for = {
+            "wrong-hello-ack": RuntimeMessageKind.HELLO,
+            "wrong-start-ack": RuntimeMessageKind.START,
+            "wrong-command-ack": RuntimeMessageKind.COMMAND,
+            "wrong-shutdown-ack": RuntimeMessageKind.SHUTDOWN,
+        }
+        wrong_kind = wrong_for.get(args.mode)
+        acknowledged_kind = None
+        if request.kind is wrong_kind:
+            acknowledged_kind = (
+                RuntimeOperationKind.COMMAND
+                if request.kind is not RuntimeMessageKind.COMMAND
+                else RuntimeOperationKind.START
+            )
+        generation = request.generation
+        if args.mode == "stale-generation" and request.kind is RuntimeMessageKind.START:
+            test_control.sendall(b"START")
+            if not test_control.recv(1):
+                return 0
+            generation -= 1
+        control.sendall(
+            encode_packet(
+                _reply(
+                    request,
+                    revision,
+                    generation=generation,
+                    acknowledged_kind=acknowledged_kind,
+                )
+            )
+        )
 
 
 if __name__ == "__main__":

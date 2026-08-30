@@ -324,6 +324,9 @@ class RuntimeProcessSupervisor:
         assert child is not None and parent is not None
         child.close()
         self._socket = parent
+        # Publish the exact owned PID before readiness exchange so diagnostics and
+        # containment proofs can bind to the process even while it is SPAWNING.
+        self._publish(SupervisorState.SPAWNING, healthy=False, slot=False)
         try:
             hello = self._exchange(
                 RuntimeMessageKind.HELLO,
@@ -348,6 +351,11 @@ class RuntimeProcessSupervisor:
             ):  # type: ignore[union-attr]
                 raise SupervisorOperationError("wrong child readiness identity")
         except BaseException as exc:
+            self._record(
+                "OPERATION_TIMEOUT"
+                if isinstance(exc, TimeoutError)
+                else "OPERATION_FAILED"
+            )
             self._quarantine(f"SPAWN_FAILED:{type(exc).__name__}")
             raise SupervisorOperationError("child readiness failed") from exc
         self._advance(

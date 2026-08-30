@@ -57,3 +57,62 @@ Only Task 3 supervisor implementation, tests, and this report were added. Task 4
 - Added deterministic blocking and throwing callback regression tests.
 
 Focused verification after fixes: `14 passed in 22.32s`; Ruff and `git diff --check` passed.
+
+## Adversarial proof/fix round 2
+
+- Replaced the timer-based late fake with an inherited-socket proof whose response is
+  released by the supervisor's post-deadline SIGTERM handler. This proves the packet
+  is genuinely late without sleeps or filesystem barriers.
+- Added socket-gated exact-PID proofs for LOAD, START, COMMAND, STATUS, and
+  ZERO_AND_STOP blocking; malformed response; unexpected exit; SIGTERM-ignore kill
+  escalation; and stale generation injection after reap/replacement. Every captured
+  PID uses a pidfd opened while that exact child is alive and is readable before the
+  slot-release assertion completes.
+- Added mismatched acknowledged-operation cases for HELLO, START, COMMAND, and
+  SHUTDOWN, plus deterministic bounded close coverage from IDLE, STARTING, RUNNING,
+  STOPPING, and a close queued across the QUARANTINED containment path.
+- Added a killed-parent subprocess harness. It reports the supervisor-owned child PID
+  over an inherited `SOCK_SEQPACKET`; killing only the exact harness PID makes the
+  exact child pidfd readable, proving `PR_SET_PDEATHSIG` leaves no orphan.
+- Exposed the already-owned child PID in the immutable SPAWNING snapshot before the
+  readiness exchange, fixing the defect exposed by malformed/exit containment tests.
+- Added explicit readiness-operation trace evidence so deadline and non-timeout spawn
+  failures have the same auditable ordering as later guarded exchanges.
+
+TDD evidence for the production fixes:
+
+```text
+RED: test_protocol_failure_and_unexpected_exit_reap_captured_exact_pid
+     snapshot.pid was None after the gated child had received HELLO.
+GREEN: 2 passed in 1.46s
+
+RED: test_late_packet_is_released_only_by_post_deadline_sigterm
+     OPERATION_TIMEOUT was absent from the readiness failure trace.
+GREEN: 1 passed in 1.34s
+```
+
+Required verification:
+
+```text
+uv run --with pytest --with pytest-repeat pytest tests/test_rom_process_supervisor.py tests/test_rom_process_protocol.py tests/test_rom_supervisor_state.py -q --count=10
+800 passed in 319.06s (0:05:19)
+
+MUJOCO_GL=egl uv run --with pytest pytest tests/test_rom_runtime_child.py -q
+21 passed in 9.10s
+
+uv run ruff check src/mjlab_microduck/rom/process_supervisor.py tests/test_rom_process_supervisor.py tests/fakes/fake_runtime_child.py tests/fakes/supervisor_parent_harness.py
+All checks passed!
+
+git diff --check
+(no output)
+```
+
+Files changed in this round:
+
+- `src/mjlab_microduck/rom/process_supervisor.py`
+- `tests/test_rom_process_supervisor.py`
+- `tests/fakes/fake_runtime_child.py`
+- `tests/fakes/supervisor_parent_harness.py`
+- this report
+
+Self-review found no remaining Task 3 proof gaps. Task 4 was not started.
