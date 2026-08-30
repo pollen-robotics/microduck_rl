@@ -4,6 +4,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     MicroduckStairContactReleaseRsiRlCfg,
     MicroduckStairLipCommitmentRsiRlCfg,
     MicroduckStairLipCheckpointRsiRlCfg,
+    MicroduckStairFrontierCollocationRsiRlCfg,
     MicroduckStairMediumDynamicsRsiRlCfg,
     MicroduckStairPhaseBalancedRsiRlCfg,
     MicroduckStairSoftDynamicsRsiRlCfg,
@@ -17,6 +18,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     make_microduck_stair_contact_release_rsi_env_cfg,
     make_microduck_stair_lip_commitment_rsi_env_cfg,
     make_microduck_stair_lip_checkpoint_rsi_env_cfg,
+    make_microduck_stair_frontier_collocation_rsi_env_cfg,
     make_microduck_stair_medium_dynamics_rsi_env_cfg,
     make_microduck_stair_phase_balanced_rsi_env_cfg,
     make_microduck_stair_soft_dynamics_rsi_env_cfg,
@@ -217,3 +219,41 @@ def test_lip_checkpoint_uses_multiplicative_signed_progress_near_stair():
     assert cfg.rewards["stair_first_tread_secured"].weight == 600.0
     assert MicroduckStairLipCheckpointRsiRlCfg.max_iterations == 75
     assert MicroduckStairLipCheckpointRsiRlCfg.save_interval == 25
+
+
+def test_frontier_collocation_retains_measured_near_lip_reset_distribution():
+    baseline = make_microduck_stair_lip_checkpoint_rsi_env_cfg()
+    cfg = make_microduck_stair_frontier_collocation_rsi_env_cfg()
+    bank = cfg.events["walker_state_bank"].params
+    frontier = cfg.rewards["stair_coupled_frontier_collocation"]
+
+    assert tuple(cfg.observations["actor"].terms) == tuple(
+        baseline.observations["actor"].terms
+    )
+    assert cfg.episode_length_s == 2.0
+    assert bank["source_episode_step_range"] == (15, 60)
+    assert bank["min_vertical_speed"] == -0.25
+    assert bank["phase_balanced"] is False
+    assert "local_x_range" not in bank
+    assert bank["phase_aligned_local_x_range"] == (0.54, 0.64)
+    assert bank["phase_aligned_x_jitter"] == 0.005
+    assert bank["local_y_range"] == (-0.08, 0.08)
+    assert bank["late_fraction"] == 0.75
+    assert bank["late_source_episode_step_range"] == (38, 60)
+    assert cfg.rewards["stair_contact_lip_commitment"].weight == 1.0e-6
+    assert cfg.rewards["stair_contact_lip_checkpoint_potential"].weight == 0.0
+    assert frontier.weight == 30.0
+    assert frontier.params["arm_after_control_steps"] == 2
+    assert frontier.params["x_start"] == 0.540
+    assert frontier.params["x_target"] == 0.665
+    assert frontier.params["z_start"] == 0.100
+    assert frontier.params["z_target"] == 0.175
+    assert frontier.params["target_bonus"] == 4.0
+    reward_names = tuple(cfg.rewards)
+    assert reward_names.index("stair_contact_lip_commitment") < reward_names.index(
+        "stair_coupled_frontier_collocation"
+    )
+    assert cfg.rewards["stair_first_riser_clearance"].weight == 500.0
+    assert cfg.rewards["stair_first_tread_secured"].weight == 600.0
+    assert MicroduckStairFrontierCollocationRsiRlCfg.max_iterations == 75
+    assert MicroduckStairFrontierCollocationRsiRlCfg.save_interval == 25

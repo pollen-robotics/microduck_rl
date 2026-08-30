@@ -2455,6 +2455,179 @@ def stair_contact_lip_checkpoint_potential(
     return signed_delta / env.step_dt
 
 
+def stair_coupled_frontier_collocation(
+    env: ManagerBasedRlEnv,
+    stair_face_x: float = 0.66,
+    corridor_half_width: float = 0.20,
+    bypass_half_width: float = 0.36,
+    arm_after_control_steps: int = 2,
+    target_hold_steps: int = 2,
+    x_start: float = 0.540,
+    x_target: float = 0.665,
+    z_start: float = 0.100,
+    z_target: float = 0.175,
+    target_bonus: float = 4.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay finite new coupled x/z frontier; gate only completion on impulse.
+
+    This continuation is paired with elevated manufacturer roll phases placed
+    immediately before the first lip.  The minimum of normalized forward and
+    vertical progress prevents either axis from compensating for the other.
+    A running maximum makes dense progress finite and non-farmable. Progress
+    starts from the first reset-safe policy state, while the held target bonus
+    still requires the physical A24 two-contact impulse. This keeps an
+    attainable mentor signal without paying reset state or accepting a target
+    reached by unrelated motion.
+    """
+
+    if min(arm_after_control_steps, target_hold_steps) < 1:
+        raise ValueError("Coupled-frontier hold steps must be positive")
+    if x_target <= x_start or z_target <= z_start:
+        raise ValueError("Coupled-frontier targets must exceed their starts")
+    if target_bonus < 0.0:
+        raise ValueError("Coupled-frontier target bonus must be nonnegative")
+
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    abs_y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    finite = torch.isfinite(torch.stack((x, z, abs_y), dim=-1)).all(dim=-1)
+
+    x_progress = torch.clamp(
+        (x - x_start) / (x_target - x_start), min=0.0, max=1.0
+    )
+    z_progress = torch.clamp(
+        (z - z_start) / (z_target - z_start), min=0.0, max=1.0
+    )
+    coupled = torch.minimum(x_progress, z_progress)
+
+    if not hasattr(env, "_stair_coupled_frontier_armed"):
+        env._stair_coupled_frontier_armed = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._stair_coupled_frontier_arm_value = torch.zeros_like(x)
+        env._stair_coupled_frontier_max_value = torch.zeros_like(x)
+        env._stair_coupled_frontier_paid_gain = torch.zeros_like(x)
+        env._stair_coupled_frontier_target_hold = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+        env._stair_coupled_frontier_gain10_latched = torch.zeros_like(
+            env._stair_coupled_frontier_armed
+        )
+        env._stair_coupled_frontier_gain25_latched = torch.zeros_like(
+            env._stair_coupled_frontier_armed
+        )
+        env._stair_coupled_frontier_raw_gain10_latched = torch.zeros_like(
+            env._stair_coupled_frontier_armed
+        )
+        env._stair_coupled_frontier_raw_gain25_latched = torch.zeros_like(
+            env._stair_coupled_frontier_armed
+        )
+        env._stair_coupled_frontier_target_latched = torch.zeros_like(
+            env._stair_coupled_frontier_armed
+        )
+        env._stair_coupled_frontier_bypass_latched = torch.zeros_like(
+            env._stair_coupled_frontier_armed
+        )
+
+    fresh = env.episode_length_buf <= 1
+    env._stair_coupled_frontier_armed[fresh] = False
+    env._stair_coupled_frontier_arm_value[fresh] = 0.0
+    env._stair_coupled_frontier_max_value[fresh] = 0.0
+    env._stair_coupled_frontier_paid_gain[fresh] = 0.0
+    env._stair_coupled_frontier_target_hold[fresh] = 0
+    env._stair_coupled_frontier_gain10_latched[fresh] = False
+    env._stair_coupled_frontier_gain25_latched[fresh] = False
+    env._stair_coupled_frontier_raw_gain10_latched[fresh] = False
+    env._stair_coupled_frontier_raw_gain25_latched[fresh] = False
+    env._stair_coupled_frontier_target_latched[fresh] = False
+    env._stair_coupled_frontier_bypass_latched[fresh] = False
+
+    already_target = (x >= x_target) & (z >= z_target)
+    newly_armed = (
+        (env.episode_length_buf >= arm_after_control_steps)
+        & finite
+        & (abs_y <= corridor_half_width)
+        & ~already_target
+        & ~env._stair_coupled_frontier_armed
+    )
+    env._stair_coupled_frontier_armed |= newly_armed
+    env._stair_coupled_frontier_arm_value[newly_armed] = coupled[newly_armed]
+    env._stair_coupled_frontier_max_value[newly_armed] = coupled[newly_armed]
+    env._stair_coupled_frontier_paid_gain[newly_armed] = 0.0
+
+    active = (
+        env._stair_coupled_frontier_armed
+        & ~env._stair_coupled_frontier_target_latched
+        & ~env._stair_coupled_frontier_bypass_latched
+        & finite
+    )
+    new_maximum = torch.where(
+        active & (abs_y <= corridor_half_width),
+        torch.maximum(env._stair_coupled_frontier_max_value, coupled),
+        env._stair_coupled_frontier_max_value,
+    )
+    env._stair_coupled_frontier_max_value = new_maximum
+    total_gain = torch.clamp(
+        env._stair_coupled_frontier_max_value
+        - env._stair_coupled_frontier_arm_value,
+        min=0.0,
+    )
+    impulse_latched = getattr(env, "_stair_lip_commitment_impulse_latched", None)
+    if impulse_latched is None:
+        impulse_latched = torch.zeros_like(env._stair_coupled_frontier_armed)
+    positive_gain = torch.clamp(
+        total_gain - env._stair_coupled_frontier_paid_gain, min=0.0
+    )
+    paid_after_step = env._stair_coupled_frontier_paid_gain + positive_gain
+    env._stair_coupled_frontier_paid_gain = torch.where(
+        active, paid_after_step, env._stair_coupled_frontier_paid_gain
+    )
+    env._stair_coupled_frontier_raw_gain10_latched |= active & (
+        total_gain >= 0.10
+    )
+    env._stair_coupled_frontier_raw_gain25_latched |= active & (
+        total_gain >= 0.25
+    )
+    env._stair_coupled_frontier_gain10_latched |= (
+        active & impulse_latched & (total_gain >= 0.10)
+    )
+    env._stair_coupled_frontier_gain25_latched |= (
+        active & impulse_latched & (total_gain >= 0.25)
+    )
+
+    bypass_candidate = (
+        active & (x >= stair_face_x) & (abs_y > bypass_half_width)
+    )
+    newly_bypassed = bypass_candidate & ~env._stair_coupled_frontier_bypass_latched
+
+    target_candidate = (
+        active
+        & impulse_latched
+        & ~bypass_candidate
+        & (x >= x_target)
+        & (z >= z_target)
+        & (abs_y <= corridor_half_width)
+    )
+    env._stair_coupled_frontier_target_hold = torch.where(
+        target_candidate,
+        env._stair_coupled_frontier_target_hold + 1,
+        torch.zeros_like(env._stair_coupled_frontier_target_hold),
+    )
+    reached_target = (
+        env._stair_coupled_frontier_target_hold >= target_hold_steps
+    ) & ~env._stair_coupled_frontier_target_latched
+
+    payout = positive_gain + target_bonus * reached_target.to(positive_gain.dtype)
+    # A lateral escape cannot retain progress collected in the strict corridor.
+    payout -= paid_after_step * newly_bypassed.to(paid_after_step.dtype)
+    env._stair_coupled_frontier_target_latched |= reached_target
+    env._stair_coupled_frontier_bypass_latched |= newly_bypassed
+    return payout / env.step_dt
+
+
 def stair_apex_or_mantle_frontier(
     env: ManagerBasedRlEnv,
     approach_start_x: float = 0.40,

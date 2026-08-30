@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
 import torch
 
 SCRIPT_PATH = (
@@ -18,6 +19,7 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 A12TrajectoryMetrics = MODULE.A12TrajectoryMetrics
 ContactTrajectoryMetrics = MODULE.ContactTrajectoryMetrics
+JointFrontierTrajectoryMetrics = MODULE.JointFrontierTrajectoryMetrics
 
 
 def _observe(
@@ -90,3 +92,39 @@ def test_contact_metrics_ignore_reset_contact_but_count_policy_recontact() -> No
     assert metrics.observe(torch.tensor([True]), torch.tensor([5])).item()
     assert not metrics.observe(torch.tensor([False]), torch.tensor([6])).item()
     assert not metrics.observe(torch.tensor([True]), torch.tensor([7])).item()
+
+
+def test_joint_frontier_requires_x_and_z_in_the_same_frame() -> None:
+    metrics = JointFrontierTrajectoryMetrics(1, "cpu")
+
+    metrics.observe(
+        torch.tensor([[0.665, 0.0, 0.120]]), torch.tensor([3])
+    )
+    metrics.observe(
+        torch.tensor([[0.560, 0.0, 0.190]]), torch.tensor([4])
+    )
+    progress, best_x, best_z, milestones = metrics.complete(torch.tensor([True]))
+
+    assert progress[0] < 0.30
+    assert best_x[0] == pytest.approx(0.665)
+    assert best_z[0] == pytest.approx(0.120)
+    assert milestones[-2] == 0
+
+
+def test_joint_frontier_reports_conjunctive_milestones_and_resets() -> None:
+    metrics = JointFrontierTrajectoryMetrics(1, "cpu")
+
+    metrics.observe(
+        torch.tensor([[0.660, 0.0, 0.175]]), torch.tensor([3])
+    )
+    progress, best_x, best_z, milestones = metrics.complete(torch.tensor([True]))
+
+    assert 0.95 <= progress[0] < 1.0
+    assert best_x[0] == pytest.approx(0.660)
+    assert best_z[0] == pytest.approx(0.175)
+    assert milestones[4] == 1
+    assert milestones[5] == 0
+
+    progress, _, _, milestones = metrics.complete(torch.tensor([True]))
+    assert progress == [0.0]
+    assert milestones == [0] * len(MODULE.JOINT_FRONTIER_MILESTONES)

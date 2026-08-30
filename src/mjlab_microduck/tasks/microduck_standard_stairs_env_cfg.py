@@ -1378,6 +1378,40 @@ def make_microduck_stair_lip_checkpoint_rsi_env_cfg(
     return cfg
 
 
+def make_microduck_stair_frontier_collocation_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A26: complete the measured near-lip coupled frontier."""
+
+    cfg = make_microduck_stair_lip_checkpoint_rsi_env_cfg(play=play)
+    cfg.episode_length_s = 2.0
+
+    # A25's broad near-lip distribution reached the measured frontier more
+    # often than aggressive phase collocation, which arrested forward motion
+    # against the riser. Keep those resets, retain A24's impulse detector at
+    # epsilon weight, and replace A25 with finite broad-basin max-progress plus
+    # a held, impulse-qualified goal.
+    cfg.rewards["stair_contact_lip_checkpoint_potential"].weight = 0.0
+    cfg.rewards["stair_coupled_frontier_collocation"] = RewardTermCfg(
+        func=microduck_mdp.stair_coupled_frontier_collocation,
+        weight=30.0,
+        params={
+            "stair_face_x": STANDARD_STAIR_START_DISTANCE,
+            "corridor_half_width": 0.20,
+            "bypass_half_width": STANDARD_STAIR_WIDTH * 0.40,
+            "arm_after_control_steps": 2,
+            "target_hold_steps": 2,
+            "x_start": 0.540,
+            "x_target": 0.665,
+            "z_start": 0.100,
+            "z_target": 0.175,
+            "target_bonus": 4.0,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    return cfg
+
+
 def make_microduck_stair_tread_contact_bank_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -1716,6 +1750,20 @@ MicroduckStairLipCheckpointRsiRlCfg.max_iterations = 75
 MicroduckStairLipCheckpointRsiRlCfg.save_interval = 25
 MicroduckStairLipCheckpointRsiRlCfg.actor.distribution_cfg["init_std"] = 0.22
 MicroduckStairLipCheckpointRsiRlCfg.algorithm.learning_rate = 1.0e-5
+
+MicroduckStairFrontierCollocationRsiRlCfg = deepcopy(
+    MicroduckStairLipCheckpointRsiRlCfg
+)
+MicroduckStairFrontierCollocationRsiRlCfg.experiment_name = (
+    "microduck_stair_frontier_collocation_rsi_specialist"
+)
+MicroduckStairFrontierCollocationRsiRlCfg.run_name = (
+    "microduck_stair_frontier_collocation_rsi_specialist"
+)
+MicroduckStairFrontierCollocationRsiRlCfg.max_iterations = 75
+MicroduckStairFrontierCollocationRsiRlCfg.save_interval = 25
+MicroduckStairFrontierCollocationRsiRlCfg.actor.distribution_cfg["init_std"] = 0.22
+MicroduckStairFrontierCollocationRsiRlCfg.algorithm.learning_rate = 1.0e-5
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)
 MicroduckStairTreadContactBankRlCfg.experiment_name = (

@@ -40,6 +40,7 @@ TASK_IDS = (
     "Mjlab-Stairs-Contact-Release-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Lip-Commitment-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Lip-Checkpoint-RSI-Specialist-MicroDuck",
+    "Mjlab-Stairs-Frontier-Collocation-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
     "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
@@ -85,6 +86,20 @@ A12_FULL_SHELL_CLEAR_MAX_ABS_Y_M = 0.20
 A12_FULL_SHELL_CLEAR_HOLD_STEPS = 4
 A12_SIDE_BYPASS_MIN_X_M = 0.660
 A12_SIDE_BYPASS_MIN_ABS_Y_M = 0.36
+JOINT_FRONTIER_START_X_M = 0.540
+JOINT_FRONTIER_TARGET_X_M = 0.665
+JOINT_FRONTIER_START_Z_M = 0.100
+JOINT_FRONTIER_TARGET_Z_M = 0.175
+JOINT_FRONTIER_MAX_ABS_Y_M = 0.20
+JOINT_FRONTIER_MILESTONES = (
+    (0.600, 0.150),
+    (0.625, 0.160),
+    (0.640, 0.170),
+    (0.650, 0.175),
+    (0.660, 0.175),
+    (0.665, 0.175),
+    (0.700, 0.198),
+)
 
 
 class A12TrajectoryMetrics:
@@ -212,6 +227,87 @@ class ContactTrajectoryMetrics:
         self._latched[done_mask] = False
 
 
+class JointFrontierTrajectoryMetrics:
+    """Measure same-frame x/z progress without mixing trials or timestamps."""
+
+    def __init__(self, num_envs: int, device: torch.device | str):
+        self._best_progress = torch.zeros(
+            num_envs, dtype=torch.float32, device=device
+        )
+        self._best_x = torch.full_like(self._best_progress, float("nan"))
+        self._best_z = torch.full_like(self._best_progress, float("nan"))
+        self._milestone_latched = torch.zeros(
+            (num_envs, len(JOINT_FRONTIER_MILESTONES)),
+            dtype=torch.bool,
+            device=device,
+        )
+
+    def observe(
+        self,
+        local_root_pos: torch.Tensor,
+        episode_steps: torch.Tensor,
+    ) -> None:
+        if local_root_pos.shape != (self._best_progress.numel(), 3):
+            raise ValueError("local_root_pos must have shape (num_envs, 3)")
+        if episode_steps.shape != self._best_progress.shape:
+            raise ValueError("episode_steps must have shape (num_envs,)")
+
+        x = local_root_pos[:, 0]
+        abs_y = torch.abs(local_root_pos[:, 1])
+        z = local_root_pos[:, 2]
+        eligible = (
+            (episode_steps >= A12_IGNORE_INITIAL_CONTROL_STEPS)
+            & torch.isfinite(local_root_pos).all(dim=-1)
+            & (abs_y <= JOINT_FRONTIER_MAX_ABS_Y_M)
+        )
+        x_progress = torch.clamp(
+            (x - JOINT_FRONTIER_START_X_M)
+            / (JOINT_FRONTIER_TARGET_X_M - JOINT_FRONTIER_START_X_M),
+            0.0,
+            1.0,
+        )
+        z_progress = torch.clamp(
+            (z - JOINT_FRONTIER_START_Z_M)
+            / (JOINT_FRONTIER_TARGET_Z_M - JOINT_FRONTIER_START_Z_M),
+            0.0,
+            1.0,
+        )
+        # The minimum cannot hide a deficient axis the way separate maxima or
+        # an additive score can. It reaches one only when both targets do.
+        joint_progress = torch.where(
+            eligible,
+            torch.minimum(x_progress, z_progress),
+            torch.zeros_like(x_progress),
+        )
+        improved = joint_progress > self._best_progress
+        self._best_progress = torch.where(
+            improved, joint_progress, self._best_progress
+        )
+        self._best_x = torch.where(improved, x, self._best_x)
+        self._best_z = torch.where(improved, z, self._best_z)
+
+        for index, (min_x, min_z) in enumerate(JOINT_FRONTIER_MILESTONES):
+            self._milestone_latched[:, index] |= (
+                eligible & (x >= min_x) & (z >= min_z)
+            )
+
+    def complete(
+        self, dones: torch.Tensor
+    ) -> tuple[list[float], list[float], list[float], list[int]]:
+        done_mask = dones.bool()
+        progress = self._best_progress[done_mask].detach().cpu().tolist()
+        best_x = self._best_x[done_mask].detach().cpu().tolist()
+        best_z = self._best_z[done_mask].detach().cpu().tolist()
+        milestone_counts = (
+            self._milestone_latched[done_mask].sum(dim=0).detach().cpu().tolist()
+        )
+        self._best_progress[done_mask] = 0.0
+        self._best_x[done_mask] = float("nan")
+        self._best_z[done_mask] = float("nan")
+        self._milestone_latched[done_mask] = False
+        return progress, best_x, best_z, milestone_counts
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", type=Path)
@@ -266,6 +362,7 @@ def main() -> int:
         "Mjlab-Stairs-Contact-Release-RSI-Specialist-MicroDuck",
         "Mjlab-Stairs-Lip-Commitment-RSI-Specialist-MicroDuck",
         "Mjlab-Stairs-Lip-Checkpoint-RSI-Specialist-MicroDuck",
+        "Mjlab-Stairs-Frontier-Collocation-RSI-Specialist-MicroDuck",
     }:
         reset_modes = ROULADE_BANK_RESET_MODES
     elif args.task == "Mjlab-Stairs-Apex-Mantle-Specialist-MicroDuck":
@@ -303,6 +400,12 @@ def main() -> int:
     previous_lip_commitment = torch.zeros_like(previous_clearance)
     previous_lip_checkpoint_progress = torch.zeros_like(previous_clearance)
     previous_lip_checkpoint_target = torch.zeros_like(previous_clearance)
+    previous_coupled_raw_gain10 = torch.zeros_like(previous_clearance)
+    previous_coupled_raw_gain25 = torch.zeros_like(previous_clearance)
+    previous_coupled_gain10 = torch.zeros_like(previous_clearance)
+    previous_coupled_gain25 = torch.zeros_like(previous_clearance)
+    previous_coupled_target = torch.zeros_like(previous_clearance)
+    previous_coupled_bypass = torch.zeros_like(previous_clearance)
     mode_trials = {name: 0 for name in reset_modes.values()}
     mode_clearance = {name: 0 for name in reset_modes.values()}
     mode_stable = {name: 0 for name in reset_modes.values()}
@@ -314,6 +417,12 @@ def main() -> int:
     mode_lip_commitment = {name: 0 for name in reset_modes.values()}
     mode_lip_checkpoint_progress = {name: 0 for name in reset_modes.values()}
     mode_lip_checkpoint_target = {name: 0 for name in reset_modes.values()}
+    mode_coupled_raw_gain10 = {name: 0 for name in reset_modes.values()}
+    mode_coupled_raw_gain25 = {name: 0 for name in reset_modes.values()}
+    mode_coupled_gain10 = {name: 0 for name in reset_modes.values()}
+    mode_coupled_gain25 = {name: 0 for name in reset_modes.values()}
+    mode_coupled_target = {name: 0 for name in reset_modes.values()}
+    mode_coupled_bypass = {name: 0 for name in reset_modes.values()}
     secured_events = 0
     face_contact_events = 0
     tread_contact_events = 0
@@ -322,6 +431,12 @@ def main() -> int:
     lip_commitment_events = 0
     lip_checkpoint_progress_events = 0
     lip_checkpoint_target_events = 0
+    coupled_raw_gain10_events = 0
+    coupled_raw_gain25_events = 0
+    coupled_gain10_events = 0
+    coupled_gain25_events = 0
+    coupled_target_events = 0
+    coupled_bypass_events = 0
     tread_contact_source_steps: list[int] = []
     face_contact_metrics = ContactTrajectoryMetrics(args.num_envs, args.device)
     tread_contact_metrics = ContactTrajectoryMetrics(args.num_envs, args.device)
@@ -351,6 +466,13 @@ def main() -> int:
         name: {metric: 0 for metric in a12_event_counts}
         for name in reset_modes.values()
     }
+    joint_frontier_metrics = JointFrontierTrajectoryMetrics(
+        args.num_envs, args.device
+    )
+    joint_frontier_progress: list[float] = []
+    joint_frontier_best_x: list[float] = []
+    joint_frontier_best_z: list[float] = []
+    joint_frontier_milestone_counts = [0] * len(JOINT_FRONTIER_MILESTONES)
     max_x = torch.full((args.num_envs,), -torch.inf, device=args.device)
     max_z = torch.full_like(max_x, -torch.inf)
     steps = base_env.max_episode_length * args.episodes
@@ -364,6 +486,10 @@ def main() -> int:
             origins = base_env.scene.terrain.env_origins
             local_pre_step = robot.data.root_link_pos_w - origins
             a12_events = a12_metrics.observe(
+                local_pre_step,
+                base_env.episode_length_buf,
+            )
+            joint_frontier_metrics.observe(
                 local_pre_step,
                 base_env.episode_length_buf,
             )
@@ -410,6 +536,36 @@ def main() -> int:
                 "_stair_lip_checkpoint_target_latched",
                 previous_lip_checkpoint_target,
             )
+            coupled_gain10 = getattr(
+                base_env,
+                "_stair_coupled_frontier_gain10_latched",
+                previous_coupled_gain10,
+            )
+            coupled_raw_gain10 = getattr(
+                base_env,
+                "_stair_coupled_frontier_raw_gain10_latched",
+                previous_coupled_raw_gain10,
+            )
+            coupled_raw_gain25 = getattr(
+                base_env,
+                "_stair_coupled_frontier_raw_gain25_latched",
+                previous_coupled_raw_gain25,
+            )
+            coupled_gain25 = getattr(
+                base_env,
+                "_stair_coupled_frontier_gain25_latched",
+                previous_coupled_gain25,
+            )
+            coupled_target = getattr(
+                base_env,
+                "_stair_coupled_frontier_target_latched",
+                previous_coupled_target,
+            )
+            coupled_bypass = getattr(
+                base_env,
+                "_stair_coupled_frontier_bypass_latched",
+                previous_coupled_bypass,
+            )
             global_contact = base_env.scene.sensors["robot_ground_contact"].data
             if (
                 global_contact.found is None
@@ -437,6 +593,16 @@ def main() -> int:
             new_lip_checkpoint_target = (
                 lip_checkpoint_target & ~previous_lip_checkpoint_target
             )
+            new_coupled_raw_gain10 = (
+                coupled_raw_gain10 & ~previous_coupled_raw_gain10
+            )
+            new_coupled_raw_gain25 = (
+                coupled_raw_gain25 & ~previous_coupled_raw_gain25
+            )
+            new_coupled_gain10 = coupled_gain10 & ~previous_coupled_gain10
+            new_coupled_gain25 = coupled_gain25 & ~previous_coupled_gain25
+            new_coupled_target = coupled_target & ~previous_coupled_target
+            new_coupled_bypass = coupled_bypass & ~previous_coupled_bypass
             new_face_contact = face_contact_metrics.observe(
                 raw_face.any(dim=-1), base_env.episode_length_buf
             )
@@ -453,6 +619,12 @@ def main() -> int:
                 new_lip_checkpoint_progress.sum().item()
             )
             lip_checkpoint_target_events += int(new_lip_checkpoint_target.sum().item())
+            coupled_raw_gain10_events += int(new_coupled_raw_gain10.sum().item())
+            coupled_raw_gain25_events += int(new_coupled_raw_gain25.sum().item())
+            coupled_gain10_events += int(new_coupled_gain10.sum().item())
+            coupled_gain25_events += int(new_coupled_gain25.sum().item())
+            coupled_target_events += int(new_coupled_target.sum().item())
+            coupled_bypass_events += int(new_coupled_bypass.sum().item())
             face_contact_events += int(new_face_contact.sum().item())
             tread_contact_events += int(new_tread_contact.sum().item())
             source_steps = getattr(base_env, "_stair_walker_bank_source_step", None)
@@ -465,6 +637,23 @@ def main() -> int:
                 )
             completed_trials += int(dones.sum().item())
             done_mask = dones.bool()
+            (
+                completed_progress,
+                completed_best_x,
+                completed_best_z,
+                completed_milestones,
+            ) = joint_frontier_metrics.complete(done_mask)
+            joint_frontier_progress.extend(completed_progress)
+            joint_frontier_best_x.extend(completed_best_x)
+            joint_frontier_best_z.extend(completed_best_z)
+            joint_frontier_milestone_counts = [
+                total + completed
+                for total, completed in zip(
+                    joint_frontier_milestone_counts,
+                    completed_milestones,
+                    strict=True,
+                )
+            ]
             origins = base_env.scene.terrain.env_origins
             for body_part, sensor_name in BODY_PART_CONTACT_SENSORS.items():
                 if body_part not in body_part_tread_metrics:
@@ -569,6 +758,24 @@ def main() -> int:
                 mode_lip_checkpoint_target[name] += int(
                     (new_lip_checkpoint_target & mode_mask).sum().item()
                 )
+                mode_coupled_raw_gain10[name] += int(
+                    (new_coupled_raw_gain10 & mode_mask).sum().item()
+                )
+                mode_coupled_raw_gain25[name] += int(
+                    (new_coupled_raw_gain25 & mode_mask).sum().item()
+                )
+                mode_coupled_gain10[name] += int(
+                    (new_coupled_gain10 & mode_mask).sum().item()
+                )
+                mode_coupled_gain25[name] += int(
+                    (new_coupled_gain25 & mode_mask).sum().item()
+                )
+                mode_coupled_target[name] += int(
+                    (new_coupled_target & mode_mask).sum().item()
+                )
+                mode_coupled_bypass[name] += int(
+                    (new_coupled_bypass & mode_mask).sum().item()
+                )
             previous_clearance = clearance.clone()
             previous_stable = stable.clone()
             previous_secured = secured.clone()
@@ -577,6 +784,12 @@ def main() -> int:
             previous_lip_commitment = lip_commitment.clone()
             previous_lip_checkpoint_progress = lip_checkpoint_progress.clone()
             previous_lip_checkpoint_target = lip_checkpoint_target.clone()
+            previous_coupled_raw_gain10 = coupled_raw_gain10.clone()
+            previous_coupled_raw_gain25 = coupled_raw_gain25.clone()
+            previous_coupled_gain10 = coupled_gain10.clone()
+            previous_coupled_gain25 = coupled_gain25.clone()
+            previous_coupled_target = coupled_target.clone()
+            previous_coupled_bypass = coupled_bypass.clone()
             previous_clearance[done_mask] = False
             previous_stable[done_mask] = False
             previous_secured[done_mask] = False
@@ -585,6 +798,12 @@ def main() -> int:
             previous_lip_commitment[done_mask] = False
             previous_lip_checkpoint_progress[done_mask] = False
             previous_lip_checkpoint_target[done_mask] = False
+            previous_coupled_raw_gain10[done_mask] = False
+            previous_coupled_raw_gain25[done_mask] = False
+            previous_coupled_gain10[done_mask] = False
+            previous_coupled_gain25[done_mask] = False
+            previous_coupled_target[done_mask] = False
+            previous_coupled_bypass[done_mask] = False
             face_contact_metrics.reset(done_mask)
             tread_contact_metrics.reset(done_mask)
             for metrics in body_part_tread_metrics.values():
@@ -649,6 +868,24 @@ def main() -> int:
             "lip_checkpoint_target_events": mode_lip_checkpoint_target[name],
             "lip_checkpoint_target_rate": mode_lip_checkpoint_target[name]
             / max(trials, 1),
+            "coupled_frontier_raw_gain10_events": mode_coupled_raw_gain10[name],
+            "coupled_frontier_raw_gain10_rate": mode_coupled_raw_gain10[name]
+            / max(trials, 1),
+            "coupled_frontier_raw_gain25_events": mode_coupled_raw_gain25[name],
+            "coupled_frontier_raw_gain25_rate": mode_coupled_raw_gain25[name]
+            / max(trials, 1),
+            "coupled_frontier_gain10_events": mode_coupled_gain10[name],
+            "coupled_frontier_gain10_rate": mode_coupled_gain10[name]
+            / max(trials, 1),
+            "coupled_frontier_gain25_events": mode_coupled_gain25[name],
+            "coupled_frontier_gain25_rate": mode_coupled_gain25[name]
+            / max(trials, 1),
+            "coupled_frontier_target_events": mode_coupled_target[name],
+            "coupled_frontier_target_rate": mode_coupled_target[name]
+            / max(trials, 1),
+            "coupled_frontier_bypass_events": mode_coupled_bypass[name],
+            "coupled_frontier_bypass_rate": mode_coupled_bypass[name]
+            / max(trials, 1),
             "root_center_over_lip_events": mode_a12_event_counts[name][
                 "root_center_over_lip"
             ],
@@ -669,7 +906,7 @@ def main() -> int:
         }
     iteration_match = re.search(r"model_(\d+)$", checkpoint.stem)
     report: dict[str, object] = {
-        "schema_version": 6,
+        "schema_version": 9,
         "task": args.task,
         "checkpoint": str(checkpoint),
         "checkpoint_iteration": (
@@ -723,6 +960,35 @@ def main() -> int:
             },
             "secured_tread": "existing_strict_environment_latch",
         },
+        "joint_frontier": {
+            "definition": (
+                "per-trial maximum of min(normalized_x, normalized_z) in the "
+                "strict lateral corridor; x and z are sampled in the same frame"
+            ),
+            "start_x_m": JOINT_FRONTIER_START_X_M,
+            "target_x_m": JOINT_FRONTIER_TARGET_X_M,
+            "start_z_m": JOINT_FRONTIER_START_Z_M,
+            "target_z_m": JOINT_FRONTIER_TARGET_Z_M,
+            "max_abs_y_m": JOINT_FRONTIER_MAX_ABS_Y_M,
+            "progress_quantiles": quantiles(joint_frontier_progress),
+            "best_same_frame_x_m_quantiles": quantiles(
+                [value for value in joint_frontier_best_x if value == value]
+            ),
+            "best_same_frame_z_m_quantiles": quantiles(
+                [value for value in joint_frontier_best_z if value == value]
+            ),
+            "milestones": {
+                f"x>={min_x:.3f},z>={min_z:.3f}": {
+                    "events": events,
+                    "rate": events / denominator,
+                }
+                for (min_x, min_z), events in zip(
+                    JOINT_FRONTIER_MILESTONES,
+                    joint_frontier_milestone_counts,
+                    strict=True,
+                )
+            },
+        },
         "riser_face_contact_events": face_contact_events,
         "riser_face_contact_rate": face_contact_events / denominator,
         "first_tread_contact_events": tread_contact_events,
@@ -737,6 +1003,18 @@ def main() -> int:
         "lip_checkpoint_progress_rate": lip_checkpoint_progress_events / denominator,
         "lip_checkpoint_target_events": lip_checkpoint_target_events,
         "lip_checkpoint_target_rate": lip_checkpoint_target_events / denominator,
+        "coupled_frontier_raw_gain10_events": coupled_raw_gain10_events,
+        "coupled_frontier_raw_gain10_rate": coupled_raw_gain10_events / denominator,
+        "coupled_frontier_raw_gain25_events": coupled_raw_gain25_events,
+        "coupled_frontier_raw_gain25_rate": coupled_raw_gain25_events / denominator,
+        "coupled_frontier_gain10_events": coupled_gain10_events,
+        "coupled_frontier_gain10_rate": coupled_gain10_events / denominator,
+        "coupled_frontier_gain25_events": coupled_gain25_events,
+        "coupled_frontier_gain25_rate": coupled_gain25_events / denominator,
+        "coupled_frontier_target_events": coupled_target_events,
+        "coupled_frontier_target_rate": coupled_target_events / denominator,
+        "coupled_frontier_bypass_events": coupled_bypass_events,
+        "coupled_frontier_bypass_rate": coupled_bypass_events / denominator,
         "body_part_tread_contact_events": body_part_tread_events,
         "body_part_tread_contact_rates": {
             name: events / denominator
