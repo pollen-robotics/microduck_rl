@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import time
 from collections import deque
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from threading import Event, Lock
+from threading import Event, Lock, Thread
 from typing import Any
 
-from mjlab_microduck.rom.contracts import RobotStatus
+from mjlab_microduck.rom.contracts import RobotStatus, TaskEvidence
+from mjlab_microduck.rom.process_protocol import AckPayload, TerminalPayload
+from mjlab_microduck.rom.process_supervisor import SupervisorSnapshot
 from mjlab_microduck.rom.runtime import RuntimeEvidence, RuntimeHandle, RuntimeSample
+from mjlab_microduck.rom.supervisor_state import SupervisorState
 
 
 class FakeMicroduckRuntime:
@@ -24,6 +28,7 @@ class FakeMicroduckRuntime:
         self.start_release.set()
         self.safe_stopped = Event()
         self.sample_started = Event()
+        self.sample_available = Event()
         self.sample_release = Event()
         self.sample_release.set()
         self.command_started = Event()
@@ -52,6 +57,10 @@ class FakeMicroduckRuntime:
         self.status_call_count = 0
         self.active_handle: RuntimeHandle | None = None
 
+    def __call__(self, terminal_callback):
+        """Build the process-supervisor test double used by service tests."""
+        return FakeRuntimeProcessSupervisor(self, terminal_callback)
+
     def complete_next(
         self, *, state: str, metrics: dict[str, Any], stop_reason: str | None = None
     ) -> None:
@@ -63,9 +72,11 @@ class FakeMicroduckRuntime:
                 stopReason=stop_reason,
             )
         )
+        self.sample_available.set()
 
     def fail_next_sample(self, error: BaseException) -> None:
         self._samples.append(error)
+        self.sample_available.set()
 
     def validate(self, action: Any, request: Any) -> None:
         self.validation_started.set()
@@ -164,3 +175,153 @@ def robot_status(*, healthy: bool = True) -> RobotStatus:
         limp=False,
         health={"ready": healthy, "healthy": healthy},
     )
+
+
+class FakeRuntimeProcessSupervisor:
+    def __init__(self, runtime, callback) -> None:
+        self.runtime, self.callback = runtime, callback
+        self.active_request = None
+        self.handle = None
+        self._generation = 1
+        self._terminal = None
+        self._operation_lock = Lock()
+        self._finish_lock = Lock()
+
+    def snapshot(self):
+        running = self.handle is not None
+        status = self.runtime.status_value
+        healthy = (
+            bool(status.health.get("ready", True)) and self.runtime.status_error is None
+        )
+        return SupervisorSnapshot(
+            SupervisorState.RUNNING if running else SupervisorState.IDLE,
+            self._generation,
+            healthy,
+            status,
+            None,
+            not running,
+            cached_terminal=self._terminal,
+        )
+
+    def readiness(self):
+        snap = self.snapshot()
+        return snap.child_healthy and snap.slot_releasable
+
+    def ensure_ready(self):
+        if self.runtime.status_error is not None:
+            raise self.runtime.status_error
+        self.runtime.status()
+        return self.snapshot()
+
+    def start(self, request):
+        with self._operation_lock:
+            self.runtime.validate(request, request)
+            try:
+                self.handle = self.runtime.start(request, request)
+            except Exception:
+                self.runtime.safe_stop(None, "RUNTIME_EXCEPTION")
+                raise
+            self.active_request = request
+            Thread(target=self._monitor, daemon=True).start()
+            return AckPayload(acknowledgedKind="START")
+
+    def _monitor(self):
+        from mjlab_microduck.rom import process_service
+
+        handle = self.handle
+        completion = process_service.action_template(
+            self.active_request.actionCode
+        ).completion
+        deadline = (
+            time.monotonic() + completion.maxDurationMs / 1000 if completion else None
+        )
+        while handle is not None and self.handle == handle:
+            if not self.runtime._samples:
+                self.runtime.sample_available.wait(0.005)
+                if deadline is not None and time.monotonic() >= deadline:
+                    self._finish("TIMED_OUT", "MAX_DURATION_EXCEEDED", {})
+                    return
+                continue
+            try:
+                sample = self.runtime.sample(handle)
+            except Exception:  # noqa: BLE001 - emulate sanitized child failure.
+                self._finish("FAILED", "RUNTIME_EXCEPTION", {})
+                return
+            if sample.terminalState is not None:
+                reason = (
+                    "TASK_COMPLETE"
+                    if sample.terminalState == "SUCCEEDED"
+                    else (sample.stopReason or "RUNTIME_FAILED")
+                )
+                self._finish(sample.terminalState, reason, sample.metrics)
+                return
+            self.runtime.sample_available.clear()
+            if deadline is not None and time.monotonic() >= deadline:
+                self._finish("TIMED_OUT", "MAX_DURATION_EXCEEDED", {})
+                return
+            Event().wait(0.001)
+
+    def command(self, task_id, command):
+        with self._operation_lock:
+            self.runtime.command(self.handle, command.parameters)
+            return AckPayload(acknowledgedKind="COMMAND")
+
+    def status(self, task_id):
+        return self.runtime.status()
+
+    def stop(self, task_id, reason):
+        with self._operation_lock:
+            return self._finish(
+                (
+                    "CANCELLED"
+                    if reason == "CANCELLED"
+                    else "TIMED_OUT"
+                    if reason == "LEASE_EXPIRED"
+                    else "FAILED"
+                ),
+                reason,
+                {},
+            )
+
+    def _finish(self, outcome, reason, metrics):
+        with self._finish_lock:
+            return self._finish_owned(outcome, reason, metrics)
+
+    def _finish_owned(self, outcome, reason, metrics):
+        if self.handle is None and self._terminal is not None:
+            return self._terminal
+        handle = self.handle
+        if self.active_request is not None and self.active_request.leaseMs is not None:
+            self.runtime.command(
+                handle, {"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0}
+            )
+        stopped = self.runtime.safe_stop(handle, reason)
+        combined = {}
+        if reason == "WATCHDOG_FAILURE":
+            combined["safetyFailure"] = reason
+        for source in (metrics, stopped.metrics):
+            for key in sorted(source):
+                try:
+                    RuntimeEvidence(metrics=combined | {key: source[key]})
+                except (TypeError, ValueError):
+                    continue
+                combined[key] = source[key]
+        terminal = TerminalPayload(
+            outcome=outcome,
+            evidence=TaskEvidence(
+                bundleDigest=self.active_request.bundleDigest,
+                policyDigest="sha256:"
+                + ("b" if self.active_request.actionCode == "STAND" else "c") * 64,
+                modelDigest="sha256:" + "c" * 64,
+                metrics=combined,
+                stopReason=reason,
+            ),
+        )
+        self.handle = None
+        self._terminal = terminal
+        self.callback(terminal)
+        return terminal
+
+    def close(self):
+        if self.handle is not None:
+            self.stop(self.active_request.taskId, "SUPERVISOR_SHUTDOWN")

@@ -23,7 +23,7 @@ from .contracts import (
     sha256_prefixed,
     unsigned_policy_bundle_manifest,
 )
-from .runtime import RuntimeEvidence, RuntimeHandle, RuntimeSample, SimulationRuntime
+from .process_supervisor import RuntimeProcessSupervisor
 from .service import SimulatorTaskService
 from .store import SqliteTaskStore
 
@@ -329,34 +329,11 @@ def _state_db_path_is_usable(state_db: Path) -> bool:
     return state_db.parent.is_dir() and os.access(state_db.parent, os.W_OK | os.X_OK)
 
 
-def _runtime_is_ready(runtime: SimulationRuntime) -> bool:
-    """Only a usable runtime may trigger durable task reconciliation."""
-    try:
-        return bool(runtime.status().health.get("ready"))
-    except Exception:  # noqa: BLE001 - startup must fail closed.
-        return False
-
-
 class UnconfiguredRuntime:
-    """Explicit fail-closed placeholder whose motion methods always refuse work."""
-
-    def _unavailable(self) -> None:
-        raise RuntimeError("simulator runtime is not configured")
+    """Legacy diagnostic placeholder; it is never a service execution fallback."""
 
     def validate(self, *_: Any) -> None:
-        self._unavailable()
-
-    def start(self, *_: Any) -> RuntimeHandle:
-        self._unavailable()
-
-    def command(self, *_: Any) -> None:
-        self._unavailable()
-
-    def sample(self, *_: Any) -> RuntimeSample:
-        self._unavailable()
-
-    def safe_stop(self, *_: Any) -> RuntimeEvidence:
-        self._unavailable()
+        raise RuntimeError("simulator runtime is not configured")
 
     def status(self) -> RobotStatus:
         return RobotStatus(
@@ -375,12 +352,16 @@ class UnconfiguredRuntime:
             loopFrequencyHz=0.0,
             fallen=False,
             limp=True,
-            health={"ready": False, "reason": "RUNTIME_UNCONFIGURED"},
+            health={
+                "ready": False,
+                "healthy": False,
+                "reasonCodes": ["RUNTIME_UNCONFIGURED"],
+            },
         )
 
 
 def create_configured_app(
-    environ: Mapping[str, str] = os.environ, *, runtime: SimulationRuntime | None = None
+    environ: Mapping[str, str] = os.environ, *, runtime: Any | None = None
 ):
     """Compose the verified concrete runtime, or remain explicitly fail-closed."""
     configuration = read_configuration(environ)
@@ -404,26 +385,26 @@ def create_configured_app(
     )
     if not state_db_usable:
         reasons.append("STATE_DB_UNAVAILABLE")
-    if bundle is not None and runtime is None:
+    if bundle is not None and state_db_usable:
+        assert configuration.state_db is not None
         try:
-            from .mujoco_runtime import MicroduckMujocoRuntime
-
             assert configuration.bundle_dir is not None
-            runtime = MicroduckMujocoRuntime(configuration.bundle_dir, bundle)
-        except Exception:  # noqa: BLE001 - startup must fail closed without artifact details.
-            runtime = None
-    if bundle is not None:
-        if runtime is None or not _runtime_is_ready(runtime):
-            reasons.append("RUNTIME_UNAVAILABLE")
-        elif state_db_usable:
-            assert configuration.state_db is not None
-            try:
-                service = SimulatorTaskService(
-                    bundle, SqliteTaskStore(configuration.state_db), runtime
+            supervisor_factory = runtime or (
+                lambda callback: RuntimeProcessSupervisor(
+                    bundle_root=configuration.bundle_dir,
+                    bundle_digest=bundle.bundleDigest,
+                    terminal_callback=callback,
+                    operation_timeout_s=10.0,
+                    owner_thread_name="microduck-runtime-supervisor-production",
                 )
-            except Exception:  # noqa: BLE001 - do not leak filesystem or database contents.
-                reasons.append("STATE_DB_UNAVAILABLE")
+            )
+            service = SimulatorTaskService(
+                bundle, SqliteTaskStore(configuration.state_db), supervisor_factory
+            )
+        except Exception:  # noqa: BLE001 - do not leak filesystem or database contents.
+            reasons.append("RUNTIME_UNAVAILABLE")
     app = create_app(service, configuration.bearer_token)
+    app.state.task_service = service
     app.state.installed_bundle = bundle
     app.state.readiness_reason_codes = reasons
     return app

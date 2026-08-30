@@ -73,7 +73,9 @@ class ChildLaunch:
 
 
 type LaunchFactory = Callable[[int], ChildLaunch]
-type IntentKind = Literal["ready", "start", "command", "status", "stop", "close", "delivery"]
+type IntentKind = Literal[
+    "ready", "start", "command", "status", "stop", "close", "delivery"
+]
 
 
 @dataclass(slots=True)
@@ -106,6 +108,7 @@ class RuntimeProcessSupervisor:
         terminal_callback: Callable[[TerminalPayload], None] | None = None,
         terminal_retry_delay_s: float = 0.05,
         terminal_retry_limit: int = 3,
+        owner_thread_name: str = "microduck-runtime-supervisor",
     ) -> None:
         if (
             min(operation_timeout_s, terminate_timeout_s, terminal_retry_delay_s) <= 0
@@ -161,7 +164,7 @@ class RuntimeProcessSupervisor:
         self._submission_lock = threading.Lock()
         self._close_intent: _Intent | None = None
         self._thread = threading.Thread(
-            target=self._run, name="microduck-runtime-supervisor", daemon=True
+            target=self._run, name=owner_thread_name, daemon=True
         )
         self._thread.start()
 
@@ -224,10 +227,15 @@ class RuntimeProcessSupervisor:
 
     def readiness(self) -> bool:
         snap = self.snapshot()
-        return snap.child_healthy and snap.slot_releasable and snap.state in {
-            SupervisorState.IDLE,
-            SupervisorState.RUNNING,
-        }
+        return (
+            snap.child_healthy
+            and snap.slot_releasable
+            and snap.state
+            in {
+                SupervisorState.IDLE,
+                SupervisorState.RUNNING,
+            }
+        )
 
     @property
     def terminal_delivery_alive(self) -> bool:
@@ -281,7 +289,9 @@ class RuntimeProcessSupervisor:
         if not intent.done.wait(wait_bound):
             raise SupervisorUnavailable("close could not reach the process owner")
         if intent.error is not None:
-            raise SupervisorUnavailable("close process containment failed") from intent.error
+            raise SupervisorUnavailable(
+                "close process containment failed"
+            ) from intent.error
 
     def _shutdown_terminal_delivery(self) -> None:
         thread = self._terminal_thread
@@ -516,7 +526,7 @@ class RuntimeProcessSupervisor:
             bundleDigest=request.bundleDigest,
             parameters=request.parameters,
             scenario=request.scenario,
-            leaseMs=request.leaseMs or 1000,
+            leaseMs=request.leaseMs,
         )
         response = self._guarded_exchange(
             RuntimeMessageKind.START, request.taskId, payload, {RuntimeMessageKind.ACK}
@@ -658,13 +668,19 @@ class RuntimeProcessSupervisor:
             return response
 
     def _poll_unsolicited(self) -> None:
-        if self._socket is None or self._process is None or self._process.poll() is not None:
+        if (
+            self._socket is None
+            or self._process is None
+            or self._process.poll() is not None
+        ):
             return
         readable, _, _ = select.select([self._socket], [], [], 0)
         if not readable:
             return
         try:
-            packet, _ancillary, flags, _address = self._socket.recvmsg(PACKET_MAX_BYTES + 1)
+            packet, _ancillary, flags, _address = self._socket.recvmsg(
+                PACKET_MAX_BYTES + 1
+            )
             if not packet or flags & socket.MSG_TRUNC:
                 raise ConnectionError("child transport closed or truncated")
             message = decode_packet(packet)
@@ -733,18 +749,21 @@ class RuntimeProcessSupervisor:
         if not success:
             self._record("TERMINAL_DELIVERY_RETRY")
             delivery = self._outstanding_terminal_delivery
-            if delivery is None or self._terminal_delivery_attempts >= self._terminal_retry_limit:
+            if (
+                delivery is None
+                or self._terminal_delivery_attempts >= self._terminal_retry_limit
+            ):
                 self._record("TERMINAL_DELIVERY_PERMANENT_FAILURE")
                 return
             self._pending_terminal_delivery = delivery
-            self._terminal_retry_not_before = time.monotonic() + self._terminal_retry_delay
+            self._terminal_retry_not_before = (
+                time.monotonic() + self._terminal_retry_delay
+            )
             return
         self._terminal_delivery_outstanding = None
         self._outstanding_terminal_delivery = None
         self._pending_terminal_delivery = None
-        self._publish(
-            self.snapshot().state, slot=True, delivery_outstanding=False
-        )
+        self._publish(self.snapshot().state, slot=True, delivery_outstanding=False)
 
     def _quarantine(self, reason: str, *, protocol_usable: bool = False) -> None:
         self._advance(

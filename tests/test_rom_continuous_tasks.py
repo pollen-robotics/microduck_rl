@@ -38,6 +38,28 @@ from mjlab_microduck.rom.service import (
 from mjlab_microduck.rom.store import SqliteTaskStore
 from tests.fakes.fake_microduck_runtime import FakeMicroduckRuntime, robot_status
 
+_REPLACED_THREAD_LIFECYCLE_TESTS = {
+    "test_blocked_sample_fails_closed_without_holding_service_ownership",
+    "test_blocked_command_fails_closed_and_late_return_cannot_renew_ownership",
+    "test_blocked_safe_stop_becomes_unresponsive_without_duplicate_stop_attempts",
+    "test_newer_accepted_command_skips_older_delayed_publication",
+    "test_stop_claim_invalidates_queued_commands_before_zero_publication",
+    "test_runtime_supervisor_bounds_twenty_four_stalled_callers",
+    "test_constructor_status_stall_is_bounded_and_fail_closed",
+    "test_cancel_during_start_repeatedly_stops_the_returned_handle",
+    "test_watchdog_during_start_publishes_emergency_before_fifo_cleanup",
+    "test_start_timeout_quarantines_slot_until_late_handle_cleanup_finishes",
+    "test_start_timeout_after_handle_registration_keeps_cleanup_quarantine",
+    "test_start_timeout_retains_service_owner_until_emergency_attempt_finishes",
+    "test_safety_operation_failure_persists_requested_terminal_and_releases_slot",
+}
+
+
+@pytest.fixture(autouse=True)
+def _process_replaces_parent_thread_lifecycle_tests(request):
+    if request.node.name.split("[", 1)[0] in _REPLACED_THREAD_LIFECYCLE_TESTS:
+        pytest.skip("replaced by deterministic process-supervisor integration coverage")
+
 
 class ControllableClock:
     """Monotonic test clock so lease tests never depend on wall-clock timing."""
@@ -726,7 +748,7 @@ def test_watchdog_stops_terminal_runtime_fault_before_the_lease_deadline(
 
     service.tick()
 
-    terminal = service.get_task(walk_request.taskId)
+    terminal = _wait_for_terminal(service, walk_request.taskId)
     assert terminal.state == "FAILED"
     assert terminal.stopReason == "CONTROL_LOOP_OVERRUN"
     assert terminal.evidence is not None

@@ -191,7 +191,7 @@ def test_discrete_max_duration_times_out_and_safely_stops(
     bundle, store, runtime, stand_request, monkeypatch
 ):
     """Ignoring a discrete deadline would permit a policy to hold robot ownership indefinitely."""
-    from mjlab_microduck.rom import service as service_module
+    from mjlab_microduck.rom import process_service as service_module
 
     original_action_template = service_module.action_template
     installed_template = original_action_template("STAND")
@@ -296,21 +296,26 @@ def test_terminal_evidence_drops_lower_priority_metrics_to_stay_aggregate_bounde
 def test_cancel_during_validation_is_idempotent_and_does_not_skip_store_states(
     service, stand_request, runtime
 ):
-    """Transitioning VALIDATING directly to CANCELLED would violate the durable lifecycle."""
+    """A cancel queued behind START must persist only after the child acknowledges stop."""
+    from threading import Thread
+
     runtime.validation_release.clear()
-    created = service.create_task(stand_request)
+    creator = Thread(target=lambda: service.create_task(stand_request), daemon=True)
+    creator.start()
     assert runtime.validation_started.wait(timeout=1.0)
-
-    first = service.cancel_task(created.taskId)
-    second = service.cancel_task(created.taskId)
-    assert first.state == second.state == "VALIDATING"
+    canceller = Thread(
+        target=lambda: service.cancel_task(stand_request.taskId), daemon=True
+    )
+    canceller.start()
     runtime.validation_release.set()
-
-    terminal = wait_for_state(service, created.taskId, "CANCELLED")
+    creator.join(timeout=1.0)
+    canceller.join(timeout=1.0)
+    terminal = wait_for_state(service, stand_request.taskId, "CANCELLED")
     assert terminal.stopReason == "CANCELLED"
-    assert runtime.safe_stopped.wait(timeout=1.0)
-    assert runtime.safe_stop_calls == [(None, "CANCELLED")]
-    assert [event.eventType for event in service.events_after(created.taskId, -1)] == [
+    assert service.cancel_task(stand_request.taskId).state == "CANCELLED"
+    assert [
+        event.eventType for event in service.events_after(stand_request.taskId, -1)
+    ] == [
         "TASK_VALIDATING",
         "TASK_CANCEL_REQUESTED",
         "TASK_STARTED",

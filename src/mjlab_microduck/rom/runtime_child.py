@@ -52,7 +52,15 @@ from .runtime import RuntimeEvidence, RuntimeHandle, RuntimeSample, SimulationRu
 from .runtime_identity import runtime_revision
 
 _ALLOWED_ENVIRONMENT = frozenset(
-    {"HOME", "LANG", "LC_ALL", "LD_LIBRARY_PATH", "MUJOCO_GL", "OMP_NUM_THREADS", "PATH"}
+    {
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LD_LIBRARY_PATH",
+        "MUJOCO_GL",
+        "OMP_NUM_THREADS",
+        "PATH",
+    }
 )
 _ERROR_CODES = {
     RuntimeMessageKind.HELLO: "PROTOCOL_INCOMPATIBLE",
@@ -101,7 +109,11 @@ class _RuntimeCompletion:
 
 
 def clear_runtime_environment() -> None:
-    kept = {name: value for name, value in os.environ.items() if name in _ALLOWED_ENVIRONMENT}
+    kept = {
+        name: value
+        for name, value in os.environ.items()
+        if name in _ALLOWED_ENVIRONMENT
+    }
     os.environ.clear()
     os.environ.update(kept)
 
@@ -114,11 +126,16 @@ class RuntimeChildHost:
         control: socket.socket,
         *,
         bundle_root: Path | None = None,
-        runtime_factory: Callable[[Path, PolicyBundle], SimulationRuntime] = MicroduckMujocoRuntime,
+        runtime_factory: Callable[
+            [Path, PolicyBundle], SimulationRuntime
+        ] = MicroduckMujocoRuntime,
         clock: Callable[[], float] = time.monotonic,
         fatal_cleanup_timeout_s: float = _FATAL_CLEANUP_TIMEOUT_S,
     ) -> None:
-        if control.family != socket.AF_UNIX or (control.type & 0xF) != socket.SOCK_SEQPACKET:
+        if (
+            control.family != socket.AF_UNIX
+            or (control.type & 0xF) != socket.SOCK_SEQPACKET
+        ):
             raise ValueError("runtime socket must be Unix SOCK_SEQPACKET")
         self._socket = control
         self._bundle_root = bundle_root
@@ -127,7 +144,9 @@ class RuntimeChildHost:
         if fatal_cleanup_timeout_s <= 0:
             raise ValueError("fatal cleanup timeout must be positive")
         self._fatal_cleanup_timeout_s = fatal_cleanup_timeout_s
-        self._messages: queue.Queue[RuntimeMessage | _RuntimeCompletion | None] = queue.Queue(maxsize=8)
+        self._messages: queue.Queue[RuntimeMessage | _RuntimeCompletion | None] = (
+            queue.Queue(maxsize=8)
+        )
         self._send_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._stop = threading.Event()
@@ -152,7 +171,9 @@ class RuntimeChildHost:
         self._sample_stop = threading.Event()
         self._latest_sample_metrics: dict[str, object] = {}
         self._completed_identity: tuple[int, str] | None = None
-        self._truthfully_stopped_completion: tuple[int, str, RuntimeHandle] | None = None
+        self._truthfully_stopped_completion: tuple[int, str, RuntimeHandle] | None = (
+            None
+        )
 
     @property
     def sample_monitor_alive(self) -> bool:
@@ -166,7 +187,9 @@ class RuntimeChildHost:
         except OSError:
             return False
 
-    def _response(self, request: RuntimeMessage, kind: RuntimeMessageKind, payload: object) -> RuntimeMessage:
+    def _response(
+        self, request: RuntimeMessage, kind: RuntimeMessageKind, payload: object
+    ) -> RuntimeMessage:
         return RuntimeMessage(
             kind=kind,
             generation=request.generation,
@@ -192,7 +215,9 @@ class RuntimeChildHost:
     def _receive(self) -> None:
         while not self._stop.is_set():
             try:
-                packet, _ancillary, flags, _address = self._socket.recvmsg(PACKET_MAX_BYTES + 1)
+                packet, _ancillary, flags, _address = self._socket.recvmsg(
+                    PACKET_MAX_BYTES + 1
+                )
             except OSError:
                 packet = b""
                 flags = 0
@@ -232,9 +257,7 @@ class RuntimeChildHost:
                 return
             self._put_message(message)
 
-    def _put_message(
-        self, message: RuntimeMessage | _RuntimeCompletion | None
-    ) -> None:
+    def _put_message(self, message: RuntimeMessage | _RuntimeCompletion | None) -> None:
         try:
             self._messages.put_nowait(message)
         except queue.Full:
@@ -286,7 +309,11 @@ class RuntimeChildHost:
             )
         else:
             evidence = RuntimeEvidence(stopReason=reason)
-        if handle is None and self._operation_active.is_set() and self._task_id is not None:
+        if (
+            handle is None
+            and self._operation_active.is_set()
+            and self._task_id is not None
+        ):
             # START may already own native resources but has not returned its handle.
             # Emergency zero is bounded; truthful cleanup acknowledgement is impossible.
             self._cleanup_timed_out.set()
@@ -302,7 +329,9 @@ class RuntimeChildHost:
                 return
             try:
                 template = action_template(self._bundle_action_code())
-                zero: Mapping[str, object] = template.lease.zeroCommand if template.lease else {}
+                zero: Mapping[str, object] = (
+                    template.lease.zeroCommand if template.lease else {}
+                )
                 runtime.command(handle, zero)
             except Exception:  # noqa: BLE001 - safe-stop still must be attempted
                 cleanup_evidence = RuntimeEvidence(
@@ -379,12 +408,20 @@ class RuntimeChildHost:
     def _bundle_action_code(self) -> str:
         return self._active_action_code
 
-    def _terminal(self, request: RuntimeMessage, reason: str, evidence: RuntimeEvidence) -> RuntimeMessage:
+    def _terminal(
+        self, request: RuntimeMessage, reason: str, evidence: RuntimeEvidence
+    ) -> RuntimeMessage:
         if not _cleanup_evidence_is_truthful(evidence):
             raise ValueError("cleanup evidence does not prove containment")
         assert self._bundle is not None
-        action = next(item for item in self._bundle.actions if item.actionCode == self._active_action_code)
-        policy = next(item for item in self._bundle.policies if item.policyRef == action.policyRef)
+        action = next(
+            item
+            for item in self._bundle.actions
+            if item.actionCode == self._active_action_code
+        )
+        policy = next(
+            item for item in self._bundle.policies if item.policyRef == action.policyRef
+        )
         if reason == "LEASE_EXPIRED":
             outcome = "TIMED_OUT"
         elif reason in {"OPERATOR_CANCELLED", "CANCELLED", "USER_CANCELLED"}:
@@ -439,9 +476,16 @@ class RuntimeChildHost:
                         with self._state_lock:
                             self._latest_sample_metrics = dict(sample.metrics)
                     if sample.terminalState is not None:
-                        reason = sample.stopReason or (
-                            "TASK_COMPLETE" if sample.terminalState == "SUCCEEDED" else "RUNTIME_FAILED"
-                        )
+                        if sample.terminalState == "SUCCEEDED":
+                            reason = "TASK_COMPLETE"
+                        elif template.execution_mode == "DISCRETE":
+                            reason = (
+                                "FALLEN"
+                                if sample.stopReason == "FALLEN"
+                                else "RUNTIME_FAILED"
+                            )
+                        else:
+                            reason = sample.stopReason or "RUNTIME_FAILED"
                         outcome = sample.terminalState
                         break
                     self._sample_stop.wait(0.02)
@@ -489,11 +533,16 @@ class RuntimeChildHost:
             return
         with self._completion_claim:
             with self._state_lock:
-                if completion.handle is not self._handle or self._safety_requested.is_set():
+                if (
+                    completion.handle is not self._handle
+                    or self._safety_requested.is_set()
+                ):
                     return
             assert self._runtime is not None
             try:
-                raw_stopped = self._runtime.safe_stop(completion.handle, completion.reason)
+                raw_stopped = self._runtime.safe_stop(
+                    completion.handle, completion.reason
+                )
                 stopped = RuntimeEvidence(
                     metrics=raw_stopped.metrics, stopReason=raw_stopped.stopReason
                 )
@@ -512,23 +561,29 @@ class RuntimeChildHost:
                     break
                 metrics = candidate
             assert self._bundle is not None
-            action = next(item for item in self._bundle.actions if item.actionCode == self._active_action_code)
-            policy = next(item for item in self._bundle.policies if item.policyRef == action.policyRef)
+            action = next(
+                item
+                for item in self._bundle.actions
+                if item.actionCode == self._active_action_code
+            )
+            policy = next(
+                item
+                for item in self._bundle.policies
+                if item.policyRef == action.policyRef
+            )
             terminal = TerminalPayload(
                 outcome=completion.outcome,
                 evidence=TaskEvidence(
                     bundleDigest=self._bundle.bundleDigest,
                     policyDigest=policy.digest,
                     modelDigest=self._bundle.model.digest,
-                    metrics=metrics, stopReason=completion.reason,
+                    metrics=metrics,
+                    stopReason=completion.reason,
                 ),
             )
             with self._state_lock:
                 generation, task_id = self._generation, self._task_id
-                if (
-                    generation != completion.generation
-                    or task_id != completion.task_id
-                ):
+                if generation != completion.generation or task_id != completion.task_id:
                     self._retire_uncertain_cleanup()
                     return
                 self._handle = None
@@ -536,11 +591,17 @@ class RuntimeChildHost:
                 self._event_sequence += 1
                 event_sequence = self._event_sequence
             assert generation is not None and task_id is not None
-            self._send(RuntimeMessage(
-                kind=RuntimeMessageKind.TERMINAL_EVENT,
-                generation=generation, operationSequence=0, taskId=task_id,
-                payload=TerminalEventPayload(eventSequence=event_sequence, terminal=terminal),
-            ))
+            self._send(
+                RuntimeMessage(
+                    kind=RuntimeMessageKind.TERMINAL_EVENT,
+                    generation=generation,
+                    operationSequence=0,
+                    taskId=task_id,
+                    payload=TerminalEventPayload(
+                        eventSequence=event_sequence, terminal=terminal
+                    ),
+                )
+            )
             with self._state_lock:
                 self._completed_identity = (generation, task_id)
                 self._generation = None
@@ -578,7 +639,8 @@ class RuntimeChildHost:
         if (
             active_handle is None
             and completed_identity == (message.generation, message.taskId)
-            and message.kind in {
+            and message.kind
+            in {
                 RuntimeMessageKind.COMMAND,
                 RuntimeMessageKind.STATUS,
                 RuntimeMessageKind.ZERO_AND_STOP,
@@ -594,10 +656,20 @@ class RuntimeChildHost:
                 if message.payload.runtimeRevision != runtime_revision():
                     self._error(message)
                     return False
-                self._send(self._response(message, RuntimeMessageKind.ACK, AckPayload(acknowledgedKind="HELLO")))
+                self._send(
+                    self._response(
+                        message,
+                        RuntimeMessageKind.ACK,
+                        AckPayload(acknowledgedKind="HELLO"),
+                    )
+                )
             elif message.kind is RuntimeMessageKind.LOAD:
                 assert isinstance(message.payload, LoadPayload)
-                root = Path(message.payload.bundleRoot) if message.payload.bundleRoot else self._bundle_root
+                root = (
+                    Path(message.payload.bundleRoot)
+                    if message.payload.bundleRoot
+                    else self._bundle_root
+                )
                 if root is None:
                     raise ValueError
                 bundle = load_qualified_bundle(root)
@@ -605,7 +677,16 @@ class RuntimeChildHost:
                     raise ValueError
                 runtime = self._runtime_factory(root, bundle)
                 self._bundle, self._runtime = bundle, runtime
-                self._send(self._response(message, RuntimeMessageKind.READY, ReadyPayload(runtimeRevision=runtime_revision(), bundleDigest=bundle.bundleDigest)))
+                self._send(
+                    self._response(
+                        message,
+                        RuntimeMessageKind.READY,
+                        ReadyPayload(
+                            runtimeRevision=runtime_revision(),
+                            bundleDigest=bundle.bundleDigest,
+                        ),
+                    )
+                )
             elif message.kind is RuntimeMessageKind.START:
                 self._start(message)
             elif message.kind is RuntimeMessageKind.COMMAND:
@@ -614,7 +695,13 @@ class RuntimeChildHost:
                 if not self._matches_active(message):
                     raise ValueError
                 assert self._runtime is not None
-                self._send(self._response(message, RuntimeMessageKind.STATUS, StatusPayload(status=self._runtime.status())))
+                self._send(
+                    self._response(
+                        message,
+                        RuntimeMessageKind.STATUS,
+                        StatusPayload(status=self._runtime.status()),
+                    )
+                )
             elif message.kind is RuntimeMessageKind.ZERO_AND_STOP:
                 assert isinstance(message.payload, ZeroAndStopPayload)
                 if not self._matches_active(message):
@@ -624,7 +711,13 @@ class RuntimeChildHost:
                 assert isinstance(message.payload, ShutdownPayload)
                 if self._handle is not None:
                     raise ValueError
-                self._send(self._response(message, RuntimeMessageKind.ACK, AckPayload(acknowledgedKind="SHUTDOWN")))
+                self._send(
+                    self._response(
+                        message,
+                        RuntimeMessageKind.ACK,
+                        AckPayload(acknowledgedKind="SHUTDOWN"),
+                    )
+                )
                 return False
         except Exception:  # noqa: BLE001 - peer receives only code-owned errors
             self._error(message)
@@ -639,7 +732,9 @@ class RuntimeChildHost:
             if not self._retire_sample_monitor():
                 return
             template = action_template(self._active_action_code)
-            zero: Mapping[str, object] = template.lease.zeroCommand if template.lease else {}
+            zero: Mapping[str, object] = (
+                template.lease.zeroCommand if template.lease else {}
+            )
             self._runtime.command(handle, zero)
             raw_evidence = self._runtime.safe_stop(handle, reason)
             evidence = RuntimeEvidence(
@@ -651,7 +746,9 @@ class RuntimeChildHost:
             self._send(self._terminal(message, reason, evidence))
             with self._state_lock:
                 self._truthfully_stopped_completion = (
-                    message.generation, message.taskId, handle
+                    message.generation,
+                    message.taskId,
+                    handle,
                 )
                 self._handle = None
                 self._generation = None
@@ -674,9 +771,15 @@ class RuntimeChildHost:
             raise ValueError
         if message.payload.bundleDigest != self._bundle.bundleDigest:
             raise ValueError
-        validate_code_owned_parameters(message.payload.actionCode, message.payload.parameters)
+        validate_code_owned_parameters(
+            message.payload.actionCode, message.payload.parameters
+        )
         validate_code_owned_lease(message.payload.actionCode, message.payload.leaseMs)
-        action = next(item for item in self._bundle.actions if item.actionCode == message.payload.actionCode)
+        action = next(
+            item
+            for item in self._bundle.actions
+            if item.actionCode == message.payload.actionCode
+        )
         if action.availability != "AVAILABLE":
             raise ValueError
         request = TaskCreateRequest(
@@ -694,7 +797,11 @@ class RuntimeChildHost:
             self._generation = message.generation
             self._task_id = message.taskId
             self._active_action_code = message.payload.actionCode
-            self._lease_deadline = self._clock() + message.payload.leaseMs / 1000
+            self._lease_deadline = (
+                self._clock() + message.payload.leaseMs / 1000
+                if message.payload.leaseMs is not None
+                else None
+            )
             self._latest_sample_metrics = {}
             self._completed_identity = None
             self._truthfully_stopped_completion = None
@@ -705,7 +812,11 @@ class RuntimeChildHost:
                 self._runtime.safe_stop(handle, self._safety_reason or "RUNTIME_FAILED")
                 return
             self._handle = handle
-        self._send(self._response(message, RuntimeMessageKind.ACK, AckPayload(acknowledgedKind="START")))
+        self._send(
+            self._response(
+                message, RuntimeMessageKind.ACK, AckPayload(acknowledgedKind="START")
+            )
+        )
         self._event_sequence = 0
         self._start_runtime_monitor()
 
@@ -713,7 +824,9 @@ class RuntimeChildHost:
         assert isinstance(message.payload, CommandPayload)
         if not self._matches_active(message):
             raise ValueError
-        validate_code_owned_parameters(self._active_action_code, message.payload.parameters)
+        validate_code_owned_parameters(
+            self._active_action_code, message.payload.parameters
+        )
         validate_code_owned_lease(self._active_action_code, message.payload.leaseMs)
         with self._state_lock:
             self._lease_deadline = self._clock() + message.payload.leaseMs / 1000
@@ -721,11 +834,19 @@ class RuntimeChildHost:
         self._runtime.command(self._handle, message.payload.parameters)
         if self._safety_requested.is_set():
             return
-        self._send(self._response(message, RuntimeMessageKind.ACK, AckPayload(acknowledgedKind="COMMAND")))
+        self._send(
+            self._response(
+                message, RuntimeMessageKind.ACK, AckPayload(acknowledgedKind="COMMAND")
+            )
+        )
 
     def run(self) -> int:
-        receiver = threading.Thread(target=self._receive, name="runtime-child-ipc", daemon=True)
-        deadman = threading.Thread(target=self._deadman, name="runtime-child-deadman", daemon=True)
+        receiver = threading.Thread(
+            target=self._receive, name="runtime-child-ipc", daemon=True
+        )
+        deadman = threading.Thread(
+            target=self._deadman, name="runtime-child-deadman", daemon=True
+        )
         receiver.start()
         deadman.start()
         while not self._stop.is_set():

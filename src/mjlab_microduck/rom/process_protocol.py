@@ -90,7 +90,7 @@ class StartPayload(ContractModel):
     bundleDigest: str = Field(pattern=_DIGEST_PATTERN)
     parameters: ParameterObject
     scenario: Scenario
-    leaseMs: int = Field(strict=True, gt=0, le=60_000)
+    leaseMs: int | None = Field(default=None, strict=True, gt=0, le=60_000)
 
 
 class CommandPayload(ContractModel):
@@ -314,7 +314,12 @@ def decode_packet(packet: bytes) -> RuntimeMessage:
     try:
         raw = json.loads(packet.decode("utf-8"))
         message = RuntimeMessage.model_validate(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError) as exc:
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValidationError,
+        ValueError,
+    ) as exc:
         raise ProtocolViolation("invalid IPC packet") from exc
     if encode_packet(message) != packet:
         raise ProtocolViolation("IPC packet must use canonical JSON")

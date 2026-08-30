@@ -310,6 +310,11 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
                 app.state.watchdog_thread = watchdog_thread
             else:
                 app.state.watchdog_thread = None
+            if service is not None:
+                try:
+                    service.close()
+                except Exception:  # noqa: BLE001 - shutdown remains fail closed.
+                    app.state.watchdog_terminalization_failed = True
 
     app = FastAPI(
         title="MicroDuck ROM Simulator API",
@@ -484,7 +489,6 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
     def create_task(request: TaskCreateRequest) -> TaskSnapshot:
         if service is None:
             raise NotReady("simulator is not ready")
-        require_motion_ready()
         return service.create_task(request)
 
     @app.get(

@@ -1,0 +1,611 @@
+"""Durable task service backed exclusively by the isolated runtime supervisor."""
+
+from __future__ import annotations
+
+import math
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from threading import Lock
+from typing import Any, Protocol
+
+from .action_catalog import (
+    action_template,
+    code_owned_action_definition,
+    validate_action_definition_envelope,
+    validate_bundle_action_envelope,
+)
+from .contracts import (
+    ActionDefinition,
+    PolicyBundle,
+    RobotStatus,
+    TaskCommandRequest,
+    TaskCreateRequest,
+    TaskEvidence,
+    sha256_prefixed,
+)
+from .process_protocol import AckPayload, TerminalPayload
+from .process_supervisor import (
+    SupervisorOperationError,
+    SupervisorSnapshot,
+    SupervisorTaskTerminalized,
+    SupervisorUnavailable,
+)
+from .store import CommandSequenceConflict as StoreCommandSequenceConflict
+from .store import IllegalTaskTransition, SqliteTaskStore, TaskIdConflict
+from .store import StaleCommand as StoreStaleCommand
+
+
+class SimulatorServiceError(ValueError):
+    code = "INTERNAL_ERROR"
+
+
+class BundleMismatch(SimulatorServiceError):
+    code = "BUNDLE_MISMATCH"
+
+
+class ActionUnavailable(SimulatorServiceError):
+    code = "ACTION_UNAVAILABLE"
+
+
+class InvalidParameters(SimulatorServiceError):
+    code = "PARAMETER_INVALID"
+
+
+class PreconditionFailed(SimulatorServiceError):
+    code = "PRECONDITION_FAILED"
+
+
+class NotReady(SimulatorServiceError):
+    code = "NOT_READY"
+
+
+class RuntimeException(SimulatorServiceError):
+    code = "RUNTIME_EXCEPTION"
+
+
+class RobotBusy(SimulatorServiceError):
+    code = "ROBOT_BUSY"
+
+
+class TaskNotFound(SimulatorServiceError):
+    code = "TASK_NOT_FOUND"
+
+
+class TaskConflict(SimulatorServiceError):
+    code = "TASK_ID_CONFLICT"
+
+
+class CommandSequenceConflict(SimulatorServiceError):
+    code = "COMMAND_SEQUENCE_CONFLICT"
+
+
+class StaleCommand(SimulatorServiceError):
+    code = "STALE_COMMAND"
+
+
+class ProcessSupervisor(Protocol):
+    def ensure_ready(self) -> SupervisorSnapshot: ...
+    def snapshot(self) -> SupervisorSnapshot: ...
+    def readiness(self) -> bool: ...
+    def start(self, request: TaskCreateRequest) -> AckPayload: ...
+    def command(self, task_id: str, command: TaskCommandRequest) -> AckPayload: ...
+    def status(self, task_id: str) -> RobotStatus: ...
+    def stop(self, task_id: str, reason: str) -> TerminalPayload: ...
+    def close(self) -> None: ...
+
+
+type SupervisorFactory = Callable[
+    [Callable[[TerminalPayload], None]], ProcessSupervisor
+]
+TERMINAL = frozenset({"SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT", "UNKNOWN"})
+
+
+@dataclass(slots=True)
+class _ActiveTask:
+    generation: int
+    request: TaskCreateRequest
+    action: ActionDefinition
+    continuous: bool
+    stop_claimed: bool = False
+    deadline: float | None = None
+
+
+class SimulatorTaskService:
+    """Own durable identity only; all simulator resources remain in the child."""
+
+    def __init__(
+        self,
+        bundle: PolicyBundle,
+        store: SqliteTaskStore,
+        supervisor_factory: SupervisorFactory,
+        *,
+        pollIntervalS: float = 0.05,
+        runtimeCallTimeoutS: float = 0.25,
+        monotonic_clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        validate_bundle_action_envelope(bundle)
+        if pollIntervalS <= 0 or not 0 < runtimeCallTimeoutS <= 5:
+            raise ValueError("invalid service bound")
+        self._bundle, self._store, self._monotonic_clock = (
+            bundle,
+            store,
+            monotonic_clock,
+        )
+        self._store.mark_interrupted_unknown()
+        self._lock, self._active, self._next_generation = Lock(), None, 1
+        self._watchdog_healthy, self._readiness_failure_reason = True, None
+        self._supervisor = supervisor_factory(self._terminal_callback)
+        try:
+            self._supervisor.ensure_ready()
+        except Exception:  # noqa: BLE001 - startup diagnostics fail closed.
+            self._readiness_failure_reason = "RUNTIME_UNAVAILABLE"
+
+    def create_task(self, request: TaskCreateRequest):
+        self._reconcile_reaped_terminal()
+        request_hash = sha256_prefixed(request)
+        existing = self._store.get(request.taskId)
+        if existing is not None:
+            return self._create_idempotent(request, request_hash)
+        with self._lock:
+            if self._active is not None:
+                raise RobotBusy("robot already has an active task")
+        self._require_motion_ready()
+        action = self._validate_request(request)
+        self._require_preconditions(action, request)
+        with self._lock:
+            if self._store.get(request.taskId) is not None:
+                return self._create_idempotent(request, request_hash)
+            if self._active is not None:
+                raise RobotBusy("robot already has an active task")
+            try:
+                snapshot, created = self._store.create(request, request_hash)
+            except TaskIdConflict as exc:
+                raise TaskConflict(str(exc)) from exc
+            if not created:
+                return snapshot
+            active = _ActiveTask(
+                self._next_generation,
+                request,
+                action,
+                action.executionMode == "CONTINUOUS_LEASE",
+            )
+            self._next_generation += 1
+            self._active = active
+            self._store.transition(
+                request.taskId, "VALIDATING", event_type="TASK_VALIDATING"
+            )
+        try:
+            self._supervisor.start(request)
+            deadline = (
+                self._monotonic_clock() + request.leaseMs / 1000
+                if active.continuous and request.leaseMs
+                else None
+            )
+            with self._lock:
+                if self._active is not active:
+                    return (
+                        snapshot
+                        if not active.continuous
+                        else self._store.get(request.taskId)
+                    )
+                if active.stop_claimed:
+                    return self._store.get(request.taskId)
+                if active.continuous:
+                    active.deadline = deadline
+                    return self._store.start_continuous(request.taskId, deadline)
+                self._store.transition(
+                    request.taskId, "RUNNING", event_type="TASK_STARTED"
+                )
+                return snapshot
+        except SupervisorTaskTerminalized:
+            return self._store.get(request.taskId)
+        except (SupervisorUnavailable, SupervisorOperationError) as exc:
+            self._persist_failure(active, "RUNTIME_UNRESPONSIVE")
+            raise RuntimeException("could not start simulator runtime") from exc
+        except Exception as exc:
+            self._persist_failure(active, "RUNTIME_EXCEPTION")
+            if not active.continuous:
+                return self._store.get(request.taskId)
+            raise RuntimeException("could not start simulator runtime") from exc
+
+    def _create_idempotent(self, request, request_hash):
+        try:
+            return self._store.create(request, request_hash)[0]
+        except TaskIdConflict as exc:
+            raise TaskConflict(str(exc)) from exc
+
+    def get_task(self, task_id: str):
+        result = self._store.get(task_id)
+        if result is None:
+            raise TaskNotFound(f"task not found: {task_id}")
+        return result
+
+    def cancel_task(self, task_id: str):
+        with self._lock:
+            snapshot = self._store.get(task_id)
+            if snapshot is None:
+                raise TaskNotFound(f"task not found: {task_id}")
+            active = self._active
+            if (
+                active is None
+                or active.request.taskId != task_id
+                or snapshot.state in TERMINAL
+                or active.stop_claimed
+            ):
+                return snapshot
+            active.stop_claimed = True
+            self._store.append_event(
+                task_id, "TASK_CANCEL_REQUESTED", {"code": "CANCELLED"}
+            )
+        return self._request_stop(active, "CANCELLED")
+
+    def command(self, task_id: str, command: TaskCommandRequest):
+        self._require_motion_ready(allow_running=True)
+        with self._lock:
+            snapshot, active = self._store.get(task_id), self._active
+            if snapshot is None:
+                raise TaskNotFound(f"task not found: {task_id}")
+            if (
+                active is None
+                or active.request.taskId != task_id
+                or not active.continuous
+            ):
+                raise InvalidParameters("task does not accept continuous commands")
+            if snapshot.state != "RUNNING" or active.stop_claimed:
+                raise InvalidParameters("task is not running")
+            if (
+                active.deadline is not None
+                and self._monotonic_clock() >= active.deadline
+            ):
+                active.stop_claimed = True
+                expired = True
+            else:
+                expired = False
+            if expired:
+                accepted = None
+            else:
+                self._validate_command(command, active.action)
+                deadline, digest = (
+                    self._monotonic_clock() + command.leaseMs / 1000,
+                    sha256_prefixed(command),
+                )
+                try:
+                    accepted, created = self._store.record_command(
+                        task_id, command, digest, deadline
+                    )
+                except StoreStaleCommand as exc:
+                    raise StaleCommand(str(exc)) from exc
+                except StoreCommandSequenceConflict as exc:
+                    raise CommandSequenceConflict(str(exc)) from exc
+                if not created:
+                    return accepted
+                active.deadline = deadline
+        if expired:
+            self._request_stop(active, "LEASE_EXPIRED")
+            raise InvalidParameters("task is not running")
+        try:
+            self._supervisor.command(task_id, command)
+        except SupervisorTaskTerminalized:
+            return self._store.get(task_id) or accepted
+        except (SupervisorUnavailable, SupervisorOperationError) as exc:
+            self._persist_failure(active, "RUNTIME_UNRESPONSIVE")
+            raise RuntimeException("simulator command was unresponsive") from exc
+        return accepted
+
+    def events_after(self, task_id: str, sequence: int, *, page_size: int = 100):
+        if (
+            not isinstance(sequence, int)
+            or isinstance(sequence, bool)
+            or not -1 <= sequence <= 2**63 - 1
+        ):
+            raise InvalidParameters("afterSequence must be a signed 64-bit cursor")
+        self.get_task(task_id)
+        return self._store.events_after(task_id, sequence, page_size=page_size)
+
+    def robot_status(self) -> RobotStatus:
+        snap = self._supervisor.snapshot()
+        status = snap.cached_status or _initial_status(ready=snap.child_healthy)
+        if snap.child_healthy:
+            return status
+        reason = (
+            snap.quarantine_reason
+            or self._readiness_failure_reason
+            or "RUNTIME_UNAVAILABLE"
+        )
+        return status.model_copy(
+            update={
+                "limp": True,
+                "health": dict(status.health)
+                | {"ready": False, "healthy": False, "reasonCodes": [reason]},
+            }
+        )
+
+    def motion_readiness(self) -> tuple[bool, tuple[str, ...]]:
+        self._reconcile_reaped_terminal()
+        if not self._watchdog_healthy:
+            return False, (self._readiness_failure_reason or "WATCHDOG_UNHEALTHY",)
+        if self._supervisor.readiness():
+            return True, ()
+        snap = self._supervisor.snapshot()
+        return False, (
+            snap.quarantine_reason
+            or self._readiness_failure_reason
+            or "RUNTIME_UNAVAILABLE",
+        )
+
+    def _reconcile_reaped_terminal(self) -> None:
+        """Release durable ownership only after the supervisor proves cleanup."""
+        snap = self._supervisor.snapshot()
+        if not snap.slot_releasable:
+            return
+        with self._lock:
+            active = self._active
+            if active is None:
+                return
+            durable = self._store.get(active.request.taskId)
+            if durable is not None and durable.state in TERMINAL:
+                self._active = None
+
+    def tick(self) -> None:
+        with self._lock:
+            active = self._active
+            expired = (
+                active is not None
+                and active.continuous
+                and active.deadline is not None
+                and self._monotonic_clock() >= active.deadline
+                and not active.stop_claimed
+            )
+            if expired:
+                active.stop_claimed = True
+        if expired:
+            self._request_stop(active, "LEASE_EXPIRED")
+            return
+        terminal = self._supervisor.snapshot().cached_terminal
+        if terminal is not None:
+            self._terminal_callback(terminal)
+
+    def watchdog_failed(self) -> None:
+        self._watchdog_healthy, self._readiness_failure_reason = (
+            False,
+            "WATCHDOG_UNHEALTHY",
+        )
+        with self._lock:
+            active = self._active
+            if active is not None:
+                active.stop_claimed = True
+        if active is not None:
+            self._request_stop(active, "WATCHDOG_FAILURE")
+
+    def close(self) -> None:
+        self._supervisor.close()
+
+    def _request_stop(self, active: _ActiveTask, reason: str):
+        try:
+            self._terminal_callback(
+                self._supervisor.stop(active.request.taskId, reason)
+            )
+        except SupervisorTaskTerminalized:
+            pass
+        except (SupervisorUnavailable, SupervisorOperationError):
+            self._persist_failure(active, "RUNTIME_UNRESPONSIVE")
+        return self._store.get(active.request.taskId)
+
+    def _terminal_callback(self, terminal: TerminalPayload) -> None:
+        with self._lock:
+            active = self._active
+            if active is None:
+                return
+            current = self._store.get(active.request.taskId)
+            if current is None:
+                raise RuntimeError("active durable task is missing")
+            if current.state in TERMINAL:
+                self._active = None
+                return
+            reason = terminal.evidence.stopReason or (
+                "TASK_COMPLETE" if terminal.outcome == "SUCCEEDED" else "RUNTIME_FAILED"
+            )
+            self._advance_running(active.request.taskId)
+            self._store.transition(
+                active.request.taskId,
+                terminal.outcome,
+                event_type=f"TASK_{terminal.outcome}",
+                payload={"code": reason},
+                evidence=terminal.evidence,
+                stop_reason=reason,
+            )
+            self._active = None
+
+    def _persist_failure(self, active: _ActiveTask, reason: str) -> None:
+        with self._lock:
+            if self._active is not active:
+                return
+            self._advance_running(active.request.taskId)
+            policy = next(
+                item
+                for item in self._bundle.policies
+                if item.policyRef == active.action.policyRef
+            )
+            evidence = TaskEvidence(
+                bundleDigest=self._bundle.bundleDigest,
+                policyDigest=policy.digest,
+                modelDigest=self._bundle.model.digest,
+                metrics={"safetyFailure": reason},
+                stopReason=reason,
+            )
+            self._store.transition(
+                active.request.taskId,
+                "FAILED",
+                event_type="TASK_FAILED",
+                payload={"code": reason},
+                evidence=evidence,
+                stop_reason=reason,
+            )
+            if self._supervisor.snapshot().slot_releasable:
+                self._active = None
+
+    def _advance_running(self, task_id: str) -> None:
+        current = self._store.get(task_id)
+        if current is not None and current.state == "VALIDATING":
+            try:
+                self._store.transition(task_id, "RUNNING", event_type="TASK_STARTED")
+            except IllegalTaskTransition:
+                pass
+
+    def _require_motion_ready(self, *, allow_running: bool = False) -> None:
+        snap = self._supervisor.snapshot()
+        if allow_running and snap.child_healthy and snap.state.value == "RUNNING":
+            return
+        if not self.motion_readiness()[0]:
+            raise NotReady("simulator is not ready for motion")
+
+    def _validate_request(self, request: TaskCreateRequest) -> ActionDefinition:
+        if (
+            request.bundleVersion != self._bundle.bundleVersion
+            or request.bundleDigest != self._bundle.bundleDigest
+        ):
+            raise BundleMismatch("requested bundle does not match installed bundle")
+        action = next(
+            (x for x in self._bundle.actions if x.actionCode == request.actionCode),
+            None,
+        )
+        if action is None or action.availability != "AVAILABLE":
+            raise ActionUnavailable(f"action is unavailable: {request.actionCode}")
+        template = action_template(action.actionCode)
+        _validate_json(request.parameters, template.parameter_schema)
+        if template.execution_mode == "DISCRETE" and request.leaseMs is not None:
+            raise InvalidParameters("discrete actions do not accept leaseMs")
+        if template.execution_mode == "CONTINUOUS_LEASE":
+            if request.leaseMs is None:
+                raise InvalidParameters("continuous actions require leaseMs")
+            assert template.lease is not None
+            if (
+                not template.lease.minLeaseMs
+                <= request.leaseMs
+                <= template.lease.maxLeaseMs
+                or request.leaseMs < template.lease.commandCadenceMs
+            ):
+                raise InvalidParameters("leaseMs is outside the action lease bounds")
+        validate_action_definition_envelope(action)
+        return action
+
+    def _validate_command(
+        self, command: TaskCommandRequest, action: ActionDefinition
+    ) -> None:
+        template = action_template(action.actionCode)
+        assert template.lease is not None
+        _validate_json(command.parameters, template.parameter_schema)
+        if (
+            not template.lease.minLeaseMs
+            <= command.leaseMs
+            <= template.lease.maxLeaseMs
+            or command.leaseMs < template.lease.commandCadenceMs
+        ):
+            raise InvalidParameters("leaseMs is outside the action lease bounds")
+
+    def _require_preconditions(
+        self, action: ActionDefinition, request: TaskCreateRequest
+    ) -> None:
+        expected = code_owned_action_definition(
+            action.actionCode,
+            availability=action.availability,
+            policy_ref=action.policyRef,
+            unavailable_reason=action.unavailableReason,
+            qualification_refs=action.qualificationRefs,
+        )
+        if (
+            request.scenario.terrain
+            not in (expected.preconditions or {})["allowedTerrains"]
+        ):
+            raise PreconditionFailed("scenario terrain is not allowed")
+        status = self.robot_status()
+        if (
+            status.fallen
+            or status.limp
+            or status.health.get("ready") is False
+            or status.health.get("healthy") is False
+        ):
+            raise PreconditionFailed("runtime is not ready")
+
+
+def _initial_status(*, ready: bool = False) -> RobotStatus:
+    from datetime import UTC, datetime
+
+    return RobotStatus(
+        schema="BIPED_POSE_V1",
+        timestamp=datetime.now(UTC),
+        basePositionM=(0.0, 0.0, 0.0),
+        baseOrientationXyzw=(0.0, 0.0, 0.0, 1.0),
+        baseLinearVelocityMps=(0.0, 0.0, 0.0),
+        baseAngularVelocityRadps=(0.0, 0.0, 0.0),
+        jointPositionsRad=(0.0,) * 14,
+        jointVelocitiesRadps=(0.0,) * 14,
+        policyTarget={},
+        requestedMotion={},
+        appliedMotion={},
+        simulationTimeS=0.0,
+        loopFrequencyHz=0.0,
+        fallen=False,
+        limp=not ready,
+        health={"ready": ready, "healthy": ready},
+    )
+
+
+def _validate_json(
+    value: Any, schema: Mapping[str, Any], path: str = "parameters"
+) -> None:
+    expected = schema.get("type")
+    if expected and not _matches(value, expected):
+        raise InvalidParameters(f"{path} must be of type {expected}")
+    if isinstance(value, Mapping):
+        props = schema.get("properties", {})
+        if any(x not in value for x in schema.get("required", [])):
+            raise InvalidParameters(f"{path} is missing required properties")
+        if schema.get("additionalProperties") is False and set(value) - set(props):
+            raise InvalidParameters(f"{path} contains undeclared properties")
+        for key, nested in value.items():
+            if isinstance(props.get(key), Mapping):
+                _validate_json(nested, props[key], f"{path}.{key}")
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        if (
+            not math.isfinite(value)
+            or value < schema.get("minimum", value)
+            or value > schema.get("maximum", value)
+        ):
+            raise InvalidParameters(f"{path} is outside bounds")
+
+
+def _matches(value: Any, expected: str | list[str]) -> bool:
+    types = (expected,) if isinstance(expected, str) else tuple(expected)
+    return any(
+        (x == "object" and isinstance(value, Mapping))
+        or (x == "array" and isinstance(value, list))
+        or (x == "string" and isinstance(value, str))
+        or (x == "boolean" and isinstance(value, bool))
+        or (x == "integer" and isinstance(value, int) and not isinstance(value, bool))
+        or (
+            x == "number"
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+        )
+        or (x == "null" and value is None)
+        for x in types
+    )
+
+
+__all__ = [
+    "ActionUnavailable",
+    "BundleMismatch",
+    "CommandSequenceConflict",
+    "InvalidParameters",
+    "NotReady",
+    "PreconditionFailed",
+    "RobotBusy",
+    "RuntimeException",
+    "SimulatorServiceError",
+    "SimulatorTaskService",
+    "StaleCommand",
+    "TaskConflict",
+    "TaskNotFound",
+]

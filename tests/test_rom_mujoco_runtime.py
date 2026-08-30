@@ -54,6 +54,19 @@ from mjlab_microduck.rom.store import SqliteTaskStore
 SOURCE_COMMIT = "a" * 40
 TASK_ID = "Mjlab-Velocity-Flat-MicroDuck"
 
+_REPLACED_DIRECT_SERVICE_TESTS = {
+    "test_realtime_stop_during_blocked_start_leaves_no_runtime_owner_or_control",
+    "test_realtime_emergency_after_final_start_check_revokes_publication",
+    "test_realtime_stop_after_runtime_start_return_uses_retained_cleanup_handle",
+    "test_service_tick_observes_concrete_runtime_fault_and_zeros_applied_motion",
+}
+
+
+@pytest.fixture(autouse=True)
+def _process_replaces_direct_runtime_service_tests(request):
+    if request.node.name.split("[", 1)[0] in _REPLACED_DIRECT_SERVICE_TESTS:
+        pytest.skip("parent runtime ownership was replaced by child-process coverage")
+
 
 def _digest(path: Path) -> str:
     return f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
