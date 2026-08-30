@@ -378,6 +378,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device", default="cuda:0" if torch.cuda.is_available() else "cpu"
     )
+    parser.add_argument(
+        "--root-over-lip-replay-fraction",
+        type=float,
+        help=(
+            "Override the forward-propagation task's exact root-over-lip "
+            "state-bank fraction for diagnostic evaluation."
+        ),
+    )
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
 
@@ -408,6 +416,10 @@ def main() -> int:
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
     if args.num_envs < 1 or args.episodes < 1:
         raise SystemExit("--num-envs and --episodes must be positive")
+    if args.root_over_lip_replay_fraction is not None and not (
+        0.0 <= args.root_over_lip_replay_fraction <= 1.0
+    ):
+        raise SystemExit("--root-over-lip-replay-fraction must be within [0, 1]")
     if args.task in {
         "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
         "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
@@ -436,6 +448,14 @@ def main() -> int:
 
     configure_torch_backends()
     env_cfg = load_env_cfg(args.task, play=True)
+    if args.root_over_lip_replay_fraction is not None:
+        bank = env_cfg.events.get("root_over_lip_state_bank")
+        if bank is None:
+            raise SystemExit(
+                "--root-over-lip-replay-fraction requires a task with "
+                "root_over_lip_state_bank"
+            )
+        bank.params["replay_fraction"] = args.root_over_lip_replay_fraction
     agent_cfg = load_rl_cfg(args.task)
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.seed = 7
@@ -501,6 +521,7 @@ def main() -> int:
     coupled_gain25_events = 0
     coupled_target_events = 0
     coupled_bypass_events = 0
+    nan_termination_events = 0
     tread_contact_source_steps: list[int] = []
     face_contact_metrics = ContactTrajectoryMetrics(args.num_envs, args.device)
     tread_contact_metrics = ContactTrajectoryMetrics(args.num_envs, args.device)
@@ -578,6 +599,9 @@ def main() -> int:
                 observations = env.get_observations()
                 actions = policy(observations)
                 _, _, dones, _ = env.step(actions)
+            nan_termination_events += int(
+                base_env.termination_manager.get_term("nan_state").sum().item()
+            )
 
             clearance = getattr(
                 base_env, "_stair_first_riser_latched", previous_clearance
@@ -996,6 +1020,9 @@ def main() -> int:
         "standard_riser_height_m": 0.17,
         "standard_tread_depth_m": 0.28,
         "num_envs": args.num_envs,
+        "root_over_lip_replay_fraction_override": (
+            args.root_over_lip_replay_fraction
+        ),
         "requested_episodes_per_env": args.episodes,
         "completed_trials": completed_trials,
         "clearance_events": clearance_events,
@@ -1018,6 +1045,8 @@ def main() -> int:
         / denominator,
         "side_bypass_events": a12_event_counts["side_bypass"],
         "side_bypass_rate": a12_event_counts["side_bypass"] / denominator,
+        "nan_termination_events": nan_termination_events,
+        "nan_termination_rate": nan_termination_events / denominator,
         "terminal_position_objective": {
             "definition": (
                 "per-trial integrated unweighted reciprocal position score "
