@@ -454,8 +454,13 @@ class WalkerStateBankReset:
             "late_source_episode_step_range"
         )
         self._replay_fraction = float(cfg.params.get("replay_fraction", 1.0))
+        self._reset_family = cfg.params.get("reset_family")
         if not 0.0 <= self._replay_fraction <= 1.0:
             raise ValueError("replay_fraction must be between zero and one")
+        if self._reset_family is not None and (
+            not isinstance(self._reset_family, int) or self._reset_family < 0
+        ):
+            raise ValueError("reset_family must be a nonnegative integer")
         if not 0.0 <= self._late_fraction <= 1.0:
             raise ValueError("late_fraction must be between zero and one")
         self._eligible_rows = eligible_walk_state_rows(
@@ -548,6 +553,7 @@ class WalkerStateBankReset:
         late_fraction: float = 0.0,
         late_source_episode_step_range: tuple[int, int] | None = None,
         replay_fraction: float = 1.0,
+        reset_family: int | None = None,
     ) -> None:
         del (
             bank_path,
@@ -571,12 +577,23 @@ class WalkerStateBankReset:
             late_fraction,
             late_source_episode_step_range,
             replay_fraction,
+            reset_family,
         )
         mode = getattr(env, "_stair_assisted_reset_mode", None)
         if mode is None:
             raise RuntimeError("Walker-state replay requires assisted reset mode tracking")
         env_ids = env_ids.to(env.device, dtype=torch.long)
-        selected_ids = env_ids[mode[env_ids] == 3]
+        candidate_ids = env_ids[mode[env_ids] == 3]
+        if self._reset_family is not None:
+            family = getattr(env, "_stair_state_bank_family", None)
+            if family is None:
+                raise RuntimeError(
+                    "reset_family selection requires a preceding family assignment event"
+                )
+            candidate_ids = candidate_ids[
+                family[candidate_ids] == self._reset_family
+            ]
+        selected_ids = candidate_ids
         if self._replay_fraction < 1.0 and len(selected_ids) > 0:
             replay_mask = (
                 torch.rand(len(selected_ids), device=env.device)
@@ -590,8 +607,8 @@ class WalkerStateBankReset:
             env._stair_walker_bank_source_step = torch.full_like(
                 env._stair_walker_bank_row, -1
             )
-        env._stair_walker_bank_row[env_ids] = -1
-        env._stair_walker_bank_source_step[env_ids] = -1
+        env._stair_walker_bank_row[candidate_ids] = -1
+        env._stair_walker_bank_source_step[candidate_ids] = -1
         if len(selected_ids) == 0:
             self._pending_env_ids = None
             self._pending_rows = None

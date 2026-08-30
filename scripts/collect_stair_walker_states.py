@@ -121,6 +121,25 @@ def _parse_args() -> argparse.Namespace:
         help="Minimum normal load in newtons for a captured tread-contact slot.",
     )
     parser.add_argument(
+        "--capture-riser-face-without-tread",
+        action="store_true",
+        help=(
+            "Capture only states with a classified first-riser face contact and "
+            "no first-tread contact in the same frame across dedicated sensors."
+        ),
+    )
+    parser.add_argument(
+        "--contact-sensors",
+        nargs="+",
+        default=(
+            "head_ground_contact",
+            "trunk_ground_contact",
+            "legs_ground_contact",
+            "feet_stair_contact",
+        ),
+        help="Sensors unioned by --capture-riser-face-without-tread.",
+    )
+    parser.add_argument(
         "--device", default="cuda:0" if torch.cuda.is_available() else "cpu"
     )
     return parser.parse_args()
@@ -255,6 +274,30 @@ def main() -> int:
                     tread_contact &= normal_force >= args.min_tread_normal_force
                 contact_gate = tread_contact.any(dim=-1)
                 contact_sensor_data = sensor
+            if args.capture_riser_face_without_tread:
+                face_any = torch.zeros_like(captured_this_episode)
+                tread_any = torch.zeros_like(captured_this_episode)
+                for sensor_name in args.contact_sensors:
+                    if sensor_name not in base_env.scene.sensors:
+                        raise RuntimeError(f"Unknown contact sensor: {sensor_name}")
+                    sensor = base_env.scene.sensors[sensor_name].data
+                    if (
+                        sensor.found is None
+                        or sensor.pos is None
+                        or sensor.normal is None
+                    ):
+                        raise RuntimeError(
+                            f"{sensor_name} must expose found, pos, and normal"
+                        )
+                    face, tread = classify_standard_stair_contacts(
+                        sensor.found,
+                        sensor.pos,
+                        sensor.normal,
+                        origins,
+                    )
+                    face_any |= face.any(dim=-1)
+                    tread_any |= tread.any(dim=-1)
+                contact_gate &= face_any & ~tread_any
             eligible = (
                 unique_episode_gate
                 & cadence_gate
@@ -356,6 +399,10 @@ def main() -> int:
             "capture_every_n_steps": args.capture_every_n_steps,
             "standing_only_reset": args.standing_only_reset,
             "capture_first_tread_contact": args.capture_first_tread_contact,
+            "capture_riser_face_without_tread": (
+                args.capture_riser_face_without_tread
+            ),
+            "contact_sensors": list(args.contact_sensors),
             "tread_contact_sensor": args.tread_contact_sensor,
             "min_tread_normal_force_n": args.min_tread_normal_force,
             "canonical_source_xy_yaw": args.standing_only_reset,

@@ -64,6 +64,9 @@ STAIR_MECHANISM_MIN_RISER_HEIGHT = 0.10
 STAIR_MECHANISM_CURRICULUM_LEVELS = 8
 STAIR_DISCOVERY_SOLREF_TIME_CONSTANT = 0.10
 STAIR_BRIDGE_SOLREF_TIME_CONSTANT = 0.065
+VIRTUAL_LIP_MAX_FACE_OFFSET = 0.040
+VIRTUAL_LIP_CURRICULUM_LEVELS = 3
+VIRTUAL_LIP_TREAD_PLATE_THICKNESS = 0.006
 
 
 def _set_stair_contact_continuation(
@@ -123,6 +126,9 @@ class BoxStandardStaircaseTerrainCfg(SubTerrainCfg):
     floor_thickness: float = 0.10
     riser_height_range: tuple[float, float] | None = None
     difficulty_levels: int | None = None
+    first_riser_face_offset_range: tuple[float, float] | None = None
+    first_riser_face_offset_levels: int | None = None
+    first_tread_plate_thickness: float = VIRTUAL_LIP_TREAD_PLATE_THICKNESS
 
     def function(
         self, difficulty: float, spec: mujoco.MjSpec, rng: np.random.Generator
@@ -142,6 +148,17 @@ class BoxStandardStaircaseTerrainCfg(SubTerrainCfg):
                 )
                 normalized_difficulty = level / (self.difficulty_levels - 1)
             riser_height = low + normalized_difficulty * (high - low)
+        first_face_offset = 0.0
+        if self.first_riser_face_offset_range is not None:
+            low, high = self.first_riser_face_offset_range
+            normalized_difficulty = float(np.clip(difficulty, 0.0, 1.0))
+            levels = self.first_riser_face_offset_levels
+            if levels is not None and levels > 1:
+                level = min(int(normalized_difficulty * levels), levels - 1)
+                normalized_difficulty = level / (levels - 1)
+            first_face_offset = low + normalized_difficulty * (high - low)
+            if not 0.0 <= first_face_offset < self.tread_depth:
+                raise ValueError("First-riser face offset must fit inside the tread")
         total_height = self.num_steps * riser_height
         boxes: list[mujoco.MjsGeom] = []
         colors: list[tuple[float, float, float, float]] = []
@@ -159,6 +176,51 @@ class BoxStandardStaircaseTerrainCfg(SubTerrainCfg):
         for step_index in range(self.num_steps):
             height = (step_index + 1) * riser_height
             x_start = self.approach_length + step_index * self.tread_depth
+            color = (
+                0.20 + 0.045 * step_index,
+                0.42 + 0.035 * step_index,
+                0.78 - 0.035 * step_index,
+                1.0,
+            )
+            if step_index == 0 and first_face_offset > 1.0e-9:
+                plate_thickness = self.first_tread_plate_thickness
+                if not 0.0 < plate_thickness < height:
+                    raise ValueError("First-tread plate thickness must fit the riser")
+                # The top remains a literal 170 mm tread beginning at the
+                # nominal x. Only the supporting vertical face is recessed,
+                # creating a short cantilever that is hardened from 40 mm to
+                # 20 mm to zero. Level 2 therefore returns to the exact box.
+                plate = body.add_geom(
+                    type=mujoco.mjtGeom.mjGEOM_BOX,
+                    size=(
+                        self.tread_depth / 2.0,
+                        self.stair_width / 2.0,
+                        plate_thickness / 2.0,
+                    ),
+                    pos=(
+                        x_start + self.tread_depth / 2.0,
+                        center_y,
+                        height - plate_thickness / 2.0,
+                    ),
+                )
+                support_depth = self.tread_depth - first_face_offset
+                support_height = height - plate_thickness
+                support = body.add_geom(
+                    type=mujoco.mjtGeom.mjGEOM_BOX,
+                    size=(
+                        support_depth / 2.0,
+                        self.stair_width / 2.0,
+                        support_height / 2.0,
+                    ),
+                    pos=(
+                        x_start + first_face_offset + support_depth / 2.0,
+                        center_y,
+                        support_height / 2.0,
+                    ),
+                )
+                boxes.extend((plate, support))
+                colors.extend((color, color))
+                continue
             step = body.add_geom(
                 type=mujoco.mjtGeom.mjGEOM_BOX,
                 size=(
@@ -169,14 +231,7 @@ class BoxStandardStaircaseTerrainCfg(SubTerrainCfg):
                 pos=(x_start + self.tread_depth / 2.0, center_y, height / 2.0),
             )
             boxes.append(step)
-            colors.append(
-                (
-                    0.20 + 0.045 * step_index,
-                    0.42 + 0.035 * step_index,
-                    0.78 - 0.035 * step_index,
-                    1.0,
-                )
-            )
+            colors.append(color)
 
         landing = body.add_geom(
             type=mujoco.mjtGeom.mjGEOM_BOX,
@@ -229,6 +284,23 @@ ROUTE_STAIR_TERRAINS_CFG = TerrainGeneratorCfg(
             proportion=1.0,
             riser_height_range=(ROUTE_MIN_RISER_HEIGHT, STANDARD_RISER_HEIGHT),
             difficulty_levels=ROUTE_CURRICULUM_LEVELS,
+        ),
+    },
+    add_lights=True,
+)
+
+
+VIRTUAL_LIP_STAIR_TERRAINS_CFG = TerrainGeneratorCfg(
+    size=(5.0, 3.0),
+    border_width=0.15,
+    num_rows=VIRTUAL_LIP_CURRICULUM_LEVELS,
+    num_cols=1,
+    curriculum=True,
+    sub_terrains={
+        "virtual_lip_stairs": BoxStandardStaircaseTerrainCfg(
+            proportion=1.0,
+            first_riser_face_offset_range=(VIRTUAL_LIP_MAX_FACE_OFFSET, 0.0),
+            first_riser_face_offset_levels=VIRTUAL_LIP_CURRICULUM_LEVELS,
         ),
     },
     add_lights=True,
@@ -1540,6 +1612,162 @@ def make_microduck_stair_forward_propagation_rsi_env_cfg(
     return cfg
 
 
+def make_microduck_stair_virtual_lip_transfer_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A30: turn root-over-lip states into real tread support transfer."""
+
+    cfg = make_microduck_stair_forward_propagation_rsi_env_cfg(play=False)
+    cfg.scene.terrain.terrain_generator = deepcopy(VIRTUAL_LIP_STAIR_TERRAINS_CFG)
+    cfg.scene.terrain.max_init_terrain_level = 0
+    cfg.events.pop("route_challenge_levels", None)
+    cfg.events["route_state_curriculum"].params.update(
+        {
+            "lip_release_fraction": 0.0,
+            "shell_brace_fraction": 0.0,
+            "tread_recovery_fraction": 0.0,
+            "real_handoff_fraction": 1.0,
+        }
+    )
+    for observation_group in ("actor", "critic"):
+        route_cues = cfg.observations[observation_group].terms[
+            "body_command"
+        ].params
+        route_cues["min_riser_height"] = STANDARD_RISER_HEIGHT
+        route_cues["max_riser_height"] = STANDARD_RISER_HEIGHT
+        route_cues["num_terrain_levels"] = VIRTUAL_LIP_CURRICULUM_LEVELS
+
+    # Assign every reset to exactly one state source. This avoids the previous
+    # Bernoulli overlays where a later bank could silently replace another.
+    manufacturer_bank = deepcopy(cfg.events["walker_state_bank"])
+    for event_name in (
+        "walker_state_bank",
+        "root_over_lip_state_bank",
+        "frontier_tier_reset_baseline",
+    ):
+        cfg.events.pop(event_name, None)
+    cfg.events["state_bank_family"] = EventTermCfg(
+        func=microduck_mdp.assign_stair_state_bank_family,
+        mode="reset",
+        params={"family_weights": (2, 1, 1)},
+    )
+    cfg.events["root_over_lip_state_bank"] = EventTermCfg(
+        func=WalkerStateBankReset,
+        mode="reset",
+        params={
+            "bank_path": ".tmp/codex/full170-a28-face-no-tread-state-bank.pt",
+            "reset_family": 0,
+        },
+    )
+    cfg.events["tread_contact_state_bank"] = EventTermCfg(
+        func=WalkerStateBankReset,
+        mode="reset",
+        params={
+            "bank_path": ".tmp/codex/full170-tread-contact-state-bank.pt",
+            "reset_family": 1,
+        },
+    )
+    manufacturer_bank.params["replay_fraction"] = 1.0
+    manufacturer_bank.params["reset_family"] = 2
+    cfg.events["manufacturer_roulade_state_bank"] = manufacturer_bank
+
+    common_contact = {
+        "nominal_stair_face_x": STANDARD_STAIR_START_DISTANCE,
+        "max_face_offset": VIRTUAL_LIP_MAX_FACE_OFFSET,
+        "num_terrain_levels": VIRTUAL_LIP_CURRICULUM_LEVELS,
+        "riser_height": STANDARD_RISER_HEIGHT,
+        "tread_depth": STANDARD_TREAD_DEPTH,
+        "corridor_half_width": STANDARD_STAIR_WIDTH * 0.40,
+    }
+    cfg.rewards["stair_delayed_frontier_tiers"].weight = 0.0
+    cfg.rewards["stair_forward_propagation_tiers"].weight = 0.0
+    cfg.rewards["stair_terminal_position_objective"].weight = 0.0
+    cfg.rewards["stair_coupled_frontier_collocation"].weight = 0.0
+    cfg.rewards["stair_contact_lip_commitment"].weight = 0.0
+    cfg.rewards["stair_riser_face_contact"].weight = 0.0
+    cfg.rewards["stair_first_tread_contact"].weight = 0.0
+    cfg.rewards["stair_new_tread_contact"] = RewardTermCfg(
+        func=microduck_mdp.stair_new_tread_contact_after_reset,
+        weight=10.0,
+        params={**common_contact, "min_policy_steps": 3},
+    )
+    cfg.rewards["stair_loaded_tread_face_release"] = RewardTermCfg(
+        func=microduck_mdp.stair_loaded_tread_face_release,
+        weight=60.0,
+        params={
+            **common_contact,
+            "hold_steps": 2,
+            "min_policy_steps": 3,
+            "min_normal_force": 0.40,
+        },
+    )
+    cfg.rewards["stair_riser_face_after_tread"] = RewardTermCfg(
+        func=microduck_mdp.stair_riser_face_contact_after_tread,
+        weight=-1.0,
+        params={**common_contact},
+    )
+    cfg.rewards["stair_virtual_lip_penetration"] = RewardTermCfg(
+        func=microduck_mdp.stair_virtual_lip_penetration_cost,
+        weight=-0.5,
+        params={
+            "nominal_stair_face_x": STANDARD_STAIR_START_DISTANCE,
+            "max_face_offset": VIRTUAL_LIP_MAX_FACE_OFFSET,
+            "num_terrain_levels": VIRTUAL_LIP_CURRICULUM_LEVELS,
+            "riser_height": STANDARD_RISER_HEIGHT,
+            "corridor_half_width": STANDARD_STAIR_WIDTH * 0.40,
+            "speed_scale": 0.40,
+            "min_policy_steps": 3,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["stair_tread_support_frontier"].weight = 15.0
+    cfg.rewards["stair_tread_pullup_frontier"] = RewardTermCfg(
+        func=microduck_mdp.stair_tread_pullup_frontier,
+        weight=10.0,
+        params={
+            "start_x": 0.60,
+            "target_x": STANDARD_STAIR_START_DISTANCE + 0.08,
+            "start_height": 0.15,
+            "target_height": 0.205,
+            "corridor_half_width": STANDARD_STAIR_WIDTH * 0.40,
+            "stair_face_x": STANDARD_STAIR_START_DISTANCE,
+            "riser_height": STANDARD_RISER_HEIGHT,
+            "tread_depth": STANDARD_TREAD_DEPTH,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["stair_first_riser_clearance"].weight = 0.0
+    cfg.rewards["stair_true_shell_clearance"] = RewardTermCfg(
+        func=microduck_mdp.stair_true_shell_clearance,
+        weight=500.0,
+        params={
+            "nominal_stair_face_x": STANDARD_STAIR_START_DISTANCE,
+            "riser_height": STANDARD_RISER_HEIGHT,
+            "corridor_half_width": STANDARD_STAIR_WIDTH * 0.40,
+            "hold_steps": 4,
+            "shell_half_extents": (0.034, 0.031, 0.022),
+            "asset_cfg": SceneEntityCfg(
+                "robot", geom_names=("trunk_shell_collision",)
+            ),
+        },
+    )
+    cfg.rewards["stair_first_tread_secured"].weight = 600.0
+    cfg.rewards["stair_first_tread_secured"].params[
+        "required_latch_name"
+    ] = "_stair_true_shell_clearance_policy_achieved"
+    # A30 is the fixed easiest-level discovery pilot. Later stages may restore
+    # promotion after exact level-0 transfer and shell gates are demonstrated.
+    cfg.curriculum.pop("terrain_levels", None)
+
+    if play:
+        cfg.events["a30_hard_viewer"] = EventTermCfg(
+            func=microduck_mdp.configure_stair_viewer_grid,
+            mode="startup",
+            params={"terrain_levels": (2,), "terrain_types": (0,)},
+        )
+    return cfg
+
+
 def make_microduck_stair_tread_contact_bank_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -1766,6 +1994,8 @@ MicroduckStairApexMantleRlCfg = deepcopy(MicroduckStairLaunchBankRlCfg)
 MicroduckStairApexMantleRlCfg.experiment_name = (
     "microduck_stair_apex_mantle_specialist"
 )
+
+
 MicroduckStairApexMantleRlCfg.run_name = "microduck_stair_apex_mantle_specialist"
 MicroduckStairApexMantleRlCfg.max_iterations = 100
 MicroduckStairApexMantleRlCfg.save_interval = 25
@@ -1943,6 +2173,18 @@ MicroduckStairForwardPropagationRsiRlCfg.run_name = (
 )
 MicroduckStairForwardPropagationRsiRlCfg.max_iterations = 75
 MicroduckStairForwardPropagationRsiRlCfg.save_interval = 25
+
+MicroduckStairVirtualLipTransferRsiRlCfg = deepcopy(
+    MicroduckStairFrontierTierRsiRlCfg
+)
+MicroduckStairVirtualLipTransferRsiRlCfg.experiment_name = (
+    "microduck_stair_virtual_lip_transfer_rsi_specialist"
+)
+MicroduckStairVirtualLipTransferRsiRlCfg.run_name = (
+    "microduck_stair_virtual_lip_transfer_rsi_specialist"
+)
+MicroduckStairVirtualLipTransferRsiRlCfg.max_iterations = 75
+MicroduckStairVirtualLipTransferRsiRlCfg.save_interval = 10
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)
 MicroduckStairTreadContactBankRlCfg.experiment_name = (

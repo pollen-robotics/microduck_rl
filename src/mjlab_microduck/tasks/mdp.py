@@ -1526,6 +1526,55 @@ def _new_frontier_delta(
     return delta / env.step_dt
 
 
+def assign_stair_state_bank_family(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    family_weights: tuple[int, ...] = (2, 1, 1),
+    forced_family: int | None = None,
+) -> None:
+    """Assign one mutually exclusive replay family to every resetting env.
+
+    Full reset batches receive exact integer quotas. Smaller asynchronous
+    batches use the same largest-remainder allocation with randomized ties, so
+    no state-bank event can overwrite a state written by another family.
+    """
+
+    if env_ids is None or len(env_ids) == 0:
+        return
+    if len(family_weights) == 0 or any(weight <= 0 for weight in family_weights):
+        raise ValueError("State-bank family weights must be positive")
+    if forced_family is not None and not 0 <= forced_family < len(family_weights):
+        raise ValueError("Forced state-bank family is outside the configured range")
+    env_ids = env_ids.to(device=env.device, dtype=torch.long)
+    if not hasattr(env, "_stair_state_bank_family"):
+        env._stair_state_bank_family = torch.full(
+            (env.num_envs,), -1, dtype=torch.long, device=env.device
+        )
+    if forced_family is not None:
+        env._stair_state_bank_family[env_ids] = forced_family
+        return
+    weights = torch.tensor(family_weights, device=env.device, dtype=torch.float32)
+    exact = weights * (len(env_ids) / float(sum(family_weights)))
+    counts = torch.floor(exact).to(torch.long)
+    remainder = len(env_ids) - int(counts.sum().item())
+    if remainder > 0:
+        fractions = exact - counts.to(exact.dtype)
+        positive = fractions > 0
+        if not torch.any(positive):
+            fractions = weights / weights.sum()
+        else:
+            fractions = torch.where(positive, fractions, torch.zeros_like(fractions))
+        extra = torch.multinomial(fractions, remainder, replacement=False)
+        counts[extra] += 1
+
+    permutation = env_ids[torch.randperm(len(env_ids), device=env.device)]
+    start = 0
+    for family, count in enumerate(counts.tolist()):
+        stop = start + count
+        env._stair_state_bank_family[permutation[start:stop]] = family
+        start = stop
+
+
 def stair_preload_frontier(
     env: ManagerBasedRlEnv,
     start_x: float = 0.42,
@@ -1715,6 +1764,57 @@ def classify_standard_stair_contacts(
     return face, tread
 
 
+def classify_virtual_lip_stair_contacts(
+    found: torch.Tensor,
+    positions_w: torch.Tensor,
+    normals_w: torch.Tensor,
+    terrain_origins_w: torch.Tensor,
+    physical_face_x: torch.Tensor,
+    *,
+    nominal_stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.36,
+    position_tolerance: float = 0.018,
+    normal_alignment: float = 0.70,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Classify a recessed physical face and the nominal horizontal tread."""
+
+    if found.ndim != 2 or positions_w.shape != normals_w.shape:
+        raise ValueError("Stair contact tensors have incompatible shapes")
+    if positions_w.shape[:2] != found.shape or positions_w.shape[-1] != 3:
+        raise ValueError("Stair contact positions must have shape [B, N, 3]")
+    if physical_face_x.shape != (found.shape[0],):
+        raise ValueError("physical_face_x must have shape [B]")
+    local_pos = positions_w - terrain_origins_w[:, None, :]
+    active = found > 0
+    in_corridor = torch.abs(local_pos[..., 1]) <= corridor_half_width
+    normal = torch.abs(torch.nan_to_num(normals_w, nan=0.0))
+    face = (
+        active
+        & in_corridor
+        & (
+            torch.abs(local_pos[..., 0] - physical_face_x[:, None])
+            <= position_tolerance
+        )
+        & (local_pos[..., 2] >= -position_tolerance)
+        & (local_pos[..., 2] <= riser_height + position_tolerance)
+        & (normal[..., 0] >= normal_alignment)
+    )
+    tread = (
+        active
+        & in_corridor
+        & (local_pos[..., 0] >= nominal_stair_face_x - position_tolerance)
+        & (
+            local_pos[..., 0]
+            <= nominal_stair_face_x + tread_depth + position_tolerance
+        )
+        & (torch.abs(local_pos[..., 2] - riser_height) <= position_tolerance)
+        & (normal[..., 2] >= normal_alignment)
+    )
+    return face, tread
+
+
 def classify_curriculum_stair_contacts(
     found: torch.Tensor,
     positions_w: torch.Tensor,
@@ -1792,6 +1892,109 @@ def _standard_stair_contact_masks(
     return face, tread, local_positions
 
 
+def _virtual_lip_physical_face_x(
+    env: ManagerBasedRlEnv,
+    *,
+    nominal_stair_face_x: float,
+    max_face_offset: float,
+    num_terrain_levels: int,
+) -> torch.Tensor:
+    levels = env.scene.terrain.terrain_levels.to(dtype=torch.float32)
+    fraction = torch.clamp(
+        levels / max(num_terrain_levels - 1, 1), min=0.0, max=1.0
+    )
+    return nominal_stair_face_x + max_face_offset * (1.0 - fraction)
+
+
+def _virtual_lip_stair_contact_masks(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    *,
+    nominal_stair_face_x: float,
+    max_face_offset: float,
+    num_terrain_levels: int,
+    riser_height: float,
+    tread_depth: float,
+    corridor_half_width: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if sensor_name not in env.scene.sensors:
+        empty = torch.zeros((env.num_envs, 1), dtype=torch.bool, device=env.device)
+        positions = torch.zeros((env.num_envs, 1, 3), device=env.device)
+        return empty, empty, positions
+    data = env.scene.sensors[sensor_name].data
+    if data.found is None or data.pos is None or data.normal is None:
+        raise RuntimeError(
+            f"{sensor_name} must provide found, pos, and normal contact fields"
+        )
+    physical_face_x = _virtual_lip_physical_face_x(
+        env,
+        nominal_stair_face_x=nominal_stair_face_x,
+        max_face_offset=max_face_offset,
+        num_terrain_levels=num_terrain_levels,
+    )
+    face, tread = classify_virtual_lip_stair_contacts(
+        data.found,
+        data.pos,
+        data.normal,
+        env.scene.terrain.env_origins,
+        physical_face_x,
+        nominal_stair_face_x=nominal_stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    local_positions = data.pos - env.scene.terrain.env_origins[:, None, :]
+    return face, tread, local_positions
+
+
+def _virtual_lip_union_contact_state(
+    env: ManagerBasedRlEnv,
+    sensor_names: tuple[str, ...],
+    *,
+    nominal_stair_face_x: float,
+    max_face_offset: float,
+    num_terrain_levels: int,
+    riser_height: float,
+    tread_depth: float,
+    corridor_half_width: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Union dedicated body sensors without losing weaker tread contacts."""
+
+    face_contact = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    tread_contact = torch.zeros_like(face_contact)
+    strongest_tread_force = torch.zeros(
+        env.num_envs, dtype=torch.float32, device=env.device
+    )
+    for sensor_name in sensor_names:
+        if sensor_name not in env.scene.sensors:
+            raise RuntimeError(f"Missing required contact sensor: {sensor_name}")
+        face, tread, _ = _virtual_lip_stair_contact_masks(
+            env,
+            sensor_name,
+            nominal_stair_face_x=nominal_stair_face_x,
+            max_face_offset=max_face_offset,
+            num_terrain_levels=num_terrain_levels,
+            riser_height=riser_height,
+            tread_depth=tread_depth,
+            corridor_half_width=corridor_half_width,
+        )
+        face_contact |= face.any(dim=-1)
+        tread_contact |= tread.any(dim=-1)
+        data = env.scene.sensors[sensor_name].data
+        if data.force is not None:
+            normal_force = torch.abs(
+                torch.sum(data.force * data.normal, dim=-1)
+            )
+            normal_force = torch.where(
+                tread, normal_force, torch.zeros_like(normal_force)
+            )
+            strongest_tread_force = torch.maximum(
+                strongest_tread_force,
+                normal_force.max(dim=-1).values,
+            )
+    return face_contact, tread_contact, strongest_tread_force
+
+
 def _stair_contact_event(
     env: ManagerBasedRlEnv, contact: torch.Tensor, latch_name: str
 ) -> torch.Tensor:
@@ -1854,6 +2057,360 @@ def stair_first_tread_contact(
         corridor_half_width=corridor_half_width,
     )
     return _stair_contact_event(env, tread, "_stair_first_tread_contact_latched")
+
+
+def stair_new_tread_contact_after_reset(
+    env: ManagerBasedRlEnv,
+    nominal_stair_face_x: float = 0.66,
+    max_face_offset: float = 0.04,
+    num_terrain_levels: int = 3,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.36,
+    min_policy_steps: int = 3,
+    sensor_names: tuple[str, ...] = (
+        "head_ground_contact",
+        "trunk_ground_contact",
+        "legs_ground_contact",
+        "feet_stair_contact",
+    ),
+) -> torch.Tensor:
+    """Pay once for tread contact created after the replayed reset state."""
+
+    if min_policy_steps < 1:
+        raise ValueError("min_policy_steps must be positive")
+    _, current, _ = _virtual_lip_union_contact_state(
+        env,
+        sensor_names,
+        nominal_stair_face_x=nominal_stair_face_x,
+        max_face_offset=max_face_offset,
+        num_terrain_levels=num_terrain_levels,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    if not hasattr(env, "_stair_contact_transfer_stage1_latched"):
+        env._stair_contact_transfer_stage1_latched = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._stair_contact_transfer_stage1_previous = torch.zeros_like(
+            env._stair_contact_transfer_stage1_latched
+        )
+        env._stair_contact_transfer_stage1_policy_achieved = torch.zeros_like(
+            env._stair_contact_transfer_stage1_latched
+        )
+    fresh = env.episode_length_buf <= 1
+    # Existing replay-bank contact is a baseline, never an achievement. Track
+    # the live contact edge separately so a baseline contact that releases and
+    # is later re-created by the policy can still count exactly once.
+    env._stair_contact_transfer_stage1_latched[fresh] = False
+    env._stair_contact_transfer_stage1_previous[fresh] = current[fresh]
+    env._stair_contact_transfer_stage1_policy_achieved[fresh] = False
+    armed = env.episode_length_buf >= min_policy_steps
+    newly_contacted = (
+        armed
+        & current
+        & ~env._stair_contact_transfer_stage1_previous
+        & ~env._stair_contact_transfer_stage1_latched
+    )
+    env._stair_contact_transfer_stage1_latched |= newly_contacted
+    env._stair_contact_transfer_stage1_policy_achieved |= newly_contacted
+    env._stair_contact_transfer_stage1_previous.copy_(current)
+    return newly_contacted.to(torch.float32)
+
+
+def stair_loaded_tread_face_release(
+    env: ManagerBasedRlEnv,
+    nominal_stair_face_x: float = 0.66,
+    max_face_offset: float = 0.04,
+    num_terrain_levels: int = 3,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.36,
+    hold_steps: int = 2,
+    min_policy_steps: int = 3,
+    min_normal_force: float = 0.40,
+    sensor_names: tuple[str, ...] = (
+        "head_ground_contact",
+        "trunk_ground_contact",
+        "legs_ground_contact",
+        "feet_stair_contact",
+    ),
+) -> torch.Tensor:
+    """Pay once when newly created tread support persists without face contact."""
+
+    if hold_steps < 1 or min_policy_steps < 1 or min_normal_force <= 0.0:
+        raise ValueError(
+            "hold_steps, min_policy_steps, and min_normal_force must be positive"
+        )
+    face_contact, tread_contact, tread_force = _virtual_lip_union_contact_state(
+        env,
+        sensor_names,
+        nominal_stair_face_x=nominal_stair_face_x,
+        max_face_offset=max_face_offset,
+        num_terrain_levels=num_terrain_levels,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    if not hasattr(env, "_stair_contact_transfer_hold"):
+        env._stair_contact_transfer_hold = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+        env._stair_contact_transfer_stage2_latched = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._stair_contact_transfer_stage2_policy_achieved = torch.zeros_like(
+            env._stair_contact_transfer_stage2_latched
+        )
+        env._stair_contact_transfer_face_seen = torch.zeros_like(
+            env._stair_contact_transfer_stage2_latched
+        )
+    fresh = env.episode_length_buf <= 1
+    env._stair_contact_transfer_hold[fresh] = 0
+    # A tread-contact bank state is useful for downstream clearance but cannot
+    # claim discovery of the transfer that already existed at reset.
+    env._stair_contact_transfer_stage2_latched[fresh] = tread_contact[fresh]
+    env._stair_contact_transfer_stage2_policy_achieved[fresh] = False
+    reset_family = getattr(env, "_stair_state_bank_family", None)
+    validated_face_source = (
+        torch.zeros_like(face_contact)
+        if reset_family is None
+        else reset_family == 0
+    )
+    # Family 0 is collected only from same-frame hard-stair face-contact,
+    # no-tread states. The recessed level deliberately removes that contact,
+    # so retain the validated source fact as the prior-face condition.
+    env._stair_contact_transfer_face_seen[fresh] = (
+        face_contact[fresh] | validated_face_source[fresh]
+    )
+    env._stair_contact_transfer_face_seen |= face_contact
+    stage1 = getattr(env, "_stair_contact_transfer_stage1_policy_achieved", None)
+    if stage1 is None:
+        stage1 = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    candidate = (
+        (env.episode_length_buf >= min_policy_steps)
+        & stage1
+        & env._stair_contact_transfer_face_seen
+        & tread_contact
+        & (tread_force >= min_normal_force)
+        & ~face_contact
+        & ~env._stair_contact_transfer_stage2_latched
+    )
+    env._stair_contact_transfer_hold = torch.where(
+        candidate,
+        env._stair_contact_transfer_hold + 1,
+        torch.zeros_like(env._stair_contact_transfer_hold),
+    )
+    released = (
+        env._stair_contact_transfer_hold >= hold_steps
+    ) & ~env._stair_contact_transfer_stage2_latched
+    env._stair_contact_transfer_stage2_latched |= released
+    env._stair_contact_transfer_stage2_policy_achieved |= released
+    return released.to(torch.float32)
+
+
+def stair_riser_face_contact_after_tread(
+    env: ManagerBasedRlEnv,
+    nominal_stair_face_x: float = 0.66,
+    max_face_offset: float = 0.04,
+    num_terrain_levels: int = 3,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.36,
+    sensor_names: tuple[str, ...] = (
+        "head_ground_contact",
+        "trunk_ground_contact",
+        "legs_ground_contact",
+        "feet_stair_contact",
+    ),
+) -> torch.Tensor:
+    """Return a face-contact cost only after the policy found the tread."""
+
+    face, _, _ = _virtual_lip_union_contact_state(
+        env,
+        sensor_names,
+        nominal_stair_face_x=nominal_stair_face_x,
+        max_face_offset=max_face_offset,
+        num_terrain_levels=num_terrain_levels,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    stage1 = getattr(env, "_stair_contact_transfer_stage1_policy_achieved", None)
+    if stage1 is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return (stage1 & face).to(torch.float32)
+
+
+def stair_virtual_lip_penetration_cost(
+    env: ManagerBasedRlEnv,
+    nominal_stair_face_x: float = 0.66,
+    max_face_offset: float = 0.04,
+    num_terrain_levels: int = 3,
+    riser_height: float = 0.17,
+    corridor_half_width: float = 0.36,
+    speed_scale: float = 0.40,
+    min_policy_steps: int = 3,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize fast collision-support penetration into the virtual riser."""
+
+    if speed_scale <= 0.0 or min_policy_steps < 1:
+        raise ValueError("speed_scale and min_policy_steps must be positive")
+    asset: Entity = env.scene[asset_cfg.name]
+    geom_ids = asset.indexing.geom_ids
+    centers = asset.data.geom_pos_w
+    linear_velocity = torch.nan_to_num(asset.data.geom_lin_vel_w, nan=0.0)
+    angular_velocity = torch.nan_to_num(asset.data.geom_ang_vel_w, nan=0.0)
+    rbound = asset.data.model.geom_rbound
+    if rbound.ndim == 1:
+        radii = rbound[geom_ids][None, :].expand(env.num_envs, -1)
+    else:
+        radii = rbound[:, geom_ids]
+    directions = torch.tensor(
+        (
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (-1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, -1.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (0.0, 0.0, -1.0),
+        ),
+        dtype=centers.dtype,
+        device=centers.device,
+    )
+    point_offsets = radii[..., None, None] * directions[None, None, :, :]
+    positions = (
+        centers[..., None, :]
+        + point_offsets
+        - env.scene.terrain.env_origins[:, None, None, :]
+    )
+    velocities = linear_velocity[..., None, :] + torch.cross(
+        angular_velocity[..., None, :].expand_as(point_offsets),
+        point_offsets,
+        dim=-1,
+    )
+    contype = asset.data.model.geom_contype[geom_ids]
+    collision_geom = contype > 0
+    physical_face_x = _virtual_lip_physical_face_x(
+        env,
+        nominal_stair_face_x=nominal_stair_face_x,
+        max_face_offset=max_face_offset,
+        num_terrain_levels=num_terrain_levels,
+    )
+    offset = physical_face_x - nominal_stair_face_x
+    inside = (
+        (offset[:, None, None] > 1.0e-6)
+        & collision_geom[None, :, None]
+        & (positions[..., 0] >= nominal_stair_face_x)
+        & (positions[..., 0] <= physical_face_x[:, None, None])
+        & (positions[..., 2] >= 0.0)
+        & (positions[..., 2] <= riser_height)
+        & (positions[..., 1].abs() <= corridor_half_width)
+    )
+    depth = torch.clamp(
+        (positions[..., 0] - nominal_stair_face_x)
+        / torch.clamp(offset[:, None, None], min=1.0e-6),
+        min=0.0,
+        max=1.0,
+    )
+    speed = torch.clamp(
+        torch.linalg.vector_norm(velocities, dim=-1) / speed_scale,
+        min=0.0,
+        max=2.0,
+    )
+    cost = torch.where(inside, depth * speed, torch.zeros_like(depth))
+    cost = cost.flatten(start_dim=1).max(dim=-1).values
+    return torch.where(
+        env.episode_length_buf >= min_policy_steps,
+        cost,
+        torch.zeros_like(cost),
+    )
+
+
+def stair_true_shell_clearance(
+    env: ManagerBasedRlEnv,
+    nominal_stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    corridor_half_width: float = 0.36,
+    hold_steps: int = 4,
+    shell_half_extents: tuple[float, float, float] = (0.034, 0.031, 0.022),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay once when every trunk-shell box corner clears the nominal lip."""
+
+    if hold_steps < 1 or min(shell_half_extents) <= 0.0:
+        raise ValueError("Shell hold and half extents must be positive")
+    asset: Entity = env.scene[asset_cfg.name]
+    centers = asset.data.geom_pos_w[:, asset_cfg.geom_ids]
+    quaternions = asset.data.geom_quat_w[:, asset_cfg.geom_ids]
+    if centers.shape[1] != 1:
+        raise ValueError("True shell clearance requires exactly one shell geom")
+    signs = torch.tensor(
+        (
+            (-1.0, -1.0, -1.0),
+            (-1.0, -1.0, 1.0),
+            (-1.0, 1.0, -1.0),
+            (-1.0, 1.0, 1.0),
+            (1.0, -1.0, -1.0),
+            (1.0, -1.0, 1.0),
+            (1.0, 1.0, -1.0),
+            (1.0, 1.0, 1.0),
+        ),
+        dtype=centers.dtype,
+        device=centers.device,
+    )
+    half_extents = torch.tensor(
+        shell_half_extents, dtype=centers.dtype, device=centers.device
+    )
+    local_corners = signs * half_extents
+    corner_count = local_corners.shape[0]
+    rotated = quat_apply(
+        quaternions[:, :, None, :].expand(-1, -1, corner_count, -1),
+        local_corners[None, None, :, :].expand(env.num_envs, 1, -1, -1),
+    )
+    corners = (
+        centers[:, :, None, :]
+        + rotated
+        - env.scene.terrain.env_origins[:, None, None, :]
+    )
+    root_y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    candidate = (
+        torch.isfinite(corners).all(dim=(-1, -2, -3))
+        & (corners[..., 0] >= nominal_stair_face_x).all(dim=(-1, -2))
+        & (corners[..., 2] >= riser_height).all(dim=(-1, -2))
+        & (root_y <= corridor_half_width)
+    )
+    if not hasattr(env, "_stair_true_shell_clearance_hold"):
+        env._stair_true_shell_clearance_hold = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+        env._stair_true_shell_clearance_latched = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._stair_true_shell_clearance_policy_achieved = torch.zeros_like(
+            env._stair_true_shell_clearance_latched
+        )
+    fresh = env.episode_length_buf <= 1
+    env._stair_true_shell_clearance_hold[fresh] = 0
+    env._stair_true_shell_clearance_latched[fresh] = candidate[fresh]
+    env._stair_true_shell_clearance_policy_achieved[fresh] = False
+    eligible = candidate & ~env._stair_true_shell_clearance_latched
+    env._stair_true_shell_clearance_hold = torch.where(
+        eligible,
+        env._stair_true_shell_clearance_hold + 1,
+        torch.zeros_like(env._stair_true_shell_clearance_hold),
+    )
+    newly_cleared = (
+        env._stair_true_shell_clearance_hold >= hold_steps
+    ) & ~env._stair_true_shell_clearance_latched
+    env._stair_true_shell_clearance_latched |= newly_cleared
+    env._stair_true_shell_clearance_policy_achieved |= newly_cleared
+    return newly_cleared.to(torch.float32)
 
 
 def stair_contact_loaded_release(
@@ -3408,6 +3965,7 @@ def stair_first_tread_secured(
     riser_height: float = 0.17,
     tread_depth: float = 0.28,
     corridor_half_width: float = 0.36,
+    required_latch_name: str | None = None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Pay once when any mechanically settled pose is secured on tread one.
@@ -3429,6 +3987,13 @@ def stair_first_tread_secured(
         corridor_half_width=corridor_half_width,
     )
     support = tread_contact.any(dim=-1)
+    ordered_gate = torch.ones_like(support)
+    if required_latch_name is not None:
+        required_latch = getattr(env, required_latch_name, None)
+        if required_latch is None:
+            ordered_gate = torch.zeros_like(support)
+        else:
+            ordered_gate = required_latch
     candidate = (
         (x >= min_x)
         & (x <= max_x)
@@ -3436,6 +4001,7 @@ def stair_first_tread_secured(
         & (linear_speed <= max_linear_speed)
         & (angular_speed <= max_angular_speed)
         & support
+        & ordered_gate
     )
     if not hasattr(env, "_stair_first_tread_secured_steps"):
         env._stair_first_tread_secured_steps = torch.zeros(
@@ -3666,6 +4232,36 @@ def route_terrain_levels(
         "mean": torch.mean(levels),
         "max": torch.max(levels),
         "route_stairs": torch.mean(levels),
+    }
+
+
+def stair_contact_transfer_terrain_levels(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Advance virtual-lip hardness only after a new support transfer."""
+
+    terrain = env.scene.terrain
+    if terrain.terrain_origins is None:
+        zero = torch.tensor(0.0, device=env.device)
+        return {"mean": zero, "max": zero, "contact_transfer": zero}
+    transferred = getattr(
+        env, "_stair_contact_transfer_stage2_policy_achieved", None
+    )
+    success = (
+        torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
+        if transferred is None
+        else transferred[env_ids]
+    )
+    # Failure holds the current level. A discovered transfer must consolidate
+    # before the physical face moves toward the exact hard stair.
+    move_down = torch.zeros_like(success)
+    terrain.update_env_origins(env_ids, success, move_down)
+    levels = terrain.terrain_levels.float()
+    return {
+        "mean": torch.mean(levels),
+        "max": torch.max(levels),
+        "contact_transfer": torch.mean(levels),
     }
 
 

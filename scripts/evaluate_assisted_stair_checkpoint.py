@@ -26,6 +26,7 @@ from mjlab.utils.torch import configure_torch_backends
 
 from mjlab_microduck.tasks.mdp import classify_standard_stair_contacts
 
+A30_TASK_ID = "Mjlab-Stairs-Virtual-Lip-Transfer-RSI-Specialist-MicroDuck"
 TASK_IDS = (
     "Mjlab-Stairs-Assisted-Specialist-MicroDuck",
     "Mjlab-Stairs-Bridge-Specialist-MicroDuck",
@@ -44,6 +45,7 @@ TASK_IDS = (
     "Mjlab-Stairs-Terminal-Position-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Frontier-Tier-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Forward-Propagation-RSI-Specialist-MicroDuck",
+    A30_TASK_ID,
     "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
     "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
@@ -71,6 +73,17 @@ TREAD_CONTACT_BANK_RESET_MODES = {
     1: "unused_head_lever",
     2: "unused_tread",
     3: "real_tread_contact",
+}
+A30_RESET_MODES = {
+    0: "face_no_tread_bank",
+    1: "tread_contact_bank",
+    2: "manufacturer_roulade",
+}
+A30_RESET_FAMILY_OVERRIDES = {
+    "mixed": None,
+    "face-no-tread": 0,
+    "tread-contact": 1,
+    "manufacturer": 2,
 }
 BODY_PART_CONTACT_SENSORS = {
     "head": "head_ground_contact",
@@ -386,6 +399,12 @@ def _parse_args() -> argparse.Namespace:
             "state-bank fraction for diagnostic evaluation."
         ),
     )
+    parser.add_argument("--terrain-level", type=int, choices=(0, 1, 2))
+    parser.add_argument(
+        "--reset-family",
+        choices=tuple(A30_RESET_FAMILY_OVERRIDES),
+        default="mixed",
+    )
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
 
@@ -411,6 +430,7 @@ def _sha256(path: Path) -> str:
 
 def main() -> int:
     args = _parse_args()
+    is_a30 = args.task == A30_TASK_ID
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_file():
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
@@ -420,7 +440,13 @@ def main() -> int:
         0.0 <= args.root_over_lip_replay_fraction <= 1.0
     ):
         raise SystemExit("--root-over-lip-replay-fraction must be within [0, 1]")
-    if args.task in {
+    if not is_a30 and args.terrain_level is not None:
+        raise SystemExit("--terrain-level is supported only for the A30 task")
+    if not is_a30 and args.reset_family != "mixed":
+        raise SystemExit("--reset-family is supported only for the A30 task")
+    if is_a30:
+        reset_modes = A30_RESET_MODES
+    elif args.task in {
         "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
         "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
         "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
@@ -458,9 +484,50 @@ def main() -> int:
         bank.params["replay_fraction"] = args.root_over_lip_replay_fraction
     agent_cfg = load_rl_cfg(args.task)
     env_cfg.scene.num_envs = args.num_envs
+    effective_terrain_level = None
+    forced_reset_family = None
+    if is_a30:
+        hard_viewer = env_cfg.events.get("a30_hard_viewer")
+        if hard_viewer is None:
+            raise RuntimeError("A30 play cfg is missing the a30_hard_viewer event")
+        effective_terrain_level = (
+            2 if args.terrain_level is None else args.terrain_level
+        )
+        hard_viewer.params["terrain_levels"] = (
+            effective_terrain_level,
+        ) * args.num_envs
+        hard_viewer.params["terrain_types"] = (0,) * args.num_envs
+        forced_reset_family = A30_RESET_FAMILY_OVERRIDES[args.reset_family]
+        state_bank_family = env_cfg.events.get("state_bank_family")
+        if state_bank_family is None:
+            raise RuntimeError("A30 cfg is missing the state_bank_family event")
+        if forced_reset_family is None:
+            state_bank_family.params.pop("forced_family", None)
+        else:
+            state_bank_family.params["forced_family"] = forced_reset_family
     env_cfg.seed = 7
     base_env = ManagerBasedRlEnv(cfg=env_cfg, device=args.device, render_mode=None)
+    if is_a30:
+        actual_levels = base_env.scene.terrain.terrain_levels
+        if not torch.all(actual_levels == effective_terrain_level):
+            base_env.close()
+            raise RuntimeError(
+                "A30 terrain-level override did not reach every evaluation environment"
+            )
     env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
+    if is_a30:
+        env.reset()
+        actual_families = getattr(base_env, "_stair_state_bank_family", None)
+        if actual_families is None:
+            env.close()
+            raise RuntimeError("A30 reset-family assignment is unavailable")
+        if forced_reset_family is not None and not torch.all(
+            actual_families == forced_reset_family
+        ):
+            env.close()
+            raise RuntimeError(
+                "A30 reset-family override did not reach every evaluation environment"
+            )
     runner_cls = load_runner_cls(args.task) or MjlabOnPolicyRunner
     runner = runner_cls(env, asdict(agent_cfg), device=args.device)
     runner.load(
@@ -490,6 +557,8 @@ def main() -> int:
     previous_coupled_gain25 = torch.zeros_like(previous_clearance)
     previous_coupled_target = torch.zeros_like(previous_clearance)
     previous_coupled_bypass = torch.zeros_like(previous_clearance)
+    previous_stage1_policy = torch.zeros_like(previous_clearance)
+    previous_stage2_policy = torch.zeros_like(previous_clearance)
     mode_trials = {name: 0 for name in reset_modes.values()}
     mode_clearance = {name: 0 for name in reset_modes.values()}
     mode_stable = {name: 0 for name in reset_modes.values()}
@@ -507,6 +576,8 @@ def main() -> int:
     mode_coupled_gain25 = {name: 0 for name in reset_modes.values()}
     mode_coupled_target = {name: 0 for name in reset_modes.values()}
     mode_coupled_bypass = {name: 0 for name in reset_modes.values()}
+    mode_stage1_policy = {name: 0 for name in reset_modes.values()}
+    mode_stage2_policy = {name: 0 for name in reset_modes.values()}
     secured_events = 0
     face_contact_events = 0
     tread_contact_events = 0
@@ -521,6 +592,9 @@ def main() -> int:
     coupled_gain25_events = 0
     coupled_target_events = 0
     coupled_bypass_events = 0
+    stage1_policy_events = 0
+    stage2_policy_events = 0
+    secured_before_clearance_events = 0
     nan_termination_events = 0
     tread_contact_source_steps: list[int] = []
     face_contact_metrics = ContactTrajectoryMetrics(args.num_envs, args.device)
@@ -570,10 +644,18 @@ def main() -> int:
     steps = base_env.max_episode_length * args.episodes
     try:
         for _ in range(steps):
-            reset_mode = getattr(base_env, "_stair_assisted_reset_mode", None)
+            reset_mode_attribute = (
+                "_stair_state_bank_family"
+                if is_a30
+                else "_stair_assisted_reset_mode"
+            )
+            reset_mode = getattr(base_env, reset_mode_attribute, None)
             if reset_mode is None:
-                raise RuntimeError("Assisted stair reset mode tracking is unavailable")
+                raise RuntimeError(
+                    f"Stair reset mode tracking is unavailable: {reset_mode_attribute}"
+                )
             episode_mode = reset_mode.clone()
+            episode_control_steps = base_env.episode_length_buf.clone()
             robot = base_env.scene["robot"]
             origins = base_env.scene.terrain.env_origins
             local_pre_step = robot.data.root_link_pos_w - origins
@@ -603,9 +685,20 @@ def main() -> int:
                 base_env.termination_manager.get_term("nan_state").sum().item()
             )
 
-            clearance = getattr(
-                base_env, "_stair_first_riser_latched", previous_clearance
-            )
+            if is_a30:
+                clearance = getattr(
+                    base_env,
+                    "_stair_true_shell_clearance_policy_achieved",
+                    None,
+                )
+                if clearance is None:
+                    raise RuntimeError(
+                        "A30 policy-created true shell-clearance tracking is unavailable"
+                    )
+            else:
+                clearance = getattr(
+                    base_env, "_stair_first_riser_latched", previous_clearance
+                )
             stable = getattr(base_env, "_stair_first_tread_latched", previous_stable)
             secured = getattr(
                 base_env, "_stair_first_tread_secured_latched", previous_secured
@@ -665,6 +758,24 @@ def main() -> int:
                 "_stair_coupled_frontier_bypass_latched",
                 previous_coupled_bypass,
             )
+            if is_a30:
+                stage1_policy = getattr(
+                    base_env,
+                    "_stair_contact_transfer_stage1_policy_achieved",
+                    None,
+                )
+                stage2_policy = getattr(
+                    base_env,
+                    "_stair_contact_transfer_stage2_policy_achieved",
+                    None,
+                )
+                if stage1_policy is None or stage2_policy is None:
+                    raise RuntimeError(
+                        "A30 contact-transfer policy-achievement tracking is unavailable"
+                    )
+            else:
+                stage1_policy = previous_stage1_policy
+                stage2_policy = previous_stage2_policy
             global_contact = base_env.scene.sensors["robot_ground_contact"].data
             if (
                 global_contact.found is None
@@ -681,6 +792,14 @@ def main() -> int:
                 base_env.scene.terrain.env_origins,
             )
             new_clearance = clearance & ~previous_clearance
+            if is_a30:
+                # The environment deliberately pre-latches a reset state that
+                # already satisfies the shell gate. Count only a latch edge
+                # created after policy control has begun. Use the pre-step
+                # counter so a valid event on a terminal step is retained.
+                new_clearance &= (
+                    episode_control_steps >= A12_IGNORE_INITIAL_CONTROL_STEPS
+                )
             new_stable = stable & ~previous_stable
             new_secured = secured & ~previous_secured
             new_contact_release = contact_release & ~previous_contact_release
@@ -702,6 +821,8 @@ def main() -> int:
             new_coupled_gain25 = coupled_gain25 & ~previous_coupled_gain25
             new_coupled_target = coupled_target & ~previous_coupled_target
             new_coupled_bypass = coupled_bypass & ~previous_coupled_bypass
+            new_stage1_policy = stage1_policy & ~previous_stage1_policy
+            new_stage2_policy = stage2_policy & ~previous_stage2_policy
             new_face_contact = face_contact_metrics.observe(
                 raw_face.any(dim=-1), base_env.episode_length_buf
             )
@@ -711,6 +832,10 @@ def main() -> int:
             clearance_events += int(new_clearance.sum().item())
             stable_events += int(new_stable.sum().item())
             secured_events += int(new_secured.sum().item())
+            if is_a30:
+                secured_before_clearance_events += int(
+                    (new_secured & ~clearance).sum().item()
+                )
             contact_release_events += int(new_contact_release.sum().item())
             lip_impulse_events += int(new_lip_impulse.sum().item())
             lip_commitment_events += int(new_lip_commitment.sum().item())
@@ -724,6 +849,8 @@ def main() -> int:
             coupled_gain25_events += int(new_coupled_gain25.sum().item())
             coupled_target_events += int(new_coupled_target.sum().item())
             coupled_bypass_events += int(new_coupled_bypass.sum().item())
+            stage1_policy_events += int(new_stage1_policy.sum().item())
+            stage2_policy_events += int(new_stage2_policy.sum().item())
             face_contact_events += int(new_face_contact.sum().item())
             tread_contact_events += int(new_tread_contact.sum().item())
             source_steps = getattr(base_env, "_stair_walker_bank_source_step", None)
@@ -878,6 +1005,12 @@ def main() -> int:
                 mode_coupled_bypass[name] += int(
                     (new_coupled_bypass & mode_mask).sum().item()
                 )
+                mode_stage1_policy[name] += int(
+                    (new_stage1_policy & mode_mask).sum().item()
+                )
+                mode_stage2_policy[name] += int(
+                    (new_stage2_policy & mode_mask).sum().item()
+                )
             previous_clearance = clearance.clone()
             previous_stable = stable.clone()
             previous_secured = secured.clone()
@@ -892,6 +1025,8 @@ def main() -> int:
             previous_coupled_gain25 = coupled_gain25.clone()
             previous_coupled_target = coupled_target.clone()
             previous_coupled_bypass = coupled_bypass.clone()
+            previous_stage1_policy = stage1_policy.clone()
+            previous_stage2_policy = stage2_policy.clone()
             previous_clearance[done_mask] = False
             previous_stable[done_mask] = False
             previous_secured[done_mask] = False
@@ -906,6 +1041,8 @@ def main() -> int:
             previous_coupled_gain25[done_mask] = False
             previous_coupled_target[done_mask] = False
             previous_coupled_bypass[done_mask] = False
+            previous_stage1_policy[done_mask] = False
+            previous_stage2_policy[done_mask] = False
             face_contact_metrics.reset(done_mask)
             tread_contact_metrics.reset(done_mask)
             for metrics in body_part_tread_metrics.values():
@@ -1008,6 +1145,23 @@ def main() -> int:
             "side_bypass_rate": mode_a12_event_counts[name]["side_bypass"]
             / max(trials, 1),
         }
+        if is_a30:
+            mode_report[name].update(
+                {
+                    "contact_transfer_stage1_policy_achieved_events": (
+                        mode_stage1_policy[name]
+                    ),
+                    "contact_transfer_stage1_policy_achieved_rate": (
+                        mode_stage1_policy[name] / max(trials, 1)
+                    ),
+                    "contact_transfer_stage2_policy_achieved_events": (
+                        mode_stage2_policy[name]
+                    ),
+                    "contact_transfer_stage2_policy_achieved_rate": (
+                        mode_stage2_policy[name] / max(trials, 1)
+                    ),
+                }
+            )
     iteration_match = re.search(r"model_(\d+)$", checkpoint.stem)
     report: dict[str, object] = {
         "schema_version": 10,
@@ -1175,6 +1329,34 @@ def main() -> int:
         "maxima_include_assisted_reset_state": True,
         "promotion_eligible": False,
     }
+    if is_a30:
+        report.update(
+            {
+                "schema_version": 11,
+                "clearance_latch_authoritative": (
+                    "_stair_true_shell_clearance_policy_achieved"
+                ),
+                "terrain_level_override": args.terrain_level,
+                "effective_terrain_level": effective_terrain_level,
+                "reset_family_override": args.reset_family,
+                "forced_reset_family": forced_reset_family,
+                "contact_transfer_stage1_policy_achieved_events": (
+                    stage1_policy_events
+                ),
+                "contact_transfer_stage1_policy_achieved_rate": (
+                    stage1_policy_events / denominator
+                ),
+                "contact_transfer_stage2_policy_achieved_events": (
+                    stage2_policy_events
+                ),
+                "contact_transfer_stage2_policy_achieved_rate": (
+                    stage2_policy_events / denominator
+                ),
+                "secured_before_true_shell_clearance_events": (
+                    secured_before_clearance_events
+                ),
+            }
+        )
     output = args.output or checkpoint.with_suffix(".assisted-eval.json")
     _write_json_atomic(output.resolve(), report)
     print(json.dumps(report, indent=2, sort_keys=True))
