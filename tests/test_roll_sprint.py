@@ -58,6 +58,9 @@ def test_roll_sprint_is_separate_six_second_61d_policy():
     assert list(cfg.observations["actor"].terms) == list(
         roulade.observations["actor"].terms
     )
+    assert cfg.observations["critic"].terms["roll_sprint_critic_padding"].params[
+        "dim"
+    ] == 16
     assert cfg.actions["joint_pos"].scale == 1.0
     assert "roll_sprint_distance" in cfg.rewards
     assert cfg.rewards["roll_sprint_distance"].weight > cfg.rewards[

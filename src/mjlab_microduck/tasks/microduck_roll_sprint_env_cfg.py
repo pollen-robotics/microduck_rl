@@ -9,7 +9,12 @@ head-top contact before its distance is released to PPO.
 import math
 
 from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.managers import CurriculumTermCfg, EventTermCfg, RewardTermCfg
+from mjlab.managers import (
+    CurriculumTermCfg,
+    EventTermCfg,
+    ObservationTermCfg,
+    RewardTermCfg,
+)
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg
 
@@ -134,6 +139,16 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     # even though the visible command remains zero-padded for deployment parity.
     command = cfg.commands["twist"]
     command.resampling_time_range = (EPISODE_LENGTH_S, EPISODE_LENGTH_S * 2)
+
+    # The A35 bootstrap has a 90D privileged critic: its final 16D block is
+    # stair-specific state. Keep the critic contract shape-compatible so its
+    # normalizer, MLP, optimizer, and value estimates can load, while leaving
+    # the deployable actor at the shared 61D contract. Flat sprint has no
+    # equivalent privileged state, so the slot is explicitly zero-padded.
+    cfg.observations["critic"].terms["roll_sprint_critic_padding"] = ObservationTermCfg(
+        func=microduck_mdp.zero_command_padding,
+        params={"dim": 16},
+    )
 
     # Rebuild curricula so no one-roll landing weights or old reward names can
     # silently remain active. DR stages are retained from the roulade recipe.
