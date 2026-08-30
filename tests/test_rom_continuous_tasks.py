@@ -30,6 +30,8 @@ from mjlab_microduck.rom.runtime import RuntimeHandle
 from mjlab_microduck.rom.service import (
     CommandSequenceConflict,
     InvalidParameters,
+    NotReady,
+    RobotBusy,
     SimulatorTaskService,
     StaleCommand,
 )
@@ -464,10 +466,10 @@ def test_watchdog_during_start_publishes_emergency_before_fifo_cleanup(
     assert runtime.active_handle is None
 
 
-def test_start_timeout_cleans_orphan_handle_before_a_new_service_generation(
+def test_start_timeout_quarantines_slot_until_late_handle_cleanup_finishes(
     bundle, store, runtime, clock, walk_request
 ):
-    """A returned orphan handle must be stopped before another generation can start."""
+    """Clearing timed-out start ownership early lets a replacement race its handle."""
     service = SimulatorTaskService(
         bundle,
         store,
@@ -476,6 +478,7 @@ def test_start_timeout_cleans_orphan_handle_before_a_new_service_generation(
         runtimeCallTimeoutS=0.05,
     )
     runtime.start_release.clear()
+    runtime.safe_stop_release.clear()
     create_done, create_outcome, create_thread = _invoke_daemon(
         lambda: service.create_task(walk_request)
     )
@@ -483,11 +486,43 @@ def test_start_timeout_cleans_orphan_handle_before_a_new_service_generation(
     assert create_done.wait(timeout=0.2)
     terminal = _wait_for_terminal(service, walk_request.taskId)
     assert terminal.stopReason == "RUNTIME_UNRESPONSIVE"
-
-    runtime.start_release.set()
     try:
+        with service._lock:
+            timed_out_owner = service._active
+            assert timed_out_owner is not None
+            assert timed_out_owner.request.taskId == walk_request.taskId
+            assert timed_out_owner.start_pending is True
+            assert timed_out_owner.cleanup_pending is True
+        blocked_replacement = walk_request.model_copy(update={"taskId": "6" * 32})
+        with pytest.raises((NotReady, RobotBusy)):
+            service.create_task(blocked_replacement)
+        assert store.get(blocked_replacement.taskId) is None
+        assert service.get_task(walk_request.taskId).state == "FAILED"
+        assert service.events_after(walk_request.taskId, -1)[-1].eventType == (
+            "TASK_FAILED"
+        )
+        assert service.cancel_task(walk_request.taskId).state == "FAILED"
+
+        runtime.start_release.set()
+        assert runtime.safe_stop_started.wait(timeout=0.2)
+        with service._lock:
+            cleanup_owner = service._active
+            assert cleanup_owner is timed_out_owner
+            assert cleanup_owner.handle == RuntimeHandle(taskId=walk_request.taskId)
+            assert cleanup_owner.cleanup_pending is True
+        assert runtime.emergency_stop_calls == [
+            "RUNTIME_UNRESPONSIVE",
+            "RUNTIME_UNRESPONSIVE",
+        ]
+        assert runtime.safe_stop_calls[-1] == (
+            RuntimeHandle(taskId=walk_request.taskId),
+            "RUNTIME_UNRESPONSIVE",
+        )
+        runtime.safe_stop_release.set()
         assert runtime.safe_stopped.wait(timeout=0.2)
     finally:
+        runtime.start_release.set()
+        runtime.safe_stop_release.set()
         create_thread.join(timeout=0.2)
 
     assert "error" in create_outcome
@@ -496,9 +531,16 @@ def test_start_timeout_cleans_orphan_handle_before_a_new_service_generation(
         "RUNTIME_UNRESPONSIVE",
     )
     assert runtime.active_handle is None
+    deadline = time.monotonic() + 0.2
+    while time.monotonic() < deadline:
+        with service._lock:
+            if service._active is None:
+                break
+        time.sleep(0.002)
+    assert service._active is None
 
     replacement = SimulatorTaskService(bundle, store, runtime, monotonic_clock=clock)
-    replacement_request = walk_request.model_copy(update={"taskId": "6" * 32})
+    replacement_request = walk_request.model_copy(update={"taskId": "7" * 32})
     running = replacement.create_task(replacement_request)
     assert running.state == "RUNNING"
     assert runtime.active_handle == RuntimeHandle(taskId=replacement_request.taskId)

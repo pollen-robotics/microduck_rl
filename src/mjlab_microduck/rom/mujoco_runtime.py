@@ -686,6 +686,8 @@ class MicroduckMujocoRuntime:
     ) -> RuntimeHandle:
         self.validate(action, request)
         start_generation = self._emergency_generation
+        published_thread: threading.Thread | None = None
+        emergency_error: RuntimeError | None = None
         with self._lock:
             if self._active_handle is not None:
                 raise RuntimeError("runtime already has an active task")
@@ -742,31 +744,56 @@ class MicroduckMujocoRuntime:
                 self._stop_event.clear()
                 self._reject_emergency_publication_locked(start_generation)
                 handle = self._active_handle
+                assert handle is not None
                 if self._realtime:
-                    self._thread = threading.Thread(
+                    published_thread = threading.Thread(
                         target=self._governed_loop,
                         name=f"microduck-policy-{request.taskId}",
                         daemon=True,
                     )
-                    self._thread.start()
-                return handle
+                    self._thread = published_thread
+                    published_thread.start()
+                try:
+                    self._reject_emergency_publication_locked(start_generation)
+                except RuntimeError as exc:
+                    emergency_error = exc
+            # Close the check/release handoff: an emergency that observed the
+            # held guard either disabled directly after release or is visible here.
+            if emergency_error is None:
+                try:
+                    self._reject_emergency_publication_locked(start_generation)
+                except RuntimeError as exc:
+                    emergency_error = exc
+        if emergency_error is not None:
+            if published_thread is not None:
+                self._settle_emergency_thread(published_thread)
+            raise emergency_error
+        return handle
 
     def command(self, handle: RuntimeHandle, parameters: Mapping[str, object]) -> None:
-        with self._lock:
-            if self._emergency_event.is_set():
-                raise RuntimeError("runtime requires restart after emergency stop")
-            self._require_handle(handle)
-            assert self._active_action is not None
-            command_generation = self._emergency_generation
-            requested_command, command, limiting_reason = self._command_for(
-                self._active_action.actionCode, parameters, self._active_action
-            )
-            with self._emergency_guard:
+        governed_thread: threading.Thread | None = None
+        try:
+            with self._lock:
+                if self._emergency_event.is_set():
+                    raise RuntimeError("runtime requires restart after emergency stop")
+                self._require_handle(handle)
+                assert self._active_action is not None
+                command_generation = self._emergency_generation
+                requested_command, command, limiting_reason = self._command_for(
+                    self._active_action.actionCode, parameters, self._active_action
+                )
+                governed_thread = self._thread
+                with self._emergency_guard:
+                    self._reject_emergency_publication_locked(command_generation)
+                    self._requested_command = requested_command
+                    self._command = command
+                    self._limiting_reason = limiting_reason
+                    self._reject_emergency_publication_locked(command_generation)
                 self._reject_emergency_publication_locked(command_generation)
-                self._requested_command = requested_command
-                self._command = command
-                self._limiting_reason = limiting_reason
-                self._reject_emergency_publication_locked(command_generation)
+        except RuntimeError:
+            if governed_thread is not None and self._emergency_event.is_set():
+                self._settle_emergency_thread(governed_thread)
+            raise
 
     def sample(self, handle: RuntimeHandle) -> RuntimeSample:
         with self._lock:
@@ -808,6 +835,14 @@ class MicroduckMujocoRuntime:
                 )
         with self._lock:
             if self._active_handle is None:
+                if self._emergency_event.is_set():
+                    self._clear_emergency_publication_locked()
+                if (
+                    thread is not None
+                    and not thread.is_alive()
+                    and self._thread is thread
+                ):
+                    self._thread = None
                 return RuntimeEvidence(stopReason=reason)
             metrics = self._evidence_metrics_locked()
             if self._fatal_reason is not None:
@@ -1169,17 +1204,31 @@ class MicroduckMujocoRuntime:
     def _reject_emergency_publication_locked(self, generation: int) -> None:
         """Prevent late start/command work from resurrecting motion intent."""
         if self._emergency_event.is_set() or self._emergency_generation != generation:
-            self._stop_event.set()
-            self._active_handle = None
-            self._active_action = None
-            self._active_request = None
-            self._active_policy = None
-            self._active_session = None
-            zero = DeploymentCommand.zero()
-            self._requested_command = zero
-            self._command = zero
-            self._disable_actuators_locked()
+            self._clear_emergency_publication_locked()
             raise RuntimeError("runtime requires restart after emergency stop")
+
+    def _clear_emergency_publication_locked(self) -> None:
+        """Revoke runtime ownership and synchronously apply force-free intent."""
+        self._stop_event.set()
+        self._active_handle = None
+        self._active_action = None
+        self._active_request = None
+        self._active_policy = None
+        self._active_session = None
+        zero = DeploymentCommand.zero()
+        self._requested_command = zero
+        self._command = zero
+        self._disable_actuators_locked()
+
+    def _settle_emergency_thread(self, thread: threading.Thread) -> None:
+        """Bound shutdown of a thread published immediately before emergency."""
+        self._stop_event.set()
+        if thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+        with self._lock:
+            self._clear_emergency_publication_locked()
+            if self._thread is thread and not thread.is_alive():
+                self._thread = None
 
     def _disable_actuators_locked(self) -> None:
         """Make fatal limp truthful by removing position-servo gain and bias."""

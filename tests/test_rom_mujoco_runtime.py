@@ -782,6 +782,70 @@ def test_late_blocked_command_cannot_overwrite_emergency_zero_intent(
     )
 
 
+def test_emergency_after_final_command_check_disables_before_return(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A guard-held emergency after the last command check must be observed."""
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root)
+    runtime = MicroduckMujocoRuntime(root, bundle, realtime=True)
+    request = _request().model_copy(update={"bundleDigest": bundle.bundleDigest})
+    handle = runtime.start(bundle.actions[0], request)
+    original_reject = runtime._reject_emergency_publication_locked
+    final_check_passed = threading.Event()
+    guard_release = threading.Event()
+    check_count = 0
+    outcome: dict[str, object] = {}
+
+    def block_after_final_check(generation: int) -> None:
+        nonlocal check_count
+        original_reject(generation)
+        check_count += 1
+        if check_count == 2:
+            final_check_passed.set()
+            assert guard_release.wait(timeout=1.0)
+
+    monkeypatch.setattr(
+        runtime, "_reject_emergency_publication_locked", block_after_final_check
+    )
+
+    def invoke_command() -> None:
+        try:
+            runtime.command(
+                handle,
+                {"vxMps": 0.2, "vyMps": 0.0, "yawRateRadps": 0.0},
+            )
+        except BaseException as exc:  # noqa: BLE001 - assert late rejection.
+            outcome["error"] = exc
+
+    command_thread = threading.Thread(target=invoke_command, daemon=True)
+    command_thread.start()
+    assert final_check_passed.wait(timeout=0.2)
+    try:
+        runtime.emergency_stop("RUNTIME_UNRESPONSIVE")
+    finally:
+        guard_release.set()
+        command_thread.join(timeout=0.2)
+
+    assert isinstance(outcome.get("error"), RuntimeError)
+    assert not command_thread.is_alive()
+    assert runtime._active_handle is None
+    assert runtime._thread is None
+    np.testing.assert_array_equal(runtime._requested_command.twist, np.zeros(3))
+    np.testing.assert_array_equal(runtime._command.twist, np.zeros(3))
+    np.testing.assert_array_equal(
+        runtime._data.ctrl[runtime._actuator_indices], np.zeros(14)
+    )
+    np.testing.assert_array_equal(
+        runtime._model.actuator_gainprm[runtime._actuator_indices],
+        np.zeros((14, 10)),
+    )
+    np.testing.assert_array_equal(
+        runtime._model.actuator_biasprm[runtime._actuator_indices],
+        np.zeros((14, 10)),
+    )
+
+
 def test_late_blocked_start_cannot_publish_runtime_ownership_after_emergency(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -998,6 +1062,120 @@ def test_realtime_stop_during_blocked_start_leaves_no_runtime_owner_or_control(
             policy_thread.join(timeout=1.0)
         create_thread.join(timeout=0.2)
         cancel_thread.join(timeout=0.2)
+
+
+@pytest.mark.parametrize("stop_kind", ["cancel", "watchdog"])
+def test_realtime_emergency_after_final_start_check_revokes_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop_kind: str
+) -> None:
+    """An emergency after the final check must not strand enabled actuators."""
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root)
+    runtime = MicroduckMujocoRuntime(root, bundle, realtime=True)
+    service = SimulatorTaskService(
+        bundle,
+        SqliteTaskStore(tmp_path / "tasks.sqlite3"),
+        runtime,
+        runtimeCallTimeoutS=0.5,
+    )
+    request = _request().model_copy(update={"bundleDigest": bundle.bundleDigest})
+    original_reject = runtime._reject_emergency_publication_locked
+    final_check_passed = threading.Event()
+    publication_release = threading.Event()
+    check_count = 0
+
+    def block_after_final_check(generation: int) -> None:
+        nonlocal check_count
+        original_reject(generation)
+        check_count += 1
+        if check_count == 2:
+            final_check_passed.set()
+            assert publication_release.wait(timeout=1.0)
+
+    monkeypatch.setattr(
+        runtime, "_reject_emergency_publication_locked", block_after_final_check
+    )
+    create_done = threading.Event()
+    stop_done = threading.Event()
+    create_outcome: dict[str, object] = {}
+    stop_outcome: dict[str, object] = {}
+
+    def invoke_create() -> None:
+        try:
+            create_outcome["result"] = service.create_task(request)
+        except BaseException as exc:  # noqa: BLE001 - assert concurrent outcome.
+            create_outcome["error"] = exc
+        finally:
+            create_done.set()
+
+    def invoke_stop() -> None:
+        try:
+            stop_outcome["result"] = (
+                service.cancel_task(request.taskId)
+                if stop_kind == "cancel"
+                else service.watchdog_failed()
+            )
+        except BaseException as exc:  # noqa: BLE001 - assert concurrent outcome.
+            stop_outcome["error"] = exc
+        finally:
+            stop_done.set()
+
+    create_thread = threading.Thread(target=invoke_create, daemon=True)
+    stop_thread = threading.Thread(target=invoke_stop, daemon=True)
+    create_thread.start()
+    assert final_check_passed.wait(timeout=0.2)
+    stop_thread.start()
+
+    try:
+        assert runtime._emergency_event.wait(timeout=0.2)
+        assert runtime._stop_event.is_set()
+        publication_release.set()
+        assert create_done.wait(timeout=0.5)
+        assert stop_done.wait(timeout=0.5)
+        expected_state = "CANCELLED" if stop_kind == "cancel" else "FAILED"
+        expected_reason = "CANCELLED" if stop_kind == "cancel" else "WATCHDOG_FAILURE"
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            terminal = service.get_task(request.taskId)
+            if terminal.state == expected_state:
+                break
+            time.sleep(0.002)
+
+        assert terminal.state == expected_state
+        assert terminal.stopReason == expected_reason
+        assert "error" not in create_outcome
+        assert "error" not in stop_outcome
+        assert service._active is None
+        assert runtime._active_handle is None
+        assert runtime._thread is None
+        np.testing.assert_array_equal(runtime._requested_command.twist, np.zeros(3))
+        np.testing.assert_array_equal(runtime._command.twist, np.zeros(3))
+        np.testing.assert_array_equal(
+            runtime._data.ctrl[runtime._actuator_indices], np.zeros(14)
+        )
+        np.testing.assert_array_equal(
+            runtime._model.actuator_gainprm[runtime._actuator_indices],
+            np.zeros((14, 10)),
+        )
+        np.testing.assert_array_equal(
+            runtime._model.actuator_biasprm[runtime._actuator_indices],
+            np.zeros((14, 10)),
+        )
+        mujoco.mj_forward(runtime._model, runtime._data)
+        np.testing.assert_array_equal(
+            runtime._data.actuator_force[runtime._actuator_indices], np.zeros(14)
+        )
+        np.testing.assert_array_equal(
+            runtime._data.qfrc_actuator, np.zeros(runtime._model.nv)
+        )
+    finally:
+        publication_release.set()
+        runtime.emergency_stop("TEST_CLEANUP")
+        policy_thread = runtime._thread
+        if policy_thread is not None:
+            policy_thread.join(timeout=1.0)
+        create_thread.join(timeout=0.2)
+        stop_thread.join(timeout=0.2)
 
 
 def test_runtime_readiness_rejects_available_action_with_wrong_policy_task_identity(

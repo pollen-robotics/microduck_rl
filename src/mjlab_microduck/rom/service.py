@@ -198,6 +198,7 @@ class _ActiveTask:
     cancel_recorded: bool = False
     handle: RuntimeHandle | None = None
     start_pending: bool = False
+    cleanup_pending: bool = False
     deadline: float | None = None
     continuous: bool = False
     stop_claimed: bool = False
@@ -798,17 +799,24 @@ class SimulatorTaskService:
             with self._lock:
                 if self._active is active:
                     active.start_pending = False
+                    if active.cleanup_pending:
+                        active.cleanup_pending = False
+                        self._active = None
             raise
         with self._lock:
-            if self._active is active and not active.terminalized:
+            if self._active is active:
                 active.handle = handle
                 active.start_pending = False
-                return handle
+                cleanup_pending = active.cleanup_pending
+                if not cleanup_pending and not active.terminalized:
+                    return handle
+            else:
+                cleanup_pending = False
             active.start_pending = False
             emergency = not active.emergency_claimed
             if emergency:
                 active.emergency_claimed = True
-        if emergency:
+        if cleanup_pending or emergency:
             try:
                 self._runtime.emergency_stop("RUNTIME_UNRESPONSIVE")
             except Exception:  # noqa: BLE001 - still attempt handle-specific cleanup.
@@ -818,6 +826,12 @@ class SimulatorTaskService:
             self._runtime.safe_stop(handle, "RUNTIME_UNRESPONSIVE")
         except Exception:  # noqa: BLE001 - the dispatcher is already fail closed.
             return handle
+        finally:
+            if cleanup_pending:
+                with self._lock:
+                    if self._active is active and active.cleanup_pending:
+                        active.cleanup_pending = False
+                        self._active = None
         return handle
 
     def _cleanup_handle(self, active: _ActiveTask) -> RuntimeHandle | None:
@@ -867,6 +881,7 @@ class SimulatorTaskService:
         """Fail closed exactly once; late runtime results have no service authority."""
         terminalize = False
         emergency = False
+        retain_cleanup_owner = False
         self._runtime_dispatcher.fail("RUNTIME_UNRESPONSIVE")
         with self._lock:
             self._watchdog_healthy = False
@@ -881,6 +896,8 @@ class SimulatorTaskService:
                 active.terminalized = True
                 active.stop_event.set()
                 terminalize = True
+                retain_cleanup_owner = active.start_pending
+                active.cleanup_pending = retain_cleanup_owner
                 if not active.emergency_claimed:
                     active.emergency_claimed = True
                     emergency = True
@@ -895,9 +912,10 @@ class SimulatorTaskService:
                     self._emergency_stop_failed = True
         if terminalize:
             assert active is not None and active.action is not None
-            with self._lock:
-                if self._active is active:
-                    self._active = None
+            if not retain_cleanup_owner:
+                with self._lock:
+                    if self._active is active:
+                        self._active = None
             evidence = self._evidence_for(
                 active.action,
                 _Outcome("FAILED", "RUNTIME_UNRESPONSIVE"),

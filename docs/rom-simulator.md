@@ -289,13 +289,22 @@ long-lived daemon worker, a bounded admission queue, and a monotonic deadline.
 If sampling, validation, start, command, status, or safe stop stalls, the
 dispatcher rejects all further work, readiness fails closed as
 `RUNTIME_UNRESPONSIVE`, active ownership is durably terminalized as `FAILED`,
-and one lock-independent emergency zero/disable attempt is made. Emergency stop
+and an immediate lock-independent emergency zero/disable attempt is made.
+Emergency stop
 publishes fatal/zero intent before attempting the native-data guard and never
-waits for that guard. Late runtime returns have no task authority and cannot
-republish command or ownership. If cancellation or watchdog failure races a
-pending start, its returned handle remains cleanup-only ownership and the FIFO
-stop resolves that handle after start finishes; durable ownership is not
-released before emergency and handle-specific cleanup have been attempted.
+waits for that guard. Start and command holders recheck the emergency state
+after their final publication and again across guard release; a raced emergency
+revokes runtime ownership, zeros motion, disables actuator gain/bias, and
+boundedly stops any published policy thread. Late runtime returns have no task
+authority and cannot republish command or ownership. If cancellation or
+watchdog failure races a pending start, its returned handle remains cleanup-only
+ownership and the FIFO stop resolves that handle after start finishes; durable
+ownership is not released before emergency and handle-specific cleanup have
+been attempted. If a runtime deadline expires while start is still pending, the
+task becomes durably `FAILED / RUNTIME_UNRESPONSIVE` but its motion slot stays
+quarantined. A late handle is registered, emergency intent is republished, and
+`safe_stop(handle)` is attempted before the slot is released. If start never
+returns, that slot remains quarantined until the process/container is restarted.
 Diagnostic reads and cancellation remain available from durable/cached state.
 At most one native runtime call can remain hung; if it cannot return/join or the
 direct zero/disable guard is unavailable, do not reuse that process: restart
