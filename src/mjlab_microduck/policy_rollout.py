@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
 import math
-from pathlib import Path
 import tempfile
+from dataclasses import dataclass
+from pathlib import Path
 
 import mujoco
 import numpy as np
@@ -15,8 +15,10 @@ import onnxruntime as ort
 
 from mjlab_microduck.blender_motion import validate_motion
 
-
 MICRODUCK_SCENE_XML = Path(__file__).parent / "robot/microduck/scene.xml"
+SIMULATION_TIMESTEP_S = 0.005
+CONTROL_DECIMATION = 4
+CONTROL_HZ = 50
 DEFAULT_POSE = np.asarray(
     [
         0.0,
@@ -47,7 +49,7 @@ class PolicyRolloutConfig:
     policy_path: Path
     output_path: Path
     duration_s: float = 4.0
-    command: tuple[float, float, float] = (0.15, 0.0, 0.0)
+    command: tuple[float, float, float] = (0.30, 0.0, 0.0)
     seed: int = 0
 
 
@@ -105,22 +107,41 @@ def _validate_joint_metadata(
 
 def _validate_config(
     config: PolicyRolloutConfig,
-) -> tuple[Path, Path, int, ort.InferenceSession, mujoco.MjModel]:
+) -> tuple[
+    Path,
+    Path,
+    float,
+    np.ndarray,
+    int,
+    ort.InferenceSession,
+    mujoco.MjModel,
+]:
     policy_path = Path(config.policy_path)
     output_path = Path(config.output_path)
     if not policy_path.is_file():
         raise PolicyRolloutError(f"policy file does not exist: {policy_path}")
+    if output_path.suffix.lower() != ".npz":
+        raise PolicyRolloutError("output_path must use the .npz extension")
+    if policy_path.resolve() == output_path.resolve():
+        raise PolicyRolloutError("policy_path and output_path must resolve to different files")
     try:
         duration_s = float(config.duration_s)
     except (TypeError, ValueError) as exc:
         raise PolicyRolloutError("duration_s must be a positive finite number") from exc
     if not math.isfinite(duration_s) or duration_s <= 0.0:
         raise PolicyRolloutError("duration_s must be a positive finite number")
-    frames_float = duration_s * 50.0
+    frames_float = duration_s * CONTROL_HZ
     frames = round(frames_float)
     if not math.isclose(frames_float, frames, rel_tol=0.0, abs_tol=1e-9):
-        raise PolicyRolloutError("duration_s must produce an integral number of 50 Hz frames")
-    command = np.asarray(config.command, dtype=np.float64)
+        raise PolicyRolloutError(
+            f"duration_s must produce an integral number of {CONTROL_HZ} Hz frames"
+        )
+    try:
+        command = np.asarray(config.command, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise PolicyRolloutError(
+            "command must contain exactly three finite values"
+        ) from exc
     if command.shape != (3,) or not np.isfinite(command).all():
         raise PolicyRolloutError("command must contain exactly three finite values")
     if not isinstance(config.seed, (int, np.integer)):
@@ -156,8 +177,18 @@ def _validate_config(
             f"{input_description} -> {output_description}"
         )
     model = mujoco.MjModel.from_xml_path(str(MICRODUCK_SCENE_XML))
+    model.opt.timestep = SIMULATION_TIMESTEP_S
+    if not math.isclose(
+        CONTROL_DECIMATION * float(model.opt.timestep),
+        1.0 / CONTROL_HZ,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise PolicyRolloutError(
+            "canonical simulation clock must use four 0.005 s substeps per 50 Hz frame"
+        )
     _validate_joint_metadata(session, _joint_names(model))
-    return policy_path, output_path, frames, session, model
+    return policy_path, output_path, duration_s, command, frames, session, model
 
 
 def _observation(
@@ -193,6 +224,46 @@ def _observation(
     return observation.astype(np.float32, copy=False)
 
 
+def _rollout_config_sha256(
+    *, duration_s: float, command: np.ndarray, seed: int
+) -> str:
+    payload = {
+        "command": [float(value) for value in command],
+        "control_decimation": CONTROL_DECIMATION,
+        "control_hz": CONTROL_HZ,
+        "duration_s": float(duration_s),
+        "seed": int(seed),
+        "timestep_s": SIMULATION_TIMESTEP_S,
+    }
+    canonical_json = json.dumps(
+        payload,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+
+def _body_world_velocities(
+    model: mujoco.MjModel, data: mujoco.MjData
+) -> tuple[np.ndarray, np.ndarray]:
+    angular = np.empty((model.nbody - 1, 3), dtype=np.float64)
+    linear = np.empty_like(angular)
+    velocity = np.empty(6, dtype=np.float64)
+    for body_id in range(1, model.nbody):
+        mujoco.mj_objectVelocity(
+            model,
+            data,
+            mujoco.mjtObj.mjOBJ_BODY,
+            body_id,
+            velocity,
+            0,
+        )
+        angular[body_id - 1] = velocity[:3]
+        linear[body_id - 1] = velocity[3:]
+    return angular, linear
+
+
 def build_motion_archive(
     *,
     joint_pos: np.ndarray,
@@ -223,7 +294,9 @@ def build_motion_archive(
 
 def export_policy_rollout(config: PolicyRolloutConfig) -> Path:
     """Run a canonical 50 Hz MuJoCo rollout and atomically export its archive."""
-    policy_path, output_path, frames, session, model = _validate_config(config)
+    policy_path, output_path, duration_s, command_values, frames, session, model = (
+        _validate_config(config)
+    )
     np.random.default_rng(config.seed)
     data = mujoco.MjData(model)
     joint_names = _joint_names(model)
@@ -262,7 +335,7 @@ def export_policy_rollout(config: PolicyRolloutConfig) -> Path:
     body_lin_vel_w = np.empty((frames, len(body_names), 3), dtype=np.float32)
     body_ang_vel_w = np.empty((frames, len(body_names), 3), dtype=np.float32)
     previous_action = np.zeros(len(joint_names), dtype=np.float32)
-    command = np.asarray(config.command, dtype=np.float32)
+    command = command_values.astype(np.float32)
 
     for frame in range(frames):
         mujoco.mj_forward(model, data)
@@ -270,8 +343,9 @@ def export_policy_rollout(config: PolicyRolloutConfig) -> Path:
         joint_vel[frame] = data.qvel[joint_qvel_addresses]
         body_pos_w[frame] = data.xpos[1:]
         body_quat_w[frame] = data.xquat[1:]
-        body_ang_vel_w[frame] = data.cvel[1:, :3]
-        body_lin_vel_w[frame] = data.cvel[1:, 3:]
+        angular_velocity, linear_velocity = _body_world_velocities(model, data)
+        body_ang_vel_w[frame] = angular_velocity
+        body_lin_vel_w[frame] = linear_velocity
 
         observation = _observation(
             model,
@@ -290,7 +364,7 @@ def export_policy_rollout(config: PolicyRolloutConfig) -> Path:
             raise PolicyRolloutError("ONNX action output must be finite with shape [1,14]")
         previous_action = action_batch[0].copy()
         data.ctrl[:] = DEFAULT_POSE + previous_action
-        for _ in range(4):
+        for _ in range(CONTROL_DECIMATION):
             mujoco.mj_step(model, data)
 
     archive = build_motion_archive(
@@ -304,6 +378,11 @@ def export_policy_rollout(config: PolicyRolloutConfig) -> Path:
         body_names=body_names,
         source_hashes={
             "policy_sha256": _sha256(policy_path),
+            "rollout_config_sha256": _rollout_config_sha256(
+                duration_s=duration_s,
+                command=command_values,
+                seed=int(config.seed),
+            ),
             "scene_sha256": _sha256(MICRODUCK_SCENE_XML),
         },
     )

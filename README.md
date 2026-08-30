@@ -213,11 +213,14 @@ uv run scripts/export_policy_rollout.py \
 
 `--output` is required. The remaining defaults are a four-second rollout with
 command `(0.30, 0.0, 0.0)` for `(linear-x, linear-y, angular-z)` and seed `0`;
-use `--lin-vel-y` and `--ang-vel-z` to set the other command components. On
-success the command prints the output path, frame count, command, policy
-SHA-256, and maximum position and orientation errors from the motion validator.
-On failure it prints one `Policy rollout failed: ...` error line and exits with
-status `2`.
+use `--lin-vel-y` and `--ang-vel-z` to set the other command components. Each
+frame advances four 5 ms MuJoCo substeps, so the 200 samples cover exactly four
+seconds at 50 Hz. The archive provenance includes SHA-256 digests of the policy,
+scene, and a canonical rollout configuration containing the command, duration,
+seed, simulation timestep, control decimation, and control rate. On success the
+command prints the output path, frame count, command, policy SHA-256, and maximum
+position and orientation errors from the motion validator. On failure it prints
+one `Policy rollout failed: ...` error line and exits with status `2`.
 
 ## Related projects
 
