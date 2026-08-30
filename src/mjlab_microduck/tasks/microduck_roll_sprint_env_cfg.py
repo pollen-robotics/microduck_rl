@@ -303,8 +303,9 @@ MicroduckRollSprintRlCfg = RslRlOnPolicyRunnerCfg(
     wandb_project="mjlab_microduck",
     experiment_name="microduck_roll_sprint",
     run_name="microduck_roll_sprint",
-    # A checkpoint every ~2.5 minutes feeds the dashboard video sampler.
-    save_interval=25,
+    # Unique checkpoints are audited every 100 iterations. The dashboard
+    # sampler repeats the latest video on its independent 150-second cadence.
+    save_interval=100,
     num_steps_per_env=24,
     max_iterations=4_000,
 )

@@ -58,20 +58,28 @@ def test_sample_once_records_four_robot_video_and_persists_state(
     checkpoint = checkpoint_root / "model_25.pt"
     checkpoint.write_bytes(b"checkpoint-25")
     args = _args(tmp_path, checkpoint_root)
-    observed: dict[str, object] = {}
+    observed: dict[str, object] = {"commands": []}
 
     def fake_run(command, *, cwd, check):
-        observed["command"] = command
+        observed["commands"].append(command)
         observed["cwd"] = cwd
         observed["check"] = check
-        Path(command[3]).parent.mkdir(parents=True, exist_ok=True)
-        Path(command[3]).write_bytes(b"video")
+        if command[1] == str(sampler.EVALUATOR):
+            output = Path(command[command.index("--output") + 1])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text("{}", encoding="utf-8")
+        else:
+            Path(command[3]).parent.mkdir(parents=True, exist_ok=True)
+            Path(command[3]).write_bytes(b"video")
         return argparse.Namespace(returncode=0)
 
     monkeypatch.setattr(sampler.subprocess, "run", fake_run)
 
     assert sampler.sample_once(args) is True
-    command = observed["command"]
+    evaluation_command, command = observed["commands"]
+    assert evaluation_command[2] == str(checkpoint)
+    assert evaluation_command[evaluation_command.index("--num-envs") + 1] == "64"
+    assert evaluation_command[evaluation_command.index("--duration") + 1] == "6"
     assert command[2] == str(checkpoint)
     assert command[command.index("--steps") + 1] == "300"
     assert command[command.index("--task-id") + 1] == args.task_id
@@ -83,6 +91,7 @@ def test_sample_once_records_four_robot_video_and_persists_state(
 
     state = json.loads(args.state_file.read_text(encoding="utf-8"))
     assert state["last_checkpoint"]["iteration"] == 25
+    assert Path(state["last_evaluation"]).is_file()
     assert state["last_video"] == str(output.resolve())
 
 
@@ -97,12 +106,47 @@ def test_duplicate_checkpoint_is_skipped(tmp_path: Path, monkeypatch) -> None:
     def fake_run(command, *, cwd, check):
         del cwd, check
         calls.append(command)
-        Path(command[3]).parent.mkdir(parents=True, exist_ok=True)
-        Path(command[3]).write_bytes(b"video")
+        if command[1] == str(sampler.EVALUATOR):
+            output = Path(command[command.index("--output") + 1])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text("{}", encoding="utf-8")
+        else:
+            Path(command[3]).parent.mkdir(parents=True, exist_ok=True)
+            Path(command[3]).write_bytes(b"video")
         return argparse.Namespace(returncode=0)
 
     monkeypatch.setattr(sampler.subprocess, "run", fake_run)
 
     assert sampler.sample_once(args) is True
     assert sampler.sample_once(args) is False
-    assert len(calls) == 1
+    assert len(calls) == 2
+
+
+def test_allow_repeats_records_every_interval_but_audits_checkpoint_once(
+    tmp_path: Path, monkeypatch
+) -> None:
+    checkpoint_root = tmp_path / "run"
+    checkpoint_root.mkdir()
+    (checkpoint_root / "model_100.pt").write_bytes(b"checkpoint")
+    args = _args(tmp_path, checkpoint_root)
+    args.allow_repeats = True
+    calls: list[list[str]] = []
+
+    def fake_run(command, *, cwd, check):
+        del cwd, check
+        calls.append(command)
+        if command[1] == str(sampler.EVALUATOR):
+            output = Path(command[command.index("--output") + 1])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text("{}", encoding="utf-8")
+        else:
+            Path(command[3]).parent.mkdir(parents=True, exist_ok=True)
+            Path(command[3]).write_bytes(b"video")
+        return argparse.Namespace(returncode=0)
+
+    monkeypatch.setattr(sampler.subprocess, "run", fake_run)
+
+    assert sampler.sample_once(args) is True
+    assert sampler.sample_once(args) is True
+    assert sum(command[1] == str(sampler.EVALUATOR) for command in calls) == 1
+    assert sum(command[1] == str(sampler.RECORDER) for command in calls) == 2

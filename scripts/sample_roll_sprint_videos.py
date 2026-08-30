@@ -19,11 +19,14 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RECORDER = REPO_ROOT / "scripts" / "record_roll_sprint_policy.py"
+EVALUATOR = REPO_ROOT / "scripts" / "evaluate_roll_sprint_checkpoint.py"
 DEFAULT_CHECKPOINT_ROOT = REPO_ROOT / "logs" / "rsl_rl" / "microduck_roll_sprint"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "artifacts" / "training" / "roll-sprint-samples"
 DEFAULT_TASK_ID = "Mjlab-Roll-Sprint-Flat-MicroDuck"
 DEFAULT_INTERVAL_SECONDS = 150.0
 RECORDING_STEPS = 300
+EVALUATION_ENVS = 64
+EVALUATION_DURATION = 6.0
 STATE_FILENAME = ".sample-roll-sprint-videos.json"
 CHECKPOINT_PATTERN = re.compile(r"model_(\d+)\.pt$")
 
@@ -119,6 +122,30 @@ def _output_path(output_dir: Path, identity: CheckpointIdentity) -> Path:
     return output_dir / f"{timestamp}-checkpoint-{identity.iteration:06d}.mp4"
 
 
+def _evaluation_path(output_dir: Path, identity: CheckpointIdentity) -> Path:
+    return (
+        output_dir
+        / "evaluations"
+        / f"checkpoint-{identity.iteration:06d}-{identity.sha256[:12]}.json"
+    )
+
+
+def _evaluator_command(*, checkpoint: Path, output: Path, device: str) -> list[str]:
+    return [
+        sys.executable,
+        str(EVALUATOR),
+        str(checkpoint),
+        "--num-envs",
+        str(EVALUATION_ENVS),
+        "--duration",
+        f"{EVALUATION_DURATION:g}",
+        "--device",
+        device,
+        "--output",
+        str(output),
+    ]
+
+
 def _recorder_command(
     *, checkpoint: Path, output: Path, task_id: str, device: str
 ) -> list[str]:
@@ -151,6 +178,33 @@ def sample_once(args: argparse.Namespace) -> bool:
         _log(f"unchanged checkpoint, no recording: {checkpoint}")
         return False
 
+    evaluation = _evaluation_path(args.output_dir, identity)
+    if not evaluation.is_file():
+        evaluation.parent.mkdir(parents=True, exist_ok=True)
+        evaluation_command = _evaluator_command(
+            checkpoint=checkpoint,
+            output=evaluation,
+            device=args.device,
+        )
+        _log(
+            f"auditing checkpoint iteration {identity.iteration} on "
+            f"{EVALUATION_ENVS} standing starts"
+        )
+        evaluation_result = subprocess.run(
+            evaluation_command, cwd=REPO_ROOT, check=False
+        )
+        if evaluation_result.returncode != 0:
+            _log(
+                f"evaluator failed with exit code {evaluation_result.returncode}; "
+                "state unchanged"
+            )
+            return False
+        if not evaluation.is_file():
+            _log("evaluator returned success without JSON; state unchanged")
+            return False
+    else:
+        _log(f"reusing completed audit: {evaluation}")
+
     output = _output_path(args.output_dir, identity)
     command = _recorder_command(
         checkpoint=checkpoint,
@@ -172,8 +226,9 @@ def sample_once(args: argparse.Namespace) -> bool:
     _write_state(
         args.state_file,
         {
-            "version": 1,
+            "version": 2,
             "last_checkpoint": asdict(identity),
+            "last_evaluation": str(evaluation.resolve()),
             "last_video": str(output.resolve()),
             "sampled_at_utc": datetime.now(UTC).isoformat(),
         },
@@ -211,6 +266,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     if not RECORDER.is_file():
         raise SystemExit(f"Recorder not found: {RECORDER}")
+    if not EVALUATOR.is_file():
+        raise SystemExit(f"Evaluator not found: {EVALUATOR}")
     if not args.checkpoint_root.is_dir():
         raise SystemExit(f"Checkpoint root not found: {args.checkpoint_root}")
     _log(

@@ -93,7 +93,7 @@ def test_roll_sprint_is_separate_six_second_61d_policy():
     assert "set_roulade_state" not in cfg.events
     assert cfg.terminations["nan_state"].time_out is False
     assert MicroduckRollSprintRlCfg.experiment_name == "microduck_roll_sprint"
-    assert MicroduckRollSprintRlCfg.save_interval == 25
+    assert MicroduckRollSprintRlCfg.save_interval == 100
 
 
 def test_roll_sprint_and_backlash_tasks_are_registered():
