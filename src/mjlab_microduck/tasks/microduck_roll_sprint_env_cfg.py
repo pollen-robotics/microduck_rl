@@ -147,9 +147,9 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         func=microduck_mdp.reset_roll_sprint_state,
         mode=old_reset.mode,
         params={
-            "standing_prob": 1.0 if play else 0.40,
-            "midroll_prob": 0.0 if play else 0.20,
-            "postroll_prob": 0.0 if play else 0.40,
+            "standing_prob": 1.0 if play else 0.70,
+            "midroll_prob": 0.0 if play else 0.15,
+            "postroll_prob": 0.0 if play else 0.15,
             "standing_z_min": old_reset.params["standing_z_min"],
             "standing_z_max": old_reset.params["standing_z_max"],
             "standing_tilt_max": old_reset.params["standing_tilt_max"],
@@ -209,29 +209,21 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                 {
                     "step": 0,
                     "params": {
-                        "standing_prob": 0.40,
-                        "midroll_prob": 0.20,
-                        "postroll_prob": 0.40,
-                    },
-                },
-                {
-                    "step": 750 * 24,
-                    "params": {
-                        "standing_prob": 0.50,
-                        "midroll_prob": 0.20,
-                        "postroll_prob": 0.30,
-                    },
-                },
-                {
-                    "step": 1750 * 24,
-                    "params": {
                         "standing_prob": 0.70,
                         "midroll_prob": 0.15,
                         "postroll_prob": 0.15,
                     },
                 },
                 {
-                    "step": 2750 * 24,
+                    "step": 250 * 24,
+                    "params": {
+                        "standing_prob": 0.80,
+                        "midroll_prob": 0.10,
+                        "postroll_prob": 0.10,
+                    },
+                },
+                {
+                    "step": 500 * 24,
                     "params": {
                         "standing_prob": 0.90,
                         "midroll_prob": 0.05,
@@ -239,7 +231,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                     },
                 },
                 {
-                    "step": 3500 * 24,
+                    "step": 750 * 24,
                     "params": {
                         "standing_prob": 1.0,
                         "midroll_prob": 0.0,

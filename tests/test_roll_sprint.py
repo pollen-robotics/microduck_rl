@@ -158,9 +158,9 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert MicroduckRollSprintRlCfg.save_interval == 100
     assert MicroduckRollSprintRlCfg.algorithm.entropy_coef == 0.0
     reset_params = cfg.events["set_roll_sprint_state"].params
-    assert reset_params["standing_prob"] == 0.40
-    assert reset_params["midroll_prob"] == 0.20
-    assert reset_params["postroll_prob"] == 0.40
+    assert reset_params["standing_prob"] == 0.70
+    assert reset_params["midroll_prob"] == 0.15
+    assert reset_params["postroll_prob"] == 0.15
     assert cfg.curriculum["roll_sprint_lane_half_width"].params[
         "width_stages"
     ] == [
@@ -187,21 +187,17 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
         (stage["step"], stage["params"])
         for stage in cfg.curriculum["roll_sprint_spawn_mix"].params["param_stages"]
     ] == [
-        (0, {"standing_prob": 0.40, "midroll_prob": 0.20, "postroll_prob": 0.40}),
+        (0, {"standing_prob": 0.70, "midroll_prob": 0.15, "postroll_prob": 0.15}),
         (
-            750 * 24,
-            {"standing_prob": 0.50, "midroll_prob": 0.20, "postroll_prob": 0.30},
+            250 * 24,
+            {"standing_prob": 0.80, "midroll_prob": 0.10, "postroll_prob": 0.10},
         ),
         (
-            1750 * 24,
-            {"standing_prob": 0.70, "midroll_prob": 0.15, "postroll_prob": 0.15},
-        ),
-        (
-            2750 * 24,
+            500 * 24,
             {"standing_prob": 0.90, "midroll_prob": 0.05, "postroll_prob": 0.05},
         ),
         (
-            3500 * 24,
+            750 * 24,
             {"standing_prob": 1.0, "midroll_prob": 0.0, "postroll_prob": 0.0},
         ),
     ]
