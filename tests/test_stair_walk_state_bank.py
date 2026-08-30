@@ -11,6 +11,7 @@ from mjlab_microduck.tasks.stair_walk_state_bank import (
     eligible_walk_state_rows,
     phase_aligned_local_x,
     phase_balanced_row_buckets,
+    paired_walk_state_rows,
 )
 
 
@@ -142,6 +143,15 @@ def test_balanced_replay_covers_every_eligible_row_equally():
 def test_balanced_replay_rejects_nondivisible_sample_counts():
     with __import__("pytest").raises(ValueError, match="divisible"):
         balanced_walk_state_rows(torch.arange(3), 8, device="cpu")
+
+
+def test_paired_replay_reuses_identical_rows_for_every_candidate() -> None:
+    paired = torch.tensor([10, 20, 30, 40])
+    rows = paired_walk_state_rows(
+        paired, torch.arange(12), group_size=4, device="cpu"
+    )
+
+    assert torch.equal(rows, paired.repeat(3))
 
 
 def test_vault_momentum_accepts_forward_upward_or_pivot_motion():

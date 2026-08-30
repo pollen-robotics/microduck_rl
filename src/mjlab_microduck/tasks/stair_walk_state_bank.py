@@ -383,6 +383,21 @@ def balanced_walk_state_rows(
     return rows[torch.randperm(sample_count, device=device)]
 
 
+def paired_walk_state_rows(
+    paired_rows: torch.Tensor,
+    env_ids: torch.Tensor,
+    group_size: int,
+    *,
+    device: str | torch.device,
+) -> torch.Tensor:
+    """Assign the same replay rows to each contiguous candidate group."""
+
+    if group_size < 1 or tuple(paired_rows.shape) != (group_size,):
+        raise ValueError("Paired replay rows must match the positive group size")
+    slots = torch.remainder(env_ids.to(device), group_size)
+    return paired_rows.to(device)[slots]
+
+
 def phase_balanced_row_buckets(
     states: dict[str, Any],
     eligible_rows: torch.Tensor,
@@ -490,6 +505,9 @@ class WalkerStateBankReset:
         self._balanced_row_replay = bool(
             cfg.params.get("balanced_row_replay", False)
         )
+        self._paired_replay_group_size = cfg.params.get(
+            "paired_replay_group_size"
+        )
         if not 0.0 <= self._replay_fraction <= 1.0:
             raise ValueError("replay_fraction must be between zero and one")
         if self._reset_family is not None and (
@@ -553,6 +571,25 @@ class WalkerStateBankReset:
             raise ValueError(
                 "Balanced row replay cannot be combined with phase or late mixtures"
             )
+        self._paired_rows: torch.Tensor | None = None
+        if self._paired_replay_group_size is not None:
+            group_size = self._paired_replay_group_size
+            if not isinstance(group_size, int) or group_size < 1:
+                raise ValueError("Paired replay group size must be a positive integer")
+            if env.num_envs % group_size != 0:
+                raise ValueError(
+                    "Environment count must be divisible by paired replay group size"
+                )
+            if (
+                self._balanced_row_replay
+                or self._phase_balanced
+                or self._late_fraction > 0.0
+            ):
+                raise ValueError(
+                    "Paired replay cannot be combined with balanced, phase, or late replay"
+                )
+            choices = torch.randint(0, len(self._eligible_rows), (group_size,))
+            self._paired_rows = self._eligible_rows[choices]
         if self._phase_aligned_local_x_range is not None:
             if self._local_x_range is not None:
                 raise ValueError(
@@ -598,6 +635,7 @@ class WalkerStateBankReset:
         reset_family: int | None = None,
         state_field_value: tuple[str, int] | None = None,
         balanced_row_replay: bool = False,
+        paired_replay_group_size: int | None = None,
     ) -> None:
         del (
             bank_path,
@@ -624,6 +662,7 @@ class WalkerStateBankReset:
             reset_family,
             state_field_value,
             balanced_row_replay,
+            paired_replay_group_size,
         )
         mode = getattr(env, "_stair_assisted_reset_mode", None)
         if mode is None:
@@ -660,7 +699,15 @@ class WalkerStateBankReset:
             self._pending_rows = None
             return
 
-        if self._balanced_row_replay:
+        if self._paired_rows is not None:
+            assert self._paired_replay_group_size is not None
+            rows = paired_walk_state_rows(
+                self._paired_rows,
+                selected_ids,
+                self._paired_replay_group_size,
+                device=env.device,
+            )
+        elif self._balanced_row_replay:
             rows = balanced_walk_state_rows(
                 self._eligible_rows,
                 len(selected_ids),

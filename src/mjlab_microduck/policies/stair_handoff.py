@@ -216,11 +216,6 @@ class StairApproachSupervisor:
     min_vx_mps: float = 0.100
     max_vx_mps: float = 0.300
     forward_command_mps: float | torch.Tensor = 0.300
-    alignment_forward_command_mps: float = 0.100
-    alignment_start_distance_m: float = 0.120
-    launch_distance_m: float = 0.120
-    alignment_max_abs_lateral_m: float = 0.025
-    alignment_max_abs_heading_rad: float = math.radians(5.0)
     twist_command_slice: slice = TWIST_COMMAND_SLICE
     route_cue_slice: slice = ROUTE_CUE_SLICE
 
@@ -267,22 +262,6 @@ class StairApproachSupervisor:
         target_vx = self._parameter_like(
             self.forward_command_mps,
             estimate.lateral_error_m,
-        )
-        misaligned = (
-            (estimate.lateral_error_m.abs() > self.alignment_max_abs_lateral_m)
-            | (
-                estimate.heading_error_rad.abs()
-                > self.alignment_max_abs_heading_rad
-            )
-        )
-        alignment_zone = (
-            (estimate.distance_to_next_face_m <= self.alignment_start_distance_m)
-            & (estimate.distance_to_next_face_m > self.launch_distance_m)
-        )
-        target_vx = torch.where(
-            alignment_zone & misaligned,
-            torch.full_like(target_vx, self.alignment_forward_command_mps),
-            target_vx,
         )
         cosine = torch.cos(estimate.heading_error_rad)
         sine = torch.sin(estimate.heading_error_rad)

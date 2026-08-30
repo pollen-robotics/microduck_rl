@@ -14,6 +14,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     BoxStandardStaircaseTerrainCfg,
     make_microduck_stair_contact_stage_rsi_env_cfg,
     make_microduck_stair_near_shell_reverse_rsi_env_cfg,
+    make_microduck_stair_option_frontier_forward_rsi_env_cfg,
     make_microduck_stair_stratified_shell_reverse_rsi_env_cfg,
     make_microduck_stair_stage15_reverse_rsi_env_cfg,
     make_microduck_stair_stage2_reverse_rsi_env_cfg,
@@ -876,3 +877,29 @@ def test_a35_changes_only_family2_to_the_balanced_stratified_bank():
     for name in a34.rewards:
         assert a35.rewards[name].weight == a34.rewards[name].weight
         assert a35.rewards[name].params == a34.rewards[name].params
+
+
+def test_a36_replays_exact_composed_frontier_with_25_percent_retention():
+    a35 = make_microduck_stair_stratified_shell_reverse_rsi_env_cfg()
+    a36 = make_microduck_stair_option_frontier_forward_rsi_env_cfg()
+
+    weights = a36.events["state_bank_family"].params["family_weights"]
+    assert weights == (1, 1, 1, 9)
+    assert sum(weights[:3]) / sum(weights) == 0.25
+    bank = a36.events["option_frontier_state_bank"]
+    assert bank.params["reset_family"] == 3
+    assert bank.params["bank_path"].endswith(
+        "stair-option-composition-frontier-bank.pt"
+    )
+    event_names = tuple(a36.events)
+    assert event_names.index("option_frontier_state_bank") < event_names.index(
+        "stage2_reverse_context"
+    )
+    assert a36.events["stage2_reverse_context"].params == {
+        "stage15_families": (1, 2, 3),
+        "stage2_family": 2,
+    }
+    assert tuple(a36.rewards) == tuple(a35.rewards)
+    for name in a35.rewards:
+        assert a36.rewards[name].weight == a35.rewards[name].weight
+        assert a36.rewards[name].params == a35.rewards[name].params

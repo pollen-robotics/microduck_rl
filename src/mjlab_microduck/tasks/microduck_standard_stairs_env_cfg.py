@@ -1920,6 +1920,45 @@ def make_microduck_stair_stratified_shell_reverse_rsi_env_cfg(
     return cfg
 
 
+def make_microduck_stair_option_frontier_forward_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A36: expand A35 forward from exact composed Stage 1.5 states."""
+
+    cfg = make_microduck_stair_stratified_shell_reverse_rsi_env_cfg(
+        play=play
+    )
+    cfg.events["state_bank_family"].params["family_weights"] = (
+        1,
+        1,
+        1,
+        9,
+    )
+    option_frontier_bank = deepcopy(cfg.events["stage15_reverse_state_bank"])
+    option_frontier_bank.params.update(
+        {
+            "bank_path": (
+                ".tmp/codex/stair-option-composition-frontier-bank.pt"
+            ),
+            "reset_family": 3,
+        }
+    )
+    ordered_events = {}
+    for name, term in cfg.events.items():
+        if name == "stage2_reverse_context":
+            ordered_events["option_frontier_state_bank"] = (
+                option_frontier_bank
+            )
+        ordered_events[name] = term
+    cfg.events = ordered_events
+    cfg.events["stage2_reverse_context"].params["stage15_families"] = (
+        1,
+        2,
+        3,
+    )
+    return cfg
+
+
 def make_microduck_stair_tread_contact_bank_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -2388,6 +2427,18 @@ MicroduckStairStratifiedShellReverseRsiRlCfg.experiment_name = (
 MicroduckStairStratifiedShellReverseRsiRlCfg.run_name = (
     "microduck_stair_stratified_shell_reverse_rsi_specialist"
 )
+
+MicroduckStairOptionFrontierForwardRsiRlCfg = deepcopy(
+    MicroduckStairStratifiedShellReverseRsiRlCfg
+)
+MicroduckStairOptionFrontierForwardRsiRlCfg.experiment_name = (
+    "microduck_stair_option_frontier_forward_rsi_specialist"
+)
+MicroduckStairOptionFrontierForwardRsiRlCfg.run_name = (
+    "microduck_stair_option_frontier_forward_rsi_specialist"
+)
+MicroduckStairOptionFrontierForwardRsiRlCfg.max_iterations = 75
+MicroduckStairOptionFrontierForwardRsiRlCfg.save_interval = 5
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)
 MicroduckStairTreadContactBankRlCfg.experiment_name = (

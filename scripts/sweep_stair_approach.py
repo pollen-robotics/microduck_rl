@@ -159,6 +159,8 @@ def main() -> int:
     pre_handoff_fall = torch.zeros(num_envs, dtype=torch.bool, device=device)
     pre_handoff_contact = torch.zeros(num_envs, dtype=torch.bool, device=device)
     pre_handoff_nan = torch.zeros(num_envs, dtype=torch.bool, device=device)
+    velocity_low_frames = torch.zeros(num_envs, dtype=torch.long, device=device)
+    velocity_high_frames = torch.zeros(num_envs, dtype=torch.long, device=device)
 
     try:
         for step in range(args.steps):
@@ -168,6 +170,16 @@ def main() -> int:
                 env.step(actions)
             estimate = policy.route_estimator.estimate()
             still_walking = ~policy.specialist_latched
+            in_window = (
+                (estimate.distance_to_next_face_m >= 0.080)
+                & (estimate.distance_to_next_face_m <= 0.120)
+            )
+            velocity_low_frames += (
+                still_walking & in_window & (estimate.forward_velocity_mps < 0.160)
+            ).to(torch.long)
+            velocity_high_frames += (
+                still_walking & in_window & (estimate.forward_velocity_mps > 0.300)
+            ).to(torch.long)
             distance_error = (estimate.distance_to_next_face_m - 0.10).abs()
             improved = still_walking & (distance_error < closest_distance_error)
             closest_distance_error[improved] = distance_error[improved]
@@ -231,6 +243,12 @@ def main() -> int:
                 pre_handoff_contact[selection].sum().item()
             ),
             "nan_count": int(pre_handoff_nan[selection].sum().item()),
+            "velocity_low_frame_count": int(
+                velocity_low_frames[selection].sum().item()
+            ),
+            "velocity_high_frame_count": int(
+                velocity_high_frames[selection].sum().item()
+            ),
             "rejection_frame_counts": dict(
                 zip(
                     (
