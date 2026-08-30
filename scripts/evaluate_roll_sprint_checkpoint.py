@@ -50,12 +50,16 @@ SELF_RIGHT_TILT_COS = microduck_mdp._ROLL_SPRINT_SELF_RIGHT_TILT_COS
 SELF_RIGHT_STALL_RATE = microduck_mdp._ROLL_SPRINT_SELF_RIGHT_STALL_RATE
 SELF_RIGHT_STALL_SECONDS = microduck_mdp._ROLL_SPRINT_SELF_RIGHT_STALL_SECONDS
 RACE_LANE_SPACING = 0.28
-TARGET_DISTANCE_M = 20.0
+TARGET_DISTANCE_M = 10.0
+MIN_VALID_ROLLS_FOR_TARGET = math.ceil(
+    TARGET_DISTANCE_M / (TARGET_ANGLE * MAX_DISTANCE_PER_RAD)
+)
+MIN_RECOVERED_REROLLS_FOR_TARGET = max(0, MIN_VALID_ROLLS_FOR_TARGET - 1)
 ROAD_MAX_YAW_DEVIATION_DEG = 20.0
 PROMOTION = {
     "repeated_roll_rate": 0.75,
-    "mean_valid_roll_count": 27.0,
-    "mean_recovered_and_rerolled_count": 26.0,
+    "mean_valid_roll_count": float(MIN_VALID_ROLLS_FOR_TARGET),
+    "mean_recovered_and_rerolled_count": float(MIN_RECOVERED_REROLLS_FOR_TARGET),
     "mean_roll_linked_distance_m": TARGET_DISTANCE_M,
     "mean_roll_linked_speed_mps": 0.5,
     "target_distance_reach_rate": 0.75,
@@ -809,7 +813,7 @@ class RollCycleAuditor:
                 "mean_net_forward_speed_mps": float(
                     (raw_forward[index] / duration_s).item()
                 ),
-                "target_20m_pass": bool(target_distance_pass[index].item()),
+                "target_10m_pass": bool(target_distance_pass[index].item()),
                 "road_corridor_pass": bool(road_corridor_pass[index].item()),
                 "final_launch_ready": bool(self.launch_ready[index].item()),
                 "final_standing_on_road": bool(final_standing_on_road[index].item()),
@@ -903,7 +907,7 @@ class RollCycleAuditor:
             "target_distance_reach_rate": float(
                 target_distance_pass.float().mean().item()
             ),
-            "four_robot_batch_target_20m_pass": bool(
+            "four_robot_batch_target_10m_pass": bool(
                 len(per_robot) == 4 and target_distance_pass.all().item()
             ),
             "standing_on_road_target_reach_rate": float(
@@ -930,7 +934,7 @@ class RollCycleAuditor:
 
 
 def absolute_race_goal_pass(report: dict[str, object]) -> bool:
-    """Return whether the long-term 20 m race target is fully satisfied."""
+    """Return whether the long-term 10 m race target is fully satisfied."""
 
     return (
         float(report["repeated_roll_rate"]) >= PROMOTION["repeated_roll_rate"]
@@ -1374,7 +1378,7 @@ def main() -> int:
 
     race_summary = auditor.summary(args.duration)
     report: dict[str, object] = {
-        "schema_version": 4,
+        "schema_version": 5,
         "task": TASK_ID,
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": _sha256(checkpoint),

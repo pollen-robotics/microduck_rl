@@ -103,7 +103,7 @@
       reroll: "Recovered reroll",
       raceFrontier: "Beats previous best",
       sharedRoad: "Shared road",
-      target20m: "3 of 4 finish standing",
+      target10m: "3 of 4 reach 10 m standing",
       finite: "NaN / OOB",
     };
     const gateList = $("#audit-gates");

@@ -442,7 +442,11 @@ def _roll_sprint_evaluation_payload(payload: dict[str, Any], path: Path) -> dict
             "straight_lane_batch_pass",
             "four_robot_batch_straight_lane_pass",
         ),
-        "target20m": _dashboard_bool(payload, "four_robot_batch_target_20m_pass"),
+        "target10m": _dashboard_bool(
+            payload,
+            "four_robot_batch_target_10m_pass",
+            "four_robot_batch_target_20m_pass",
+        ),
     }
     nan_count = _dashboard_number(payload, "nan_env_count")
     out_of_bounds_count = _dashboard_number(payload, "out_of_bounds_env_count")
@@ -457,7 +461,7 @@ def _roll_sprint_evaluation_payload(payload: dict[str, Any], path: Path) -> dict
         payload, "standing_on_road_target_reach_rate"
     )
     if standing_target_rate is not None:
-        passes["target20m"] = standing_target_rate >= 0.75
+        passes["target10m"] = standing_target_rate >= 0.75
     passes["finite"] = (
         nan_count == 0 and out_of_bounds_count == 0
         if nan_count is not None and out_of_bounds_count is not None

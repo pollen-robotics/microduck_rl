@@ -134,7 +134,7 @@ def test_dashboard_normalizes_latest_self_righting_evaluation(tmp_path, monkeypa
                 "race_frontier_improvement_pass": True,
                 "race_frontier_retention_pass": True,
                 "four_robot_batch_road_corridor_pass": True,
-                "four_robot_batch_target_20m_pass": False,
+                "four_robot_batch_target_10m_pass": False,
                 "standing_on_road_target_reach_rate": 0.75,
                 "road_exit_env_count": 0,
                 "maximum_road_boundary_overshoot_m": 0.0,
@@ -177,9 +177,24 @@ def test_dashboard_normalizes_latest_self_righting_evaluation(tmp_path, monkeypa
         "reroll": True,
         "raceFrontier": True,
         "sharedRoad": True,
-        "target20m": True,
+        "target10m": True,
         "finite": True,
     }
+
+
+def test_dashboard_maps_historical_v4_20m_pass_to_current_10m_gate(tmp_path) -> None:
+    report_path = tmp_path / "historical-v4.json"
+    report_path.write_text("{}", encoding="utf-8")
+
+    evaluation = serve_dashboard._roll_sprint_evaluation_payload(
+        {
+            "schema_version": 4,
+            "four_robot_batch_target_20m_pass": True,
+        },
+        report_path,
+    )
+
+    assert evaluation["passes"]["target10m"] is True
 
 
 def test_dashboard_skips_malformed_newest_evaluation(tmp_path, monkeypatch) -> None:

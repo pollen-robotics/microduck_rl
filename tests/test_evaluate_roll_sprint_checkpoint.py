@@ -328,9 +328,9 @@ def test_auditor_requires_recovery_before_second_credited_roll() -> None:
     assert report["repeated_roll_rate"] == pytest.approx(1.0)
     assert report["maximum_forward_speed_mps"] == pytest.approx(1.25)
     assert report["per_robot"][0]["maximum_forward_speed_mps"] == pytest.approx(1.25)
-    assert not report["per_robot"][0]["target_20m_pass"]
+    assert not report["per_robot"][0]["target_10m_pass"]
     assert report["target_distance_reach_rate"] == pytest.approx(0.0)
-    assert not report["four_robot_batch_target_20m_pass"]
+    assert not report["four_robot_batch_target_10m_pass"]
     assert report["recovery_gate_diagnostics"] == {
         "awaiting_steps": MODULE.RECOVERY_HOLD_STEPS,
         "foot_supported_head_released_steps": MODULE.RECOVERY_HOLD_STEPS,
@@ -423,16 +423,21 @@ def test_evaluator_ranks_standing_on_road_robot_by_credited_frontier() -> None:
         step_dt=0.02,
         course_center_xy=torch.zeros(2),
     )
-    auditor.last_position[:] = torch.tensor([[5.0, -0.10], [10.0, 0.10]])
+    auditor.last_position[:] = torch.tensor([[10.0, -0.10], [10.5, 0.10]])
     auditor.final_course_lateral[:] = torch.tensor([-0.10, 0.10])
-    auditor.linked_distance[:] = torch.tensor([4.0, 3.0])
+    auditor.linked_distance[:] = torch.tensor([10.0, 9.9])
     auditor.launch_ready[:] = True
 
     report = auditor.summary(20.0)
 
     assert report["standing_on_road_winner_robot_index"] == 0
+    assert report["target_distance_m"] == pytest.approx(10.0)
     assert report["per_robot"][0]["standing_on_road_rank"] == 1
+    assert report["per_robot"][0]["target_10m_pass"]
+    assert report["per_robot"][0]["standing_on_road_finish_pass"]
     assert report["per_robot"][1]["standing_on_road_rank"] == 2
+    assert not report["per_robot"][1]["target_10m_pass"]
+    assert not report["per_robot"][1]["standing_on_road_finish_pass"]
 
 
 def test_heading_uses_lateral_axis_at_vertical_pitch() -> None:
@@ -446,6 +451,9 @@ def test_heading_uses_lateral_axis_at_vertical_pitch() -> None:
 
 
 def test_absolute_race_goal_requires_every_gate() -> None:
+    assert MODULE.TARGET_DISTANCE_M == pytest.approx(10.0)
+    assert MODULE.PROMOTION["mean_valid_roll_count"] == pytest.approx(14.0)
+    assert MODULE.PROMOTION["mean_recovered_and_rerolled_count"] == pytest.approx(13.0)
     report = {
         **MODULE.PROMOTION,
         "road_exit_env_count": 0,

@@ -32,7 +32,7 @@ ROAD_HALF_WIDTH_M = microduck_mdp._ROLL_SPRINT_ROAD_HALF_WIDTH
 ROAD_SAFE_FULL_REWARD_HALF_WIDTH_M = microduck_mdp._ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH
 ROAD_REPOSITION_TRIGGER_M = microduck_mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M
 ROAD_REPOSITION_REARM_M = microduck_mdp._ROLL_SPRINT_REPOSITION_REARM_M
-TARGET_DISTANCE_M = 20.0
+TARGET_DISTANCE_M = 10.0
 RACE_CAMERA_LOOKAT = (0.60, 0.0, 0.08)
 RACE_CAMERA_DISTANCE = 3.2
 RACE_CAMERA_FOVY = 45.0
@@ -144,7 +144,8 @@ def _recording_fps(policy_dt: float, frame_stride: int) -> float:
 
 def _race_header_text(elapsed_s: float, total_s: float, leader_index: int) -> str:
     return (
-        f"20 m ROLL RACE  |  t {elapsed_s:05.1f} s / {total_s:.1f} s"
+        f"{TARGET_DISTANCE_M:g} m ROLL RACE  |  "
+        f"t {elapsed_s:05.1f} s / {total_s:.1f} s"
         f"  |  camera follows on-road standing leader R{leader_index + 1}"
     )
 
@@ -281,7 +282,7 @@ def _race_corridor_segments(
 
 
 def _draw_race_corridor(visualizer) -> None:
-    """Draw a non-colliding four-lane 20 m corridor into the render scene."""
+    """Draw the non-colliding shared-road race corridor into the render scene."""
     for start, end, color, radius in _race_corridor_segments():
         visualizer.add_cylinder(start, end, radius=radius, color=color)
 

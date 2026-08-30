@@ -115,7 +115,7 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     roulade = make_microduck_roulade_env_cfg()
 
     assert cfg.episode_length_s == EPISODE_LENGTH_S == 40.0
-    assert TARGET_DISTANCE_M == 20.0
+    assert TARGET_DISTANCE_M == 10.0
     assert mdp._ROLL_SPRINT_RECOVERY_MAX_FORWARD_RATE == 6.0
     assert mdp._ROLL_SPRINT_RECOVERY_HOLD_STEPS == 5
     assert mdp._ROLL_SPRINT_RECOVERY_MIN_HEIGHT_M == 0.09

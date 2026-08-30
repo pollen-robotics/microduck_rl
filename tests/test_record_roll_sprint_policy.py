@@ -167,7 +167,7 @@ def test_recording_fps_preserves_real_simulation_time() -> None:
 
 def test_race_header_uses_requested_rollout_duration() -> None:
     assert MODULE._race_header_text(19.1, 20.0, 2) == (
-        "20 m ROLL RACE  |  t 019.1 s / 20.0 s"
+        "10 m ROLL RACE  |  t 019.1 s / 20.0 s"
         "  |  camera follows on-road standing leader R3"
     )
 
@@ -294,7 +294,7 @@ def test_leader_rejects_lying_or_off_road_robot_and_retains_safe_fallback(
     assert MODULE._select_on_road_leader(env, previous_leader_index=2) == 2
 
 
-def test_corridor_has_four_lanes_and_spans_exactly_twenty_meters() -> None:
+def test_corridor_has_four_lanes_and_spans_exactly_ten_meters() -> None:
     segments = MODULE._race_corridor_segments()
     longitudinal = [
         (start, end) for start, end, _color, _radius in segments if start[1] == end[1]
@@ -303,6 +303,7 @@ def test_corridor_has_four_lanes_and_spans_exactly_twenty_meters() -> None:
         (start, end) for start, end, _color, _radius in segments if start[0] == end[0]
     ]
 
+    assert MODULE.TARGET_DISTANCE_M == pytest.approx(10.0)
     assert len(longitudinal) == 5
     assert all(start[0] == 0.0 for start, _end in longitudinal)
     assert all(end[0] == MODULE.TARGET_DISTANCE_M for _start, end in longitudinal)
