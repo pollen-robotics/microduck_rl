@@ -65,6 +65,19 @@ def _recover(auditor, *, forward_position: float) -> None:
         )
 
 
+def _yaw_quat(degrees: float) -> tuple[float, float, float, float]:
+    half = math.radians(degrees) / 2.0
+    return (math.cos(half), 0.0, 0.0, math.sin(half))
+
+
+def _pitched_yaw_quat(degrees: float) -> tuple[float, float, float, float]:
+    yaw_half = math.radians(degrees) / 2.0
+    pitch_half = math.pi / 4.0
+    cy, sy = math.cos(yaw_half), math.sin(yaw_half)
+    cp, sp = math.cos(pitch_half), math.sin(pitch_half)
+    return (cy * cp, -sy * sp, cy * sp, sy * cp)
+
+
 def test_auditor_backward_rocking_cannot_complete_or_repay_angle() -> None:
     auditor = _auditor()
 
@@ -148,6 +161,62 @@ def test_auditor_requires_lane_reposition_before_roll_restart() -> None:
     assert report["mean_lane_reposition_latency_s"] == pytest.approx(
         (2 * MODULE.RECOVERY_HOLD_STEPS + 1) * 0.02
     )
+
+
+def test_auditor_requires_heading_reposition_before_roll_restart() -> None:
+    auditor = _auditor()
+    auditor.accum[:] = 1.25
+
+    _observe(auditor, omega=0.0, root_quat=_yaw_quat(21.0))
+
+    assert auditor.awaiting_reposition.item()
+    assert auditor.accum.item() == 0.0
+    for _ in range(MODULE.RECOVERY_HOLD_STEPS):
+        _observe(auditor, omega=0.0, root_quat=_yaw_quat(11.0))
+    assert auditor.awaiting_reposition.item()
+    assert auditor.reposition_count.item() == 0
+
+    for _ in range(MODULE.RECOVERY_HOLD_STEPS):
+        _observe(auditor, omega=0.0, root_quat=_yaw_quat(0.0))
+    assert not auditor.awaiting_reposition.item()
+    assert auditor.reposition_count.item() == 1
+
+
+def test_auditor_heading_violation_invalidates_active_cycle() -> None:
+    auditor = _auditor()
+    auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
+    auditor.head_latch[:] = True
+
+    _observe(
+        auditor,
+        omega=1.0,
+        forward_position=0.30,
+        root_quat=_pitched_yaw_quat(21.0),
+    )
+
+    assert auditor.valid_count.item() == 0
+    assert auditor.invalid_count.item() == 1
+    assert auditor.linked_distance.item() == 0.0
+
+
+def test_auditor_completion_outside_heading_rearm_starts_reposition() -> None:
+    auditor = _auditor()
+    auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
+    auditor.head_latch[:] = True
+
+    _observe(
+        auditor,
+        omega=1.0,
+        forward_position=0.20,
+        root_quat=_yaw_quat(15.0),
+    )
+
+    assert auditor.valid_count.item() == 1
+    assert auditor.awaiting_recovery.item()
+    assert auditor.awaiting_reposition.item()
+    _recover(auditor, forward_position=0.20)
+    assert auditor.recovery_count.item() == 1
+    assert auditor.reposition_count.item() == 1
 
 
 def test_auditor_uses_net_cycle_advance_and_global_frontier() -> None:

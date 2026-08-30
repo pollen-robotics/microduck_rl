@@ -147,6 +147,12 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         func=microduck_mdp.roll_sprint_lane_centering_progress,
         weight=4.0,
     )
+    cfg.rewards["roll_sprint_heading_alignment"] = RewardTermCfg(
+        func=microduck_mdp.roll_sprint_heading_alignment_progress,
+        # Signed potential change only: turning away is charged before a
+        # correction can repay it, and holding an aligned heading pays zero.
+        weight=1.0,
+    )
     cfg.rewards["roll_sprint_flatness"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_flatness_penalty,
         weight=-0.25,
@@ -176,10 +182,10 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
             "postroll_prob": 0.0 if play else 0.15,
             "crouch_prob": 0.0 if play else 0.15,
             "ground_recovery_prob": 0.0 if play else 0.15,
-            "ground_face_down_prob": 0.70,
-            "ground_face_up_prob": 0.10,
-            "ground_left_prob": 0.10,
-            "ground_right_prob": 0.10,
+            "ground_face_down_prob": 0.25,
+            "ground_face_up_prob": 0.25,
+            "ground_left_prob": 0.25,
+            "ground_right_prob": 0.25,
             "standing_z_min": old_reset.params["standing_z_min"],
             "standing_z_max": old_reset.params["standing_z_max"],
             "standing_tilt_max": old_reset.params["standing_tilt_max"],
@@ -195,8 +201,9 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         },
     )
 
-    # Keep the command slots live and update the fixed-horizon command timing,
-    # even though the visible command remains zero-padded for deployment parity.
+    # Keep the 61D command block shape-compatible. The roll state uses its
+    # existing twist slots for self-right mode, lane return, and reset-heading
+    # correction without adding an actor observation.
     command = cfg.commands["twist"]
     command.resampling_time_range = (EPISODE_LENGTH_S, EPISODE_LENGTH_S * 2)
     for group in ("actor", "critic"):
@@ -276,10 +283,10 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                         "postroll_prob": 0.15,
                         "crouch_prob": 0.15,
                         "ground_recovery_prob": 0.15,
-                        "ground_face_down_prob": 0.70,
-                        "ground_face_up_prob": 0.10,
-                        "ground_left_prob": 0.10,
-                        "ground_right_prob": 0.10,
+                        "ground_face_down_prob": 0.25,
+                        "ground_face_up_prob": 0.25,
+                        "ground_left_prob": 0.25,
+                        "ground_right_prob": 0.25,
                     },
                 },
                 {
@@ -290,10 +297,10 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                         "postroll_prob": 0.15,
                         "crouch_prob": 0.15,
                         "ground_recovery_prob": 0.20,
-                        "ground_face_down_prob": 0.55,
-                        "ground_face_up_prob": 0.15,
-                        "ground_left_prob": 0.15,
-                        "ground_right_prob": 0.15,
+                        "ground_face_down_prob": 0.25,
+                        "ground_face_up_prob": 0.25,
+                        "ground_left_prob": 0.25,
+                        "ground_right_prob": 0.25,
                     },
                 },
                 {
@@ -336,15 +343,14 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                 "step": 0,
                 "width": microduck_mdp._ROLL_SPRINT_BOOTSTRAP_LANE_HALF_WIDTH,
             },
-            # A53 lost recovered-rerolls even before its 250-iteration lane
-            # step. Keep the recovery-rich phase wide, then harden one axis at
-            # a time after the cyclic transition has had time to consolidate.
-            {"step": 1000 * 24, "width": 0.60},
-            {"step": 2000 * 24, "width": 0.40},
-            {"step": 2800 * 24, "width": 0.28},
-            {"step": 3400 * 24, "width": 0.20},
+            # A63 improved raw/frontier distance while all four canonical
+            # robots reached 168--180 degrees yaw and p95 drift 1.49 m. A 2 m
+            # bootstrap explicitly paid that failure. Teach a correctable
+            # corridor first and reach the canonical gate before mid-training.
+            {"step": 250 * 24, "width": 0.28},
+            {"step": 750 * 24, "width": 0.20},
             {
-                "step": 3750 * 24,
+                "step": 1500 * 24,
                 "width": microduck_mdp._ROLL_SPRINT_LANE_HALF_WIDTH,
             },
         ]

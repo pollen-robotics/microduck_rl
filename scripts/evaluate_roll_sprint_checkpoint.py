@@ -38,6 +38,13 @@ RECOVERY_MIN_HEIGHT_M = microduck_mdp._ROLL_SPRINT_RECOVERY_MIN_HEIGHT_M
 RECOVERY_HOLD_STEPS = microduck_mdp._ROLL_SPRINT_RECOVERY_HOLD_STEPS
 REPOSITION_TRIGGER_M = microduck_mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M
 REPOSITION_REARM_M = microduck_mdp._ROLL_SPRINT_REPOSITION_REARM_M
+REPOSITION_HEADING_TRIGGER_RAD = (
+    microduck_mdp._ROLL_SPRINT_REPOSITION_HEADING_TRIGGER_RAD
+)
+REPOSITION_HEADING_REARM_RAD = (
+    microduck_mdp._ROLL_SPRINT_REPOSITION_HEADING_REARM_RAD
+)
+SELF_RIGHT_TILT_COS = microduck_mdp._ROLL_SPRINT_SELF_RIGHT_TILT_COS
 RACE_LANE_SPACING = 0.28
 TARGET_DISTANCE_M = 20.0
 STRAIGHT_LANE_MAX_DRIFT_M = 0.08
@@ -237,22 +244,46 @@ class RollCycleAuditor:
         displacement = position_xy - self.start_position
         forward_position = (displacement * self.heading).sum(dim=-1)
         lateral_position = (displacement * self.lateral).sum(dim=-1)
+        current_heading = heading_from_quat(root_quat)
+        heading_dot = (current_heading * self.heading).sum(dim=-1).clamp(-1.0, 1.0)
+        heading_cross = (
+            current_heading[:, 0] * self.heading[:, 1]
+            - current_heading[:, 1] * self.heading[:, 0]
+        )
+        heading_error = torch.atan2(heading_cross, heading_dot)
+        heading_error_abs = heading_error.abs()
         awaiting_before = self.awaiting_recovery
         reposition_before = self.awaiting_reposition
         reposition_triggered = (
             active
             & ~reposition_before
-            & (lateral_position.abs() > REPOSITION_TRIGGER_M)
+            & (upright_cos > SELF_RIGHT_TILT_COS)
+            & (
+                (lateral_position.abs() > REPOSITION_TRIGGER_M)
+                | (heading_error_abs > REPOSITION_HEADING_TRIGGER_RAD)
+            )
         )
         waiting_before = awaiting_before | reposition_before
         locked_before = waiting_before | reposition_triggered
         awaiting_active = active & awaiting_before
+        launch_ready = (
+            foot_support
+            & ~head_contact
+            & (upright_cos >= RECOVERY_UPRIGHT_COS)
+            & (lateral_z <= RECOVERY_LATERAL_Z)
+            & (root_height >= RECOVERY_MIN_HEIGHT_M)
+            & (omega.abs() <= RECOVERY_MAX_FORWARD_RATE)
+        )
         foot_release = awaiting_active & foot_support & ~head_contact
         upright_ready = foot_release & (upright_cos >= RECOVERY_UPRIGHT_COS)
         sagittal_ready = upright_ready & (lateral_z <= RECOVERY_LATERAL_Z)
         height_ready = sagittal_ready & (root_height >= RECOVERY_MIN_HEIGHT_M)
         rate_ready = height_ready & (omega.abs() <= RECOVERY_MAX_FORWARD_RATE)
-        recovery_candidate = rate_ready & (lateral_position.abs() <= REPOSITION_REARM_M)
+        recovery_candidate = (
+            rate_ready
+            & (lateral_position.abs() <= REPOSITION_REARM_M)
+            & (heading_error_abs <= REPOSITION_HEADING_REARM_RAD)
+        )
         transition_foot_release = active & waiting_before & foot_support & ~head_contact
         transition_upright = transition_foot_release & (
             upright_cos >= RECOVERY_UPRIGHT_COS
@@ -265,6 +296,7 @@ class RollCycleAuditor:
             & (root_height >= RECOVERY_MIN_HEIGHT_M)
             & (omega.abs() <= RECOVERY_MAX_FORWARD_RATE)
             & (lateral_position.abs() <= REPOSITION_REARM_M)
+            & (heading_error_abs <= REPOSITION_HEADING_REARM_RAD)
         )
         self.awaiting_recovery_steps += awaiting_active.to(torch.long)
         self.recovery_foot_release_steps += foot_release.to(torch.long)
@@ -346,7 +378,14 @@ class RollCycleAuditor:
             & ~locked_before
             & (lateral_position.abs() > LANE_HALF_WIDTH_M)
         )
-        lateral_violation = orientation_violation | corridor_violation
+        heading_violation = (
+            active
+            & ~locked_before
+            & (heading_error_abs > REPOSITION_HEADING_TRIGGER_RAD)
+        )
+        lateral_violation = (
+            orientation_violation | corridor_violation | heading_violation
+        )
         old_lateral_invalid = torch.where(
             transitioned | reposition_triggered,
             torch.zeros_like(self.lateral_invalid),
@@ -357,6 +396,15 @@ class RollCycleAuditor:
         completed = active & ~locked_before & (new_accum >= TARGET_ANGLE)
         valid = completed & new_head_latch & ~new_lateral_invalid
         invalid = completed & ~valid
+        completion_reposition = (
+            valid
+            & launch_ready
+            & (
+                (lateral_position.abs() > REPOSITION_REARM_M)
+                | (heading_error_abs > REPOSITION_HEADING_REARM_RAD)
+            )
+        )
+        reposition_started = reposition_triggered | completion_reposition
         rotation_budget = MAX_DISTANCE_PER_RAD * torch.clamp(
             new_accum, min=0.0, max=TARGET_ANGLE
         )
@@ -413,7 +461,7 @@ class RollCycleAuditor:
             ),
         )
         self.awaiting_reposition = torch.where(
-            reposition_triggered,
+            reposition_started,
             torch.ones_like(reposition_before),
             torch.where(
                 transitioned,
@@ -430,7 +478,7 @@ class RollCycleAuditor:
                 self.recovered_cycle_armed,
             ),
         )
-        reset_recovery_clock = transitioned | valid | reposition_triggered
+        reset_recovery_clock = transitioned | valid | reposition_started
         self.recovery_hold_steps = torch.where(
             reset_recovery_clock,
             torch.zeros_like(recovery_hold),
@@ -442,7 +490,7 @@ class RollCycleAuditor:
             recovery_latency,
         )
         self.reposition_latency_steps = torch.where(
-            transitioned | reposition_triggered,
+            transitioned | reposition_started,
             torch.zeros_like(reposition_latency),
             reposition_latency,
         )
@@ -459,13 +507,7 @@ class RollCycleAuditor:
             torch.maximum(self.max_forward_speed, forward_speed.clamp_min(0.0)),
             self.max_forward_speed,
         )
-        current_heading = heading_from_quat(root_quat)
-        heading_dot = (self.heading * current_heading).sum(dim=-1).clamp(-1.0, 1.0)
-        heading_cross = (
-            self.heading[:, 0] * current_heading[:, 1]
-            - self.heading[:, 1] * current_heading[:, 0]
-        )
-        heading_deviation = torch.atan2(heading_cross, heading_dot).abs()
+        heading_deviation = heading_error_abs
         self.max_heading_deviation = torch.where(
             active,
             torch.maximum(self.max_heading_deviation, heading_deviation),
