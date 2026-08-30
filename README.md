@@ -204,8 +204,8 @@ the same canonical scene used by the Blender validator:
 
 ```bash
 uv run scripts/export_policy_rollout.py \
-  /path/to/walking.onnx \
-  --output /tmp/walking-forward.npz \
+  /home/mcao/MyCode/microduck/policies/alpha_walking.onnx \
+  --output /tmp/alpha-walking-forward.npz \
   --duration 4 \
   --lin-vel-x 0.30 \
   --seed 0
