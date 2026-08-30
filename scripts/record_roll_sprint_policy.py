@@ -38,6 +38,8 @@ RACE_CAMERA_MAX_STEP_M = 0.08
 RACE_LINE_HEIGHT = 0.008
 RACE_LINE_RADIUS = 0.018
 SPEED_WINDOW_S = 1.0
+ROBOT_LABEL_FONT_SIZE = 13
+HEADER_FONT_SIZE = 15
 LABEL_COLORS = (
     (64, 180, 255),
     (255, 91, 91),
@@ -486,11 +488,11 @@ def _overlay_race_labels(
     image = Image.fromarray(frame).convert("RGBA")
     draw = ImageDraw.Draw(image)
     try:
-        font = ImageFont.truetype("arial.ttf", 18)
-        header_font = ImageFont.truetype("arialbd.ttf", 20)
+        font = ImageFont.truetype("arial.ttf", ROBOT_LABEL_FONT_SIZE)
+        header_font = ImageFont.truetype("arialbd.ttf", HEADER_FONT_SIZE)
     except OSError:
-        font = ImageFont.load_default(size=18)
-        header_font = ImageFont.load_default(size=20)
+        font = ImageFont.load_default(size=ROBOT_LABEL_FONT_SIZE)
+        header_font = ImageFont.load_default(size=HEADER_FONT_SIZE)
 
     header = (
         _recovery_header_text(elapsed_s, total_s)
@@ -499,14 +501,15 @@ def _overlay_race_labels(
     )
     header_box = draw.textbbox((0, 0), header, font=header_font)
     header_width = header_box[2] - header_box[0]
+    header_height = header_box[3] - header_box[1]
     draw.rounded_rectangle(
-        (12, 10, 32 + header_width, 42),
-        radius=7,
+        (12, 10, 28 + header_width, 22 + header_height),
+        radius=5,
         fill=(10, 14, 22, 215),
         outline=(235, 239, 245),
         width=1,
     )
-    draw.text((22, 15), header, font=header_font, fill=(255, 255, 255))
+    draw.text((20, 14), header, font=header_font, fill=(255, 255, 255))
 
     max_speeds = max_speeds_mps.detach().cpu().tolist()
     valid_distances = valid_distances_m.detach().cpu().tolist()
@@ -543,11 +546,11 @@ def _overlay_race_labels(
         label_width, label_height = label_sizes[index]
         color = LABEL_COLORS[index % len(LABEL_COLORS)]
         draw.rounded_rectangle(
-            (x - 6, y - 4, x + label_width + 6, y + label_height + 7),
-            radius=6,
+            (x - 4, y - 3, x + label_width + 4, y + label_height + 4),
+            radius=4,
             fill=(8, 12, 18, 220),
             outline=color,
-            width=2,
+            width=1,
         )
         draw.text((x, y), label, font=font, fill=color)
         label_edge_x = x if float(pixel[0]) < x else x + label_width

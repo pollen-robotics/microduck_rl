@@ -236,13 +236,13 @@ def test_heading_uses_lateral_axis_at_vertical_pitch() -> None:
     assert heading[0, 1].item() == pytest.approx(0.0, abs=1.0e-6)
 
 
-def test_promotion_requires_every_gate() -> None:
+def test_absolute_race_goal_requires_every_gate() -> None:
     report = {
         **MODULE.PROMOTION,
         "nan_env_count": 0,
         "out_of_bounds_env_count": 0,
     }
-    assert MODULE.promotion_pass(report)
+    assert MODULE.absolute_race_goal_pass(report)
 
     for key in MODULE.PROMOTION:
         failing = dict(report)
@@ -253,12 +253,12 @@ def test_promotion_requires_every_gate() -> None:
             failing[key] = float(report[key]) + 0.001
         else:
             failing[key] = float(report[key]) - 0.001
-        assert not MODULE.promotion_pass(failing), key
+        assert not MODULE.absolute_race_goal_pass(failing), key
 
     for key in ("nan_env_count", "out_of_bounds_env_count"):
         failing = dict(report)
         failing[key] = 1
-        assert not MODULE.promotion_pass(failing), key
+        assert not MODULE.absolute_race_goal_pass(failing), key
 
 
 def _recovery_case(
@@ -303,7 +303,7 @@ def test_recovery_battery_reports_sixteen_orientation_seed_cases() -> None:
     report = MODULE.summarize_recovery_battery(
         cases,
         race_report=_race_report(),
-        parent_frontier_m=10.5,
+        parent_frontier_m=9.5,
     )
 
     assert report["total_attempts"] == 16
@@ -314,7 +314,9 @@ def test_recovery_battery_reports_sixteen_orientation_seed_cases() -> None:
     assert report["frontier_after_recovery_m"] == pytest.approx(4.0)
     assert report["lane_reposition_count"] == 16
     assert report["lane_reposition_latency_mean_s"] == pytest.approx(0.4)
-    assert report["race_frontier_ratio_to_parent"] == pytest.approx(10 / 10.5)
+    assert report["race_frontier_ratio_to_parent"] == pytest.approx(10 / 9.5)
+    assert report["race_frontier_delta_to_parent_m"] == pytest.approx(0.5)
+    assert report["race_frontier_improved_over_parent"]
     assert report["overall_pass"]
     assert set(report["by_orientation"]) == set(MODULE.RECOVERY_ORIENTATIONS)
     assert all(
@@ -346,4 +348,24 @@ def test_recovery_battery_fails_weak_orientation_and_parent_regression() -> None
     assert report["by_orientation"]["left"]["success_rate"] == pytest.approx(0.25)
     assert not report["by_orientation"]["left"]["pass"]
     assert not report["race_frontier_at_least_90pct_parent"]
+    assert not report["race_frontier_improved_over_parent"]
+    assert not report["overall_pass"]
+
+
+def test_incremental_promotion_requires_strict_frontier_improvement() -> None:
+    cases = [
+        _recovery_case(orientation, seed)
+        for orientation in MODULE.RECOVERY_ORIENTATIONS
+        for seed in MODULE.RECOVERY_SEEDS
+    ]
+
+    report = MODULE.summarize_recovery_battery(
+        cases,
+        race_report=_race_report(),
+        parent_frontier_m=10.0,
+    )
+
+    assert report["race_frontier_delta_to_parent_m"] == pytest.approx(0.0)
+    assert report["race_frontier_at_least_90pct_parent"]
+    assert not report["race_frontier_improved_over_parent"]
     assert not report["overall_pass"]

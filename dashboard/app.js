@@ -74,7 +74,7 @@
     const overall = evaluation.passes?.overall;
     const overallBadge = $("#audit-overall");
     overallBadge.className = `gate-badge ${overall === true ? "is-pass" : overall === false ? "is-fail" : "is-unknown"}`;
-    overallBadge.textContent = overall === true ? "Ready" : overall === false ? "Not ready" : "Pending";
+    overallBadge.textContent = overall === true ? "Improves best" : overall === false ? "No improvement" : "Pending";
 
     const attempts = evaluation.selfRightAttempts;
     const successes = evaluation.selfRightSuccesses;
@@ -101,7 +101,7 @@
     const gateNames = {
       recovery: "Recovery",
       reroll: "Recovered reroll",
-      raceFrontier: "Race frontier",
+      raceFrontier: "Beats previous best",
       straightLane: "Straight lane",
       target20m: "20 m target",
       lateralDrift: "Lateral drift",

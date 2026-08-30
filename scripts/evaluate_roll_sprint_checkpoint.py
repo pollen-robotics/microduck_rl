@@ -636,7 +636,9 @@ class RollCycleAuditor:
         }
 
 
-def promotion_pass(report: dict[str, object]) -> bool:
+def absolute_race_goal_pass(report: dict[str, object]) -> bool:
+    """Return whether the long-term 20 m race target is fully satisfied."""
+
     return (
         float(report["repeated_roll_rate"]) >= PROMOTION["repeated_roll_rate"]
         and float(report["mean_valid_roll_count"]) >= PROMOTION["mean_valid_roll_count"]
@@ -724,12 +726,16 @@ def summarize_recovery_battery(
     recovery_drift = [float(case["maximum_lateral_drift_m"]) for case in cases]
     recovery_p95_drift = _p95(recovery_drift) or 0.0
     race_frontier = float(race_report["mean_credited_forward_frontier_m"])
-    parent_ratio = (
-        None
-        if parent_frontier_m is None or parent_frontier_m <= 0.0
-        else race_frontier / parent_frontier_m
-    )
-    race_frontier_pass = parent_ratio is None or parent_ratio >= 0.90
+    if parent_frontier_m is None or parent_frontier_m <= 0.0:
+        parent_ratio = None
+        parent_delta = None
+        race_frontier_retained = True
+        race_frontier_improved = True
+    else:
+        parent_ratio = race_frontier / parent_frontier_m
+        parent_delta = race_frontier - parent_frontier_m
+        race_frontier_retained = parent_ratio >= 0.90
+        race_frontier_improved = parent_delta > 0.0
     nan_count = int(race_report["nan_env_count"]) + sum(
         bool(case["nan_seen"]) for case in cases
     )
@@ -742,7 +748,7 @@ def summarize_recovery_battery(
         and float(aggregate_p95) <= RECOVERY_MAX_P95_LATENCY_S
         and reroll_rate >= RECOVERY_MIN_REROLL_RATE
         and all(bool(report["pass"]) for report in by_orientation.values())
-        and race_frontier_pass
+        and race_frontier_improved
         and float(race_report["p95_lateral_drift_m"]) <= 0.40
         and nan_count == 0
         and out_of_bounds_count == 0
@@ -768,7 +774,9 @@ def summarize_recovery_battery(
         - int(race_report["out_of_bounds_env_count"]),
         "parent_frontier_m": parent_frontier_m,
         "race_frontier_ratio_to_parent": parent_ratio,
-        "race_frontier_at_least_90pct_parent": race_frontier_pass,
+        "race_frontier_delta_to_parent_m": parent_delta,
+        "race_frontier_at_least_90pct_parent": race_frontier_retained,
+        "race_frontier_improved_over_parent": race_frontier_improved,
         "by_orientation": by_orientation,
         "cases": cases,
         "overall_pass": overall_pass,
@@ -1046,9 +1054,13 @@ def main() -> int:
         parent_frontier_m=args.parent_frontier_m,
     )
     report["recovery_battery"] = recovery_battery
-    report["promotion_pass"] = promotion_pass(report)
+    report["absolute_race_goal_pass"] = absolute_race_goal_pass(report)
+    report["promotion_pass"] = bool(recovery_battery["overall_pass"])
     report["race_frontier_retention_pass"] = recovery_battery[
         "race_frontier_at_least_90pct_parent"
+    ]
+    report["race_frontier_improvement_pass"] = recovery_battery[
+        "race_frontier_improved_over_parent"
     ]
     report["straight_lane_batch_pass"] = report[
         "four_robot_batch_straight_lane_pass"
@@ -1064,10 +1076,10 @@ def main() -> int:
     )
     report["final_recovery_pass"] = final_recovery_pass
     report["acceptance_pass"] = bool(
-        report["promotion_pass"]
+        report["absolute_race_goal_pass"]
         and final_recovery_pass
         and report["straight_lane_batch_pass"]
-        and report["race_frontier_retention_pass"]
+        and report["race_frontier_improvement_pass"]
         and report["p95_lateral_drift_pass"]
     )
     output = args.output or checkpoint.with_suffix(".roll-sprint-eval.json")

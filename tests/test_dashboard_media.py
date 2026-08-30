@@ -94,6 +94,7 @@ def test_dashboard_normalizes_latest_self_righting_evaluation(tmp_path, monkeypa
                 "checkpoint": str(tmp_path / "model_300.pt"),
                 "checkpoint_iteration": 300,
                 "checkpoint_sha256": "deadbeef",
+                "mean_credited_forward_frontier_m": 1.25,
                 "recovery_battery": {
                     "total_attempts": 16,
                     "total_successes": 14,
@@ -105,6 +106,9 @@ def test_dashboard_normalizes_latest_self_righting_evaluation(tmp_path, monkeypa
                     "frontier_after_recovery_m": 8.25,
                     "lane_reposition_count": 3,
                     "lane_reposition_latency_mean_s": 0.8,
+                    "parent_frontier_m": 1.0,
+                    "race_frontier_delta_to_parent_m": 0.25,
+                    "race_frontier_improved_over_parent": True,
                     "by_orientation": {
                         "face_down": {
                             "attempts": 4,
@@ -126,6 +130,8 @@ def test_dashboard_normalizes_latest_self_righting_evaluation(tmp_path, monkeypa
                     "overall_pass": True,
                 },
                 "acceptance_pass": False,
+                "promotion_pass": True,
+                "race_frontier_improvement_pass": True,
                 "race_frontier_retention_pass": True,
                 "straight_lane_batch_pass": True,
                 "four_robot_batch_target_20m_pass": False,
@@ -142,6 +148,9 @@ def test_dashboard_normalizes_latest_self_righting_evaluation(tmp_path, monkeypa
 
     assert evaluation["available"] is True
     assert evaluation["checkpoint"] == "model_300.pt"
+    assert evaluation["meanFrontierM"] == 1.25
+    assert evaluation["parentFrontierM"] == 1.0
+    assert evaluation["frontierDeltaM"] == 0.25
     assert evaluation["selfRightAttempts"] == 16
     assert evaluation["selfRightSuccesses"] == 14
     assert evaluation["selfRightSuccessRate"] == 0.875
@@ -158,7 +167,7 @@ def test_dashboard_normalizes_latest_self_righting_evaluation(tmp_path, monkeypa
     ]
     assert evaluation["orientations"][0]["frontierAfterRecoveryM"] == 2.5
     assert evaluation["passes"] == {
-        "overall": False,
+        "overall": True,
         "recovery": True,
         "reroll": True,
         "raceFrontier": True,

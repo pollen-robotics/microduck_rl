@@ -417,7 +417,7 @@ def _orientation_dashboard_metrics(payload: dict[str, Any]) -> list[dict[str, An
 def _roll_sprint_evaluation_payload(payload: dict[str, Any], path: Path) -> dict[str, Any]:
     passes = {
         "overall": _dashboard_bool(
-            payload, "acceptance_pass", "evaluation_pass", "promotion_pass"
+            payload, "promotion_pass", "acceptance_pass", "evaluation_pass"
         ),
         "recovery": _dashboard_bool(
             payload,
@@ -430,7 +430,11 @@ def _roll_sprint_evaluation_payload(payload: dict[str, Any], path: Path) -> dict
             payload, "self_right_then_reroll_pass", "recovery.reroll_pass"
         ),
         "raceFrontier": _dashboard_bool(
-            payload, "race_frontier_retention_pass", "race.frontier_retention_pass"
+            payload,
+            "race_frontier_improvement_pass",
+            "recovery_battery.race_frontier_improved_over_parent",
+            "race_frontier_retention_pass",
+            "race.frontier_retention_pass",
         ),
         "straightLane": _dashboard_bool(
             payload, "straight_lane_batch_pass", "four_robot_batch_straight_lane_pass"
@@ -461,6 +465,15 @@ def _roll_sprint_evaluation_payload(payload: dict[str, Any], path: Path) -> dict
         "checkpoint": Path(str(payload.get("checkpoint", ""))).name or None,
         "checkpointIteration": _dashboard_number(payload, "checkpoint_iteration"),
         "checkpointSha256": payload.get("checkpoint_sha256"),
+        "meanFrontierM": _dashboard_number(
+            payload, "mean_credited_forward_frontier_m", "mean_roll_linked_distance_m"
+        ),
+        "parentFrontierM": _dashboard_number(
+            payload, "recovery_battery.parent_frontier_m"
+        ),
+        "frontierDeltaM": _dashboard_number(
+            payload, "recovery_battery.race_frontier_delta_to_parent_m"
+        ),
         "selfRightAttempts": _dashboard_number(
             payload,
             "total_self_right_attempt_count",

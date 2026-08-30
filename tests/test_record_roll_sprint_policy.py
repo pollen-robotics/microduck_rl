@@ -251,6 +251,11 @@ def test_race_label_reports_robot_max_speed_and_valid_distance() -> None:
     assert label == "R1  MAX 1s 1.23 m/s  |  4.6 m valid"
 
 
+def test_video_overlay_uses_compact_fonts() -> None:
+    assert MODULE.ROBOT_LABEL_FONT_SIZE <= 13
+    assert MODULE.HEADER_FONT_SIZE <= 15
+
+
 def test_world_projection_anchors_label_to_robot_screen_position() -> None:
     camera = SimpleNamespace(
         pos=[0.0, 0.0, 0.0],
