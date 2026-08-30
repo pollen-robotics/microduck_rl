@@ -5,6 +5,8 @@ import torch
 
 from mjlab_microduck.tasks import mdp
 from mjlab_microduck.tasks.microduck_roll_sprint_env_cfg import (
+    EPISODE_LENGTH_S,
+    TARGET_DISTANCE_M,
     MicroduckRollSprintRlCfg,
     make_microduck_roll_sprint_env_cfg,
 )
@@ -95,11 +97,12 @@ def _recover(env, asset) -> None:
         mdp._update_roll_sprint_state(env, asset)
 
 
-def test_roll_sprint_is_separate_six_second_61d_policy():
+def test_roll_sprint_is_separate_long_distance_61d_policy():
     cfg = make_microduck_roll_sprint_env_cfg()
     roulade = make_microduck_roulade_env_cfg()
 
-    assert cfg.episode_length_s == 6.0
+    assert cfg.episode_length_s == EPISODE_LENGTH_S == 40.0
+    assert TARGET_DISTANCE_M == 20.0
     assert cfg.scene.terrain.terrain_type == "plane"
     assert list(cfg.observations["actor"].terms) == list(
         roulade.observations["actor"].terms

@@ -35,15 +35,17 @@ RECOVERY_UPRIGHT_COS = math.cos(math.radians(50.0))
 RECOVERY_LATERAL_Z = math.sin(math.radians(35.0))
 RECOVERY_HOLD_STEPS = 3
 RACE_LANE_SPACING = 0.28
+TARGET_DISTANCE_M = 20.0
 STRAIGHT_LANE_MAX_DRIFT_M = 0.08
 STRAIGHT_LANE_MAX_YAW_DEVIATION_DEG = 20.0
 PROMOTION = {
     "repeated_roll_rate": 0.75,
-    "mean_valid_roll_count": 2.0,
-    "mean_recovered_and_rerolled_count": 1.0,
-    "mean_roll_linked_distance_m": 0.35,
-    "mean_roll_linked_speed_mps": 0.058,
-    "p95_lateral_drift_m": 0.08,
+    "mean_valid_roll_count": 27.0,
+    "mean_recovered_and_rerolled_count": 26.0,
+    "mean_roll_linked_distance_m": TARGET_DISTANCE_M,
+    "mean_roll_linked_speed_mps": 0.5,
+    "target_distance_reach_rate": 0.75,
+    "p95_lateral_drift_m": 0.40,
     "mean_uncredited_positive_displacement_m": 0.08,
 }
 
@@ -146,6 +148,7 @@ class RollCycleAuditor:
         )
         self.max_lateral_drift = zero.clone()
         self.max_heading_deviation = zero.clone()
+        self.max_forward_speed = zero.clone()
         self.peak_angular_speed = zero.clone()
         self.peak_impact_acceleration = zero.clone()
         self.nan_seen = false.clone()
@@ -335,6 +338,12 @@ class RollCycleAuditor:
             torch.maximum(self.max_lateral_drift, lateral_drift),
             self.max_lateral_drift,
         )
+        forward_speed = (linear_velocity_w[:, :2] * self.heading).sum(dim=-1)
+        self.max_forward_speed = torch.where(
+            active,
+            torch.maximum(self.max_forward_speed, forward_speed.clamp_min(0.0)),
+            self.max_forward_speed,
+        )
         current_heading = heading_from_quat(root_quat)
         heading_dot = (self.heading * current_heading).sum(dim=-1).clamp(-1.0, 1.0)
         heading_cross = (
@@ -386,26 +395,29 @@ class RollCycleAuditor:
         max_heading_deviation_deg = torch.rad2deg(self.max_heading_deviation)
         straight_lane_pass = (
             (self.max_lateral_drift <= STRAIGHT_LANE_MAX_DRIFT_M)
-            & (
-                max_heading_deviation_deg
-                <= STRAIGHT_LANE_MAX_YAW_DEVIATION_DEG
-            )
+            & (max_heading_deviation_deg <= STRAIGHT_LANE_MAX_YAW_DEVIATION_DEG)
             & (self.recovered_and_rerolled_count >= 1)
             & ~self.nan_seen
         )
+        target_distance_pass = self.linked_distance >= TARGET_DISTANCE_M
         per_robot = [
             {
                 "robot_index": index,
                 "net_forward_distance_m": float(raw_forward[index].item()),
-                "maximum_lateral_drift_m": float(
-                    self.max_lateral_drift[index].item()
-                ),
+                "maximum_lateral_drift_m": float(self.max_lateral_drift[index].item()),
                 "maximum_heading_yaw_deviation_deg": float(
                     max_heading_deviation_deg[index].item()
                 ),
                 "valid_roll_recover_reroll_count": int(
                     self.recovered_and_rerolled_count[index].item()
                 ),
+                "maximum_forward_speed_mps": float(
+                    self.max_forward_speed[index].item()
+                ),
+                "mean_net_forward_speed_mps": float(
+                    (raw_forward[index] / duration_s).item()
+                ),
+                "target_20m_pass": bool(target_distance_pass[index].item()),
                 "straight_lane_pass": bool(straight_lane_pass[index].item()),
             }
             for index in range(len(raw_forward))
@@ -446,6 +458,14 @@ class RollCycleAuditor:
             "maximum_heading_yaw_deviation_deg": float(
                 max_heading_deviation_deg.max().item()
             ),
+            "maximum_forward_speed_mps": float(self.max_forward_speed.max().item()),
+            "target_distance_m": TARGET_DISTANCE_M,
+            "target_distance_reach_rate": float(
+                target_distance_pass.float().mean().item()
+            ),
+            "four_robot_batch_target_20m_pass": bool(
+                len(per_robot) == 4 and target_distance_pass.all().item()
+            ),
             "per_robot": per_robot,
             "four_robot_batch_straight_lane_pass": bool(
                 len(per_robot) == 4 and straight_lane_pass.all().item()
@@ -475,6 +495,8 @@ def promotion_pass(report: dict[str, object]) -> bool:
         >= PROMOTION["mean_roll_linked_distance_m"]
         and float(report["mean_roll_linked_speed_mps"])
         >= PROMOTION["mean_roll_linked_speed_mps"]
+        and float(report["target_distance_reach_rate"])
+        >= PROMOTION["target_distance_reach_rate"]
         and float(report["p95_lateral_drift_m"]) <= PROMOTION["p95_lateral_drift_m"]
         and float(report["mean_uncredited_positive_displacement_m"])
         <= PROMOTION["mean_uncredited_positive_displacement_m"]
@@ -487,7 +509,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", type=Path)
     parser.add_argument("--num-envs", type=int, default=4)
-    parser.add_argument("--duration", type=float, default=6.0)
+    parser.add_argument("--duration", type=float, default=40.0)
     parser.add_argument(
         "--device", default="cuda:0" if torch.cuda.is_available() else "cpu"
     )
@@ -501,7 +523,9 @@ def main() -> int:
     if not checkpoint.is_file():
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
     if args.num_envs != 4 or args.duration <= 0.0:
-        raise SystemExit("canonical evaluation requires --num-envs 4 and positive duration")
+        raise SystemExit(
+            "canonical evaluation requires --num-envs 4 and positive duration"
+        )
 
     configure_torch_backends()
     env_cfg = load_env_cfg(TASK_ID, play=True)

@@ -131,7 +131,12 @@ def test_auditor_requires_recovery_before_second_credited_roll() -> None:
     auditor = _auditor()
     auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
     auditor.head_latch[:] = True
-    _observe(auditor, omega=1.0, forward_position=0.20)
+    _observe(
+        auditor,
+        omega=1.0,
+        forward_position=0.20,
+        forward_velocity=1.25,
+    )
 
     auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
     auditor.head_latch[:] = True
@@ -150,6 +155,11 @@ def test_auditor_requires_recovery_before_second_credited_roll() -> None:
     report = auditor.summary(6.0)
     assert report["mean_recovery_latency_s"] == pytest.approx(0.06)
     assert report["repeated_roll_rate"] == pytest.approx(1.0)
+    assert report["maximum_forward_speed_mps"] == pytest.approx(1.25)
+    assert report["per_robot"][0]["maximum_forward_speed_mps"] == pytest.approx(1.25)
+    assert not report["per_robot"][0]["target_20m_pass"]
+    assert report["target_distance_reach_rate"] == pytest.approx(0.0)
+    assert not report["four_robot_batch_target_20m_pass"]
 
 
 def test_heading_uses_lateral_axis_at_vertical_pitch() -> None:

@@ -24,9 +24,10 @@ DEFAULT_CHECKPOINT_ROOT = REPO_ROOT / "logs" / "rsl_rl" / "microduck_roll_sprint
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "artifacts" / "training" / "roll-sprint-samples"
 DEFAULT_TASK_ID = "Mjlab-Roll-Sprint-Flat-MicroDuck"
 DEFAULT_INTERVAL_SECONDS = 150.0
-RECORDING_STEPS = 300
+RECORDING_STEPS = 2000
+RECORDING_FRAME_STRIDE = 7
 EVALUATION_ENVS = 4
-EVALUATION_DURATION = 6.0
+EVALUATION_DURATION = 40.0
 STATE_FILENAME = ".sample-roll-sprint-videos.json"
 CHECKPOINT_PATTERN = re.compile(r"model_(\d+)\.pt$")
 
@@ -158,6 +159,8 @@ def _recorder_command(
         task_id,
         "--steps",
         str(RECORDING_STEPS),
+        "--frame-stride",
+        str(RECORDING_FRAME_STRIDE),
         "--device",
         device,
     ]

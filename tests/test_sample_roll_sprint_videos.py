@@ -29,12 +29,14 @@ def _args(tmp_path: Path, checkpoint_root: Path) -> argparse.Namespace:
     )
 
 
-def test_defaults_record_six_seconds_every_150_seconds() -> None:
+def test_defaults_record_long_race_every_150_seconds() -> None:
     args = sampler._parse_args(["--once"])
 
     assert args.interval_seconds == 150.0
     assert args.task_id == "Mjlab-Roll-Sprint-Flat-MicroDuck"
-    assert sampler.RECORDING_STEPS == 300
+    assert sampler.RECORDING_STEPS == 2000
+    assert sampler.RECORDING_FRAME_STRIDE == 7
+    assert sampler.EVALUATION_DURATION == 40.0
 
 
 def test_find_newest_checkpoint_uses_modification_time(tmp_path: Path) -> None:
@@ -78,10 +80,11 @@ def test_sample_once_records_four_robot_video_and_persists_state(
     assert sampler.sample_once(args) is True
     evaluation_command, command = observed["commands"]
     assert evaluation_command[2] == str(checkpoint)
-    assert evaluation_command[evaluation_command.index("--num-envs") + 1] == "64"
-    assert evaluation_command[evaluation_command.index("--duration") + 1] == "6"
+    assert evaluation_command[evaluation_command.index("--num-envs") + 1] == "4"
+    assert evaluation_command[evaluation_command.index("--duration") + 1] == "40"
     assert command[2] == str(checkpoint)
-    assert command[command.index("--steps") + 1] == "300"
+    assert command[command.index("--steps") + 1] == "2000"
+    assert command[command.index("--frame-stride") + 1] == "7"
     assert command[command.index("--task-id") + 1] == args.task_id
     output = Path(command[3])
     assert "checkpoint-000025" in output.name

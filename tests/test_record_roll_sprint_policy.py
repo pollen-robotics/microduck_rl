@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 SCRIPT_PATH = (
@@ -98,10 +99,7 @@ def test_canonical_video_arranges_four_parallel_deterministic_race_lanes() -> No
     )
     yaws = torch.atan2(
         2.0
-        * (
-            robot.pose[:, 3] * robot.pose[:, 6]
-            + robot.pose[:, 4] * robot.pose[:, 5]
-        ),
+        * (robot.pose[:, 3] * robot.pose[:, 6] + robot.pose[:, 4] * robot.pose[:, 5]),
         1.0 - 2.0 * (robot.pose[:, 5].square() + robot.pose[:, 6].square()),
     )
     assert torch.allclose(projected_starts, projected_starts[:1], atol=1.0e-7)
@@ -122,3 +120,57 @@ def test_race_camera_is_centered_down_the_shared_forward_axis() -> None:
     assert MODULE.RACE_CAMERA_LOOKAT[1] == 0.0
     assert MODULE.RACE_CAMERA_DISTANCE >= 2.5
     assert MODULE.RACE_CAMERA_ELEVATION <= -45.0
+
+
+def test_race_label_reports_robot_max_speed_and_valid_distance() -> None:
+    label = MODULE._race_label_text(0, 1.234, 4.56)
+
+    assert label == "R1  MAX 1.23 m/s  |  4.6 m valid"
+
+
+def test_world_projection_anchors_label_to_robot_screen_position() -> None:
+    camera = SimpleNamespace(
+        pos=[0.0, 0.0, 0.0],
+        forward=[1.0, 0.0, 0.0],
+        up=[0.0, 0.0, 1.0],
+        frustum_near=1.0,
+        frustum_top=1.0,
+        frustum_bottom=-1.0,
+        frustum_center=0.0,
+        frustum_width=4.0,
+        orthographic=False,
+    )
+
+    pixels, visible = MODULE._project_world_points(
+        MODULE.np.array([[2.0, 0.0, 0.0], [2.0, -1.0, 0.0]]),
+        camera,
+        width=200,
+        height=100,
+    )
+
+    assert visible.tolist() == [True, True]
+    assert pixels[0].tolist() == pytest.approx([100.0, 50.0])
+    assert pixels[1, 0] > pixels[0, 0]
+
+
+def test_camera_follows_first_robot_only_along_forward_axis() -> None:
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            root_link_pos_w=torch.tensor([[8.5, -0.42, 0.12], [12.0, -0.14, 0.12]])
+        )
+    )
+    camera = SimpleNamespace(lookat=MODULE.np.zeros(3))
+
+    class _Scene:
+        def __getitem__(self, name):
+            assert name == "robot"
+            return robot
+
+    env = SimpleNamespace(
+        scene=_Scene(),
+        _offline_renderer=SimpleNamespace(_cam=camera),
+    )
+
+    MODULE._follow_first_robot(env)
+
+    assert camera.lookat.tolist() == pytest.approx([8.5, 0.0, 0.08])

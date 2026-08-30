@@ -1,9 +1,10 @@
 """Microduck repeated supported forward-roll sprint task.
 
 This is a separate deployable policy from the one-roll-and-stand roulade.  A
-fixed six-second horizon makes forward distance the natural average-speed
-objective.  Each cycle must still be a supported sagittal roll with a flat
-head-top contact before its distance is released to PPO.
+fixed forty-second horizon makes sustained forward distance and speed the
+natural objective while leaving enough time to prove a 20 m race. Each cycle
+must still be a supported sagittal roll with a flat head-top contact before its
+distance is released to PPO.
 """
 
 from mjlab.envs import ManagerBasedRlEnvCfg
@@ -38,7 +39,8 @@ from mjlab_microduck.tasks.microduck_roulade_env_cfg import (
 )
 from mjlab_microduck.tasks.symmetry import SYMMETRY_CFG, PpoWithSymmetryCfg
 
-EPISODE_LENGTH_S = 6.0
+EPISODE_LENGTH_S = 40.0
+TARGET_DISTANCE_M = 20.0
 
 
 def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
