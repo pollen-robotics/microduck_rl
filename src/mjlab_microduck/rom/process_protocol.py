@@ -63,6 +63,20 @@ class RuntimeMessageKind(str, Enum):
     ERROR = "ERROR"
 
 
+class RuntimeOperationKind(str, Enum):
+    """Message kinds that can be acknowledged or reported as failed."""
+
+    HELLO = "HELLO"
+    LOAD = "LOAD"
+    START = "START"
+    COMMAND = "COMMAND"
+    STATUS = "STATUS"
+    ZERO_AND_STOP = "ZERO_AND_STOP"
+    SHUTDOWN = "SHUTDOWN"
+    READY = "READY"
+    TERMINAL = "TERMINAL"
+
+
 class HelloPayload(ContractModel):
     runtimeRevision: BoundedIdentifier
 
@@ -109,13 +123,13 @@ class ReadyPayload(ContractModel):
 
 
 class AckPayload(ContractModel):
-    acknowledgedKind: RuntimeMessageKind
+    acknowledgedKind: RuntimeOperationKind
 
     @field_validator("acknowledgedKind", mode="before")
     @classmethod
-    def parse_acknowledged_kind(cls, value: Any) -> RuntimeMessageKind | Any:
+    def parse_acknowledged_kind(cls, value: Any) -> RuntimeOperationKind | Any:
         try:
-            return RuntimeMessageKind(value)
+            return RuntimeOperationKind(value)
         except (TypeError, ValueError):
             return value
 
@@ -132,8 +146,17 @@ class ErrorDetail(ContractModel):
 
 
 class ErrorPayload(ContractModel):
+    operationKind: RuntimeOperationKind
     code: ErrorCode
     detail: ErrorDetail
+
+    @field_validator("operationKind", mode="before")
+    @classmethod
+    def parse_operation_kind(cls, value: Any) -> RuntimeOperationKind | Any:
+        try:
+            return RuntimeOperationKind(value)
+        except (TypeError, ValueError):
+            return value
 
 
 type RuntimePayload = (
@@ -173,6 +196,15 @@ _LIFECYCLE_MESSAGE_KINDS = frozenset(
     }
 )
 
+_LIFECYCLE_OPERATION_KINDS = frozenset(
+    {
+        RuntimeOperationKind.HELLO,
+        RuntimeOperationKind.LOAD,
+        RuntimeOperationKind.READY,
+        RuntimeOperationKind.SHUTDOWN,
+    }
+)
+
 
 def _payload_type(kind: RuntimeMessageKind, payload: object) -> type[RuntimePayload]:
     if kind is RuntimeMessageKind.STATUS:
@@ -182,6 +214,16 @@ def _payload_type(kind: RuntimeMessageKind, payload: object) -> type[RuntimePayl
             else StatusPayload
         )
     return _PAYLOAD_TYPES[kind]
+
+
+def _is_lifecycle_scoped(kind: RuntimeMessageKind, payload: RuntimePayload) -> bool:
+    if kind in _LIFECYCLE_MESSAGE_KINDS:
+        return True
+    if isinstance(payload, AckPayload):
+        return payload.acknowledgedKind in _LIFECYCLE_OPERATION_KINDS
+    if isinstance(payload, ErrorPayload):
+        return payload.operationKind in _LIFECYCLE_OPERATION_KINDS
+    return False
 
 
 class RuntimeMessage(ContractModel):
@@ -217,9 +259,9 @@ class RuntimeMessage(ContractModel):
         payload_type = _payload_type(self.kind, self.payload)
         if not isinstance(self.payload, payload_type):
             raise TypeError("IPC payload does not match message kind")
-        if self.kind in _LIFECYCLE_MESSAGE_KINDS and self.taskId is not None:
+        if _is_lifecycle_scoped(self.kind, self.payload) and self.taskId is not None:
             raise ValueError("lifecycle IPC messages require taskId to be null")
-        if self.kind not in _LIFECYCLE_MESSAGE_KINDS and self.taskId is None:
+        if not _is_lifecycle_scoped(self.kind, self.payload) and self.taskId is None:
             raise ValueError("task-scoped IPC messages require a taskId")
         return self
 

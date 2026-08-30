@@ -214,10 +214,15 @@ def test_error_payload_allows_only_code_owned_sanitized_detail() -> None:
         generation=7,
         operationSequence=4,
         taskId="0" * 32,
-        payload={"code": "OPERATION_FAILED", "detail": {"retryable": False}},
+        payload={
+            "operationKind": "START",
+            "code": "OPERATION_FAILED",
+            "detail": {"retryable": False},
+        },
     )
 
     assert decode_packet(encode_packet(message)).payload.model_dump() == {
+        "operationKind": "START",
         "code": "OPERATION_FAILED",
         "detail": {"retryable": False},
     }
@@ -228,9 +233,78 @@ def test_error_payload_allows_only_code_owned_sanitized_detail() -> None:
             operationSequence=4,
             taskId="0" * 32,
             payload={
+                "operationKind": "START",
                 "code": "OPERATION_FAILED",
                 "detail": {"retryable": False, "message": "/proc/123/cmdline"},
             },
+        )
+
+
+@pytest.mark.parametrize(
+    ("kind", "payload"),
+    [
+        ("ACK", {"acknowledgedKind": "SHUTDOWN"}),
+        (
+            "ERROR",
+            {
+                "operationKind": "LOAD",
+                "code": "BUNDLE_REJECTED",
+                "detail": {"retryable": False},
+            },
+        ),
+    ],
+)
+def test_contextual_response_to_a_lifecycle_operation_requires_null_task_id(
+    kind: str, payload: dict[str, object]
+) -> None:
+    """Binding a handshake response to a task would misroute a pre-task failure."""
+    message = RuntimeMessage(
+        kind=kind,
+        generation=7,
+        operationSequence=5,
+        taskId=None,
+        payload=payload,
+    )
+
+    assert decode_packet(encode_packet(message)).taskId is None
+
+
+@pytest.mark.parametrize(
+    ("kind", "task_id", "payload"),
+    [
+        ("ACK", "0" * 32, {"acknowledgedKind": "SHUTDOWN"}),
+        ("ACK", None, {"acknowledgedKind": "START"}),
+        (
+            "ERROR",
+            "0" * 32,
+            {
+                "operationKind": "LOAD",
+                "code": "BUNDLE_REJECTED",
+                "detail": {"retryable": False},
+            },
+        ),
+        (
+            "ERROR",
+            None,
+            {
+                "operationKind": "START",
+                "code": "OPERATION_FAILED",
+                "detail": {"retryable": False},
+            },
+        ),
+    ],
+)
+def test_contextual_response_rejects_a_task_id_from_the_wrong_operation_scope(
+    kind: str, task_id: str | None, payload: dict[str, object]
+) -> None:
+    """Optional response task IDs would weaken correlation across process contexts."""
+    with pytest.raises(ValidationError, match="taskId"):
+        RuntimeMessage(
+            kind=kind,
+            generation=7,
+            operationSequence=5,
+            taskId=task_id,
+            payload=payload,
         )
 
 
