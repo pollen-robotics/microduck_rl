@@ -199,7 +199,8 @@ root pose and joint positions.
 
 ## Related projects
 
-- [microduck](https://github.com/pollen-robotics/microduck) — the Microduck project home, including the onboard runtime that runs the exported policies
+- [microduck](https://github.com/unergybot/microduck) — the forked Microduck runtime that runs the exported policies
+- [Open Duck Blender](https://github.com/unergybot/Open_Duck_Blender) — the forked animation and native motion-export workflow
 - [mjlab](https://github.com/mujocolab/mjlab) — the training framework (MuJoCo Warp + rsl_rl)
 - [BAM](https://github.com/Rhoban/bam) — better actuator models, by Rhoban
 
