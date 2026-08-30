@@ -161,6 +161,13 @@ def _active_host() -> tuple[RuntimeChildHost, FakeMicroduckRuntime, socket.socke
 
 def test_lease_expiry_initiates_zero_stop_without_parent_watchdog() -> None:
     host, runtime, parent, thread = _active_host()
+    host._last_request = RuntimeMessage(
+        kind="COMMAND", generation=7, operationSequence=1, taskId="1" * 32,
+        payload=CommandPayload(
+            parameters={"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0},
+            leaseMs=100,
+        ),
+    )
     with host._state_lock:
         host._lease_deadline = time.monotonic() + 0.03
     assert runtime.emergency_stopped.wait(timeout=1)
@@ -171,6 +178,11 @@ def test_lease_expiry_initiates_zero_stop_without_parent_watchdog() -> None:
         "yawRateRadps": 0.0,
     }
     assert runtime.safe_stop_calls[-1][1] == "LEASE_EXPIRED"
+    parent.settimeout(1)
+    terminal = decode_packet(parent.recv(65_537))
+    assert terminal.kind is RuntimeMessageKind.TERMINAL
+    assert terminal.payload.outcome == "TIMED_OUT"
+    assert host._safety_complete.is_set()
     parent.close()
     thread.join(timeout=1)
 
@@ -185,7 +197,7 @@ def test_parent_eof_initiates_local_zero_stop() -> None:
 
 
 def test_deadman_initiates_emergency_zero_while_command_call_is_blocked() -> None:
-    _host, runtime, parent, thread = _active_host()
+    host, runtime, parent, thread = _active_host()
     runtime.command_release.clear()
     command = RuntimeMessage(
         kind="COMMAND",
@@ -200,9 +212,17 @@ def test_deadman_initiates_emergency_zero_while_command_call_is_blocked() -> Non
     parent.sendall(encode_packet(command))
     assert runtime.command_started.wait(timeout=1)
     assert runtime.emergency_stopped.wait(timeout=1)
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert not host._safety_complete.is_set()
+    parent.settimeout(0.1)
+    with pytest.raises((TimeoutError, ConnectionError, OSError)):
+        packet = parent.recv(65_537)
+        if not packet:
+            raise ConnectionError
+        assert decode_packet(packet).kind is not RuntimeMessageKind.TERMINAL
     runtime.command_release.set()
     parent.close()
-    thread.join(timeout=1)
 
 
 def test_normal_stop_returns_child_to_idle_for_next_generation() -> None:
@@ -295,6 +315,11 @@ def test_sigterm_wakes_child_and_extra_inherited_fd_is_closed() -> None:
     while extra_fd_path.exists() and time.monotonic() < deadline:
         time.sleep(0.01)
     assert not extra_fd_path.exists()
+    hello = RuntimeMessage(
+        kind="HELLO", generation=1, operationSequence=1, taskId=None,
+        payload=HelloPayload(runtimeRevision=runtime_revision()),
+    )
+    assert _exchange(parent, hello).kind is RuntimeMessageKind.ACK
     process.send_signal(signal.SIGTERM)
     assert process.wait(timeout=3) == 0
     parent.close()
@@ -335,6 +360,14 @@ def test_blocked_start_cannot_defeat_local_emergency_zero() -> None:
     assert runtime.emergency_stopped.wait(timeout=1)
     thread.join(timeout=1)
     assert not thread.is_alive()
+    assert not host._safety_complete.is_set()
+    assert host._cleanup_timed_out.is_set()
+    parent.settimeout(0.1)
+    with pytest.raises((TimeoutError, ConnectionError, OSError)):
+        packet = parent.recv(65_537)
+        if not packet:
+            raise ConnectionError
+        assert decode_packet(packet).kind is not RuntimeMessageKind.TERMINAL
     runtime.start_release.set()
     parent.close()
 
@@ -364,5 +397,18 @@ def test_blocked_status_or_stop_cannot_defeat_local_emergency_zero(operation: st
     assert runtime.emergency_stopped.wait(timeout=1)
     thread.join(timeout=1)
     assert not thread.is_alive()
+    if operation == "status":
+        terminal = decode_packet(parent.recv(65_537))
+        assert terminal.kind is RuntimeMessageKind.TERMINAL
+        assert host._safety_complete.is_set()
+    else:
+        assert not host._safety_complete.is_set()
+        assert host._cleanup_timed_out.is_set()
+        parent.settimeout(0.1)
+        with pytest.raises((TimeoutError, ConnectionError, OSError)):
+            packet = parent.recv(65_537)
+            if not packet:
+                raise ConnectionError
+            assert decode_packet(packet).kind is not RuntimeMessageKind.TERMINAL
     release.set()
     parent.close()

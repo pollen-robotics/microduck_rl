@@ -61,6 +61,7 @@ _ERROR_CODES = {
     RuntimeMessageKind.ZERO_AND_STOP: "STOP_FAILED",
     RuntimeMessageKind.SHUTDOWN: "SHUTDOWN_FAILED",
 }
+_FATAL_CLEANUP_TIMEOUT_S = 0.25
 
 
 def clear_runtime_environment() -> None:
@@ -79,6 +80,7 @@ class RuntimeChildHost:
         bundle_root: Path | None = None,
         runtime_factory: Callable[[Path, PolicyBundle], SimulationRuntime] = MicroduckMujocoRuntime,
         clock: Callable[[], float] = time.monotonic,
+        fatal_cleanup_timeout_s: float = _FATAL_CLEANUP_TIMEOUT_S,
     ) -> None:
         if control.family != socket.AF_UNIX or (control.type & 0xF) != socket.SOCK_SEQPACKET:
             raise ValueError("runtime socket must be Unix SOCK_SEQPACKET")
@@ -86,6 +88,9 @@ class RuntimeChildHost:
         self._bundle_root = bundle_root
         self._runtime_factory = runtime_factory
         self._clock = clock
+        if fatal_cleanup_timeout_s <= 0:
+            raise ValueError("fatal cleanup timeout must be positive")
+        self._fatal_cleanup_timeout_s = fatal_cleanup_timeout_s
         self._messages: queue.Queue[RuntimeMessage | None] = queue.Queue(maxsize=8)
         self._send_lock = threading.Lock()
         self._state_lock = threading.Lock()
@@ -93,6 +98,7 @@ class RuntimeChildHost:
         self._safety_requested = threading.Event()
         self._safety_started = threading.Event()
         self._safety_complete = threading.Event()
+        self._cleanup_timed_out = threading.Event()
         self._safety_start_lock = threading.Lock()
         self._safety_reason: str | None = None
         self._runtime: SimulationRuntime | None = None
@@ -231,33 +237,50 @@ class RuntimeChildHost:
             )
         else:
             evidence = RuntimeEvidence(stopReason=reason)
+        if handle is None and self._operation_active.is_set() and self._task_id is not None:
+            # START may already own native resources but has not returned its handle.
+            # Emergency zero is bounded; truthful cleanup acknowledgement is impossible.
+            self._cleanup_timed_out.set()
+            return
+        cleanup_result: list[RuntimeEvidence] = []
+
         def cleanup() -> None:
-            nonlocal evidence
+            cleanup_evidence = evidence
             if handle is None:
+                cleanup_result.append(cleanup_evidence)
                 return
             try:
                 template = action_template(self._bundle_action_code())
                 zero: Mapping[str, object] = template.lease.zeroCommand if template.lease else {}
                 runtime.command(handle, zero)
             except Exception:  # noqa: BLE001 - safe-stop still must be attempted
-                evidence = RuntimeEvidence(
+                cleanup_evidence = RuntimeEvidence(
                     metrics={"safetyFailure": "ZERO_COMMAND_FAILED"},
                     stopReason=reason,
                 )
             try:
-                evidence = runtime.safe_stop(handle, reason)
+                stopped = runtime.safe_stop(handle, reason)
+                if "safetyFailure" not in cleanup_evidence.metrics:
+                    cleanup_evidence = stopped
             except Exception:  # noqa: BLE001 - child exits after bounded evidence
-                evidence = RuntimeEvidence(
+                cleanup_evidence = RuntimeEvidence(
                     metrics={"safetyFailure": "SAFE_STOP_FAILED"},
                     stopReason=reason,
                 )
-            with self._state_lock:
-                self._handle = None
+            cleanup_result.append(cleanup_evidence)
 
         if handle is not None:
-            threading.Thread(
+            cleanup_thread = threading.Thread(
                 target=cleanup, name="runtime-child-best-effort-cleanup", daemon=True
-            ).start()
+            )
+            cleanup_thread.start()
+            cleanup_thread.join(timeout=self._fatal_cleanup_timeout_s)
+            if cleanup_thread.is_alive():
+                self._cleanup_timed_out.set()
+                return
+            evidence = cleanup_result[0]
+            with self._state_lock:
+                self._handle = None
         if (
             request is not None
             and request.taskId is not None
@@ -445,7 +468,7 @@ class RuntimeChildHost:
             self._perform_safety_stop()
         self._stop.set()
         if self._safety_requested.is_set():
-            self._safety_complete.wait(timeout=2.0)
+            self._safety_complete.wait(timeout=self._fatal_cleanup_timeout_s + 0.05)
         try:
             self._socket.close()
         except OSError:
