@@ -208,7 +208,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                     },
                 },
                 {
-                    "step": 500 * 24,
+                    "step": 1500 * 24,
                     "params": {
                         "standing_prob": 0.60,
                         "midroll_prob": 0.20,
@@ -216,7 +216,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                     },
                 },
                 {
-                    "step": 1500 * 24,
+                    "step": 2500 * 24,
                     "params": {
                         "standing_prob": 0.80,
                         "midroll_prob": 0.10,
@@ -224,7 +224,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                     },
                 },
                 {
-                    "step": 2500 * 24,
+                    "step": 3250 * 24,
                     "params": {
                         "standing_prob": 1.0,
                         "midroll_prob": 0.0,
@@ -244,10 +244,13 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                 "width": microduck_mdp._ROLL_SPRINT_BOOTSTRAP_LANE_HALF_WIDTH,
             },
             {"step": 250 * 24, "width": 0.40},
-            {"step": 500 * 24, "width": 0.28},
-            {"step": 1000 * 24, "width": 0.20},
+            # A51 measured a reroll collapse when 0.40 -> 0.28 coincided with
+            # harder starts and DR at iteration 500. Consolidate repeated
+            # recovery/reroll behavior before each later, staggered tightening.
+            {"step": 1750 * 24, "width": 0.28},
+            {"step": 2750 * 24, "width": 0.20},
             {
-                "step": 1500 * 24,
+                "step": 3500 * 24,
                 "width": microduck_mdp._ROLL_SPRINT_LANE_HALF_WIDTH,
             },
         ]
@@ -262,9 +265,9 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
             "reward_name": "roll_sprint_invalid_cycle",
             "weight_stages": [
                 {"step": 0, "weight": 0.0},
-                {"step": 750 * 24, "weight": -0.5},
-                {"step": 1250 * 24, "weight": -1.0},
-                {"step": 2000 * 24, "weight": -2.0},
+                {"step": 2000 * 24, "weight": -0.5},
+                {"step": 3000 * 24, "weight": -1.0},
+                {"step": 3750 * 24, "weight": -2.0},
             ],
         },
     )
@@ -276,9 +279,9 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                 "event_name": "randomize_com",
                 "range_stages": [
                     {"step": 0, "range": COM_RANDOMIZATION_RANGE},
-                    {"step": 500 * 24, "range": 0.005},
-                    {"step": 1000 * 24, "range": 0.01},
-                    {"step": 1500 * 24, "range": 0.015},
+                    {"step": 2000 * 24, "range": 0.005},
+                    {"step": 3000 * 24, "range": 0.01},
+                    {"step": 3750 * 24, "range": 0.015},
                 ],
             },
         )
@@ -289,8 +292,8 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                 "event_name": "randomize_head_com",
                 "range_stages": [
                     {"step": 0, "range": HEAD_COM_RANDOMIZATION_RANGE},
-                    {"step": 500 * 24, "range": 0.005},
-                    {"step": 1000 * 24, "range": 0.01},
+                    {"step": 2000 * 24, "range": 0.005},
+                    {"step": 3000 * 24, "range": 0.01},
                 ],
             },
         )
@@ -313,10 +316,10 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
             "weight_stages": [
                 {"step": 0, "weight": 1.5},
                 {"step": 250 * 24, "weight": 0.75},
-                {"step": 750 * 24, "weight": 0.25},
+                {"step": 2000 * 24, "weight": 0.25},
                 # Dense rotation is only a bootstrap. The final race objective
                 # is exclusively the valid-cycle forward frontier above.
-                {"step": 1500 * 24, "weight": 0.0},
+                {"step": 3500 * 24, "weight": 0.0},
             ],
         },
     )
@@ -326,7 +329,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
             "reward_name": "roll_sprint_head_pivot",
             "weight_stages": [
                 {"step": 0, "weight": 0.25},
-                {"step": 1500 * 24, "weight": 0.10},
+                {"step": 3000 * 24, "weight": 0.10},
             ],
         },
     )

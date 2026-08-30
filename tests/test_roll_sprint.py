@@ -11,6 +11,8 @@ from mjlab_microduck.tasks.microduck_roll_sprint_env_cfg import (
     make_microduck_roll_sprint_env_cfg,
 )
 from mjlab_microduck.tasks.microduck_roulade_env_cfg import (
+    COM_RANDOMIZATION_RANGE,
+    HEAD_COM_RANDOMIZATION_RANGE,
     make_microduck_roulade_env_cfg,
 )
 
@@ -152,12 +154,15 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert reset_params["standing_prob"] == 0.50
     assert reset_params["midroll_prob"] == 0.25
     assert reset_params["postroll_prob"] == 0.25
-    assert [
-        stage["width"]
-        for stage in cfg.curriculum["roll_sprint_lane_half_width"].params[
-            "width_stages"
-        ]
-    ] == [2.0, 0.40, 0.28, 0.20, 0.14]
+    assert cfg.curriculum["roll_sprint_lane_half_width"].params[
+        "width_stages"
+    ] == [
+        {"step": 0, "width": 2.0},
+        {"step": 250 * 24, "width": 0.40},
+        {"step": 1750 * 24, "width": 0.28},
+        {"step": 2750 * 24, "width": 0.20},
+        {"step": 3500 * 24, "width": 0.14},
+    ]
     play_cfg = make_microduck_roll_sprint_env_cfg(play=True)
     assert play_cfg.curriculum["roll_sprint_lane_half_width"].params[
         "width_stages"
@@ -166,9 +171,52 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
         "weight_stages"
     ] == [
         {"step": 0, "weight": 0.0},
-        {"step": 750 * 24, "weight": -0.5},
-        {"step": 1250 * 24, "weight": -1.0},
-        {"step": 2000 * 24, "weight": -2.0},
+        {"step": 2000 * 24, "weight": -0.5},
+        {"step": 3000 * 24, "weight": -1.0},
+        {"step": 3750 * 24, "weight": -2.0},
+    ]
+    assert [
+        (stage["step"], stage["params"])
+        for stage in cfg.curriculum["roll_sprint_spawn_mix"].params["param_stages"]
+    ] == [
+        (0, {"standing_prob": 0.50, "midroll_prob": 0.25, "postroll_prob": 0.25}),
+        (
+            1500 * 24,
+            {"standing_prob": 0.60, "midroll_prob": 0.20, "postroll_prob": 0.20},
+        ),
+        (
+            2500 * 24,
+            {"standing_prob": 0.80, "midroll_prob": 0.10, "postroll_prob": 0.10},
+        ),
+        (
+            3250 * 24,
+            {"standing_prob": 1.0, "midroll_prob": 0.0, "postroll_prob": 0.0},
+        ),
+    ]
+    assert cfg.curriculum["roll_sprint_progress_weight"].params[
+        "weight_stages"
+    ] == [
+        {"step": 0, "weight": 1.5},
+        {"step": 250 * 24, "weight": 0.75},
+        {"step": 2000 * 24, "weight": 0.25},
+        {"step": 3500 * 24, "weight": 0.0},
+    ]
+    assert cfg.curriculum["roll_sprint_head_pivot_weight"].params[
+        "weight_stages"
+    ] == [
+        {"step": 0, "weight": 0.25},
+        {"step": 3000 * 24, "weight": 0.10},
+    ]
+    assert cfg.curriculum["com_range"].params["range_stages"] == [
+        {"step": 0, "range": COM_RANDOMIZATION_RANGE},
+        {"step": 2000 * 24, "range": 0.005},
+        {"step": 3000 * 24, "range": 0.01},
+        {"step": 3750 * 24, "range": 0.015},
+    ]
+    assert cfg.curriculum["head_com_range"].params["range_stages"] == [
+        {"step": 0, "range": HEAD_COM_RANDOMIZATION_RANGE},
+        {"step": 2000 * 24, "range": 0.005},
+        {"step": 3000 * 24, "range": 0.01},
     ]
     assert {
         "roll_sprint_recovery_count",
@@ -643,17 +691,17 @@ def test_roll_sprint_training_lane_gate_tightens_to_canonical_width():
     stages = [
         {"step": 0, "width": 2.0},
         {"step": 250 * 24, "width": 0.40},
-        {"step": 500 * 24, "width": 0.28},
-        {"step": 1000 * 24, "width": 0.20},
-        {"step": 1500 * 24, "width": 0.14},
+        {"step": 1750 * 24, "width": 0.28},
+        {"step": 2750 * 24, "width": 0.20},
+        {"step": 3500 * 24, "width": 0.14},
     ]
 
     for step, expected in (
         (0, 2.0),
         (250 * 24, 0.40),
-        (500 * 24, 0.28),
-        (1000 * 24, 0.20),
-        (1500 * 24, 0.14),
+        (1750 * 24, 0.28),
+        (2750 * 24, 0.20),
+        (3500 * 24, 0.14),
     ):
         env.common_step_counter = step
         reported = mdp.roll_sprint_lane_half_width_curriculum(
