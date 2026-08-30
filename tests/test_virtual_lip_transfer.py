@@ -15,6 +15,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     make_microduck_stair_contact_stage_rsi_env_cfg,
     make_microduck_stair_near_shell_reverse_rsi_env_cfg,
     make_microduck_stair_option_frontier_forward_rsi_env_cfg,
+    make_microduck_stair_stage2_forward_rsi_env_cfg,
     make_microduck_stair_stratified_shell_reverse_rsi_env_cfg,
     make_microduck_stair_stage15_reverse_rsi_env_cfg,
     make_microduck_stair_stage2_reverse_rsi_env_cfg,
@@ -903,3 +904,116 @@ def test_a36_replays_exact_composed_frontier_with_25_percent_retention():
     for name in a35.rewards:
         assert a36.rewards[name].weight == a35.rewards[name].weight
         assert a36.rewards[name].params == a35.rewards[name].params
+
+
+def test_reverse_context_supports_multiple_stage2_seed_families():
+    env = SimpleNamespace(num_envs=5, device="cpu")
+    env._stair_state_bank_family = torch.arange(5)
+
+    microduck_mdp.seed_stair_contact_transfer_reverse_context(
+        env,
+        torch.arange(5),
+        stage15_families=(1, 2, 3, 4),
+        stage2_families=(2, 4),
+    )
+
+    assert env._stair_contact_transfer_reverse_stage15_seed.tolist() == [
+        False,
+        True,
+        True,
+        True,
+        True,
+    ]
+    assert env._stair_contact_transfer_reverse_stage2_seed.tolist() == [
+        False,
+        False,
+        True,
+        False,
+        True,
+    ]
+
+
+def test_a37_bridges_stage2_forward_with_retained_prior_families():
+    a36 = make_microduck_stair_option_frontier_forward_rsi_env_cfg()
+    a37 = make_microduck_stair_stage2_forward_rsi_env_cfg()
+
+    weights = a37.events["state_bank_family"].params["family_weights"]
+    assert weights == (1, 1, 1, 3, 6)
+    assert sum(weights[:3]) / sum(weights) == 0.25
+    assert weights[3] / sum(weights) == 0.25
+    assert weights[4] / sum(weights) == 0.50
+    bank = a37.events["stage2_forward_state_bank"]
+    assert bank.params["reset_family"] == 4
+    assert bank.params["bank_path"].endswith(
+        "a36-model33-stage2-forward-state-bank.pt"
+    )
+    event_names = tuple(a37.events)
+    assert event_names.index("stage2_forward_state_bank") < event_names.index(
+        "stage2_reverse_context"
+    )
+    assert a37.events["stage2_reverse_context"].params == {
+        "stage15_families": (1, 2, 3, 4),
+        "stage2_families": (2, 4),
+    }
+    secured = a37.rewards["stair_first_tread_secured"].params
+    assert secured["min_x"] == 0.70
+    assert secured["min_height"] == 0.198
+    assert secured["max_linear_speed"] == 0.25
+    assert secured["max_angular_speed"] == 1.5
+    assert secured["hold_time_s"] == 0.75
+    assert secured["required_latch_name"] == (
+        "_stair_true_shell_clearance_policy_achieved"
+    )
+    assert a37.terminations["secured_tread_success"].func is (
+        microduck_mdp.stair_secured_tread_success
+    )
+    stalled = a37.terminations["stair_progress_stalled"]
+    assert stalled.func is microduck_mdp.stair_progress_stalled
+    assert stalled.params["max_stall_s"] == 1.10
+    assert tuple(a37.rewards) == tuple(a36.rewards)
+    for name in a36.rewards:
+        assert a37.rewards[name].weight == a36.rewards[name].weight
+        if name != "stair_first_tread_secured":
+            assert a37.rewards[name].params == a36.rewards[name].params
+
+
+def test_stair_stall_timer_resets_on_real_progress_and_ignores_secured(
+    monkeypatch,
+):
+    env = SimpleNamespace(
+        num_envs=2,
+        device="cpu",
+        step_dt=0.02,
+        episode_length_buf=torch.ones(2, dtype=torch.long),
+        test_x=torch.tensor([0.55, 0.55]),
+        test_z=torch.tensor([0.11, 0.11]),
+    )
+
+    def fake_local_state(current_env, _asset_cfg):
+        return (
+            current_env.test_x,
+            current_env.test_z,
+            torch.ones(current_env.num_envs),
+        )
+
+    monkeypatch.setattr(microduck_mdp, "_stair_local_state", fake_local_state)
+    assert not microduck_mdp.stair_progress_stalled(env).any()
+
+    for step in range(2, 42):
+        env.episode_length_buf[:] = step
+        assert not microduck_mdp.stair_progress_stalled(env).any()
+
+    env.test_x[0] = 0.62
+    env.episode_length_buf[:] = 42
+    assert not microduck_mdp.stair_progress_stalled(env).any()
+
+    stalled = torch.zeros(2, dtype=torch.bool)
+    for step in range(43, 82):
+        env.episode_length_buf[:] = step
+        stalled = microduck_mdp.stair_progress_stalled(env)
+    assert stalled.tolist() == [False, True]
+
+    env._stair_first_tread_secured_latched = torch.tensor([False, True])
+    env.episode_length_buf[:] = 83
+    assert microduck_mdp.stair_progress_stalled(env).tolist() == [False, False]
+    assert microduck_mdp.stair_secured_tread_success(env).tolist() == [False, True]

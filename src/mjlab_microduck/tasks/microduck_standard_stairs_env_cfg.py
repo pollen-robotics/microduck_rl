@@ -18,6 +18,7 @@ from mjlab.managers import (
     EventTermCfg,
     ObservationTermCfg,
     RewardTermCfg,
+    TerminationTermCfg,
 )
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
@@ -1959,6 +1960,78 @@ def make_microduck_stair_option_frontier_forward_rsi_env_cfg(
     return cfg
 
 
+def make_microduck_stair_stage2_forward_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A37: bridge exact on-policy Stage 2 states into shell clearance."""
+
+    cfg = make_microduck_stair_option_frontier_forward_rsi_env_cfg(play=play)
+    # Keep 25% mastered late-state replay, 25% of the preceding composed
+    # Stage 1.5 frontier, and devote 50% to the newly observed Stage 2 gap.
+    cfg.events["state_bank_family"].params["family_weights"] = (
+        1,
+        1,
+        1,
+        3,
+        6,
+    )
+    stage2_forward_bank = deepcopy(cfg.events["option_frontier_state_bank"])
+    stage2_forward_bank.params.update(
+        {
+            "bank_path": (
+                ".tmp/codex/a36-model33-stage2-forward-state-bank.pt"
+            ),
+            "reset_family": 4,
+        }
+    )
+    ordered_events = {}
+    for name, term in cfg.events.items():
+        if name == "stage2_reverse_context":
+            ordered_events["stage2_forward_state_bank"] = stage2_forward_bank
+        ordered_events[name] = term
+    cfg.events = ordered_events
+    context = cfg.events["stage2_reverse_context"].params
+    context["stage15_families"] = (1, 2, 3, 4)
+    context.pop("stage2_family", None)
+    context["stage2_families"] = (2, 4)
+
+    # A transient hop is not success. Require the entire shell-clear sequence,
+    # tread support, low motion, and 0.75 s of uninterrupted occupancy before
+    # paying the one-shot secured reward and ending the episode as success.
+    secured = cfg.rewards["stair_first_tread_secured"]
+    secured.params.update(
+        {
+            "min_x": STANDARD_STAIR_START_DISTANCE + 0.04,
+            "min_height": 0.198,
+            "max_linear_speed": 0.25,
+            "max_angular_speed": 1.5,
+            "hold_time_s": 0.75,
+            "required_latch_name": (
+                "_stair_true_shell_clearance_policy_achieved"
+            ),
+        }
+    )
+    cfg.terminations["secured_tread_success"] = TerminationTermCfg(
+        func=microduck_mdp.stair_secured_tread_success,
+        time_out=False,
+    )
+    cfg.terminations["stair_progress_stalled"] = TerminationTermCfg(
+        func=microduck_mdp.stair_progress_stalled,
+        time_out=False,
+        params={
+            "start_x": 0.50,
+            "target_x": STANDARD_STAIR_START_DISTANCE + 0.04,
+            "start_height": 0.09,
+            "target_height": 0.198,
+            "warmup_s": 0.50,
+            "max_stall_s": 1.10,
+            "min_progress_delta": 0.01,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    return cfg
+
+
 def make_microduck_stair_tread_contact_bank_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -2439,6 +2512,16 @@ MicroduckStairOptionFrontierForwardRsiRlCfg.run_name = (
 )
 MicroduckStairOptionFrontierForwardRsiRlCfg.max_iterations = 75
 MicroduckStairOptionFrontierForwardRsiRlCfg.save_interval = 5
+
+MicroduckStairStage2ForwardRsiRlCfg = deepcopy(
+    MicroduckStairOptionFrontierForwardRsiRlCfg
+)
+MicroduckStairStage2ForwardRsiRlCfg.experiment_name = (
+    "microduck_stair_stage2_forward_rsi_specialist"
+)
+MicroduckStairStage2ForwardRsiRlCfg.run_name = (
+    "microduck_stair_stage2_forward_rsi_specialist"
+)
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)
 MicroduckStairTreadContactBankRlCfg.experiment_name = (

@@ -1601,6 +1601,7 @@ def seed_stair_contact_transfer_reverse_context(
     reverse_family: int = 1,
     stage15_families: tuple[int, ...] | None = None,
     stage2_family: int | None = None,
+    stage2_families: tuple[int, ...] | None = None,
 ) -> None:
     """Mark policy-generated replay rows as proven contact prefixes.
 
@@ -1629,15 +1630,18 @@ def seed_stair_contact_transfer_reverse_context(
         stage15_families = (reverse_family,)
     if len(stage15_families) == 0:
         raise ValueError("At least one Stage 1.5 reverse family is required")
+    if stage2_family is not None and stage2_families is not None:
+        raise ValueError("Use either stage2_family or stage2_families, not both")
+    if stage2_families is None:
+        stage2_families = () if stage2_family is None else (stage2_family,)
     stage15_seed = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
     for family_id in stage15_families:
         stage15_seed |= family[env_ids] == family_id
+    stage2_seed = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
+    for family_id in stage2_families:
+        stage2_seed |= family[env_ids] == family_id
     env._stair_contact_transfer_reverse_stage15_seed[env_ids] = stage15_seed
-    env._stair_contact_transfer_reverse_stage2_seed[env_ids] = (
-        torch.zeros_like(stage15_seed)
-        if stage2_family is None
-        else family[env_ids] == stage2_family
-    )
+    env._stair_contact_transfer_reverse_stage2_seed[env_ids] = stage2_seed
 
 
 def stair_preload_frontier(
@@ -4332,6 +4336,89 @@ def stair_first_tread_secured(
     ) & ~env._stair_first_tread_secured_latched
     env._stair_first_tread_secured_latched |= newly_secured
     return newly_secured.float()
+
+
+def stair_secured_tread_success(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Terminate only after the strict secured-tread hold has completed."""
+
+    secured = getattr(env, "_stair_first_tread_secured_latched", None)
+    if secured is None:
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    return secured
+
+
+def stair_progress_stalled(
+    env: ManagerBasedRlEnv,
+    start_x: float = 0.50,
+    target_x: float = 0.70,
+    start_height: float = 0.09,
+    target_height: float = 0.198,
+    warmup_s: float = 0.50,
+    max_stall_s: float = 1.10,
+    min_progress_delta: float = 0.01,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Recycle attempts that stop improving before they secure the tread.
+
+    The timer observes a monotonic physical potential plus ordered contact
+    milestones. It does not require upright posture, so head levers and rolls
+    remain valid. Reaching a new milestone resets the full settling window.
+    """
+
+    if target_x <= start_x or target_height <= start_height:
+        raise ValueError("Stair stall targets must exceed their start values")
+    if warmup_s < 0.0 or max_stall_s <= 0.0 or min_progress_delta <= 0.0:
+        raise ValueError("Stair stall timing and progress delta must be positive")
+
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    x_progress = torch.clamp((x - start_x) / (target_x - start_x), 0.0, 1.0)
+    z_progress = torch.clamp(
+        (z - start_height) / (target_height - start_height), 0.0, 1.0
+    )
+
+    def latch(name: str) -> torch.Tensor:
+        value = getattr(env, name, None)
+        if value is None:
+            return torch.zeros(env.num_envs, device=env.device)
+        return value.float()
+
+    progress = (
+        0.35 * x_progress
+        + 0.25 * z_progress
+        + 0.10 * latch("_stair_contact_transfer_stage15_policy_achieved")
+        + 0.15 * latch("_stair_contact_transfer_stage2_policy_achieved")
+        + 0.15 * latch("_stair_true_shell_clearance_policy_achieved")
+    )
+    if not hasattr(env, "_stair_stall_best_progress"):
+        env._stair_stall_best_progress = torch.zeros(
+            env.num_envs, device=env.device
+        )
+        env._stair_stall_timer_s = torch.zeros(env.num_envs, device=env.device)
+
+    fresh = env.episode_length_buf <= 1
+    env._stair_stall_best_progress[fresh] = progress[fresh]
+    env._stair_stall_timer_s[fresh] = 0.0
+    improved = progress >= env._stair_stall_best_progress + min_progress_delta
+    improved &= ~fresh
+    env._stair_stall_best_progress = torch.maximum(
+        env._stair_stall_best_progress, progress
+    )
+    env._stair_stall_timer_s = torch.where(
+        improved,
+        torch.zeros_like(env._stair_stall_timer_s),
+        env._stair_stall_timer_s + env.step_dt,
+    )
+    env._stair_stall_timer_s[fresh] = 0.0
+
+    secured = getattr(env, "_stair_first_tread_secured_latched", None)
+    if secured is None:
+        secured = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    age_s = env.episode_length_buf.float() * env.step_dt
+    return (
+        (age_s >= warmup_s)
+        & (env._stair_stall_timer_s >= max_stall_s)
+        & ~secured
+    )
 
 
 def stair_first_tread_settle_quality(

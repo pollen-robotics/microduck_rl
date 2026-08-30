@@ -33,11 +33,13 @@ A33_TASK_ID = "Mjlab-Stairs-Stage2-Reverse-RSI-Specialist-MicroDuck"
 A34_TASK_ID = "Mjlab-Stairs-Near-Shell-Reverse-RSI-Specialist-MicroDuck"
 A35_TASK_ID = "Mjlab-Stairs-Stratified-Shell-Reverse-RSI-Specialist-MicroDuck"
 A36_TASK_ID = "Mjlab-Stairs-Option-Frontier-Forward-RSI-Specialist-MicroDuck"
+A37_TASK_ID = "Mjlab-Stairs-Stage2-Forward-RSI-Specialist-MicroDuck"
 STAGE2_SEEDED_TASK_IDS = (
     A33_TASK_ID,
     A34_TASK_ID,
     A35_TASK_ID,
     A36_TASK_ID,
+    A37_TASK_ID,
 )
 CONTACT_TRANSFER_TASK_IDS = (
     A30_TASK_ID,
@@ -47,6 +49,7 @@ CONTACT_TRANSFER_TASK_IDS = (
     A34_TASK_ID,
     A35_TASK_ID,
     A36_TASK_ID,
+    A37_TASK_ID,
 )
 STAGE15_TASK_IDS = (
     A31_TASK_ID,
@@ -55,6 +58,7 @@ STAGE15_TASK_IDS = (
     A34_TASK_ID,
     A35_TASK_ID,
     A36_TASK_ID,
+    A37_TASK_ID,
 )
 TASK_IDS = (
     "Mjlab-Stairs-Assisted-Specialist-MicroDuck",
@@ -81,6 +85,7 @@ TASK_IDS = (
     A34_TASK_ID,
     A35_TASK_ID,
     A36_TASK_ID,
+    A37_TASK_ID,
     "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
     "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
@@ -164,6 +169,14 @@ A36_RESET_MODES = {
 A36_RESET_FAMILY_OVERRIDES = {
     **A35_RESET_FAMILY_OVERRIDES,
     "option-frontier": 3,
+}
+A37_RESET_MODES = {
+    **A36_RESET_MODES,
+    4: "stage2_forward_bank",
+}
+A37_RESET_FAMILY_OVERRIDES = {
+    **A36_RESET_FAMILY_OVERRIDES,
+    "stage2-forward": 4,
 }
 BODY_PART_CONTACT_SENSORS = {
     "head": "head_ground_contact",
@@ -491,6 +504,7 @@ def _parse_args() -> argparse.Namespace:
                     *A34_RESET_FAMILY_OVERRIDES,
                     *A35_RESET_FAMILY_OVERRIDES,
                     *A36_RESET_FAMILY_OVERRIDES,
+                    *A37_RESET_FAMILY_OVERRIDES,
                 )
             )
         ),
@@ -533,6 +547,7 @@ def main() -> int:
     is_a34 = args.task == A34_TASK_ID
     is_a35 = args.task == A35_TASK_ID
     is_a36 = args.task == A36_TASK_ID
+    is_a37 = args.task == A37_TASK_ID
     uses_stage2_seed_semantics = args.task in STAGE2_SEEDED_TASK_IDS
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_file():
@@ -552,14 +567,16 @@ def main() -> int:
             "--reset-family is supported only for contact-transfer tasks"
         )
     if args.bank_stratum is not None and (
-        not (is_a35 or is_a36)
+        not (is_a35 or is_a36 or is_a37)
         or args.reset_family != "near-shell-reverse"
     ):
         raise SystemExit(
-            "--bank-stratum requires the A35 or A36 task with "
+            "--bank-stratum requires the A35, A36, or A37 task with "
             "--reset-family near-shell-reverse"
         )
-    if is_a36:
+    if is_a37:
+        reset_family_overrides = A37_RESET_FAMILY_OVERRIDES
+    elif is_a36:
         reset_family_overrides = A36_RESET_FAMILY_OVERRIDES
     elif is_a35:
         reset_family_overrides = A35_RESET_FAMILY_OVERRIDES
@@ -575,7 +592,9 @@ def main() -> int:
         raise SystemExit(
             f"--reset-family {args.reset_family!r} is invalid for {args.task}"
         )
-    if is_a36:
+    if is_a37:
+        reset_modes = A37_RESET_MODES
+    elif is_a36:
         reset_modes = A36_RESET_MODES
     elif is_a35:
         reset_modes = A35_RESET_MODES
@@ -1049,13 +1068,17 @@ def main() -> int:
             elif uses_stage2_seed_semantics:
                 # Families 1 and 2 seed the Stage 1/1.5 prefix. A36 family 3
                 # also seeds that prefix from the composed option frontier.
-                # Family 2 alone seeds Stage 2. Suppress only reset-created
-                # edges during the first two policy steps; family 0 stays live.
+                # Family 2 seeds Stage 2, and A37 family 4 adds an on-policy
+                # Stage 2 bank. Suppress only reset-created edges during the
+                # first two policy steps; family 0 stays live.
                 initial_policy_steps = episode_control_steps < 2
                 seeded_prefix = (episode_mode == 1) | (episode_mode == 2)
-                if is_a36:
+                if is_a36 or is_a37:
                     seeded_prefix |= episode_mode == 3
                 seeded_stage2 = episode_mode == 2
+                if is_a37:
+                    seeded_prefix |= episode_mode == 4
+                    seeded_stage2 |= episode_mode == 4
                 new_stage1_policy &= ~(seeded_prefix & initial_policy_steps)
                 new_stage15_policy &= ~(seeded_prefix & initial_policy_steps)
                 new_stage2_policy &= ~(seeded_stage2 & initial_policy_steps)
@@ -1786,6 +1809,8 @@ def main() -> int:
         )
     if is_a36:
         report["schema_version"] = 15
+    if is_a37:
+        report["schema_version"] = 16
     output = args.output or checkpoint.with_suffix(".assisted-eval.json")
     _write_json_atomic(output.resolve(), report)
     print(json.dumps(report, indent=2, sort_keys=True))

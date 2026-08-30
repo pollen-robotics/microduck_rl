@@ -23,10 +23,14 @@ JointFrontierTrajectoryMetrics = MODULE.JointFrontierTrajectoryMetrics
 TerminalPositionTrajectoryMetrics = MODULE.TerminalPositionTrajectoryMetrics
 
 
-def test_a34_and_a35_inherit_stage2_seed_and_order_semantics() -> None:
+def test_a34_through_a37_inherit_stage2_seed_and_order_semantics() -> None:
     assert MODULE.A33_TASK_ID in MODULE.STAGE2_SEEDED_TASK_IDS
     assert MODULE.A34_TASK_ID in MODULE.STAGE2_SEEDED_TASK_IDS
     assert MODULE.A35_TASK_ID in MODULE.STAGE2_SEEDED_TASK_IDS
+    assert MODULE.A36_TASK_ID in MODULE.STAGE2_SEEDED_TASK_IDS
+    assert MODULE.A37_TASK_ID in MODULE.STAGE2_SEEDED_TASK_IDS
+    assert MODULE.A37_RESET_FAMILY_OVERRIDES["stage2-forward"] == 4
+    assert MODULE.A37_RESET_MODES[4] == "stage2_forward_bank"
 
 
 def _observe(
