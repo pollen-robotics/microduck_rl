@@ -140,13 +140,18 @@ def test_follow_camera_uses_fresh_reward_position() -> None:
     env = SimpleNamespace(
         _offline_renderer=SimpleNamespace(_cam=camera),
         _roll_sprint_forward_position=torch.tensor([3.0, 0.0, 0.0, 0.0]),
+        _roll_sprint_lateral_displacement=torch.tensor([1.0, 0.0, 0.0, 0.0]),
+        scene=SimpleNamespace(
+            terrain=SimpleNamespace(env_origins=torch.tensor([[0.0, -0.42, 0.0]]))
+        ),
     )
 
-    next_x = MODULE._follow_first_robot(env, 0.60)
+    next_x, next_y = MODULE._follow_first_robot(env, 0.60, 0.0)
 
     assert next_x == pytest.approx(0.60 + MODULE.RACE_CAMERA_MAX_STEP_M)
+    assert next_y == pytest.approx(MODULE.RACE_CAMERA_MAX_STEP_M)
     assert camera.lookat.tolist() == pytest.approx(
-        [next_x, MODULE.RACE_CAMERA_LOOKAT[1], MODULE.RACE_CAMERA_LOOKAT[2]]
+        [next_x, next_y, MODULE.RACE_CAMERA_LOOKAT[2]]
     )
 
 

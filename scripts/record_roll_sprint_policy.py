@@ -352,21 +352,46 @@ def _camera_follow_x(previous_x_m: float, robot_x_m: float) -> float:
     return previous_x_m + step_m
 
 
-def _follow_first_robot(base_env: ManagerBasedRlEnv, previous_x_m: float) -> float:
-    """Travel with robot 1 in x while keeping all four lanes centered in y."""
+def _camera_follow_y(previous_y_m: float, robot_y_m: float) -> float:
+    """Smoothly follow robot 1 laterally in either direction."""
+    if not np.isfinite(robot_y_m):
+        return previous_y_m
+    step_m = float(
+        np.clip(
+            (robot_y_m - previous_y_m) * RACE_CAMERA_FOLLOW_ALPHA,
+            -RACE_CAMERA_MAX_STEP_M,
+            RACE_CAMERA_MAX_STEP_M,
+        )
+    )
+    return previous_y_m + step_m
+
+
+def _follow_first_robot(
+    base_env: ManagerBasedRlEnv,
+    previous_x_m: float,
+    previous_y_m: float,
+) -> tuple[float, float]:
+    """Travel with robot 1 in both axes so it cannot leave the camera."""
     renderer = base_env._offline_renderer
     if renderer is None:
         raise RuntimeError("Offline renderer is not initialized")
     # Use the reward-side position cache. The asset root position exposed by
     # the offscreen backend can lag the physics state and let R1 leave frame.
     first_robot_x_m = float(base_env._roll_sprint_forward_position[0].item())
+    first_robot_y_m = float(
+        (
+            base_env.scene.terrain.env_origins[0, 1]
+            + base_env._roll_sprint_lateral_displacement[0]
+        ).item()
+    )
     camera_x_m = _camera_follow_x(previous_x_m, first_robot_x_m)
+    camera_y_m = _camera_follow_y(previous_y_m, first_robot_y_m)
     renderer._cam.lookat[:] = (
         camera_x_m,
-        RACE_CAMERA_LOOKAT[1],
+        camera_y_m,
         RACE_CAMERA_LOOKAT[2],
     )
-    return camera_x_m
+    return camera_x_m, camera_y_m
 
 
 def _overlay_race_labels(
@@ -527,6 +552,7 @@ def main() -> int:
         [previous_forward_position_m], maxlen=speed_window_steps + 1
     )
     camera_x_m = RACE_CAMERA_LOOKAT[0]
+    camera_y_m = RACE_CAMERA_LOOKAT[1]
 
     writer: subprocess.Popen[bytes] | None = None
     try:
@@ -556,7 +582,11 @@ def main() -> int:
                     base_env._roll_sprint_forward_frontier
                     - base_env._roll_sprint_forward_origin
                 ).clamp_min(0.0)
-            camera_x_m = _follow_first_robot(base_env, camera_x_m)
+            camera_x_m, camera_y_m = _follow_first_robot(
+                base_env,
+                camera_x_m,
+                camera_y_m,
+            )
             if (step + 1) % args.frame_stride != 0:
                 continue
             rendered = base_env.render()

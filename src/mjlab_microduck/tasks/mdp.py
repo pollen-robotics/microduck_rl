@@ -12093,16 +12093,22 @@ def arrange_roll_sprint_race_start(
 def roll_sprint_progress(
     env: ManagerBasedRlEnv,
     max_paid_rate: float = 5.0,
+    lane_half_width: float = 0.14,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Dense, support-gated forward pitch progress for cyclic bootstrapping."""
+    """Pay supported forward roll progress in proportion to lane adherence."""
     asset = env.scene[asset_cfg.name]
     _update_roll_sprint_state(env, asset)
     paid_rate = torch.clamp(
         env._roll_sprint_progress_delta,
         max=max_paid_rate * env.step_dt,
     )
-    return paid_rate / (env.step_dt * _ROLL_SPRINT_TARGET_ANGLE)
+    lane_quality = torch.clamp(
+        1.0 - (env._roll_sprint_lateral_displacement / lane_half_width).square(),
+        min=0.0,
+        max=1.0,
+    )
+    return lane_quality * paid_rate / (env.step_dt * _ROLL_SPRINT_TARGET_ANGLE)
 
 
 def roll_sprint_distance(

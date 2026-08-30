@@ -117,6 +117,7 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
         cfg.rewards["roll_sprint_distance"].weight
         > cfg.rewards["roll_sprint_progress"].weight
     )
+    assert cfg.rewards["roll_sprint_progress"].params["lane_half_width"] == 0.14
     assert cfg.rewards["roll_sprint_cycle_rate"].weight == 1.0
     assert cfg.rewards["roll_sprint_recovery"].weight == 0.25
     assert cfg.rewards["roll_sprint_invalid_cycle"].weight == -2.0
@@ -586,6 +587,31 @@ def test_roll_sprint_lateral_displacement_has_no_credit_and_costs_straightness(
 
     assert env._roll_sprint_completed_distance[0] == 0.0
     assert penalty[0] == pytest.approx(0.24)
+
+
+def test_roll_progress_reward_fades_to_zero_at_lane_edge_without_idle_annuity():
+    env, _asset = _fake_env(4)
+    mdp._roll_sprint_state(env)
+    env._roll_sprint_last_update_step[:] = env.common_step_counter
+    env._roll_sprint_progress_delta[:] = env.step_dt * mdp._ROLL_SPRINT_TARGET_ANGLE
+    env._roll_sprint_lateral_displacement[:] = torch.tensor([0.0, 0.07, 0.14, 0.25])
+
+    reward = mdp.roll_sprint_progress(
+        env,
+        max_paid_rate=10.0,
+        lane_half_width=0.14,
+    )
+
+    assert reward.tolist() == pytest.approx([1.0, 0.75, 0.0, 0.0])
+    env._roll_sprint_progress_delta.zero_()
+    assert torch.equal(
+        mdp.roll_sprint_progress(
+            env,
+            max_paid_rate=10.0,
+            lane_half_width=0.14,
+        ),
+        torch.zeros(4),
+    )
 
 
 def test_roll_sprint_backward_rotation_and_translation_earn_no_credit(monkeypatch):
