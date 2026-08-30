@@ -83,7 +83,14 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     )
     cfg.rewards["roll_sprint_recovery"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_recovery_rate,
-        weight=0.25,
+        # A53 measured recovery extinction before the first lane stage. This
+        # remains a single latched event and is still much smaller than the
+        # valid frontier released by even one useful roll.
+        weight=1.0,
+    )
+    cfg.rewards["roll_sprint_recovered_reroll"] = RewardTermCfg(
+        func=microduck_mdp.roll_sprint_recovered_reroll_rate,
+        weight=0.5,
     )
     cfg.rewards["roll_sprint_head_pivot"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_head_pivot,
@@ -140,9 +147,9 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         func=microduck_mdp.reset_roll_sprint_state,
         mode=old_reset.mode,
         params={
-            "standing_prob": 1.0 if play else 0.50,
-            "midroll_prob": 0.0 if play else 0.25,
-            "postroll_prob": 0.0 if play else 0.25,
+            "standing_prob": 1.0 if play else 0.40,
+            "midroll_prob": 0.0 if play else 0.20,
+            "postroll_prob": 0.0 if play else 0.40,
             "standing_z_min": old_reset.params["standing_z_min"],
             "standing_z_max": old_reset.params["standing_z_max"],
             "standing_tilt_max": old_reset.params["standing_tilt_max"],
@@ -202,29 +209,37 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                 {
                     "step": 0,
                     "params": {
-                        "standing_prob": 0.50,
-                        "midroll_prob": 0.25,
-                        "postroll_prob": 0.25,
-                    },
-                },
-                {
-                    "step": 1500 * 24,
-                    "params": {
-                        "standing_prob": 0.60,
+                        "standing_prob": 0.40,
                         "midroll_prob": 0.20,
-                        "postroll_prob": 0.20,
+                        "postroll_prob": 0.40,
                     },
                 },
                 {
-                    "step": 2500 * 24,
+                    "step": 750 * 24,
                     "params": {
-                        "standing_prob": 0.80,
-                        "midroll_prob": 0.10,
-                        "postroll_prob": 0.10,
+                        "standing_prob": 0.50,
+                        "midroll_prob": 0.20,
+                        "postroll_prob": 0.30,
                     },
                 },
                 {
-                    "step": 3250 * 24,
+                    "step": 1750 * 24,
+                    "params": {
+                        "standing_prob": 0.70,
+                        "midroll_prob": 0.15,
+                        "postroll_prob": 0.15,
+                    },
+                },
+                {
+                    "step": 2750 * 24,
+                    "params": {
+                        "standing_prob": 0.90,
+                        "midroll_prob": 0.05,
+                        "postroll_prob": 0.05,
+                    },
+                },
+                {
+                    "step": 3500 * 24,
                     "params": {
                         "standing_prob": 1.0,
                         "midroll_prob": 0.0,
@@ -243,14 +258,15 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                 "step": 0,
                 "width": microduck_mdp._ROLL_SPRINT_BOOTSTRAP_LANE_HALF_WIDTH,
             },
-            {"step": 250 * 24, "width": 0.40},
-            # A51 measured a reroll collapse when 0.40 -> 0.28 coincided with
-            # harder starts and DR at iteration 500. Consolidate repeated
-            # recovery/reroll behavior before each later, staggered tightening.
-            {"step": 1750 * 24, "width": 0.28},
-            {"step": 2750 * 24, "width": 0.20},
+            # A53 lost recovered-rerolls even before its 250-iteration lane
+            # step. Keep the recovery-rich phase wide, then harden one axis at
+            # a time after the cyclic transition has had time to consolidate.
+            {"step": 1000 * 24, "width": 0.60},
+            {"step": 2000 * 24, "width": 0.40},
+            {"step": 2800 * 24, "width": 0.28},
+            {"step": 3400 * 24, "width": 0.20},
             {
-                "step": 3500 * 24,
+                "step": 3750 * 24,
                 "width": microduck_mdp._ROLL_SPRINT_LANE_HALF_WIDTH,
             },
         ]
@@ -304,8 +320,9 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
             "reward_name": "roll_sprint_distance",
             "weight_stages": [
                 {"step": 0, "weight": 12.0},
-                {"step": 250 * 24, "weight": 24.0},
-                {"step": 750 * 24, "weight": 32.0},
+                {"step": 750 * 24, "weight": 16.0},
+                {"step": 1500 * 24, "weight": 24.0},
+                {"step": 2500 * 24, "weight": 32.0},
             ],
         },
     )
@@ -315,8 +332,8 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
             "reward_name": "roll_sprint_progress",
             "weight_stages": [
                 {"step": 0, "weight": 1.5},
-                {"step": 250 * 24, "weight": 0.75},
-                {"step": 2000 * 24, "weight": 0.25},
+                {"step": 1250 * 24, "weight": 1.0},
+                {"step": 2500 * 24, "weight": 0.25},
                 # Dense rotation is only a bootstrap. The final race objective
                 # is exclusively the valid-cycle forward frontier above.
                 {"step": 3500 * 24, "weight": 0.0},

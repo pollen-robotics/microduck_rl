@@ -176,13 +176,26 @@ def test_auditor_requires_recovery_before_second_credited_roll() -> None:
     assert auditor.recovery_count.item() == 1
     assert auditor.recovered_and_rerolled_count.item() == 1
     report = auditor.summary(6.0)
-    assert report["mean_recovery_latency_s"] == pytest.approx(0.06)
+    assert report["mean_recovery_latency_s"] == pytest.approx(0.04)
     assert report["repeated_roll_rate"] == pytest.approx(1.0)
     assert report["maximum_forward_speed_mps"] == pytest.approx(1.25)
     assert report["per_robot"][0]["maximum_forward_speed_mps"] == pytest.approx(1.25)
     assert not report["per_robot"][0]["target_20m_pass"]
     assert report["target_distance_reach_rate"] == pytest.approx(0.0)
     assert not report["four_robot_batch_target_20m_pass"]
+    assert report["recovery_gate_diagnostics"] == {
+        "awaiting_steps": 2,
+        "foot_supported_head_released_steps": 2,
+        "upright_ready_steps": 2,
+        "sagittal_ready_steps": 2,
+        "rate_ready_steps": 2,
+        "candidate_steps": 2,
+        "max_consecutive_candidate_steps": 2,
+        "foot_release_fraction": 1.0,
+        "upright_given_foot_release_fraction": 1.0,
+        "sagittal_given_upright_fraction": 1.0,
+        "rate_given_sagittal_fraction": 1.0,
+    }
 
 
 def test_heading_uses_lateral_axis_at_vertical_pitch() -> None:

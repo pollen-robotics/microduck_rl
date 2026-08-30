@@ -11493,14 +11493,16 @@ _ROLL_SPRINT_LANE_HALF_WIDTH = 0.14
 _ROLL_SPRINT_BOOTSTRAP_LANE_HALF_WIDTH = 2.0
 _ROLL_SPRINT_LATERAL_INVALID_Z = math.sin(math.radians(60.0))
 # A launch-ready recovery is deliberately dynamic. Normal MicroDuck roll
-# transit is 3.5--5.5 rad/s (and the A35 diagnostic reached still higher
-# peaks), so 3 rad/s separates the completed inverted phase without asking the
-# robot to stand still. A 50-degree upright cone and 35-degree sagittal cone
-# admit a feet-supported crouch; three 50 Hz steps reject contact flicker.
-_ROLL_SPRINT_RECOVERY_MAX_FORWARD_RATE = 3.0
+# transit is 3.5--5.5 rad/s. The frozen parent policy produced 94 feet-down,
+# head-released, upright, sagittal recovery steps in 10 s, but the old 3 rad/s
+# cutoff rejected 92 of them. Six rad/s preserves that dynamic transition
+# without accepting the inverted phase, which is excluded independently by
+# feet support, head release, and the upright cone. Two 50 Hz steps are a
+# brief 40 ms launch-ready latch while still rejecting a one-frame contact.
+_ROLL_SPRINT_RECOVERY_MAX_FORWARD_RATE = 6.0
 _ROLL_SPRINT_RECOVERY_UPRIGHT_COS = math.cos(math.radians(50.0))
 _ROLL_SPRINT_RECOVERY_LATERAL_Z = math.sin(math.radians(35.0))
-_ROLL_SPRINT_RECOVERY_HOLD_STEPS = 3
+_ROLL_SPRINT_RECOVERY_HOLD_STEPS = 2
 
 
 def _roll_sprint_state(env: ManagerBasedRlEnv) -> None:
@@ -12233,6 +12235,16 @@ def roll_sprint_recovery_rate(
     asset = env.scene[asset_cfg.name]
     _update_roll_sprint_state(env, asset)
     return env._roll_sprint_recovered_now.float() / env.step_dt
+
+
+def roll_sprint_recovered_reroll_rate(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """One-shot rate for a valid roll completed after a latched recovery."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_recovered_rerolled_now.float() / env.step_dt
 
 
 def roll_sprint_recovery_count(

@@ -31,10 +31,10 @@ FLAT_ZERO = math.sin(math.radians(60.0))
 MIN_FORWARD_RATE = 0.5
 MAX_DISTANCE_PER_RAD = 0.12
 LANE_HALF_WIDTH_M = 0.14
-RECOVERY_MAX_FORWARD_RATE = 3.0
-RECOVERY_UPRIGHT_COS = math.cos(math.radians(50.0))
-RECOVERY_LATERAL_Z = math.sin(math.radians(35.0))
-RECOVERY_HOLD_STEPS = 3
+RECOVERY_MAX_FORWARD_RATE = microduck_mdp._ROLL_SPRINT_RECOVERY_MAX_FORWARD_RATE
+RECOVERY_UPRIGHT_COS = microduck_mdp._ROLL_SPRINT_RECOVERY_UPRIGHT_COS
+RECOVERY_LATERAL_Z = microduck_mdp._ROLL_SPRINT_RECOVERY_LATERAL_Z
+RECOVERY_HOLD_STEPS = microduck_mdp._ROLL_SPRINT_RECOVERY_HOLD_STEPS
 RACE_LANE_SPACING = 0.28
 TARGET_DISTANCE_M = 20.0
 STRAIGHT_LANE_MAX_DRIFT_M = 0.08
@@ -144,6 +144,27 @@ class RollCycleAuditor:
         self.recovered_and_rerolled_count = torch.zeros(
             count, dtype=torch.long, device=device
         )
+        self.awaiting_recovery_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.recovery_foot_release_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.recovery_upright_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.recovery_sagittal_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.recovery_rate_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.recovery_candidate_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.max_recovery_candidate_streak = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
         self.head_top_contact_count = torch.zeros(
             count, dtype=torch.long, device=device
         )
@@ -192,20 +213,27 @@ class RollCycleAuditor:
         omega = angular_velocity_b[:, 1]
         upright_cos = 1.0 - 2.0 * (root_quat[:, 1].square() + root_quat[:, 2].square())
         awaiting_before = self.awaiting_recovery
-        recovery_candidate = (
-            active
-            & awaiting_before
-            & foot_support
-            & ~head_contact
-            & (upright_cos >= RECOVERY_UPRIGHT_COS)
-            & (lateral_z <= RECOVERY_LATERAL_Z)
-            & (omega <= RECOVERY_MAX_FORWARD_RATE)
-        )
+        awaiting_active = active & awaiting_before
+        foot_release = awaiting_active & foot_support & ~head_contact
+        upright_ready = foot_release & (upright_cos >= RECOVERY_UPRIGHT_COS)
+        sagittal_ready = upright_ready & (lateral_z <= RECOVERY_LATERAL_Z)
+        rate_ready = sagittal_ready & (omega <= RECOVERY_MAX_FORWARD_RATE)
+        recovery_candidate = rate_ready
+        self.awaiting_recovery_steps += awaiting_active.to(torch.long)
+        self.recovery_foot_release_steps += foot_release.to(torch.long)
+        self.recovery_upright_steps += upright_ready.to(torch.long)
+        self.recovery_sagittal_steps += sagittal_ready.to(torch.long)
+        self.recovery_rate_steps += rate_ready.to(torch.long)
+        self.recovery_candidate_steps += recovery_candidate.to(torch.long)
         old_recovery_hold = self.recovery_hold_steps
         recovery_hold = torch.where(
             recovery_candidate,
             old_recovery_hold + 1,
             torch.zeros_like(old_recovery_hold),
+        )
+        self.max_recovery_candidate_streak = torch.maximum(
+            self.max_recovery_candidate_streak,
+            recovery_hold,
         )
         recovered = (
             recovery_candidate
@@ -394,6 +422,11 @@ class RollCycleAuditor:
         )
         repeated = self.recovered_and_rerolled_count >= 1
         total_recoveries = int(self.recovery_count.sum().item())
+        awaiting_steps = int(self.awaiting_recovery_steps.sum().item())
+        foot_release_steps = int(self.recovery_foot_release_steps.sum().item())
+        upright_steps = int(self.recovery_upright_steps.sum().item())
+        sagittal_steps = int(self.recovery_sagittal_steps.sum().item())
+        rate_steps = int(self.recovery_rate_steps.sum().item())
         mean_recovery_latency = (
             float(self.recovery_latency_total_steps.sum().item())
             * self.step_dt
@@ -456,6 +489,25 @@ class RollCycleAuditor:
                 self.recovered_and_rerolled_count.sum().item()
             ),
             "mean_recovery_latency_s": mean_recovery_latency,
+            "recovery_gate_diagnostics": {
+                "awaiting_steps": awaiting_steps,
+                "foot_supported_head_released_steps": foot_release_steps,
+                "upright_ready_steps": upright_steps,
+                "sagittal_ready_steps": sagittal_steps,
+                "rate_ready_steps": rate_steps,
+                "candidate_steps": int(self.recovery_candidate_steps.sum().item()),
+                "max_consecutive_candidate_steps": int(
+                    self.max_recovery_candidate_streak.max().item()
+                ),
+                "foot_release_fraction": foot_release_steps
+                / max(awaiting_steps, 1),
+                "upright_given_foot_release_fraction": upright_steps
+                / max(foot_release_steps, 1),
+                "sagittal_given_upright_fraction": sagittal_steps
+                / max(upright_steps, 1),
+                "rate_given_sagittal_fraction": rate_steps
+                / max(sagittal_steps, 1),
+            },
             "repeated_roll_rate": float(repeated.float().mean().item()),
             "head_top_contact_count": int(self.head_top_contact_count.sum().item()),
             "p95_lateral_drift_m": float(

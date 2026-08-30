@@ -105,6 +105,8 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
 
     assert cfg.episode_length_s == EPISODE_LENGTH_S == 40.0
     assert TARGET_DISTANCE_M == 20.0
+    assert mdp._ROLL_SPRINT_RECOVERY_MAX_FORWARD_RATE == 6.0
+    assert mdp._ROLL_SPRINT_RECOVERY_HOLD_STEPS == 2
     assert cfg.scene.terrain.terrain_type == "plane"
     assert list(cfg.observations["actor"].terms) == list(
         roulade.observations["actor"].terms
@@ -123,7 +125,12 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
         mdp._ROLL_SPRINT_LANE_HALF_WIDTH
     )
     assert cfg.rewards["roll_sprint_cycle_rate"].weight == 1.0
-    assert cfg.rewards["roll_sprint_recovery"].weight == 0.25
+    assert cfg.rewards["roll_sprint_recovery"].weight == 1.0
+    assert cfg.rewards["roll_sprint_recovered_reroll"].weight == 0.5
+    assert (
+        cfg.rewards["roll_sprint_recovered_reroll"].weight
+        < cfg.rewards["roll_sprint_distance"].weight
+    )
     assert cfg.rewards["roll_sprint_invalid_cycle"].weight == 0.0
     assert cfg.rewards["roll_sprint_sagittal"].weight == -0.05
     assert cfg.rewards["roll_sprint_flatness"].weight == -0.25
@@ -151,17 +158,18 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert MicroduckRollSprintRlCfg.save_interval == 100
     assert MicroduckRollSprintRlCfg.algorithm.entropy_coef == 0.0
     reset_params = cfg.events["set_roll_sprint_state"].params
-    assert reset_params["standing_prob"] == 0.50
-    assert reset_params["midroll_prob"] == 0.25
-    assert reset_params["postroll_prob"] == 0.25
+    assert reset_params["standing_prob"] == 0.40
+    assert reset_params["midroll_prob"] == 0.20
+    assert reset_params["postroll_prob"] == 0.40
     assert cfg.curriculum["roll_sprint_lane_half_width"].params[
         "width_stages"
     ] == [
         {"step": 0, "width": 2.0},
-        {"step": 250 * 24, "width": 0.40},
-        {"step": 1750 * 24, "width": 0.28},
-        {"step": 2750 * 24, "width": 0.20},
-        {"step": 3500 * 24, "width": 0.14},
+        {"step": 1000 * 24, "width": 0.60},
+        {"step": 2000 * 24, "width": 0.40},
+        {"step": 2800 * 24, "width": 0.28},
+        {"step": 3400 * 24, "width": 0.20},
+        {"step": 3750 * 24, "width": 0.14},
     ]
     play_cfg = make_microduck_roll_sprint_env_cfg(play=True)
     assert play_cfg.curriculum["roll_sprint_lane_half_width"].params[
@@ -179,17 +187,21 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
         (stage["step"], stage["params"])
         for stage in cfg.curriculum["roll_sprint_spawn_mix"].params["param_stages"]
     ] == [
-        (0, {"standing_prob": 0.50, "midroll_prob": 0.25, "postroll_prob": 0.25}),
+        (0, {"standing_prob": 0.40, "midroll_prob": 0.20, "postroll_prob": 0.40}),
         (
-            1500 * 24,
-            {"standing_prob": 0.60, "midroll_prob": 0.20, "postroll_prob": 0.20},
+            750 * 24,
+            {"standing_prob": 0.50, "midroll_prob": 0.20, "postroll_prob": 0.30},
         ),
         (
-            2500 * 24,
-            {"standing_prob": 0.80, "midroll_prob": 0.10, "postroll_prob": 0.10},
+            1750 * 24,
+            {"standing_prob": 0.70, "midroll_prob": 0.15, "postroll_prob": 0.15},
         ),
         (
-            3250 * 24,
+            2750 * 24,
+            {"standing_prob": 0.90, "midroll_prob": 0.05, "postroll_prob": 0.05},
+        ),
+        (
+            3500 * 24,
             {"standing_prob": 1.0, "midroll_prob": 0.0, "postroll_prob": 0.0},
         ),
     ]
@@ -197,9 +209,17 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
         "weight_stages"
     ] == [
         {"step": 0, "weight": 1.5},
-        {"step": 250 * 24, "weight": 0.75},
-        {"step": 2000 * 24, "weight": 0.25},
+        {"step": 1250 * 24, "weight": 1.0},
+        {"step": 2500 * 24, "weight": 0.25},
         {"step": 3500 * 24, "weight": 0.0},
+    ]
+    assert cfg.curriculum["roll_sprint_distance_weight"].params[
+        "weight_stages"
+    ] == [
+        {"step": 0, "weight": 12.0},
+        {"step": 750 * 24, "weight": 16.0},
+        {"step": 1500 * 24, "weight": 24.0},
+        {"step": 2500 * 24, "weight": 32.0},
     ]
     assert cfg.curriculum["roll_sprint_head_pivot_weight"].params[
         "weight_stages"
@@ -465,6 +485,12 @@ def test_roll_recover_reroll_credits_two_cycles(monkeypatch):
     assert env._roll_sprint_recovered_and_rerolled[0] == 1.0
     assert env._roll_sprint_forward_frontier[0] == pytest.approx(0.45)
     assert env._roll_sprint_completed_distance[0] == pytest.approx(0.25)
+    assert mdp.roll_sprint_recovered_reroll_rate(env)[0] == pytest.approx(
+        1.0 / env.step_dt
+    )
+
+    env.common_step_counter += 1
+    assert mdp.roll_sprint_recovered_reroll_rate(env)[0] == 0.0
 
 
 def test_roll_sprint_side_violation_invalidates_whole_cycle(monkeypatch):
