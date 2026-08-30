@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Bounded A15 CEM search for a full-height first-stair action sequence.
+"""Bounded CEM search for a full-height first-stair action sequence.
 
-The manufacturer-derived A9 actor remains frozen. CEM searches only a short,
-piecewise-constant residual action sequence from one exact manufacturer-roll
-bank state. Candidate fitness is the best single state on its own trajectory,
-with an auxiliary contact-sequence score that rewards real anchor contact,
-positive pitch work, release, and later tread support. It is never assembled
-from independent maxima, and a lateral bypass invalidates the candidate.
+The selected policy remains frozen. CEM searches only a short,
+piecewise-constant residual action sequence from one exact stair-bank state.
+Candidate fitness is the best single state on its own trajectory, with an
+auxiliary contact-sequence score that rewards real anchor contact, positive
+pitch work, release, and later tread support. It is never assembled from
+independent maxima, and a lateral bypass invalidates the candidate.
 """
 
 from __future__ import annotations
@@ -460,6 +460,19 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--bank-row", type=int)
+    parser.add_argument(
+        "--bank-event",
+        default="auto",
+        help=(
+            "State-bank reset event to pin. 'auto' prefers the earliest "
+            "unsolved forward-curriculum bank."
+        ),
+    )
+    parser.add_argument(
+        "--state-bank-family",
+        type=int,
+        help="Force this state_bank_family value before every CEM rollout.",
+    )
     parser.add_argument("--bank-local-x", type=float)
     parser.add_argument("--bank-local-y", type=float)
     parser.add_argument("--horizon-steps", type=int, default=40)
@@ -538,6 +551,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         value = getattr(args, name)
         if value is not None and not math.isfinite(value):
             raise SystemExit(f"--{name.replace('_', '-')} must be finite")
+    if args.state_bank_family is not None and args.state_bank_family < 0:
+        raise SystemExit("--state-bank-family must be nonnegative")
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -578,10 +593,12 @@ def load_initial_knots(
         return mean
     source_path = path.expanduser().resolve()
     if not source_path.is_file():
-        raise FileNotFoundError(f"Initial A13 NPZ not found: {source_path}")
+        raise FileNotFoundError(f"Initial search NPZ not found: {source_path}")
     with np.load(source_path, allow_pickle=False) as archive:
         if "best_knots" not in archive:
-            raise ValueError(f"Initial A13 NPZ has no best_knots array: {source_path}")
+            raise ValueError(
+                f"Initial search NPZ has no best_knots array: {source_path}"
+            )
         source = np.asarray(archive["best_knots"], dtype=np.float64)
     if source.ndim == 2 and source.shape[1] == 14 and action_dim == SAGITTAL_ACTION_DIM:
         source = project_sagittal_actions(source)
@@ -661,38 +678,93 @@ def force_assisted_reset_mode(env_cfg: Any, mode: str) -> None:
         reset[name] = (midpoint, midpoint)
 
 
+def resolve_bank_event_name(env_cfg: Any, requested: str = "auto") -> str:
+    """Resolve the reset bank that defines the current forward frontier."""
+
+    if requested != "auto":
+        if requested not in env_cfg.events:
+            raise KeyError(f"Task has no state-bank event {requested!r}")
+        return requested
+    for name in (
+        "stage2_forward_state_bank",
+        "option_frontier_state_bank",
+        "stage2_reverse_state_bank",
+        "walker_state_bank",
+    ):
+        if name in env_cfg.events:
+            return name
+    raise KeyError("Task exposes no supported stair state-bank event")
+
+
+def force_state_bank_family(env_cfg: Any, family: int | None) -> None:
+    """Force one replay family so every candidate starts from the same bank."""
+
+    if family is None:
+        return
+    selector = env_cfg.events.get("state_bank_family")
+    if selector is None:
+        raise KeyError("--state-bank-family requires a state_bank_family event")
+    selector.params["forced_family"] = family
+
+
+def disable_search_only_terminations(env_cfg: Any) -> tuple[str, ...]:
+    """Keep terminal latches observable until CEM scores the next state."""
+
+    removed = []
+    for name in ("secured_tread_success", "stair_progress_stalled"):
+        if name in env_cfg.terminations:
+            env_cfg.terminations.pop(name)
+            removed.append(name)
+    return tuple(removed)
+
+
 def pin_bank_reset_position(
-    env_cfg: Any, local_x_m: float | None, local_y_m: float | None
+    env_cfg: Any,
+    local_x_m: float | None,
+    local_y_m: float | None,
+    *,
+    event_name: str = "walker_state_bank",
 ) -> None:
     """Remove bank-position randomness when exact CEM comparisons need it."""
 
     if local_x_m is None and local_y_m is None:
         return
-    bank = env_cfg.events["walker_state_bank"].params
+    bank = env_cfg.events[event_name].params
     if local_x_m is not None:
         bank["local_x_range"] = (local_x_m, local_x_m)
     if local_y_m is not None:
         bank["local_y_range"] = (local_y_m, local_y_m)
 
 
-def _pin_loaded_foot_bank_row(base_env: Any, requested_row: int | None, torch: Any) -> int:
-    term_cfg = base_env.event_manager.get_term_cfg("walker_state_bank")
+def _pin_loaded_bank_row(
+    base_env: Any,
+    event_name: str,
+    requested_row: int | None,
+    torch: Any,
+) -> int:
+    term_cfg = base_env.event_manager.get_term_cfg(event_name)
     bank_reset = term_cfg.func
     if not hasattr(bank_reset, "_eligible_rows"):
-        raise RuntimeError("walker_state_bank does not expose eligible bank rows")
+        raise RuntimeError(f"{event_name} does not expose eligible bank rows")
     eligible = bank_reset._eligible_rows.detach().cpu().to(torch.long)
     if eligible.numel() == 0:
-        raise RuntimeError("A12 loaded-foot bank has no eligible rows")
+        raise RuntimeError(f"{event_name} has no eligible rows")
     if requested_row is None:
         selected = int(eligible[0].item())
     else:
         selected = int(requested_row)
         if not bool((eligible == selected).any().item()):
             raise RuntimeError(
-                f"Requested --bank-row {selected} is not among the A12 eligible rows"
+                f"Requested --bank-row {selected} is not eligible for {event_name}"
             )
     bank_reset._eligible_rows = torch.tensor([selected], dtype=torch.long)
     return selected
+
+
+def _pin_loaded_foot_bank_row(base_env: Any, requested_row: int | None, torch: Any) -> int:
+    """Backward-compatible wrapper for the original A12 bank search."""
+
+    return _pin_loaded_bank_row(base_env, "walker_state_bank", requested_row, torch)
 
 
 def _locate_and_validate_shell(base_env: Any) -> int:
@@ -955,7 +1027,15 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
     env_cfg = load_env_cfg(args.task_id, play=True)
     agent_cfg = load_rl_cfg(args.task_id)
     force_assisted_reset_mode(env_cfg, args.forced_reset_mode)
-    pin_bank_reset_position(env_cfg, args.bank_local_x, args.bank_local_y)
+    bank_event_name = resolve_bank_event_name(env_cfg, args.bank_event)
+    force_state_bank_family(env_cfg, args.state_bank_family)
+    pin_bank_reset_position(
+        env_cfg,
+        args.bank_local_x,
+        args.bank_local_y,
+        event_name=bank_event_name,
+    )
+    disabled_terminations = disable_search_only_terminations(env_cfg)
     _validate_fixed_stair(env_cfg)
     env_cfg.scene.num_envs = args.batch_size
     env_cfg.seed = args.seed
@@ -964,8 +1044,8 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
     try:
         selected_bank_row = None
         if args.forced_reset_mode in {"task-default", "bank"}:
-            selected_bank_row = _pin_loaded_foot_bank_row(
-                base_env, args.bank_row, torch
+            selected_bank_row = _pin_loaded_bank_row(
+                base_env, bank_event_name, args.bank_row, torch
             )
         shell_geom_id = _locate_and_validate_shell(base_env)
         runner_cls = load_runner_cls(args.task_id) or MjlabOnPolicyRunner
@@ -1071,7 +1151,11 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
             "task": args.task_id,
             "forced_reset_mode": args.forced_reset_mode,
             "baseline_checkpoint": str(checkpoint),
+            "loaded_bank_row": selected_bank_row,
             "loaded_foot_bank_row": selected_bank_row,
+            "state_bank_event": bank_event_name,
+            "state_bank_family": args.state_bank_family,
+            "search_only_disabled_terminations": disabled_terminations,
             "fixed_stair": {
                 "riser_height_m": STANDARD_RISER_HEIGHT_M,
                 "tread_depth_m": STANDARD_TREAD_DEPTH_M,

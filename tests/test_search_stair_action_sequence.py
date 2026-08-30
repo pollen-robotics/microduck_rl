@@ -93,6 +93,39 @@ def test_bank_reset_position_can_be_pinned_without_changing_other_params() -> No
     assert params["min_root_height"] == 0.08
 
 
+def test_forward_bank_auto_resolution_and_family_forcing() -> None:
+    family = SimpleNamespace(params={"family_weights": (1, 1, 1, 3, 6)})
+    cfg = SimpleNamespace(
+        events={
+            "state_bank_family": family,
+            "walker_state_bank": SimpleNamespace(params={}),
+            "stage2_forward_state_bank": SimpleNamespace(params={}),
+        }
+    )
+
+    assert SEARCH.resolve_bank_event_name(cfg) == "stage2_forward_state_bank"
+    SEARCH.force_state_bank_family(cfg, 4)
+
+    assert family.params["forced_family"] == 4
+
+
+def test_cem_disables_only_resetting_a37_terminations() -> None:
+    keep = object()
+    cfg = SimpleNamespace(
+        terminations={
+            "time_out": keep,
+            "nan_state": keep,
+            "secured_tread_success": object(),
+            "stair_progress_stalled": object(),
+        }
+    )
+
+    removed = SEARCH.disable_search_only_terminations(cfg)
+
+    assert removed == ("secured_tread_success", "stair_progress_stalled")
+    assert cfg.terminations == {"time_out": keep, "nan_state": keep}
+
+
 def test_load_initial_knots_preserves_prefix_and_zero_extends(tmp_path: Path) -> None:
     source = np.arange(12, dtype=np.float32).reshape(3, 4)
     path = tmp_path / "warm.npz"
