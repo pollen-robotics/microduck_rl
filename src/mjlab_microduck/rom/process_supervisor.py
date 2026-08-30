@@ -35,7 +35,7 @@ from .process_protocol import (
     encode_packet,
 )
 from .runtime_identity import runtime_revision
-from .supervisor_state import SupervisorState
+from .supervisor_state import SupervisorEvent, SupervisorState, transition
 
 
 class SupervisorUnavailable(RuntimeError):
@@ -100,8 +100,17 @@ class RuntimeProcessSupervisor:
         self._operation_timeout = operation_timeout_s
         self._terminate_timeout = terminate_timeout_s
         self._terminal_callback = terminal_callback
+        self._terminal_queue: queue.Queue[TerminalPayload] | None = None
+        if terminal_callback is not None:
+            self._terminal_queue = queue.Queue(maxsize=1)
+            threading.Thread(
+                target=self._deliver_terminals,
+                name="microduck-terminal-delivery",
+                daemon=True,
+            ).start()
         self._queue: queue.Queue[_Intent] = queue.Queue(maxsize=queue_size)
         self._snapshot_lock = threading.Lock()
+        self._trace_lock = threading.Lock()
         self._snapshot_value = SupervisorSnapshot(
             SupervisorState.NO_CHILD, 0, False, None, None, True
         )
@@ -117,7 +126,25 @@ class RuntimeProcessSupervisor:
         )
         self._thread.start()
 
+    def _deliver_terminals(self) -> None:
+        assert self._terminal_queue is not None and self._terminal_callback is not None
+        while True:
+            payload = self._terminal_queue.get()
+            try:
+                self._terminal_callback(payload)
+            except Exception as exc:  # noqa: BLE001 - callback boundary is isolated
+                self._record(f"TERMINAL_DELIVERY_FAILED:{type(exc).__name__}")
+
     def _default_launch(self, socket_fd: int) -> ChildLaunch:
+        allowed = {
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "LD_LIBRARY_PATH",
+            "MUJOCO_GL",
+            "OMP_NUM_THREADS",
+            "PATH",
+        }
         return ChildLaunch(
             (
                 sys.executable,
@@ -127,12 +154,18 @@ class RuntimeProcessSupervisor:
                 str(socket_fd),
                 "--bundle-root",
                 self._bundle_root,
-            )
+            ),
+            env={key: value for key, value in os.environ.items() if key in allowed},
         )
 
     @property
     def trace(self) -> tuple[str, ...]:
-        return tuple(self._trace)
+        with self._trace_lock:
+            return tuple(self._trace)
+
+    def _record(self, value: str) -> None:
+        with self._trace_lock:
+            self._trace.append(value)
 
     def snapshot(self) -> SupervisorSnapshot:
         with self._snapshot_lock:
@@ -170,9 +203,15 @@ class RuntimeProcessSupervisor:
             return
         try:
             self._submit("close")
-        except SupervisorUnavailable:
-            pass
+        except SupervisorUnavailable as exc:
+            raise SupervisorUnavailable(
+                "close could not reach the process owner"
+            ) from exc
         self._thread.join(self._operation_timeout + self._terminate_timeout + 1)
+        if self._thread.is_alive() or self.snapshot().pid is not None:
+            raise SupervisorUnavailable(
+                "close did not prove owner termination and exact reap"
+            )
 
     def _submit(self, kind: IntentKind, *args: object) -> Any:
         if self._closed and kind != "close":
@@ -213,6 +252,11 @@ class RuntimeProcessSupervisor:
         with self._snapshot_lock:
             self._snapshot_value = new
 
+    def _advance(self, event: SupervisorEvent, **publish: Any) -> None:
+        """Apply Task 1's total transition function to every normal lifecycle edge."""
+        decision = transition(self.snapshot().state, event)
+        self._publish(decision.next_state, **publish)
+
     def _run(self) -> None:
         while True:
             intent = self._queue.get()
@@ -251,25 +295,33 @@ class RuntimeProcessSupervisor:
     def _spawn(self) -> None:
         self._generation += 1
         self._sequence = 0
-        self._publish(SupervisorState.SPAWNING, healthy=False, reason=None, slot=False)
-        parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-        launch = self._launch_factory(child.fileno())
-        pass_fds = tuple(dict.fromkeys((child.fileno(), *launch.pass_fds)))
+        self._advance(
+            SupervisorEvent.SPAWN_REQUESTED, healthy=False, reason=None, slot=False
+        )
+        parent: socket.socket | None = None
+        child: socket.socket | None = None
+        launch: ChildLaunch | None = None
         try:
+            parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+            launch = self._launch_factory(child.fileno())
+            pass_fds = tuple(dict.fromkeys((child.fileno(), *launch.pass_fds)))
             self._process = subprocess.Popen(
                 list(launch.argv), pass_fds=pass_fds, env=launch.env, close_fds=True
             )
         except BaseException:
-            parent.close()
-            child.close()
+            if parent is not None:
+                parent.close()
+            if child is not None:
+                child.close()
             self._publish(SupervisorState.NO_CHILD, healthy=False, slot=True)
             raise
         finally:
-            for inherited_fd in launch.close_after_spawn:
+            for inherited_fd in launch.close_after_spawn if launch else ():
                 try:
                     os.close(inherited_fd)
                 except OSError:
                     continue
+        assert child is not None and parent is not None
         child.close()
         self._socket = parent
         try:
@@ -298,13 +350,15 @@ class RuntimeProcessSupervisor:
         except BaseException as exc:
             self._quarantine(f"SPAWN_FAILED:{type(exc).__name__}")
             raise SupervisorOperationError("child readiness failed") from exc
-        self._publish(SupervisorState.IDLE, healthy=True, reason=None, slot=True)
+        self._advance(
+            SupervisorEvent.READY_RECEIVED, healthy=True, reason=None, slot=True
+        )
 
     def _start(self, request: TaskCreateRequest) -> AckPayload:
         if self.snapshot().state is not SupervisorState.IDLE:
             raise SupervisorUnavailable("motion slot is unavailable")
         self._active_task = request.taskId
-        self._publish(SupervisorState.STARTING, slot=False)
+        self._advance(SupervisorEvent.START_SENT, slot=False)
         payload = StartPayload(
             actionCode=request.actionCode,
             bundleDigest=request.bundleDigest,
@@ -319,7 +373,7 @@ class RuntimeProcessSupervisor:
         if response.payload.acknowledgedKind.value != "START":
             self._quarantine("START_ACK_MISMATCH")
             raise SupervisorOperationError("wrong START acknowledgment")
-        self._publish(SupervisorState.RUNNING, slot=False)
+        self._advance(SupervisorEvent.START_ACK, slot=False)
         return response.payload
 
     def _command(
@@ -342,6 +396,9 @@ class RuntimeProcessSupervisor:
             {RuntimeMessageKind.ACK},
         )
         assert isinstance(response.payload, AckPayload)
+        if response.payload.acknowledgedKind.value != "COMMAND":
+            self._quarantine("COMMAND_ACK_MISMATCH")
+            raise SupervisorOperationError("wrong COMMAND acknowledgment")
         return response.payload
 
     def _status(self, task_id: str) -> RobotStatus:
@@ -358,7 +415,7 @@ class RuntimeProcessSupervisor:
 
     def _stop(self, task_id: str, reason: str) -> TerminalPayload:
         self._require_active(task_id)
-        self._publish(SupervisorState.STOPPING, slot=False)
+        self._advance(SupervisorEvent.STOP_CLAIMED, slot=False)
         response = self._guarded_exchange(
             RuntimeMessageKind.ZERO_AND_STOP,
             task_id,
@@ -367,9 +424,13 @@ class RuntimeProcessSupervisor:
         )
         assert isinstance(response.payload, TerminalPayload)
         self._active_task = None
-        self._publish(SupervisorState.IDLE, healthy=True, slot=True)
-        if self._terminal_callback is not None:
-            self._terminal_callback(response.payload)
+        if self._terminal_queue is not None:
+            try:
+                self._terminal_queue.put_nowait(response.payload)
+            except queue.Full as exc:
+                self._quarantine("TERMINAL_DELIVERY_BACKPRESSURE")
+                raise SupervisorOperationError("terminal handoff unavailable") from exc
+        self._advance(SupervisorEvent.TERMINAL_ACK, healthy=True, slot=True)
         return response.payload
 
     def _require_active(self, task_id: str) -> None:
@@ -383,12 +444,13 @@ class RuntimeProcessSupervisor:
         try:
             return self._exchange(*args)
         except BaseException as exc:
-            self._trace.append(
+            self._record(
                 "OPERATION_TIMEOUT"
                 if isinstance(exc, TimeoutError)
                 else "OPERATION_FAILED"
             )
-            self._quarantine(type(exc).__name__)
+            trustworthy = isinstance(exc, TimeoutError) and self._process is not None
+            self._quarantine(type(exc).__name__, protocol_usable=trustworthy)
             raise SupervisorOperationError("runtime operation failed closed") from exc
 
     def _exchange(
@@ -434,12 +496,48 @@ class RuntimeProcessSupervisor:
                 raise SupervisorOperationError("ambiguous child response")
             return response
 
-    def _quarantine(self, reason: str) -> None:
-        self._publish(
-            SupervisorState.QUARANTINED, healthy=False, reason=reason, slot=False
+    def _quarantine(self, reason: str, *, protocol_usable: bool = False) -> None:
+        self._advance(
+            SupervisorEvent.OPERATION_TIMEOUT, healthy=False, reason=reason, slot=False
         )
-        self._trace.append("QUARANTINED")
+        self._record("QUARANTINED")
+        if protocol_usable and self._active_task is not None:
+            self._best_effort_zero()
         self._terminate_and_reap()
+
+    def _best_effort_zero(self) -> None:
+        """Attempt one independently bounded stop without trusting it as release proof."""
+        if (
+            self._socket is None
+            or self._process is None
+            or self._process.poll() is not None
+        ):
+            return
+        self._sequence += 1
+        request = RuntimeMessage(
+            kind=RuntimeMessageKind.ZERO_AND_STOP,
+            generation=self._generation,
+            operationSequence=self._sequence,
+            taskId=self._active_task,
+            payload=ZeroAndStopPayload(reason="RUNTIME_UNRESPONSIVE"),
+        )
+        try:
+            self._socket.sendall(encode_packet(request))
+            readable, _, _ = select.select(
+                [self._socket], [], [], min(self._terminate_timeout, 0.1)
+            )
+            if readable:
+                packet = self._socket.recv(PACKET_MAX_BYTES + 1)
+                response = decode_packet(packet)
+                if (
+                    response.kind is RuntimeMessageKind.TERMINAL
+                    and response.generation == self._generation
+                    and response.operationSequence == self._sequence
+                    and response.taskId == self._active_task
+                ):
+                    self._record("BEST_EFFORT_STOP_ACK")
+        except (OSError, ValueError):
+            return
 
     def _terminate_and_reap(self) -> None:
         process = self._process
@@ -447,29 +545,31 @@ class RuntimeProcessSupervisor:
         if process is None:
             self._publish(SupervisorState.NO_CHILD, healthy=False, slot=True)
             return
-        self._publish(SupervisorState.TERMINATING, slot=False)
+        self._advance(SupervisorEvent.SIGTERM_SENT, slot=False)
         if process.poll() is None:
             process.send_signal(signal.SIGTERM)
-            self._trace.append("SIGTERM_SENT")
+            self._record("SIGTERM_SENT")
             try:
                 process.wait(timeout=self._terminate_timeout)
             except subprocess.TimeoutExpired:
-                self._trace.append("TERM_TIMEOUT")
-                self._publish(SupervisorState.KILLING, slot=False)
+                self._record("TERM_TIMEOUT")
+                self._advance(SupervisorEvent.TERM_TIMEOUT, slot=False)
                 process.kill()
-                self._trace.append("SIGKILL_SENT")
-        self._publish(SupervisorState.REAPING, slot=False)
+                self._record("SIGKILL_SENT")
+                self._advance(SupervisorEvent.SIGKILL_SENT, slot=False)
+        if self.snapshot().state is SupervisorState.TERMINATING:
+            self._publish(SupervisorState.REAPING, slot=False)
         process.wait(timeout=max(self._operation_timeout, 0.1))
         if process.poll() is None:
             raise RuntimeError("exact child reap was not confirmed")
-        self._trace.append("CHILD_REAPED")
+        self._record("CHILD_REAPED")
         if owned_socket is not None:
             owned_socket.close()
         self._process = None
         self._socket = None
         self._active_task = None
-        self._publish(SupervisorState.NO_CHILD, healthy=False, slot=True)
-        self._trace.append("NO_CHILD")
+        self._advance(SupervisorEvent.CHILD_REAPED, healthy=False, slot=True)
+        self._record("NO_CHILD")
 
     def _close_owned_child(self) -> None:
         if self._process is None:
@@ -477,12 +577,15 @@ class RuntimeProcessSupervisor:
             return
         if self.snapshot().state is SupervisorState.IDLE:
             try:
-                self._exchange(
+                response = self._exchange(
                     RuntimeMessageKind.SHUTDOWN,
                     None,
                     ShutdownPayload(reason="SUPERVISOR_SHUTDOWN"),
                     {RuntimeMessageKind.ACK},
                 )
+                assert isinstance(response.payload, AckPayload)
+                if response.payload.acknowledgedKind.value != "SHUTDOWN":
+                    raise SupervisorOperationError("wrong SHUTDOWN acknowledgment")
             except Exception as exc:  # noqa: BLE001 - shutdown escalates below
-                self._trace.append(f"SHUTDOWN_FAILED:{type(exc).__name__}")
+                self._record(f"SHUTDOWN_FAILED:{type(exc).__name__}")
         self._terminate_and_reap()

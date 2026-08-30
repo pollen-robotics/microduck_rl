@@ -44,3 +44,16 @@ git diff --check
 ## Scope
 
 Only Task 3 supervisor implementation, tests, and this report were added. Task 4 was not started and public V1 HTTP/task contracts were not changed.
+
+## Scoped-review fix round 1
+
+- Isolated terminal callbacks behind one bounded nonblocking handoff queue and fixed daemon delivery worker; blocking/throwing callbacks cannot block the sole process owner. Slot reuse is published only after successful handoff, and backpressure quarantines.
+- `close()` now raises fail-closed unless it proves owner-thread termination and exact child reap.
+- Production lifecycle edges invoke Task 1's total transition function; invalid event/state pairs quarantine.
+- Timeout quarantine attempts one separately bounded canonical ZERO_AND_STOP only while transport remains trustworthy, then still requires exact reap.
+- Spawn construction and inherited descriptor cleanup are exception-safe, and production exec receives only a minimal environment allowlist.
+- COMMAND and SHUTDOWN acknowledgements now validate their exact acknowledged operation.
+- Trace publication/read is synchronized.
+- Added deterministic blocking and throwing callback regression tests.
+
+Focused verification after fixes: `14 passed in 22.32s`; Ruff and `git diff --check` passed.

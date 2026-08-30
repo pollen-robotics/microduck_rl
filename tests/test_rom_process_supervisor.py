@@ -225,3 +225,40 @@ def test_24_callers_share_one_owner_thread_and_one_child() -> None:
     supervisor.close()
     assert launch.test_peer is not None
     launch.test_peer.close()
+
+
+def test_blocking_terminal_callback_cannot_block_owner_or_close() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def callback(_terminal: object) -> None:
+        entered.set()
+        release.wait()
+
+    supervisor, launch = _supervisor("normal", terminal_callback=callback)
+    supervisor.start(_request())
+    supervisor.stop(TASK_ID, "CANCELLED")
+    assert entered.wait(timeout=1)
+    supervisor.close()
+    assert supervisor.snapshot().pid is None
+    release.set()
+    assert launch.test_peer is not None
+    launch.test_peer.close()
+
+
+def test_throwing_terminal_callback_isolated_from_acknowledged_stop() -> None:
+    called = threading.Event()
+
+    def callback(_terminal: object) -> None:
+        called.set()
+        raise RuntimeError("test callback failure")
+
+    supervisor, launch = _supervisor("normal", terminal_callback=callback)
+    supervisor.start(_request())
+    terminal = supervisor.stop(TASK_ID, "CANCELLED")
+    assert terminal.evidence.stopReason == "CANCELLED"
+    assert called.wait(timeout=1)
+    supervisor.close()
+    assert any(item.startswith("TERMINAL_DELIVERY_FAILED") for item in supervisor.trace)
+    assert launch.test_peer is not None
+    launch.test_peer.close()
