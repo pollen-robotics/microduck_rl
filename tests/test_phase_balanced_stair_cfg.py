@@ -7,6 +7,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     MicroduckStairFrontierCollocationRsiRlCfg,
     MicroduckStairTerminalPositionRsiRlCfg,
     MicroduckStairFrontierTierRsiRlCfg,
+    MicroduckStairForwardPropagationRsiRlCfg,
     MicroduckStairMediumDynamicsRsiRlCfg,
     MicroduckStairPhaseBalancedRsiRlCfg,
     MicroduckStairSoftDynamicsRsiRlCfg,
@@ -23,6 +24,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     make_microduck_stair_frontier_collocation_rsi_env_cfg,
     make_microduck_stair_terminal_position_rsi_env_cfg,
     make_microduck_stair_frontier_tier_rsi_env_cfg,
+    make_microduck_stair_forward_propagation_rsi_env_cfg,
     make_microduck_stair_medium_dynamics_rsi_env_cfg,
     make_microduck_stair_phase_balanced_rsi_env_cfg,
     make_microduck_stair_soft_dynamics_rsi_env_cfg,
@@ -335,3 +337,49 @@ def test_frontier_tier_rsi_overlays_exact_states_without_reset_jackpot():
     assert MicroduckStairFrontierTierRsiRlCfg.algorithm.learning_rate == 1.0e-5
     assert MicroduckStairFrontierTierRsiRlCfg.algorithm.schedule == "fixed"
     assert MicroduckStairFrontierTierRsiRlCfg.algorithm.entropy_coef == 0.0002
+
+
+def test_forward_propagation_rsi_spreads_root_crossing_to_broad_starts():
+    baseline = make_microduck_stair_frontier_tier_rsi_env_cfg()
+    cfg = make_microduck_stair_forward_propagation_rsi_env_cfg()
+    bank = cfg.events["root_over_lip_state_bank"]
+    snapshot = cfg.events["frontier_tier_reset_baseline"]
+    tiers = cfg.rewards["stair_forward_propagation_tiers"]
+
+    assert tuple(cfg.observations["actor"].terms) == tuple(
+        baseline.observations["actor"].terms
+    )
+    assert "frontier_state_bank" not in cfg.events
+    assert tuple(cfg.events).index("walker_state_bank") < tuple(cfg.events).index(
+        "root_over_lip_state_bank"
+    ) < tuple(cfg.events).index("frontier_tier_reset_baseline")
+    assert bank.params == {
+        "bank_path": ".tmp/codex/full170-a28-root-over-lip-state-bank.pt",
+        "replay_fraction": 0.25,
+    }
+    assert snapshot.func.__name__ == "snapshot_stair_frontier_tier_baseline"
+    assert snapshot.params["x_thresholds"] == (
+        0.625,
+        0.640,
+        0.650,
+        0.660,
+        0.665,
+    )
+    assert snapshot.params["min_height_thresholds"] == (
+        0.160,
+        0.170,
+        0.175,
+        0.175,
+        0.175,
+    )
+    assert cfg.rewards["stair_delayed_frontier_tiers"].weight == 0.0
+    assert tiers.weight == 1.0
+    assert tiers.params["tier_rewards"] == (10.0, 20.0, 40.0, 80.0, 160.0)
+    assert tiers.params["min_height_thresholds"] == snapshot.params[
+        "min_height_thresholds"
+    ]
+    assert tiers.params["prelatch_reset_satisfied"] is True
+    assert cfg.rewards["stair_first_riser_clearance"].weight == 500.0
+    assert cfg.rewards["stair_first_tread_secured"].weight == 600.0
+    assert MicroduckStairForwardPropagationRsiRlCfg.num_steps_per_env == 48
+    assert MicroduckStairForwardPropagationRsiRlCfg.algorithm.learning_rate == 1e-5

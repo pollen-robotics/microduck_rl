@@ -2710,11 +2710,13 @@ def stair_delayed_frontier_tiers(
     x_thresholds: tuple[float, ...] = (0.650, 0.660, 0.665),
     tier_rewards: tuple[float, ...] = (25.0, 75.0, 150.0),
     min_height: float = 0.175,
+    min_height_thresholds: tuple[float, ...] | None = None,
     corridor_half_width: float = 0.20,
     hold_steps: int = 2,
     min_policy_steps: int = 3,
     bypass_x: float = 0.660,
     bypass_half_width: float = 0.36,
+    prelatch_reset_satisfied: bool = False,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Pay once for held, post-control progress beyond a replay frontier.
@@ -2734,6 +2736,10 @@ def stair_delayed_frontier_tiers(
         raise ValueError("Frontier x thresholds must be ascending")
     if any(reward <= 0.0 for reward in tier_rewards):
         raise ValueError("Frontier tier rewards must be positive")
+    if min_height_thresholds is not None and len(min_height_thresholds) != len(
+        x_thresholds
+    ):
+        raise ValueError("Frontier height thresholds must align with x thresholds")
     if hold_steps < 1 or min_policy_steps < 1:
         raise ValueError("Frontier hold and policy-step delays must be positive")
     if min(corridor_half_width, bypass_half_width) <= 0.0:
@@ -2761,6 +2767,16 @@ def stair_delayed_frontier_tiers(
     fresh = env.episode_length_buf <= 1
     env._stair_delayed_frontier_tier_hold[fresh] = 0
     env._stair_delayed_frontier_tier_paid[fresh] = False
+    if prelatch_reset_satisfied:
+        reset_satisfied = getattr(
+            env, "_stair_reset_frontier_tiers_satisfied", None
+        )
+        expected_shape = (env.num_envs, tier_count)
+        if reset_satisfied is None or reset_satisfied.shape != expected_shape:
+            raise RuntimeError(
+                "Reset-safe frontier tiers require a matching reset snapshot event"
+            )
+        env._stair_delayed_frontier_tier_paid[fresh] = reset_satisfied[fresh]
     env._stair_delayed_frontier_bypassed[fresh] = False
 
     bypass = finite & (x >= bypass_x) & (abs_y > bypass_half_width)
@@ -2771,10 +2787,19 @@ def stair_delayed_frontier_tiers(
         & ~env._stair_delayed_frontier_bypassed
     )
     thresholds = torch.tensor(x_thresholds, dtype=x.dtype, device=x.device)
+    height_thresholds = torch.tensor(
+        (
+            (min_height,) * tier_count
+            if min_height_thresholds is None
+            else min_height_thresholds
+        ),
+        dtype=z.dtype,
+        device=z.device,
+    )
     candidates = (
         armed[:, None]
         & (x[:, None] >= thresholds[None, :])
-        & (z[:, None] >= min_height)
+        & (z[:, None] >= height_thresholds[None, :])
         & (abs_y[:, None] <= corridor_half_width)
     )
     env._stair_delayed_frontier_tier_hold = torch.where(
@@ -2788,6 +2813,56 @@ def stair_delayed_frontier_tiers(
     env._stair_delayed_frontier_tier_paid |= newly_reached
     rewards = torch.tensor(tier_rewards, dtype=x.dtype, device=x.device)
     return torch.sum(newly_reached.to(x.dtype) * rewards[None, :], dim=-1)
+
+
+def snapshot_stair_frontier_tier_baseline(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    x_thresholds: tuple[float, ...] = (0.625, 0.640, 0.650, 0.660, 0.665),
+    min_height_thresholds: tuple[float, ...] = (
+        0.160,
+        0.170,
+        0.175,
+        0.175,
+        0.175,
+    ),
+    corridor_half_width: float = 0.20,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Snapshot milestone tiers already satisfied by an exact reset state."""
+
+    if len(x_thresholds) == 0 or len(x_thresholds) != len(
+        min_height_thresholds
+    ):
+        raise ValueError("Reset milestone thresholds must be non-empty and aligned")
+    if corridor_half_width <= 0.0:
+        raise ValueError("Reset milestone corridor must be positive")
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    env_ids = env_ids.to(device=env.device, dtype=torch.long)
+    asset: Entity = env.scene[asset_cfg.name]
+    local = asset.data.root_link_pos_w[env_ids] - env.scene.terrain.env_origins[
+        env_ids
+    ]
+    x_threshold = torch.tensor(
+        x_thresholds, dtype=local.dtype, device=local.device
+    )
+    z_threshold = torch.tensor(
+        min_height_thresholds, dtype=local.dtype, device=local.device
+    )
+    satisfied = (
+        torch.isfinite(local).all(dim=-1)[:, None]
+        & (local[:, 0, None] >= x_threshold[None, :])
+        & (local[:, 2, None] >= z_threshold[None, :])
+        & (local[:, 1].abs()[:, None] <= corridor_half_width)
+    )
+    expected_shape = (env.num_envs, len(x_thresholds))
+    current = getattr(env, "_stair_reset_frontier_tiers_satisfied", None)
+    if current is None or current.shape != expected_shape:
+        env._stair_reset_frontier_tiers_satisfied = torch.zeros(
+            expected_shape, dtype=torch.bool, device=env.device
+        )
+    env._stair_reset_frontier_tiers_satisfied[env_ids] = satisfied
 
 
 def stair_apex_or_mantle_frontier(

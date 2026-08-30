@@ -148,6 +148,7 @@ from .microduck_standard_stairs_env_cfg import (
     make_microduck_stair_frontier_collocation_rsi_env_cfg,
     make_microduck_stair_terminal_position_rsi_env_cfg,
     make_microduck_stair_frontier_tier_rsi_env_cfg,
+    make_microduck_stair_forward_propagation_rsi_env_cfg,
     make_microduck_stair_soft_dynamics_rsi_env_cfg,
     make_microduck_stair_medium_dynamics_rsi_env_cfg,
     make_microduck_stair_foot_anchor_vault_env_cfg,
@@ -171,6 +172,7 @@ from .microduck_standard_stairs_env_cfg import (
     MicroduckStairFrontierCollocationRsiRlCfg,
     MicroduckStairTerminalPositionRsiRlCfg,
     MicroduckStairFrontierTierRsiRlCfg,
+    MicroduckStairForwardPropagationRsiRlCfg,
     MicroduckStairSoftDynamicsRsiRlCfg,
     MicroduckStairMediumDynamicsRsiRlCfg,
     MicroduckStairFootAnchorVaultRlCfg,
@@ -517,6 +519,14 @@ register_mjlab_task(
     env_cfg=make_microduck_stair_frontier_tier_rsi_env_cfg(),
     play_env_cfg=make_microduck_stair_frontier_tier_rsi_env_cfg(play=True),
     rl_cfg=MicroduckStairFrontierTierRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Forward-Propagation-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_forward_propagation_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_forward_propagation_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairForwardPropagationRsiRlCfg,
     runner_cls=MicroduckStairSpecialistRunner,
 )
 

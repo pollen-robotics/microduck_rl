@@ -1488,6 +1488,58 @@ def make_microduck_stair_frontier_tier_rsi_env_cfg(
     return cfg
 
 
+def make_microduck_stair_forward_propagation_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A29: propagate the rare A28 crossing back to broad resets."""
+
+    cfg = make_microduck_stair_frontier_tier_rsi_env_cfg(play=play)
+
+    # RFCL-style forward phase: most starts return to the broad manufacturer
+    # RSI distribution. A quarter continue from exact A28 root-over-lip states
+    # so PPO can still explore the remaining shell-clearance transition.
+    del cfg.events["frontier_state_bank"]
+    cfg.events["root_over_lip_state_bank"] = EventTermCfg(
+        func=WalkerStateBankReset,
+        mode="reset",
+        params={
+            "bank_path": ".tmp/codex/full170-a28-root-over-lip-state-bank.pt",
+            "replay_fraction": 0.25,
+        },
+    )
+    tier_x = (0.625, 0.640, 0.650, 0.660, 0.665)
+    tier_z = (0.160, 0.170, 0.175, 0.175, 0.175)
+    cfg.events["frontier_tier_reset_baseline"] = EventTermCfg(
+        func=microduck_mdp.snapshot_stair_frontier_tier_baseline,
+        mode="reset",
+        params={
+            "x_thresholds": tier_x,
+            "min_height_thresholds": tier_z,
+            "corridor_half_width": 0.20,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+
+    cfg.rewards["stair_delayed_frontier_tiers"].weight = 0.0
+    cfg.rewards["stair_forward_propagation_tiers"] = RewardTermCfg(
+        func=microduck_mdp.stair_delayed_frontier_tiers,
+        weight=1.0,
+        params={
+            "x_thresholds": tier_x,
+            "tier_rewards": (10.0, 20.0, 40.0, 80.0, 160.0),
+            "min_height_thresholds": tier_z,
+            "corridor_half_width": 0.20,
+            "hold_steps": 2,
+            "min_policy_steps": 3,
+            "bypass_x": 0.660,
+            "bypass_half_width": 0.36,
+            "prelatch_reset_satisfied": True,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    return cfg
+
+
 def make_microduck_stair_tread_contact_bank_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -1879,6 +1931,18 @@ MicroduckStairFrontierTierRsiRlCfg.algorithm.num_learning_epochs = 5
 MicroduckStairFrontierTierRsiRlCfg.algorithm.num_mini_batches = 4
 MicroduckStairFrontierTierRsiRlCfg.algorithm.desired_kl = 0.01
 MicroduckStairFrontierTierRsiRlCfg.algorithm.max_grad_norm = 0.5
+
+MicroduckStairForwardPropagationRsiRlCfg = deepcopy(
+    MicroduckStairFrontierTierRsiRlCfg
+)
+MicroduckStairForwardPropagationRsiRlCfg.experiment_name = (
+    "microduck_stair_forward_propagation_rsi_specialist"
+)
+MicroduckStairForwardPropagationRsiRlCfg.run_name = (
+    "microduck_stair_forward_propagation_rsi_specialist"
+)
+MicroduckStairForwardPropagationRsiRlCfg.max_iterations = 75
+MicroduckStairForwardPropagationRsiRlCfg.save_interval = 25
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)
 MicroduckStairTreadContactBankRlCfg.experiment_name = (

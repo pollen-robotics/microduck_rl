@@ -172,6 +172,44 @@ def test_delayed_frontier_tiers_permanently_reject_lateral_bypass():
         assert microduck_mdp.stair_delayed_frontier_tiers(env).item() == 0.0
 
 
+def test_reset_snapshot_prelatches_only_milestones_already_satisfied():
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            root_link_pos_w=torch.tensor([[0.640, 0.0, 0.170]]),
+        )
+    )
+    env = SimpleNamespace(
+        num_envs=1,
+        device="cpu",
+        episode_length_buf=torch.tensor([1]),
+        scene=_Scene(robot),
+    )
+    x_thresholds = (0.625, 0.640, 0.650)
+    z_thresholds = (0.160, 0.170, 0.175)
+    microduck_mdp.snapshot_stair_frontier_tier_baseline(
+        env,
+        torch.tensor([0]),
+        x_thresholds=x_thresholds,
+        min_height_thresholds=z_thresholds,
+    )
+    params = {
+        "x_thresholds": x_thresholds,
+        "tier_rewards": (10.0, 20.0, 40.0),
+        "min_height_thresholds": z_thresholds,
+        "prelatch_reset_satisfied": True,
+    }
+
+    assert microduck_mdp.stair_delayed_frontier_tiers(env, **params).item() == 0.0
+    assert env._stair_delayed_frontier_tier_paid.tolist() == [
+        [True, True, False]
+    ]
+    robot.data.root_link_pos_w[:] = torch.tensor([[0.650, 0.0, 0.175]])
+    env.episode_length_buf[:] = 3
+    assert microduck_mdp.stair_delayed_frontier_tiers(env, **params).item() == 0.0
+    env.episode_length_buf[:] = 4
+    assert microduck_mdp.stair_delayed_frontier_tiers(env, **params).item() == 40.0
+
+
 def test_lip_commitment_requires_delayed_spatial_hold(monkeypatch):
     robot = SimpleNamespace(
         data=SimpleNamespace(

@@ -43,6 +43,7 @@ TASK_IDS = (
     "Mjlab-Stairs-Frontier-Collocation-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Terminal-Position-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Frontier-Tier-RSI-Specialist-MicroDuck",
+    "Mjlab-Stairs-Forward-Propagation-RSI-Specialist-MicroDuck",
     "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
     "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
@@ -425,6 +426,7 @@ def main() -> int:
         "Mjlab-Stairs-Frontier-Collocation-RSI-Specialist-MicroDuck",
         "Mjlab-Stairs-Terminal-Position-RSI-Specialist-MicroDuck",
         "Mjlab-Stairs-Frontier-Tier-RSI-Specialist-MicroDuck",
+        "Mjlab-Stairs-Forward-Propagation-RSI-Specialist-MicroDuck",
     }:
         reset_modes = ROULADE_BANK_RESET_MODES
     elif args.task == "Mjlab-Stairs-Apex-Mantle-Specialist-MicroDuck":
