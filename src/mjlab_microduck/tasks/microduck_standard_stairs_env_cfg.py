@@ -1831,6 +1831,59 @@ def make_microduck_stair_stage15_reverse_rsi_env_cfg(
     return cfg
 
 
+def make_microduck_stair_stage2_reverse_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A33: reverse-reset from exact Stage 2 support states."""
+
+    cfg = make_microduck_stair_stage15_reverse_rsi_env_cfg(play=play)
+    cfg.events["state_bank_family"].params["family_weights"] = (2, 1, 1)
+    stage2_bank = deepcopy(cfg.events["stage15_reverse_state_bank"])
+    stage2_bank.params.update(
+        {
+            "bank_path": ".tmp/codex/full170-a33-model10-stage2-state-bank.pt",
+            "reset_family": 2,
+        }
+    )
+    cfg.events.pop("stage15_reverse_context")
+    cfg.events["stage2_reverse_state_bank"] = stage2_bank
+    cfg.events["stage2_reverse_context"] = EventTermCfg(
+        func=microduck_mdp.seed_stair_contact_transfer_reverse_context,
+        mode="reset",
+        params={"stage15_families": (1, 2), "stage2_family": 2},
+    )
+    shell_frontier = RewardTermCfg(
+        func=microduck_mdp.stair_true_shell_clearance_frontier,
+        weight=40.0,
+        params={
+            "start_x": 0.625,
+            "target_x": STANDARD_STAIR_START_DISTANCE,
+            "start_height": 0.150,
+            "target_height": STANDARD_RISER_HEIGHT,
+            "corridor_half_width": 0.20,
+            "required_latch_name": (
+                "_stair_contact_transfer_stage15_policy_achieved"
+            ),
+            "shell_half_extents": (0.034, 0.031, 0.022),
+            "asset_cfg": SceneEntityCfg(
+                "robot", geom_names=("trunk_shell_collision",)
+            ),
+        },
+    )
+    ordered_rewards = {}
+    for name, term in cfg.rewards.items():
+        if name == "stair_true_shell_clearance":
+            ordered_rewards["stair_true_shell_clearance_frontier"] = (
+                shell_frontier
+            )
+        ordered_rewards[name] = term
+    cfg.rewards = ordered_rewards
+    cfg.rewards["stair_true_shell_clearance"].params[
+        "required_latch_name"
+    ] = "_stair_contact_transfer_stage2_policy_achieved"
+    return cfg
+
+
 def make_microduck_stair_tread_contact_bank_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -2268,6 +2321,16 @@ MicroduckStairStage15ReverseRsiRlCfg.experiment_name = (
 )
 MicroduckStairStage15ReverseRsiRlCfg.run_name = (
     "microduck_stair_stage15_reverse_rsi_specialist"
+)
+
+MicroduckStairStage2ReverseRsiRlCfg = deepcopy(
+    MicroduckStairStage15ReverseRsiRlCfg
+)
+MicroduckStairStage2ReverseRsiRlCfg.experiment_name = (
+    "microduck_stair_stage2_reverse_rsi_specialist"
+)
+MicroduckStairStage2ReverseRsiRlCfg.run_name = (
+    "microduck_stair_stage2_reverse_rsi_specialist"
 )
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)

@@ -45,6 +45,7 @@ from mjlab_microduck.tasks.stair_walk_state_bank import (
 
 DEFAULT_TASK_ID = "Mjlab-Stairs-Route-MicroDuck"
 A31_TASK_ID = "Mjlab-Stairs-Contact-Stage-RSI-Specialist-MicroDuck"
+A32_TASK_ID = "Mjlab-Stairs-Stage15-Reverse-RSI-Specialist-MicroDuck"
 CONTACT_TRANSFER_SENSOR_NAMES = (
     "head_ground_contact",
     "trunk_ground_contact",
@@ -158,20 +159,28 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--capture-contact-transfer-stage2",
+        action="store_true",
+        help=(
+            "Capture the first policy-created A32 Stage 2 edge in each "
+            "episode with strict transfer/contact validation."
+        ),
+    )
+    parser.add_argument(
         "--terrain-level",
         type=int,
         choices=(0, 1, 2),
         help=(
-            "A31 virtual-lip terrain level. Stage 1.5 collection requires "
-            "this to be explicitly set to 0."
+            "Contact-transfer virtual-lip terrain level. Stage 1.5 and "
+            "Stage 2 collection require this to be explicitly set to 0."
         ),
     )
     parser.add_argument(
         "--reset-family",
-        choices=("face-no-tread",),
+        choices=("face-no-tread", "stage15-reverse"),
         help=(
-            "A31 replay reset family. Stage 1.5 collection requires the "
-            "explicit face-no-tread source family."
+            "Replay reset family. Stage 1.5 collection requires face-no-tread; "
+            "Stage 2 collection requires stage15-reverse."
         ),
     )
     parser.add_argument(
@@ -184,7 +193,7 @@ def _parse_args() -> argparse.Namespace:
         "--contact-transfer-max-abs-local-y",
         type=float,
         default=0.20,
-        help="Maximum absolute root y for a captured Stage 1.5 edge.",
+        help="Maximum absolute root y for a captured contact-transfer edge.",
     )
     parser.add_argument(
         "--contact-sensors",
@@ -215,27 +224,37 @@ def _write_bank_atomic(path: Path, bank: dict[str, object]) -> None:
 
 
 def _validate_contact_transfer_args(args: argparse.Namespace) -> None:
-    if not args.capture_contact_transfer_stage15:
+    stage15_mode = args.capture_contact_transfer_stage15
+    stage2_mode = args.capture_contact_transfer_stage2
+    if stage15_mode and stage2_mode:
+        raise SystemExit("Choose exactly one contact-transfer capture stage")
+    if not stage15_mode and not stage2_mode:
         if args.terrain_level is not None or args.reset_family is not None:
             raise SystemExit(
                 "--terrain-level and --reset-family require "
-                "--capture-contact-transfer-stage15"
+                "--capture-contact-transfer-stage15 or "
+                "--capture-contact-transfer-stage2"
             )
         return
-    if args.source_task != A31_TASK_ID:
+    expected_task = A31_TASK_ID if stage15_mode else A32_TASK_ID
+    expected_family = "face-no-tread" if stage15_mode else "stage15-reverse"
+    capture_flag = (
+        "--capture-contact-transfer-stage15"
+        if stage15_mode
+        else "--capture-contact-transfer-stage2"
+    )
+    stage_label = "Stage 1.5" if stage15_mode else "Stage 2"
+    if args.source_task != expected_task:
         raise SystemExit(
-            "--capture-contact-transfer-stage15 requires "
-            f"--source-task {A31_TASK_ID}"
+            f"{capture_flag} requires --source-task {expected_task}"
         )
     if args.terrain_level != 0:
         raise SystemExit(
-            "--capture-contact-transfer-stage15 requires explicit "
-            "--terrain-level 0"
+            f"{capture_flag} requires explicit --terrain-level 0"
         )
-    if args.reset_family != "face-no-tread":
+    if args.reset_family != expected_family:
         raise SystemExit(
-            "--capture-contact-transfer-stage15 requires explicit "
-            "--reset-family face-no-tread"
+            f"{capture_flag} requires explicit --reset-family {expected_family}"
         )
     incompatible = (
         args.capture_first_tread_contact
@@ -246,22 +265,23 @@ def _validate_contact_transfer_args(args: argparse.Namespace) -> None:
     )
     if incompatible:
         raise SystemExit(
-            "Stage 1.5 capture cannot be combined with legacy contact/cadence, "
+            f"{stage_label} capture cannot be combined with legacy contact/cadence, "
             "standing-reset, or command-zeroing modes"
         )
     if tuple(args.contact_sensors) != CONTACT_TRANSFER_SENSOR_NAMES:
         raise SystemExit(
-            "Stage 1.5 capture requires the complete dedicated contact-sensor set"
+            f"{stage_label} capture requires the complete dedicated "
+            "contact-sensor set"
         )
     if (
         args.contact_transfer_min_normal_force <= 0.0
         or args.contact_transfer_max_abs_local_y <= 0.0
     ):
-        raise SystemExit("Stage 1.5 force and lateral bounds must be positive")
+        raise SystemExit(f"{stage_label} force and lateral bounds must be positive")
 
 
 def _apply_contact_transfer_overrides(
-    env_cfg: Any, *, num_envs: int, terrain_level: int
+    env_cfg: Any, *, num_envs: int, terrain_level: int, forced_family: int
 ) -> None:
     hard_viewer = env_cfg.events.get("a30_hard_viewer")
     if hard_viewer is None:
@@ -271,7 +291,7 @@ def _apply_contact_transfer_overrides(
     family_event = env_cfg.events.get("state_bank_family")
     if family_event is None:
         raise RuntimeError("A31 play cfg is missing the state_bank_family event")
-    family_event.params["forced_family"] = 0
+    family_event.params["forced_family"] = forced_family
 
 
 def _select_nested_rows(value: Any, rows: torch.Tensor) -> Any:
@@ -358,6 +378,43 @@ def _stage15_capture_eligibility(
     )
 
 
+def _stage2_capture_eligibility(
+    *,
+    stage2_edge: torch.Tensor,
+    stage1: torch.Tensor,
+    stage15: torch.Tensor,
+    stage2: torch.Tensor,
+    shell_clearance: torch.Tensor,
+    face_contact: torch.Tensor,
+    tread_contact: torch.Tensor,
+    strongest_tread_force: torch.Tensor,
+    episode_steps: torch.Tensor,
+    root_y: torch.Tensor,
+    dones: torch.Tensor,
+    nan_termination: torch.Tensor,
+    side_bypass_seen: torch.Tensor,
+    finite: torch.Tensor,
+    min_normal_force: float,
+    max_abs_local_y: float,
+) -> torch.Tensor:
+    return (
+        stage2_edge
+        & stage1
+        & stage15
+        & stage2
+        & ~shell_clearance
+        & ~face_contact
+        & tread_contact
+        & (strongest_tread_force >= min_normal_force)
+        & (episode_steps >= 3)
+        & (torch.abs(root_y) <= max_abs_local_y)
+        & ~dones.bool()
+        & ~nan_termination
+        & ~side_bypass_seen
+        & finite
+    )
+
+
 def _contact_transfer_sensor_state(
     env: ManagerBasedRlEnv,
 ) -> tuple[
@@ -427,7 +484,7 @@ def _contact_transfer_sensor_state(
 def _required_env_tensor(env: ManagerBasedRlEnv, name: str) -> torch.Tensor:
     value = getattr(env, name, None)
     if value is None or not isinstance(value, torch.Tensor):
-        raise RuntimeError(f"A31 tracking tensor is unavailable: {name}")
+        raise RuntimeError(f"Contact-transfer tracking tensor is unavailable: {name}")
     return value
 
 
@@ -452,9 +509,13 @@ def main() -> int:
     ):
         raise SystemExit("State count, environment count, steps, and capture band are invalid")
     _validate_contact_transfer_args(args)
+    capture_contact_transfer = (
+        args.capture_contact_transfer_stage15
+        or args.capture_contact_transfer_stage2
+    )
     preserve_command_observations = (
         args.preserve_command_observations
-        or args.capture_contact_transfer_stage15
+        or capture_contact_transfer
     )
 
     configure_torch_backends()
@@ -473,38 +534,43 @@ def main() -> int:
         base_pose["y"] = (0.0, 0.0)
         base_pose["yaw"] = (0.0, 0.0)
     env_cfg.scene.num_envs = args.num_envs
-    if args.capture_contact_transfer_stage15:
+    if capture_contact_transfer:
         assert args.terrain_level is not None
         _apply_contact_transfer_overrides(
             env_cfg,
             num_envs=args.num_envs,
             terrain_level=args.terrain_level,
+            forced_family=(0 if args.capture_contact_transfer_stage15 else 1),
         )
     env_cfg.seed = 0
     base_env = ManagerBasedRlEnv(cfg=env_cfg, device=args.device, render_mode=None)
-    if args.capture_contact_transfer_stage15:
+    if capture_contact_transfer:
         actual_levels = base_env.scene.terrain.terrain_levels
         if not torch.all(actual_levels == args.terrain_level):
             base_env.close()
             raise RuntimeError(
-                "A31 terrain-level override did not reach every collector environment"
+                "Contact-transfer terrain-level override did not reach every "
+                "collector environment"
             )
     env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
-    if args.capture_contact_transfer_stage15:
+    if capture_contact_transfer:
         env.reset()
         actual_families = _required_env_tensor(
             base_env, "_stair_state_bank_family"
         )
         source_rows = _required_env_tensor(base_env, "_stair_walker_bank_row")
-        if not torch.all(actual_families == 0):
+        expected_family = 0 if args.capture_contact_transfer_stage15 else 1
+        if not torch.all(actual_families == expected_family):
             env.close()
             raise RuntimeError(
-                "A31 face-no-tread reset override did not reach every environment"
+                f"Contact-transfer reset family {expected_family} did not reach "
+                "every environment"
             )
         if not torch.all(source_rows >= 0):
             env.close()
             raise RuntimeError(
-                "A31 face-no-tread reset did not produce a replay-bank row for "
+                f"Contact-transfer reset family {expected_family} did not produce "
+                "a replay-bank row for "
                 "every environment"
             )
     runner_cls = load_runner_cls(args.source_task) or MjlabOnPolicyRunner
@@ -516,6 +582,7 @@ def main() -> int:
         args.num_envs, dtype=torch.bool, device=args.device
     )
     previous_stage15_policy = torch.zeros_like(captured_this_episode)
+    previous_stage2_policy = torch.zeros_like(captured_this_episode)
     side_bypass_seen = torch.zeros_like(captured_this_episode)
     seen_state_digests: set[str] = set()
     duplicate_states_rejected = 0
@@ -552,7 +619,7 @@ def main() -> int:
             remaining = args.target_states - sum(
                 int(chunk["root_qpos_local"].shape[0]) for chunk in chunks
             )
-            if args.capture_contact_transfer_stage15:
+            if capture_contact_transfer:
                 (
                     face_any,
                     tread_any,
@@ -573,6 +640,13 @@ def main() -> int:
                     base_env, "_stair_true_shell_clearance_policy_achieved"
                 ).bool()
                 stage15_edge = stage15 & ~previous_stage15_policy
+                stage2_edge = stage2 & ~previous_stage2_policy
+                source_reset_families = _required_env_tensor(
+                    base_env, "_stair_state_bank_family"
+                )
+                source_bank_rows = _required_env_tensor(
+                    base_env, "_stair_walker_bank_row"
+                )
                 nan_termination = base_env.termination_manager.get_term(
                     "nan_state"
                 ).bool()
@@ -594,23 +668,48 @@ def main() -> int:
                     & torch.isfinite(local).all(dim=-1)
                     & torch.isfinite(strongest_tread_force)
                 )
-                eligible = (~captured_this_episode) & _stage15_capture_eligibility(
-                    stage15_edge=stage15_edge,
-                    stage1=stage1,
-                    stage2=stage2,
-                    shell_clearance=shell_clearance,
-                    face_contact=face_any,
-                    tread_contact=tread_any,
-                    strongest_tread_force=strongest_tread_force,
-                    episode_steps=base_env.episode_length_buf,
-                    root_y=local[:, 1],
-                    dones=dones,
-                    nan_termination=nan_termination,
-                    side_bypass_seen=side_bypass_seen,
-                    finite=finite,
-                    min_normal_force=args.contact_transfer_min_normal_force,
-                    max_abs_local_y=args.contact_transfer_max_abs_local_y,
-                )
+                if args.capture_contact_transfer_stage15:
+                    eligible = _stage15_capture_eligibility(
+                        stage15_edge=stage15_edge,
+                        stage1=stage1,
+                        stage2=stage2,
+                        shell_clearance=shell_clearance,
+                        face_contact=face_any,
+                        tread_contact=tread_any,
+                        strongest_tread_force=strongest_tread_force,
+                        episode_steps=base_env.episode_length_buf,
+                        root_y=local[:, 1],
+                        dones=dones,
+                        nan_termination=nan_termination,
+                        side_bypass_seen=side_bypass_seen,
+                        finite=finite,
+                        min_normal_force=args.contact_transfer_min_normal_force,
+                        max_abs_local_y=args.contact_transfer_max_abs_local_y,
+                    )
+                else:
+                    eligible = _stage2_capture_eligibility(
+                        stage2_edge=stage2_edge,
+                        stage1=stage1,
+                        stage15=stage15,
+                        stage2=stage2,
+                        shell_clearance=shell_clearance,
+                        face_contact=face_any,
+                        tread_contact=tread_any,
+                        strongest_tread_force=strongest_tread_force,
+                        episode_steps=base_env.episode_length_buf,
+                        root_y=local[:, 1],
+                        dones=dones,
+                        nan_termination=nan_termination,
+                        side_bypass_seen=side_bypass_seen,
+                        finite=finite,
+                        min_normal_force=args.contact_transfer_min_normal_force,
+                        max_abs_local_y=args.contact_transfer_max_abs_local_y,
+                    )
+                    eligible &= (
+                        (source_reset_families == 1)
+                        & (source_bank_rows >= 0)
+                    )
+                eligible = (~captured_this_episode) & eligible
                 candidate_ids = eligible.nonzero(as_tuple=False).squeeze(-1)
                 captured_this_episode[candidate_ids] = True
                 if len(candidate_ids) > 0 and remaining > 0:
@@ -682,6 +781,7 @@ def main() -> int:
                         }
                         chunks.append(chunk)
                 previous_stage15_policy.copy_(stage15)
+                previous_stage2_policy.copy_(stage2)
             else:
                 unique_episode_gate = (
                     ~captured_this_episode
@@ -797,6 +897,7 @@ def main() -> int:
             done_mask = dones.to(torch.bool)
             captured_this_episode[done_mask] = False
             previous_stage15_policy[done_mask] = False
+            previous_stage2_policy[done_mask] = False
             side_bypass_seen[done_mask] = False
 
             collected = sum(
@@ -833,13 +934,13 @@ def main() -> int:
             "walker_checkpoint_sha256": _sha256(checkpoint),
             "capture_local_x_m": (
                 None
-                if args.capture_contact_transfer_stage15
+                if capture_contact_transfer
                 else [args.min_local_x, args.max_local_x]
             ),
             "capture_min_local_z_m": args.min_local_z,
             "capture_max_abs_local_y_m": (
                 args.contact_transfer_max_abs_local_y
-                if args.capture_contact_transfer_stage15
+                if capture_contact_transfer
                 else args.max_abs_local_y
             ),
             "riser_height_m": STANDARD_RISER_HEIGHT_M,
@@ -871,14 +972,17 @@ def main() -> int:
             "capture_contact_transfer_stage15": (
                 args.capture_contact_transfer_stage15
             ),
+            "capture_contact_transfer_stage2": (
+                args.capture_contact_transfer_stage2
+            ),
             "contact_transfer_terrain_level": (
                 args.terrain_level
-                if args.capture_contact_transfer_stage15
+                if capture_contact_transfer
                 else None
             ),
             "contact_transfer_reset_family": (
                 args.reset_family
-                if args.capture_contact_transfer_stage15
+                if capture_contact_transfer
                 else None
             ),
             "contact_transfer_min_normal_force_n": (
@@ -888,10 +992,10 @@ def main() -> int:
                 args.contact_transfer_max_abs_local_y
             ),
             "contact_transfer_first_policy_edge_only": (
-                args.capture_contact_transfer_stage15
+                capture_contact_transfer
             ),
             "contact_transfer_exact_state_deduplication": (
-                args.capture_contact_transfer_stage15
+                capture_contact_transfer
             ),
             "duplicate_states_rejected": duplicate_states_rejected,
             "nonfinite_states_rejected": nonfinite_states_rejected,

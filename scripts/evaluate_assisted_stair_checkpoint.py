@@ -29,8 +29,9 @@ from mjlab_microduck.tasks.mdp import classify_standard_stair_contacts
 A30_TASK_ID = "Mjlab-Stairs-Virtual-Lip-Transfer-RSI-Specialist-MicroDuck"
 A31_TASK_ID = "Mjlab-Stairs-Contact-Stage-RSI-Specialist-MicroDuck"
 A32_TASK_ID = "Mjlab-Stairs-Stage15-Reverse-RSI-Specialist-MicroDuck"
-CONTACT_TRANSFER_TASK_IDS = (A30_TASK_ID, A31_TASK_ID, A32_TASK_ID)
-STAGE15_TASK_IDS = (A31_TASK_ID, A32_TASK_ID)
+A33_TASK_ID = "Mjlab-Stairs-Stage2-Reverse-RSI-Specialist-MicroDuck"
+CONTACT_TRANSFER_TASK_IDS = (A30_TASK_ID, A31_TASK_ID, A32_TASK_ID, A33_TASK_ID)
+STAGE15_TASK_IDS = (A31_TASK_ID, A32_TASK_ID, A33_TASK_ID)
 TASK_IDS = (
     "Mjlab-Stairs-Assisted-Specialist-MicroDuck",
     "Mjlab-Stairs-Bridge-Specialist-MicroDuck",
@@ -52,6 +53,7 @@ TASK_IDS = (
     A30_TASK_ID,
     A31_TASK_ID,
     A32_TASK_ID,
+    A33_TASK_ID,
     "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
     "Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
     "Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
@@ -99,6 +101,17 @@ A32_RESET_FAMILY_OVERRIDES = {
     "mixed": None,
     "face-no-tread": 0,
     "stage15-reverse": 1,
+}
+A33_RESET_MODES = {
+    0: "face_no_tread_bank",
+    1: "stage15_reverse_bank",
+    2: "stage2_reverse_bank",
+}
+A33_RESET_FAMILY_OVERRIDES = {
+    "mixed": None,
+    "face-no-tread": 0,
+    "stage15-reverse": 1,
+    "stage2-reverse": 2,
 }
 BODY_PART_CONTACT_SENSORS = {
     "head": "head_ground_contact",
@@ -419,7 +432,11 @@ def _parse_args() -> argparse.Namespace:
         "--reset-family",
         choices=tuple(
             dict.fromkeys(
-                (*A30_RESET_FAMILY_OVERRIDES, *A32_RESET_FAMILY_OVERRIDES)
+                (
+                    *A30_RESET_FAMILY_OVERRIDES,
+                    *A32_RESET_FAMILY_OVERRIDES,
+                    *A33_RESET_FAMILY_OVERRIDES,
+                )
             )
         ),
         default="mixed",
@@ -452,6 +469,7 @@ def main() -> int:
     is_contact_transfer = args.task in CONTACT_TRANSFER_TASK_IDS
     is_stage15_task = args.task in STAGE15_TASK_IDS
     is_a32 = args.task == A32_TASK_ID
+    is_a33 = args.task == A33_TASK_ID
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_file():
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
@@ -469,14 +487,19 @@ def main() -> int:
         raise SystemExit(
             "--reset-family is supported only for contact-transfer tasks"
         )
-    reset_family_overrides = (
-        A32_RESET_FAMILY_OVERRIDES if is_a32 else A30_RESET_FAMILY_OVERRIDES
-    )
+    if is_a33:
+        reset_family_overrides = A33_RESET_FAMILY_OVERRIDES
+    elif is_a32:
+        reset_family_overrides = A32_RESET_FAMILY_OVERRIDES
+    else:
+        reset_family_overrides = A30_RESET_FAMILY_OVERRIDES
     if is_contact_transfer and args.reset_family not in reset_family_overrides:
         raise SystemExit(
             f"--reset-family {args.reset_family!r} is invalid for {args.task}"
         )
-    if is_a32:
+    if is_a33:
+        reset_modes = A33_RESET_MODES
+    elif is_a32:
         reset_modes = A32_RESET_MODES
     elif is_contact_transfer:
         reset_modes = A30_RESET_MODES
@@ -624,6 +647,7 @@ def main() -> int:
     mode_stage2_policy = {name: 0 for name in reset_modes.values()}
     mode_stage15_without_stage1 = {name: 0 for name in reset_modes.values()}
     mode_stage2_without_stage15 = {name: 0 for name in reset_modes.values()}
+    mode_shell_before_stage2 = {name: 0 for name in reset_modes.values()}
     secured_events = 0
     face_contact_events = 0
     tread_contact_events = 0
@@ -643,6 +667,7 @@ def main() -> int:
     stage2_policy_events = 0
     stage15_without_stage1_events = 0
     stage2_without_stage15_events = 0
+    shell_before_stage2_events = 0
     secured_before_clearance_events = 0
     nan_termination_events = 0
     tread_contact_source_steps: list[int] = []
@@ -699,6 +724,7 @@ def main() -> int:
             "stage2_policy",
             "stage15_without_stage1",
             "stage2_without_stage15",
+            "shell_before_stage2",
             "nan_termination",
         )
     }
@@ -926,12 +952,23 @@ def main() -> int:
                 live_prefix_edge = episode_control_steps >= 2
                 new_stage1_policy &= live_prefix_edge
                 new_stage15_policy &= live_prefix_edge
+            elif is_a33:
+                # Families 1 and 2 seed the Stage 1/1.5 prefix. Family 2 also
+                # seeds Stage 2. Suppress only those reset-created edges during
+                # the first two policy steps; family 0 remains fully live.
+                initial_policy_steps = episode_control_steps < 2
+                seeded_prefix = (episode_mode == 1) | (episode_mode == 2)
+                seeded_stage2 = episode_mode == 2
+                new_stage1_policy &= ~(seeded_prefix & initial_policy_steps)
+                new_stage15_policy &= ~(seeded_prefix & initial_policy_steps)
+                new_stage2_policy &= ~(seeded_stage2 & initial_policy_steps)
             if is_stage15_task:
                 stage15_without_stage1 = new_stage15_policy & ~stage1_policy
                 stage2_without_stage15 = new_stage2_policy & ~stage15_policy
             else:
                 stage15_without_stage1 = torch.zeros_like(new_stage15_policy)
                 stage2_without_stage15 = torch.zeros_like(new_stage2_policy)
+            shell_before_stage2 = new_clearance & ~stage2_policy
             new_face_contact = face_contact_metrics.observe(
                 raw_face.any(dim=-1), base_env.episode_length_buf
             )
@@ -969,6 +1006,10 @@ def main() -> int:
             episode_event_flags["stage2_without_stage15"] |= (
                 stage2_without_stage15
             )
+            if is_a33:
+                episode_event_flags["shell_before_stage2"] |= (
+                    shell_before_stage2
+                )
             episode_event_flags["face_contact"] |= new_face_contact
             episode_event_flags["tread_contact"] |= new_tread_contact
             source_steps = getattr(base_env, "_stair_walker_bank_source_step", None)
@@ -1124,6 +1165,9 @@ def main() -> int:
             stage2_without_stage15_events += completed_event_counts[
                 "stage2_without_stage15"
             ]
+            shell_before_stage2_events += completed_event_counts[
+                "shell_before_stage2"
+            ]
             nan_termination_events += completed_event_counts["nan_termination"]
             for metric, flags in episode_a12_event_flags.items():
                 a12_event_counts[metric] += int(
@@ -1215,6 +1259,11 @@ def main() -> int:
                 )
                 mode_stage2_without_stage15[name] += int(
                     episode_event_flags["stage2_without_stage15"][mode_mask]
+                    .sum()
+                    .item()
+                )
+                mode_shell_before_stage2[name] += int(
+                    episode_event_flags["shell_before_stage2"][mode_mask]
                     .sum()
                     .item()
                 )
@@ -1398,6 +1447,10 @@ def main() -> int:
                         mode_stage2_without_stage15[name]
                     ),
                 }
+            )
+        if is_a33:
+            mode_report[name]["shell_before_stage2_event_violations"] = (
+                mode_shell_before_stage2[name]
             )
     iteration_match = re.search(r"model_(\d+)$", checkpoint.stem)
     report: dict[str, object] = {
@@ -1614,6 +1667,15 @@ def main() -> int:
         )
     if is_a32:
         report["schema_version"] = 13
+    if is_a33:
+        report.update(
+            {
+                "schema_version": 14,
+                "shell_before_stage2_event_violations": (
+                    shell_before_stage2_events
+                ),
+            }
+        )
     output = args.output or checkpoint.with_suffix(".assisted-eval.json")
     _write_json_atomic(output.resolve(), report)
     print(json.dumps(report, indent=2, sort_keys=True))

@@ -1579,12 +1579,14 @@ def seed_stair_contact_transfer_reverse_context(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
     reverse_family: int = 1,
+    stage15_families: tuple[int, ...] | None = None,
+    stage2_family: int | None = None,
 ) -> None:
-    """Mark policy-generated Stage 1.5 replay rows as a proven prefix.
+    """Mark policy-generated replay rows as proven contact prefixes.
 
     The reset itself never pays a stage reward. Reward terms use this marker
-    only to prequalify the already-observed Stage 1 and Stage 1.5 history so
-    PPO can learn the missing loaded-support hold from that exact state.
+    only to prequalify already-observed history so PPO can learn the next
+    missing transition from that exact state.
     """
 
     if env_ids is None or len(env_ids) == 0:
@@ -1599,8 +1601,22 @@ def seed_stair_contact_transfer_reverse_context(
         env._stair_contact_transfer_reverse_stage15_seed = torch.zeros(
             env.num_envs, dtype=torch.bool, device=env.device
         )
-    env._stair_contact_transfer_reverse_stage15_seed[env_ids] = (
-        family[env_ids] == reverse_family
+    if not hasattr(env, "_stair_contact_transfer_reverse_stage2_seed"):
+        env._stair_contact_transfer_reverse_stage2_seed = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    if stage15_families is None:
+        stage15_families = (reverse_family,)
+    if len(stage15_families) == 0:
+        raise ValueError("At least one Stage 1.5 reverse family is required")
+    stage15_seed = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
+    for family_id in stage15_families:
+        stage15_seed |= family[env_ids] == family_id
+    env._stair_contact_transfer_reverse_stage15_seed[env_ids] = stage15_seed
+    env._stair_contact_transfer_reverse_stage2_seed[env_ids] = (
+        torch.zeros_like(stage15_seed)
+        if stage2_family is None
+        else family[env_ids] == stage2_family
     )
 
 
@@ -2289,13 +2305,18 @@ def stair_loaded_tread_face_release(
         "_stair_contact_transfer_reverse_stage15_seed",
         torch.zeros_like(tread_contact),
     )
+    stage2_seed = getattr(
+        env,
+        "_stair_contact_transfer_reverse_stage2_seed",
+        torch.zeros_like(tread_contact),
+    )
     env._stair_contact_transfer_hold[fresh] = 0
     # A tread-contact bank state is useful for downstream clearance but cannot
     # claim discovery of the transfer that already existed at reset.
     env._stair_contact_transfer_stage2_latched[fresh] = (
-        tread_contact[fresh] & ~reverse_seed[fresh]
+        (tread_contact[fresh] & ~reverse_seed[fresh]) | stage2_seed[fresh]
     )
-    env._stair_contact_transfer_stage2_policy_achieved[fresh] = False
+    env._stair_contact_transfer_stage2_policy_achieved[fresh] = stage2_seed[fresh]
     reset_family = getattr(env, "_stair_state_bank_family", None)
     validated_face_source = (
         torch.zeros_like(face_contact)
@@ -2309,6 +2330,7 @@ def stair_loaded_tread_face_release(
         face_contact[fresh]
         | validated_face_source[fresh]
         | reverse_seed[fresh]
+        | stage2_seed[fresh]
     )
     env._stair_contact_transfer_face_seen |= face_contact
     stage1 = getattr(env, "_stair_contact_transfer_stage1_policy_achieved", None)
@@ -2467,19 +2489,15 @@ def stair_virtual_lip_penetration_cost(
     )
 
 
-def stair_true_shell_clearance(
+def _stair_shell_corner_state(
     env: ManagerBasedRlEnv,
-    nominal_stair_face_x: float = 0.66,
-    riser_height: float = 0.17,
-    corridor_half_width: float = 0.36,
-    hold_steps: int = 4,
-    shell_half_extents: tuple[float, float, float] = (0.034, 0.031, 0.022),
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Pay once when every trunk-shell box corner clears the nominal lip."""
+    shell_half_extents: tuple[float, float, float],
+    asset_cfg: SceneEntityCfg,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return trunk-shell box corners in terrain-local coordinates and root y."""
 
-    if hold_steps < 1 or min(shell_half_extents) <= 0.0:
-        raise ValueError("Shell hold and half extents must be positive")
+    if min(shell_half_extents) <= 0.0:
+        raise ValueError("Shell half extents must be positive")
     asset: Entity = env.scene[asset_cfg.name]
     centers = asset.data.geom_pos_w[:, asset_cfg.geom_ids]
     quaternions = asset.data.geom_quat_w[:, asset_cfg.geom_ids]
@@ -2516,11 +2534,92 @@ def stair_true_shell_clearance(
     root_y = torch.abs(
         asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
     )
+    return corners, root_y
+
+
+def stair_true_shell_clearance_frontier(
+    env: ManagerBasedRlEnv,
+    start_x: float = 0.625,
+    target_x: float = 0.660,
+    start_height: float = 0.150,
+    target_height: float = 0.170,
+    corridor_half_width: float = 0.20,
+    required_latch_name: str = "_stair_contact_transfer_stage15_policy_achieved",
+    shell_half_extents: tuple[float, float, float] = (0.034, 0.031, 0.022),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay bounded episode-best progress of the worst trunk-shell corner.
+
+    The minimum of normalized x and z margins makes both dimensions necessary.
+    Reset states establish the baseline, so replayed progress pays nothing.
+    Holding or oscillating around a previously reached margin cannot be farmed.
+    """
+
+    if target_x <= start_x or target_height <= start_height:
+        raise ValueError("Shell frontier targets must exceed their starts")
+    corners, root_y = _stair_shell_corner_state(
+        env, shell_half_extents, asset_cfg
+    )
+    min_x = corners[..., 0].amin(dim=(-1, -2))
+    min_z = corners[..., 2].amin(dim=(-1, -2))
+    x_progress = torch.clamp(
+        (min_x - start_x) / (target_x - start_x), min=0.0, max=1.0
+    )
+    z_progress = torch.clamp(
+        (min_z - start_height) / (target_height - start_height),
+        min=0.0,
+        max=1.0,
+    )
+    value = torch.minimum(x_progress, z_progress)
+    required = getattr(env, required_latch_name, None)
+    if required is None:
+        required = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    finite = torch.isfinite(corners).all(dim=(-1, -2, -3))
+    eligible = required & finite & (root_y <= corridor_half_width)
+    value = torch.where(eligible, value, torch.zeros_like(value))
+    state_name = "_stair_true_shell_clearance_frontier_best"
+    previous_best = getattr(env, state_name, None)
+    if previous_best is None:
+        previous_best = value.clone()
+        setattr(env, state_name, previous_best)
+    fresh = env.episode_length_buf <= 1
+    previous_best[fresh] = value[fresh]
+    new_best = torch.maximum(previous_best, value)
+    delta = new_best - previous_best
+    setattr(env, state_name, new_best)
+    return delta
+
+
+def stair_true_shell_clearance(
+    env: ManagerBasedRlEnv,
+    nominal_stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    corridor_half_width: float = 0.36,
+    hold_steps: int = 4,
+    required_latch_name: str | None = None,
+    shell_half_extents: tuple[float, float, float] = (0.034, 0.031, 0.022),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay once when every trunk-shell box corner clears the nominal lip."""
+
+    if hold_steps < 1:
+        raise ValueError("Shell hold must be positive")
+    corners, root_y = _stair_shell_corner_state(
+        env, shell_half_extents, asset_cfg
+    )
+    required = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    if required_latch_name is not None:
+        required = getattr(env, required_latch_name, None)
+        if required is None:
+            required = torch.zeros(
+                env.num_envs, dtype=torch.bool, device=env.device
+            )
     candidate = (
         torch.isfinite(corners).all(dim=(-1, -2, -3))
         & (corners[..., 0] >= nominal_stair_face_x).all(dim=(-1, -2))
         & (corners[..., 2] >= riser_height).all(dim=(-1, -2))
         & (root_y <= corridor_half_width)
+        & required
     )
     if not hasattr(env, "_stair_true_shell_clearance_hold"):
         env._stair_true_shell_clearance_hold = torch.zeros(

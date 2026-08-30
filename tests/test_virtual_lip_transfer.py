@@ -14,6 +14,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     BoxStandardStaircaseTerrainCfg,
     make_microduck_stair_contact_stage_rsi_env_cfg,
     make_microduck_stair_stage15_reverse_rsi_env_cfg,
+    make_microduck_stair_stage2_reverse_rsi_env_cfg,
     make_microduck_stair_forward_propagation_rsi_env_cfg,
     make_microduck_stair_virtual_lip_transfer_rsi_env_cfg,
 )
@@ -369,6 +370,41 @@ def test_reverse_stage15_seed_prepays_no_prefix_reward_and_unlocks_hold(
     )
 
 
+def test_reverse_stage2_seed_prepays_no_stage_reward(monkeypatch):
+    monkeypatch.setattr(
+        microduck_mdp,
+        "_virtual_lip_union_contact_state",
+        _fake_virtual_union,
+    )
+    env = _contact_env(1)
+    env._stair_contact_transfer_reverse_stage15_seed = torch.ones(
+        1, dtype=torch.bool
+    )
+    env._stair_contact_transfer_reverse_stage2_seed = torch.ones(
+        1, dtype=torch.bool
+    )
+    env._stair_state_bank_family = torch.full((1,), 2, dtype=torch.long)
+    env.test_tread[:] = True
+    env.test_force[:] = 7.0
+
+    assert microduck_mdp.stair_new_tread_contact_after_reset(env).item() == 0.0
+    assert (
+        microduck_mdp.stair_loaded_tread_no_face_first_frame(
+            env, min_normal_force=2.0
+        ).item()
+        == 0.0
+    )
+    assert (
+        microduck_mdp.stair_loaded_tread_face_release(
+            env, min_normal_force=2.0, require_stage15=True
+        ).item()
+        == 0.0
+    )
+    assert env._stair_contact_transfer_stage1_policy_achieved.item()
+    assert env._stair_contact_transfer_stage15_policy_achieved.item()
+    assert env._stair_contact_transfer_stage2_policy_achieved.item()
+
+
 def test_penetration_cost_is_gated_before_arming_and_on_hard_level():
     robot = SimpleNamespace(
         indexing=SimpleNamespace(geom_ids=torch.tensor([0])),
@@ -451,6 +487,88 @@ def test_true_shell_clearance_requires_every_corner_and_pays_once():
     assert microduck_mdp.stair_true_shell_clearance(
         env, hold_steps=2, asset_cfg=asset_cfg
     ).item() == 0.0
+
+
+def test_shell_frontier_is_bounded_reset_safe_and_worst_corner_aligned():
+    geom_pos = torch.tensor([[[0.665, 0.0, 0.175]]])
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            geom_pos_w=geom_pos,
+            geom_quat_w=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]]),
+            root_link_pos_w=torch.tensor([[0.665, 0.0, 0.175]]),
+        )
+    )
+    env = SimpleNamespace(
+        num_envs=1,
+        device="cpu",
+        episode_length_buf=torch.ones(1, dtype=torch.long),
+        scene=_AssetScene(robot, torch.zeros(1, dtype=torch.long)),
+        _stair_contact_transfer_stage15_policy_achieved=torch.ones(
+            1, dtype=torch.bool
+        ),
+    )
+    asset_cfg = SimpleNamespace(name="robot", geom_ids=torch.tensor([0]))
+
+    assert microduck_mdp.stair_true_shell_clearance_frontier(
+        env, asset_cfg=asset_cfg
+    ).item() == 0.0
+    env.episode_length_buf[:] = 3
+    geom_pos[..., 0] = 0.680
+    geom_pos[..., 2] = 0.190
+    first_gain = microduck_mdp.stair_true_shell_clearance_frontier(
+        env, asset_cfg=asset_cfg
+    ).item()
+    assert 0.44 < first_gain < 0.46
+    assert microduck_mdp.stair_true_shell_clearance_frontier(
+        env, asset_cfg=asset_cfg
+    ).item() == 0.0
+    geom_pos[..., 0] = 0.700
+    geom_pos[..., 2] = 0.195
+    second_gain = microduck_mdp.stair_true_shell_clearance_frontier(
+        env, asset_cfg=asset_cfg
+    ).item()
+    assert 0.39 < second_gain < 0.41
+    assert first_gain + second_gain < 1.0
+
+
+def test_true_shell_can_be_hard_gated_after_policy_stage2():
+    geom_pos = torch.tensor([[[0.700, 0.0, 0.190]]])
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            geom_pos_w=geom_pos,
+            geom_quat_w=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]]),
+            root_link_pos_w=torch.tensor([[0.700, 0.0, 0.205]]),
+        )
+    )
+    env = SimpleNamespace(
+        num_envs=1,
+        device="cpu",
+        episode_length_buf=torch.ones(1, dtype=torch.long),
+        scene=_AssetScene(robot, torch.zeros(1, dtype=torch.long)),
+        _stair_contact_transfer_stage2_policy_achieved=torch.zeros(
+            1, dtype=torch.bool
+        ),
+    )
+    asset_cfg = SimpleNamespace(name="robot", geom_ids=torch.tensor([0]))
+    required = "_stair_contact_transfer_stage2_policy_achieved"
+
+    assert microduck_mdp.stair_true_shell_clearance(
+        env, hold_steps=2, required_latch_name=required, asset_cfg=asset_cfg
+    ).item() == 0.0
+    geom_pos[..., 2] = 0.195
+    env.episode_length_buf[:] = 3
+    assert microduck_mdp.stair_true_shell_clearance(
+        env, hold_steps=2, required_latch_name=required, asset_cfg=asset_cfg
+    ).item() == 0.0
+    env._stair_contact_transfer_stage2_policy_achieved[:] = True
+    env.episode_length_buf[:] = 4
+    assert microduck_mdp.stair_true_shell_clearance(
+        env, hold_steps=2, required_latch_name=required, asset_cfg=asset_cfg
+    ).item() == 0.0
+    env.episode_length_buf[:] = 5
+    assert microduck_mdp.stair_true_shell_clearance(
+        env, hold_steps=2, required_latch_name=required, asset_cfg=asset_cfg
+    ).item() == 1.0
 
 
 def test_secured_tread_requires_ordered_policy_shell_clearance(monkeypatch):
@@ -645,6 +763,50 @@ def test_a32_replaces_generic_banks_with_exact_two_family_reverse_mix():
     assert event_names.index("stage15_reverse_state_bank") < event_names.index(
         "stage15_reverse_context"
     )
+    assert play_cfg.events["a30_hard_viewer"].params == {
+        "terrain_levels": (2,),
+        "terrain_types": (0,),
+    }
+
+
+def test_a33_adds_exact_stage2_family_and_bounded_shell_frontier():
+    cfg = make_microduck_stair_stage2_reverse_rsi_env_cfg()
+    play_cfg = make_microduck_stair_stage2_reverse_rsi_env_cfg(play=True)
+
+    assert cfg.events["state_bank_family"].params["family_weights"] == (2, 1, 1)
+    assert cfg.events["root_over_lip_state_bank"].params["reset_family"] == 0
+    assert cfg.events["stage15_reverse_state_bank"].params["reset_family"] == 1
+    stage2_bank = cfg.events["stage2_reverse_state_bank"]
+    assert stage2_bank.params["reset_family"] == 2
+    assert stage2_bank.params["bank_path"].endswith(
+        "full170-a33-model10-stage2-state-bank.pt"
+    )
+    context = cfg.events["stage2_reverse_context"]
+    assert context.params == {"stage15_families": (1, 2), "stage2_family": 2}
+    event_names = tuple(cfg.events)
+    assert event_names.index("stage15_reverse_state_bank") < event_names.index(
+        "stage2_reverse_state_bank"
+    )
+    assert event_names.index("stage2_reverse_state_bank") < event_names.index(
+        "stage2_reverse_context"
+    )
+
+    rewards = tuple(cfg.rewards)
+    assert rewards.index("stair_loaded_tread_no_face_first_frame") < rewards.index(
+        "stair_loaded_tread_face_release"
+    )
+    assert rewards.index("stair_loaded_tread_face_release") < rewards.index(
+        "stair_true_shell_clearance_frontier"
+    )
+    assert rewards.index("stair_true_shell_clearance_frontier") < rewards.index(
+        "stair_true_shell_clearance"
+    )
+    frontier = cfg.rewards["stair_true_shell_clearance_frontier"]
+    assert frontier.func is microduck_mdp.stair_true_shell_clearance_frontier
+    assert frontier.weight == 40.0
+    assert cfg.rewards["stair_true_shell_clearance"].params[
+        "required_latch_name"
+    ] == "_stair_contact_transfer_stage2_policy_achieved"
     assert play_cfg.events["a30_hard_viewer"].params == {
         "terrain_levels": (2,),
         "terrain_types": (0,),
