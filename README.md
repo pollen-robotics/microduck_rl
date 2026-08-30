@@ -197,6 +197,31 @@ The command rejects reordered names, malformed or non-finite arrays, incorrect
 metadata, and body transforms that do not match a MuJoCo replay of the exported
 root pose and joint positions.
 
+## Headless policy rollout export
+
+Export an ONNX walking policy as a native, validated 50 Hz motion archive with
+the same canonical scene used by the Blender validator:
+
+```bash
+uv run scripts/export_policy_rollout.py \
+  /home/mcao/MyCode/microduck/policies/alpha_walking.onnx \
+  --output /tmp/alpha-walking-forward.npz \
+  --duration 4 \
+  --lin-vel-x 0.30 \
+  --seed 0
+```
+
+`--output` is required. The remaining defaults are a four-second rollout with
+command `(0.30, 0.0, 0.0)` for `(linear-x, linear-y, angular-z)` and seed `0`;
+use `--lin-vel-y` and `--ang-vel-z` to set the other command components. Each
+frame advances four 5 ms MuJoCo substeps, so the 200 samples cover exactly four
+seconds at 50 Hz. The archive provenance includes SHA-256 digests of the policy,
+scene, and a canonical rollout configuration containing the command, duration,
+seed, simulation timestep, control decimation, and control rate. On success the
+command prints the output path, frame count, command, policy SHA-256, and maximum
+position and orientation errors from the motion validator. On failure it prints
+one `Policy rollout failed: ...` error line and exits with status `2`.
+
 ## Related projects
 
 - [microduck](https://github.com/unergybot/microduck) — the forked Microduck runtime that runs the exported policies
