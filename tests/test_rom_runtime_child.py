@@ -136,6 +136,7 @@ def test_fake_child_exposes_every_required_environment_free_mode() -> None:
         "duplicate-event",
         "stale-event",
         "malformed-event",
+        "lease-cleanup-failure",
     )
 
 
@@ -295,6 +296,39 @@ def test_continuous_fault_wins_stop_race_without_poisoning_same_child_reuse() ->
     thread.join(timeout=1)
 
 
+def test_continuous_stop_wins_queued_completion_and_reuses_same_child() -> None:
+    host, runtime, parent, thread = _active_host()
+    runtime.sample_release.clear()
+    host._start_runtime_monitor()
+    assert runtime.sample_started.wait(timeout=1)
+    parent.sendall(encode_packet(RuntimeMessage(
+        kind="ZERO_AND_STOP", generation=7, operationSequence=1,
+        taskId="1" * 32, payload=ZeroAndStopPayload(reason="OPERATOR_CANCELLED"),
+    )))
+    deadline = time.monotonic() + 1
+    while not host._sample_stop.is_set() and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert host._sample_stop.is_set()
+    runtime.complete_next(state="FAILED", metrics={}, stop_reason="FALLEN")
+    runtime.sample_release.set()
+    terminal = decode_packet(parent.recv(65_537))
+    assert terminal.kind is RuntimeMessageKind.TERMINAL
+    assert terminal.payload.evidence.stopReason == "OPERATOR_CANCELLED"
+
+    start = RuntimeMessage(
+        kind="START", generation=8, operationSequence=2, taskId="2" * 32,
+        payload=StartPayload(
+            actionCode="WALK_VELOCITY", bundleDigest="sha256:" + "a" * 64,
+            parameters={"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0},
+            scenario={"terrain": "flat", "seed": 8}, leaseMs=1000,
+        ),
+    )
+    assert _exchange(parent, start).kind is RuntimeMessageKind.ACK
+    assert thread.is_alive()
+    parent.close()
+    thread.join(timeout=1)
+
+
 def test_discrete_safe_stop_failure_withholds_terminal_and_exits_transport() -> None:
     host, runtime, parent, thread = _active_host()
     host._active_action_code = "STAND"
@@ -381,6 +415,7 @@ def _active_host() -> tuple[RuntimeChildHost, FakeMicroduckRuntime, socket.socke
 
 def test_lease_expiry_initiates_zero_stop_without_parent_watchdog() -> None:
     host, runtime, parent, thread = _active_host()
+    host._start_runtime_monitor()
     host._last_request = RuntimeMessage(
         kind="COMMAND", generation=7, operationSequence=1, taskId="1" * 32,
         payload=CommandPayload(
@@ -404,9 +439,63 @@ def test_lease_expiry_initiates_zero_stop_without_parent_watchdog() -> None:
     assert terminal.operationSequence == 0
     assert terminal.payload.eventSequence == 1
     assert terminal.payload.terminal.outcome == "TIMED_OUT"
+    assert not host.sample_monitor_alive
     assert host._safety_complete.is_set()
     parent.close()
     thread.join(timeout=1)
+
+
+@pytest.mark.parametrize("failure", ["exception", "invalid-evidence"])
+def test_lease_expiry_safe_stop_failure_withholds_event_and_retires_transport(
+    failure: str,
+) -> None:
+    host, runtime, parent, thread = _active_host()
+    host._start_runtime_monitor()
+    if failure == "exception":
+        runtime.safe_stop_error = RuntimeError("uncertain cleanup")
+    else:
+        runtime.safe_stop_metrics = {f"metric-{index}": index for index in range(33)}
+    host._last_request = RuntimeMessage(
+        kind="COMMAND", generation=7, operationSequence=1, taskId="1" * 32,
+        payload=CommandPayload(
+            parameters={"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0},
+            leaseMs=100,
+        ),
+    )
+    with host._state_lock:
+        host._lease_deadline = time.monotonic() + 0.03
+    assert runtime.safe_stopped.wait(timeout=1)
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert host._cleanup_timed_out.is_set()
+    parent.settimeout(1)
+    assert parent.recv(65_537) == b""
+    parent.close()
+
+
+def test_blocked_continuous_monitor_on_lease_expiry_retires_without_event() -> None:
+    host, runtime, parent, thread = _active_host()
+    runtime.sample_release.clear()
+    host._start_runtime_monitor()
+    assert runtime.sample_started.wait(timeout=1)
+    host._last_request = RuntimeMessage(
+        kind="COMMAND", generation=7, operationSequence=1, taskId="1" * 32,
+        payload=CommandPayload(
+            parameters={"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0},
+            leaseMs=100,
+        ),
+    )
+    with host._state_lock:
+        host._lease_deadline = time.monotonic() + 0.03
+    assert runtime.safe_stopped.wait(timeout=1)
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert host._cleanup_timed_out.is_set()
+    parent.settimeout(1)
+    assert parent.recv(65_537) == b""
+    assert len(runtime.safe_stop_calls) == 1
+    runtime.sample_release.set()
+    parent.close()
 
 
 def test_parent_eof_initiates_local_zero_stop() -> None:

@@ -68,6 +68,8 @@ _FATAL_CLEANUP_TIMEOUT_S = 0.25
 
 @dataclass(frozen=True, slots=True)
 class _RuntimeCompletion:
+    generation: int
+    task_id: str
     handle: RuntimeHandle
     sample: RuntimeSample
     outcome: str
@@ -126,6 +128,7 @@ class RuntimeChildHost:
         self._sample_stop = threading.Event()
         self._latest_sample_metrics: dict[str, object] = {}
         self._completed_identity: tuple[int, str] | None = None
+        self._truthfully_stopped_completion: tuple[int, str, RuntimeHandle] | None = None
 
     @property
     def sample_monitor_alive(self) -> bool:
@@ -264,12 +267,12 @@ class RuntimeChildHost:
             # Emergency zero is bounded; truthful cleanup acknowledgement is impossible.
             self._cleanup_timed_out.set()
             return
-        cleanup_result: list[RuntimeEvidence] = []
+        cleanup_result: list[tuple[RuntimeEvidence, bool]] = []
 
         def cleanup() -> None:
             cleanup_evidence = evidence
             if handle is None:
-                cleanup_result.append(cleanup_evidence)
+                cleanup_result.append((cleanup_evidence, True))
                 return
             try:
                 template = action_template(self._bundle_action_code())
@@ -281,7 +284,10 @@ class RuntimeChildHost:
                     stopReason=reason,
                 )
             try:
-                stopped = runtime.safe_stop(handle, reason)
+                raw_stopped = runtime.safe_stop(handle, reason)
+                stopped = RuntimeEvidence(
+                    metrics=raw_stopped.metrics, stopReason=raw_stopped.stopReason
+                )
                 if "safetyFailure" not in cleanup_evidence.metrics:
                     cleanup_evidence = stopped
             except Exception:  # noqa: BLE001 - child exits after bounded evidence
@@ -289,7 +295,9 @@ class RuntimeChildHost:
                     metrics={"safetyFailure": "SAFE_STOP_FAILED"},
                     stopReason=reason,
                 )
-            cleanup_result.append(cleanup_evidence)
+                cleanup_result.append((cleanup_evidence, False))
+                return
+            cleanup_result.append((cleanup_evidence, True))
 
         if handle is not None:
             cleanup_thread = threading.Thread(
@@ -300,7 +308,10 @@ class RuntimeChildHost:
             if cleanup_thread.is_alive():
                 self._cleanup_timed_out.set()
                 return
-            evidence = cleanup_result[0]
+            evidence, cleanup_truthful = cleanup_result[0]
+            if not cleanup_truthful:
+                self._retire_uncertain_cleanup()
+                return
             self._sample_stop.set()
             monitor = self._sample_thread
             if monitor is not None:
@@ -379,6 +390,8 @@ class RuntimeChildHost:
         def monitor() -> None:
             assert self._runtime is not None and self._handle is not None
             runtime, handle = self._runtime, self._handle
+            assert self._generation is not None and self._task_id is not None
+            generation, task_id = self._generation, self._task_id
             sample = RuntimeSample(running=True)
             reason = "MAX_DURATION_EXCEEDED"
             outcome = "TIMED_OUT"
@@ -405,7 +418,9 @@ class RuntimeChildHost:
             except Exception:  # noqa: BLE001 - runtime detail is never serialized
                 sample = RuntimeSample(running=False, terminalState="FAILED")
                 reason, outcome = "RUNTIME_EXCEPTION", "FAILED"
-            self._put_message(_RuntimeCompletion(handle, sample, outcome, reason))
+            self._put_message(
+                _RuntimeCompletion(generation, task_id, handle, sample, outcome, reason)
+            )
 
         self._sample_thread = threading.Thread(
             target=monitor, name="runtime-child-sample-monitor", daemon=True
@@ -424,6 +439,15 @@ class RuntimeChildHost:
     def _handle_runtime_completion(self, completion: _RuntimeCompletion) -> None:
         monitor = self._sample_thread
         if monitor is None:
+            stopped = self._truthfully_stopped_completion
+            if (
+                stopped is not None
+                and completion.generation == stopped[0]
+                and completion.task_id == stopped[1]
+                and completion.handle is stopped[2]
+            ):
+                self._truthfully_stopped_completion = None
+                return
             self._retire_uncertain_cleanup()
             return
         monitor.join(timeout=self._fatal_cleanup_timeout_s)
@@ -465,6 +489,12 @@ class RuntimeChildHost:
             )
             with self._state_lock:
                 generation, task_id = self._generation, self._task_id
+                if (
+                    generation != completion.generation
+                    or task_id != completion.task_id
+                ):
+                    self._retire_uncertain_cleanup()
+                    return
                 self._handle = None
                 self._lease_deadline = None
                 self._event_sequence += 1
@@ -569,14 +599,18 @@ class RuntimeChildHost:
     def _normal_stop(self, message: RuntimeMessage, reason: str) -> None:
         with self._completion_claim:
             assert self._runtime is not None and self._handle is not None
+            handle = self._handle
             if not self._retire_sample_monitor():
                 return
             template = action_template(self._active_action_code)
             zero: Mapping[str, object] = template.lease.zeroCommand if template.lease else {}
-            self._runtime.command(self._handle, zero)
-            evidence = self._runtime.safe_stop(self._handle, reason)
+            self._runtime.command(handle, zero)
+            evidence = self._runtime.safe_stop(handle, reason)
             self._send(self._terminal(message, reason, evidence))
             with self._state_lock:
+                self._truthfully_stopped_completion = (
+                    message.generation, message.taskId, handle
+                )
                 self._handle = None
                 self._generation = None
                 self._task_id = None
@@ -621,6 +655,7 @@ class RuntimeChildHost:
             self._lease_deadline = self._clock() + message.payload.leaseMs / 1000
             self._latest_sample_metrics = {}
             self._completed_identity = None
+            self._truthfully_stopped_completion = None
         self._runtime.validate(action, request)
         handle = self._runtime.start(action, request)
         with self._state_lock:

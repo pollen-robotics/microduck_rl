@@ -42,6 +42,7 @@ MODES = (
     "duplicate-event",
     "stale-event",
     "malformed-event",
+    "lease-cleanup-failure",
 )
 
 PROOF_MODES = (
@@ -254,10 +255,17 @@ def main() -> int:
             )
         )
         if request.kind is RuntimeMessageKind.START and args.mode in {
-            "terminal-event", "duplicate-event", "stale-event", "malformed-event"
+            "terminal-event",
+            "duplicate-event",
+            "stale-event",
+            "malformed-event",
+            "lease-cleanup-failure",
         }:
             test_control.sendall(b"STARTED")
-            if args.mode == "terminal-event":
+            if args.mode == "lease-cleanup-failure":
+                if test_control.recv(4) == b"EMIT":
+                    return 0
+            elif args.mode == "terminal-event":
                 if test_control.recv(4) == b"EMIT":
                     control.sendall(encode_packet(_terminal_event(request)))
             elif args.mode == "malformed-event":

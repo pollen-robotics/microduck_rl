@@ -178,6 +178,31 @@ def test_idle_owner_consumes_unsolicited_terminal_and_releases_slot() -> None:
         supervisor.close()
 
 
+def test_lease_cleanup_failure_eof_is_reaped_before_slot_release() -> None:
+    delivered = threading.Event()
+    supervisor, launch = _supervisor(
+        "lease-cleanup-failure", terminal_callback=lambda _payload: delivered.set()
+    )
+    try:
+        supervisor.ensure_ready()
+        supervisor.start(_request())
+        peer = _receive_gate(launch, b"STARTED")
+        pid = supervisor.snapshot().pid
+        assert pid is not None
+        pidfd = os.pidfd_open(pid)
+        peer.sendall(b"EMIT")
+        deadline = time.monotonic() + 2
+        while supervisor.snapshot().pid is not None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not delivered.is_set()
+        assert "QUARANTINED" in supervisor.trace
+        assert "CHILD_REAPED" in supervisor.trace
+        _assert_pidfd_dead(pidfd)
+        assert supervisor.snapshot().slot_releasable is True
+    finally:
+        supervisor.close()
+
+
 def test_terminal_event_interleaved_with_status_is_not_consumed_as_response() -> None:
     delivered = threading.Event()
     supervisor, _launch = _supervisor(
