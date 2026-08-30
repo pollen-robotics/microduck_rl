@@ -93,6 +93,11 @@ STAIR_TARGETS = {
         "experiment": "microduck_stair_lip_commitment_rsi_specialist",
         "iterations": 75,
     },
+    "specialist-lip-checkpoint-rsi": {
+        "task": "Mjlab-Stairs-Lip-Checkpoint-RSI-Specialist-MicroDuck",
+        "experiment": "microduck_stair_lip_checkpoint_rsi_specialist",
+        "iterations": 75,
+    },
     "specialist-tread-contact-bank": {
         "task": "Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
         "experiment": "microduck_stair_tread_contact_bank_specialist",

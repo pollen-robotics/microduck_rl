@@ -2263,6 +2263,198 @@ def stair_contact_lip_commitment(
     return payout
 
 
+def stair_contact_lip_checkpoint_potential(
+    env: ManagerBasedRlEnv,
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.20,
+    bypass_half_width: float = 0.36,
+    arm_hold_steps: int = 2,
+    target_hold_steps: int = 2,
+    x_start: float = 0.540,
+    x_target: float = 0.665,
+    x_softness: float = 0.010,
+    z_start: float = 0.100,
+    z_target: float = 0.175,
+    z_softness: float = 0.005,
+    sensor_names: tuple[str, ...] = (
+        "robot_ground_contact",
+        "head_ground_contact",
+        "legs_ground_contact",
+        "trunk_ground_contact",
+    ),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward signed simultaneous x/z progress toward the first stair lip.
+
+    Two classified stair-contact frames arm a mentor-style center-of-mass
+    checkpoint.  Its geometric-mean potential stays informative before the
+    exact goal but collapses when either forward or vertical progress is poor.
+    Only the signed change is paid, so holding and oscillating cannot create a
+    jackpot.  The shaping stops at a held root-over-lip state or side bypass.
+    """
+
+    if min(arm_hold_steps, target_hold_steps) < 1:
+        raise ValueError("Lip-checkpoint hold steps must be positive")
+    if min(x_softness, z_softness) <= 0.0:
+        raise ValueError("Lip-checkpoint softness must be positive")
+    if x_target <= x_start or z_target <= z_start:
+        raise ValueError("Lip-checkpoint targets must exceed their starts")
+
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    abs_y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    finite = torch.isfinite(torch.stack((x, z, abs_y), dim=-1)).all(dim=-1)
+
+    face_contact = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    tread_contact = torch.zeros_like(face_contact)
+    for sensor_name in sensor_names:
+        if sensor_name not in env.scene.sensors:
+            raise RuntimeError(f"Missing required contact sensor: {sensor_name}")
+        face, tread, _ = _standard_stair_contact_masks(
+            env,
+            sensor_name,
+            stair_face_x=stair_face_x,
+            riser_height=riser_height,
+            tread_depth=tread_depth,
+            corridor_half_width=corridor_half_width,
+        )
+        face_contact |= face.any(dim=-1)
+        tread_contact |= tread.any(dim=-1)
+    contact = face_contact | tread_contact
+
+    def soft_progress(
+        value: torch.Tensor, start: float, target: float, softness: float
+    ) -> torch.Tensor:
+        numerator = torch.nn.functional.softplus((value - start) / softness)
+        denominator = torch.nn.functional.softplus(
+            torch.as_tensor(
+                (target - start) / softness,
+                dtype=value.dtype,
+                device=value.device,
+            )
+        )
+        return torch.clamp(numerator / denominator, min=0.0, max=1.0)
+
+    px = soft_progress(x, x_start, x_target, x_softness)
+    pz = soft_progress(z, z_start, z_target, z_softness)
+    potential = torch.sqrt(torch.clamp(px * pz, min=0.0))
+
+    if not hasattr(env, "_stair_lip_checkpoint_load_streak"):
+        env._stair_lip_checkpoint_load_streak = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+        env._stair_lip_checkpoint_armed = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._stair_lip_checkpoint_contact_qualified = torch.zeros_like(
+            env._stair_lip_checkpoint_armed
+        )
+        env._stair_lip_checkpoint_previous = torch.zeros_like(x)
+        env._stair_lip_checkpoint_target_hold = torch.zeros_like(
+            env._stair_lip_checkpoint_load_streak
+        )
+        env._stair_lip_checkpoint_progress_latched = torch.zeros_like(
+            env._stair_lip_checkpoint_armed
+        )
+        env._stair_lip_checkpoint_target_latched = torch.zeros_like(
+            env._stair_lip_checkpoint_armed
+        )
+        env._stair_lip_checkpoint_bypass_latched = torch.zeros_like(
+            env._stair_lip_checkpoint_armed
+        )
+
+    fresh = env.episode_length_buf <= 1
+    env._stair_lip_checkpoint_load_streak[fresh] = 0
+    env._stair_lip_checkpoint_armed[fresh] = False
+    env._stair_lip_checkpoint_contact_qualified[fresh] = False
+    env._stair_lip_checkpoint_previous[fresh] = 0.0
+    env._stair_lip_checkpoint_target_hold[fresh] = 0
+    env._stair_lip_checkpoint_progress_latched[fresh] = False
+    env._stair_lip_checkpoint_target_latched[fresh] = False
+    env._stair_lip_checkpoint_bypass_latched[fresh] = False
+
+    already_target = (x >= x_target) & (z >= z_target)
+    contact_candidate = (
+        (env.episode_length_buf >= 3)
+        & finite
+        & (abs_y <= corridor_half_width)
+        & contact
+        & ~already_target
+        & ~env._stair_lip_checkpoint_contact_qualified
+    )
+    env._stair_lip_checkpoint_load_streak = torch.where(
+        contact_candidate,
+        env._stair_lip_checkpoint_load_streak + 1,
+        torch.zeros_like(env._stair_lip_checkpoint_load_streak),
+    )
+    newly_contact_qualified = (
+        env._stair_lip_checkpoint_load_streak >= arm_hold_steps
+    ) & ~env._stair_lip_checkpoint_contact_qualified
+    env._stair_lip_checkpoint_contact_qualified |= newly_contact_qualified
+    impulse_latched = getattr(env, "_stair_lip_commitment_impulse_latched", None)
+    if impulse_latched is None:
+        impulse_latched = torch.zeros_like(env._stair_lip_checkpoint_armed)
+    newly_armed = (
+        env._stair_lip_checkpoint_contact_qualified
+        & impulse_latched
+        & finite
+        & (abs_y <= corridor_half_width)
+        & ~already_target
+        & ~env._stair_lip_checkpoint_armed
+    )
+    env._stair_lip_checkpoint_armed |= newly_armed
+    env._stair_lip_checkpoint_previous[newly_armed] = potential[newly_armed]
+
+    bypass_candidate = (
+        env._stair_lip_checkpoint_armed
+        & (x >= stair_face_x)
+        & (abs_y > bypass_half_width)
+    )
+    active = (
+        env._stair_lip_checkpoint_armed
+        & ~env._stair_lip_checkpoint_target_latched
+        & ~env._stair_lip_checkpoint_bypass_latched
+        & finite
+    )
+    effective_potential = torch.where(
+        abs_y <= corridor_half_width, potential, torch.zeros_like(potential)
+    )
+    signed_delta = torch.where(
+        active & ~newly_armed,
+        effective_potential - env._stair_lip_checkpoint_previous,
+        torch.zeros_like(potential),
+    )
+    positive_progress = signed_delta > 1.0e-6
+    env._stair_lip_checkpoint_progress_latched |= positive_progress
+    env._stair_lip_checkpoint_previous = torch.where(
+        active, effective_potential, env._stair_lip_checkpoint_previous
+    )
+    # Calculate the corridor-collapse repayment before making a bypass terminal.
+    env._stair_lip_checkpoint_bypass_latched |= bypass_candidate
+
+    target_candidate = (
+        active
+        & ~bypass_candidate
+        & (x >= x_target)
+        & (z >= z_target)
+        & (abs_y <= corridor_half_width)
+    )
+    env._stair_lip_checkpoint_target_hold = torch.where(
+        target_candidate,
+        env._stair_lip_checkpoint_target_hold + 1,
+        torch.zeros_like(env._stair_lip_checkpoint_target_hold),
+    )
+    reached_target = (
+        env._stair_lip_checkpoint_target_hold >= target_hold_steps
+    ) & ~env._stair_lip_checkpoint_target_latched
+    env._stair_lip_checkpoint_target_latched |= reached_target
+    return signed_delta / env.step_dt
+
+
 def stair_apex_or_mantle_frontier(
     env: ManagerBasedRlEnv,
     approach_start_x: float = 0.40,

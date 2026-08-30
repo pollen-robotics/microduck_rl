@@ -1328,6 +1328,56 @@ def make_microduck_stair_lip_commitment_rsi_env_cfg(
     return cfg
 
 
+def make_microduck_stair_lip_checkpoint_rsi_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Stage A25: mentor simultaneous root progress from near-stair contacts."""
+
+    cfg = make_microduck_stair_lip_commitment_rsi_env_cfg(play=play)
+    bank = cfg.events["walker_state_bank"].params
+    bank["late_fraction"] = 0.75
+    cfg.events["walker_state_bank"] = EventTermCfg(
+        func=WalkerStateBankReset,
+        mode="reset",
+        params=bank,
+    )
+    # A24 proved the manufacturer motion creates contact impulses, but its
+    # post-success-only reward stayed zero.  Keep that state machine at zero
+    # weight for diagnostics and pay signed geometric-mean x/z progress after
+    # real stair contact.  This is the mentor checkpoint, not a scripted path.
+    # RewardManager skips exact-zero terms.  A negligible weight keeps A24's
+    # physical impulse detector running without materially changing return.
+    cfg.rewards["stair_contact_lip_commitment"].weight = 1.0e-6
+    cfg.rewards["stair_assisted_approach"].weight = 0.0
+    cfg.rewards["stair_contact_lip_checkpoint_potential"] = RewardTermCfg(
+        func=microduck_mdp.stair_contact_lip_checkpoint_potential,
+        weight=10.0,
+        params={
+            "stair_face_x": STANDARD_STAIR_START_DISTANCE,
+            "riser_height": STANDARD_RISER_HEIGHT,
+            "tread_depth": STANDARD_TREAD_DEPTH,
+            "corridor_half_width": 0.20,
+            "bypass_half_width": STANDARD_STAIR_WIDTH * 0.40,
+            "arm_hold_steps": 2,
+            "target_hold_steps": 2,
+            "x_start": 0.540,
+            "x_target": 0.665,
+            "x_softness": 0.010,
+            "z_start": 0.100,
+            "z_target": 0.175,
+            "z_softness": 0.005,
+            "sensor_names": (
+                "robot_ground_contact",
+                "head_ground_contact",
+                "legs_ground_contact",
+                "trunk_ground_contact",
+            ),
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    return cfg
+
+
 def make_microduck_stair_tread_contact_bank_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -1654,6 +1704,18 @@ MicroduckStairLipCommitmentRsiRlCfg.max_iterations = 75
 MicroduckStairLipCommitmentRsiRlCfg.save_interval = 25
 MicroduckStairLipCommitmentRsiRlCfg.actor.distribution_cfg["init_std"] = 0.22
 MicroduckStairLipCommitmentRsiRlCfg.algorithm.learning_rate = 1.0e-5
+
+MicroduckStairLipCheckpointRsiRlCfg = deepcopy(MicroduckStairLipCommitmentRsiRlCfg)
+MicroduckStairLipCheckpointRsiRlCfg.experiment_name = (
+    "microduck_stair_lip_checkpoint_rsi_specialist"
+)
+MicroduckStairLipCheckpointRsiRlCfg.run_name = (
+    "microduck_stair_lip_checkpoint_rsi_specialist"
+)
+MicroduckStairLipCheckpointRsiRlCfg.max_iterations = 75
+MicroduckStairLipCheckpointRsiRlCfg.save_interval = 25
+MicroduckStairLipCheckpointRsiRlCfg.actor.distribution_cfg["init_std"] = 0.22
+MicroduckStairLipCheckpointRsiRlCfg.algorithm.learning_rate = 1.0e-5
 
 MicroduckStairTreadContactBankRlCfg = deepcopy(MicroduckStairRouladeBankRlCfg)
 MicroduckStairTreadContactBankRlCfg.experiment_name = (

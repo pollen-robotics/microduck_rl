@@ -3,6 +3,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     MicroduckStairContactMantleRsiRlCfg,
     MicroduckStairContactReleaseRsiRlCfg,
     MicroduckStairLipCommitmentRsiRlCfg,
+    MicroduckStairLipCheckpointRsiRlCfg,
     MicroduckStairMediumDynamicsRsiRlCfg,
     MicroduckStairPhaseBalancedRsiRlCfg,
     MicroduckStairSoftDynamicsRsiRlCfg,
@@ -15,6 +16,7 @@ from mjlab_microduck.tasks.microduck_standard_stairs_env_cfg import (
     make_microduck_stair_contact_mantle_rsi_env_cfg,
     make_microduck_stair_contact_release_rsi_env_cfg,
     make_microduck_stair_lip_commitment_rsi_env_cfg,
+    make_microduck_stair_lip_checkpoint_rsi_env_cfg,
     make_microduck_stair_medium_dynamics_rsi_env_cfg,
     make_microduck_stair_phase_balanced_rsi_env_cfg,
     make_microduck_stair_soft_dynamics_rsi_env_cfg,
@@ -185,3 +187,33 @@ def test_lip_commitment_starts_near_stair_and_requires_spatial_conversion():
     assert cfg.rewards["stair_first_tread_secured"].weight == 600.0
     assert MicroduckStairLipCommitmentRsiRlCfg.max_iterations == 75
     assert MicroduckStairLipCommitmentRsiRlCfg.save_interval == 25
+
+
+def test_lip_checkpoint_uses_multiplicative_signed_progress_near_stair():
+    baseline = make_microduck_stair_lip_commitment_rsi_env_cfg()
+    cfg = make_microduck_stair_lip_checkpoint_rsi_env_cfg()
+    bank = cfg.events["walker_state_bank"].params
+    checkpoint = cfg.rewards["stair_contact_lip_checkpoint_potential"]
+
+    assert tuple(cfg.observations["actor"].terms) == tuple(
+        baseline.observations["actor"].terms
+    )
+    assert bank["late_fraction"] == 0.75
+    assert bank["phase_aligned_local_x_range"] == (0.54, 0.64)
+    assert cfg.rewards["stair_contact_lip_commitment"].weight == 1.0e-6
+    assert cfg.rewards["stair_assisted_approach"].weight == 0.0
+    assert checkpoint.weight == 10.0
+    reward_names = tuple(cfg.rewards)
+    assert reward_names.index("stair_contact_lip_commitment") < reward_names.index(
+        "stair_contact_lip_checkpoint_potential"
+    )
+    assert checkpoint.params["arm_hold_steps"] == 2
+    assert checkpoint.params["target_hold_steps"] == 2
+    assert checkpoint.params["x_start"] == 0.540
+    assert checkpoint.params["x_target"] == 0.665
+    assert checkpoint.params["z_start"] == 0.100
+    assert checkpoint.params["z_target"] == 0.175
+    assert cfg.rewards["stair_first_riser_clearance"].weight == 500.0
+    assert cfg.rewards["stair_first_tread_secured"].weight == 600.0
+    assert MicroduckStairLipCheckpointRsiRlCfg.max_iterations == 75
+    assert MicroduckStairLipCheckpointRsiRlCfg.save_interval == 25
