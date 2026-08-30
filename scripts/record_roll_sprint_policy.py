@@ -119,6 +119,13 @@ def _recording_fps(policy_dt: float, frame_stride: int) -> float:
     return 1.0 / (policy_dt * frame_stride)
 
 
+def _race_header_text(elapsed_s: float, total_s: float, leader_index: int) -> str:
+    return (
+        f"20 m ROLL RACE  |  t {elapsed_s:05.1f} s / {total_s:.1f} s"
+        f"  |  camera follows in-lane leader R{leader_index + 1}"
+    )
+
+
 def _race_lane_origins(
     num_lanes: int,
     lane_spacing: float,
@@ -426,6 +433,7 @@ def _overlay_race_labels(
     max_speeds_mps: torch.Tensor,
     valid_distances_m: torch.Tensor,
     elapsed_s: float,
+    total_s: float,
     leader_index: int,
 ) -> np.ndarray:
     """Draw per-robot metrics at the rendered screen position of each robot."""
@@ -455,10 +463,7 @@ def _overlay_race_labels(
         font = ImageFont.load_default(size=18)
         header_font = ImageFont.load_default(size=20)
 
-    header = (
-        f"20 m ROLL RACE  |  t {elapsed_s:05.1f} s / 40.0 s"
-        f"  |  camera follows in-lane leader R{leader_index + 1}"
-    )
+    header = _race_header_text(elapsed_s, total_s, leader_index)
     header_box = draw.textbbox((0, 0), header, font=header_font)
     header_width = header_box[2] - header_box[0]
     draw.rounded_rectangle(
@@ -627,6 +632,7 @@ def main() -> int:
                 max_speeds_mps=max_speeds_mps,
                 valid_distances_m=valid_distances_m,
                 elapsed_s=(step + 1) * policy_dt,
+                total_s=args.steps * policy_dt,
                 leader_index=leader_index,
             )
             if writer is None:

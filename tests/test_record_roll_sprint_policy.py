@@ -138,7 +138,14 @@ def test_follow_camera_advances_and_retreats_smoothly() -> None:
 
 
 def test_recording_fps_preserves_real_simulation_time() -> None:
-    assert MODULE._recording_fps(0.04, 4) == pytest.approx(6.25)
+    assert MODULE._recording_fps(0.02, 4) == pytest.approx(12.5)
+
+
+def test_race_header_uses_requested_rollout_duration() -> None:
+    assert MODULE._race_header_text(19.1, 20.0, 2) == (
+        "20 m ROLL RACE  |  t 019.1 s / 20.0 s"
+        "  |  camera follows in-lane leader R3"
+    )
 
 
 def test_camera_follows_furthest_forward_robot_that_remains_in_lane() -> None:
