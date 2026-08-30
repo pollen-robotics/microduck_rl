@@ -60,6 +60,8 @@ h2 { margin-bottom: 0; font-size: 1.22rem; letter-spacing: -.035em; }
 .panel { border: 1px solid var(--line); border-radius: .95rem; background: rgba(20, 26, 33, .88); box-shadow: 0 12px 35px rgba(0, 0, 0, .08); }
 .runs-panel, .metrics-panel, .media-panel { padding: 1.35rem; }
 .section-heading { justify-content: space-between; gap: 1rem; margin-bottom: 1.15rem; }
+.media-controls { display: flex; align-items: end; gap: .9rem; }
+.video-selector { display: grid; gap: .25rem; color: var(--muted); font-size: .68rem; font-weight: 700; }
 .section-count { color: var(--muted); font-size: .74rem; }
 .run-grid { display: grid; gap: .7rem; }
 .run-card { padding: 1rem; border: 1px solid var(--line); border-radius: .7rem; background: var(--panel); }

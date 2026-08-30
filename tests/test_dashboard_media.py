@@ -62,3 +62,23 @@ def test_dashboard_lists_all_curated_videos_newest_first(tmp_path, monkeypatch) 
     assert all(item["kind"] == "video" for item in media)
     assert media[0]["name"] == "promotion-11.mp4"
     assert media[-1]["name"] == "promotion-00.mp4"
+
+
+def test_dashboard_separates_roll_sprint_and_stair_video_collections(tmp_path, monkeypatch) -> None:
+    media_root = tmp_path / "artifacts"
+    roll_dir = media_root / "training" / "roll-sprint-samples"
+    stair_dir = media_root / "training" / "stair-policy-samples"
+    roll_dir.mkdir(parents=True)
+    stair_dir.mkdir(parents=True)
+    (roll_dir / "roll-0001.mp4").write_bytes(b"roll")
+    (stair_dir / "stair-0001.mp4").write_bytes(b"stair")
+    monkeypatch.setattr(serve_dashboard, "FEATURED_MEDIA_FILE", tmp_path / "missing.json")
+    monkeypatch.setattr(serve_dashboard, "MEDIA_ROOTS", {"artifacts": media_root})
+
+    state = serve_dashboard.dashboard_state(include_metrics=False)
+    by_name = {item["name"]: item["collection"] for item in state["media"]}
+
+    assert by_name == {"roll-0001.mp4": "roll-sprint", "stair-0001.mp4": "stairs"}
+    assert state["defaultVideoCollection"] == "roll-sprint"
+    counts = {item["id"]: item["videoCount"] for item in state["videoCollections"]}
+    assert counts == {"roll-sprint": 1, "stairs": 1}

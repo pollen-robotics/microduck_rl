@@ -29,10 +29,16 @@
         <div class="section-heading media-heading">
           <div>
             <p class="eyebrow">Newest sample first</p>
-            <h2 id="media-title">Stair-training evolution</h2>
-            <p class="gallery-copy">A 20-second rollout from the newest checkpoint is sampled every 2.5 minutes during active training.</p>
+            <h2 id="media-title">Roll sprint evolution</h2>
+            <p id="gallery-copy" class="gallery-copy">A rollout from the selected policy run.</p>
           </div>
-          <span id="video-count" class="section-count">0 videos</span>
+          <div class="media-controls">
+            <label class="video-selector">
+              <span>Video run</span>
+              <select id="video-collection" class="select-control" aria-label="Choose the training run to visualize"></select>
+            </label>
+            <span id="video-count" class="section-count">0 videos</span>
+          </div>
         </div>
         <div id="media-grid" class="media-grid" aria-live="polite"></div>
         <div id="media-empty" class="empty-state" hidden>No training samples have been recorded yet.</div>

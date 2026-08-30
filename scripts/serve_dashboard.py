@@ -48,6 +48,18 @@ MEDIA_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".mp4", ".webm",
     ".mov", ".m4v", ".avi", ".mkv",
 }
+VIDEO_COLLECTIONS = {
+    "roll-sprint": {
+        "label": "Roll sprint",
+        "description": "Repeated flat-ground rolls from the current sprint policy.",
+        "default": True,
+    },
+    "stairs": {
+        "label": "Stair training",
+        "description": "The existing staircase-policy rollout samples.",
+        "default": False,
+    },
+}
 CHECKPOINT_EXTENSIONS = {".pt", ".pth", ".onnx", ".ckpt"}
 MAX_EVENT_BYTES = 64 * 1024 * 1024
 MAX_SERIES_POINTS = 180
@@ -391,6 +403,7 @@ def _discover_media() -> list[dict[str, Any]]:
                 "source": source,
                 "path": relative_path,
                 "kind": kind,
+                "collection": _media_collection(source, relative_path),
                 "url": "/media/" + source + "/" + relative_path,
                 "size": _human_size(stat.st_size),
                 "modified": _iso_timestamp(stat.st_mtime),
@@ -404,13 +417,43 @@ def _discover_media() -> list[dict[str, Any]]:
     return media
 
 
+def _media_collection(source: str, relative_path: str) -> str:
+    """Map a video path to the dashboard's selectable training run."""
+
+    normalized = f"{source}/{relative_path}".lower().replace("_", "-")
+    if "roll-sprint" in normalized or "rollsprint" in normalized:
+        return "roll-sprint"
+    if "stair" in normalized:
+        return "stairs"
+    # Curated legacy media is staircase media by convention. Keep unknown
+    # images/videos available without making them look like the new run.
+    return "stairs"
+
+
 def dashboard_state(*, include_metrics: bool = True) -> dict[str, Any]:
     del include_metrics
     media = _discover_media()
+    video_counts = {
+        collection_id: sum(
+            item["kind"] == "video" and item["collection"] == collection_id
+            for item in media
+        )
+        for collection_id in VIDEO_COLLECTIONS
+    }
+    video_collections = [
+        {
+            "id": collection_id,
+            **definition,
+            "videoCount": video_counts[collection_id],
+        }
+        for collection_id, definition in VIDEO_COLLECTIONS.items()
+    ]
     return {
         "generatedAt": _iso_timestamp(time.time()),
         "repo": REPO_ROOT.name,
         "media": media,
+        "videoCollections": video_collections,
+        "defaultVideoCollection": "roll-sprint",
         "summary": {
             "media": len(media),
         },

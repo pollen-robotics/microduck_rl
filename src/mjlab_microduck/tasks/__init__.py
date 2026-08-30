@@ -131,6 +131,10 @@ from .microduck_roulade_env_cfg import (
     make_microduck_roulade_env_cfg,
     MicroduckRouladeRlCfg,
 )
+from .microduck_roll_sprint_env_cfg import (
+    make_microduck_roll_sprint_env_cfg,
+    MicroduckRollSprintRlCfg,
+)
 from .microduck_stairs_env_cfg import (
     make_microduck_stairs_env_cfg,
     MicroduckStairsRlCfg,
@@ -362,6 +366,15 @@ register_mjlab_task(
     env_cfg=make_microduck_roulade_env_cfg(),
     play_env_cfg=make_microduck_roulade_env_cfg(play=True),
     rl_cfg=MicroduckRouladeRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Roll sprint: repeated supported forward rolls, distance released per cycle.
+register_mjlab_task(
+    task_id="Mjlab-Roll-Sprint-Flat-MicroDuck",
+    env_cfg=make_microduck_roll_sprint_env_cfg(),
+    play_env_cfg=make_microduck_roll_sprint_env_cfg(play=True),
+    rl_cfg=MicroduckRollSprintRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
@@ -678,6 +691,7 @@ _BACKLASH_TASKS = (
     ("Mjlab-Velocity-Swizzle-Backlash-MicroDuck", make_microduck_velocity_swizzle_env_cfg, {}, MicroduckSwizzleRlCfg, _BL_ROLLERS),
     ("Mjlab-RollerCrouch-Flat-Backlash-MicroDuck", make_microduck_roller_crouch_env_cfg, {}, MicroduckRollerCrouchRlCfg, _BL_ROLLERS),
     ("Mjlab-RollerSlope-Flat-Backlash-MicroDuck", make_microduck_roller_slope_env_cfg, {}, MicroduckRollerSlopeRlCfg, _BL_ROLLERS),
+    ("Mjlab-Roll-Sprint-Flat-Backlash-MicroDuck", make_microduck_roll_sprint_env_cfg, {}, MicroduckRollSprintRlCfg, _BL_ALLCOL),
 )
 for _task_id, _make_cfg, _kw, _rl_cfg, _robot_cfg in _BACKLASH_TASKS:
     register_mjlab_task(
