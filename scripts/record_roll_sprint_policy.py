@@ -192,14 +192,14 @@ def _project_world_points(
 
 
 def _follow_first_robot(base_env: ManagerBasedRlEnv) -> None:
-    """Track robot 1 forward while preserving the shared four-lane framing."""
+    """Keep robot 1 centered as the straight-lane race diverges."""
     renderer = base_env._offline_renderer
     if renderer is None:
         raise RuntimeError("Offline renderer is not initialized")
     first_position = base_env.scene["robot"].data.root_link_pos_w[0]
     renderer._cam.lookat[:] = (
         float(first_position[0].item()),
-        0.0,
+        float(first_position[1].item()),
         RACE_CAMERA_LOOKAT[2],
     )
 
@@ -253,7 +253,10 @@ def _overlay_race_labels(
 
     max_speeds = max_speeds_mps.detach().cpu().tolist()
     valid_distances = valid_distances_m.detach().cpu().tolist()
-    for index, (pixel, is_visible) in enumerate(zip(pixels, visible, strict=True)):
+    draw_order = (*range(1, len(pixels)), 0)
+    for index in draw_order:
+        pixel = pixels[index]
+        is_visible = visible[index]
         if not is_visible:
             continue
         label = _race_label_text(index, max_speeds[index], valid_distances[index])

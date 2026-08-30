@@ -173,4 +173,4 @@ def test_camera_follows_first_robot_only_along_forward_axis() -> None:
 
     MODULE._follow_first_robot(env)
 
-    assert camera.lookat.tolist() == pytest.approx([8.5, 0.0, 0.08])
+    assert camera.lookat.tolist() == pytest.approx([8.5, -0.42, 0.08])
