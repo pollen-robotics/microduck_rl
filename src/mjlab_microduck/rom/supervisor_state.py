@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 
 
 class SupervisorState(str, Enum):
@@ -59,7 +60,7 @@ class SupervisorTransition:
     releases_slot: bool = False
 
 
-_TRANSITIONS: dict[tuple[SupervisorState, SupervisorEvent], SupervisorTransition] = {
+_TRANSITIONS = MappingProxyType({
     (SupervisorState.NO_CHILD, SupervisorEvent.SPAWN_REQUESTED): SupervisorTransition(
         SupervisorState.SPAWNING, (SupervisorEffect.SPAWN_CHILD,)
     ),
@@ -93,7 +94,7 @@ _TRANSITIONS: dict[tuple[SupervisorState, SupervisorEvent], SupervisorTransition
     (SupervisorState.REAPING, SupervisorEvent.CHILD_REAPED): SupervisorTransition(
         SupervisorState.NO_CHILD, (SupervisorEffect.RELEASE_SLOT,), releases_slot=True
     ),
-}
+})
 
 
 def transition(state: SupervisorState, event: SupervisorEvent) -> SupervisorTransition:

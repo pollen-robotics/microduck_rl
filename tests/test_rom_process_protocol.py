@@ -102,3 +102,154 @@ def test_ack_packet_decodes_its_kind_specific_payload() -> None:
 
     assert isinstance(decoded.payload, AckPayload)
     assert decoded.payload.acknowledgedKind.value == "START"
+
+
+@pytest.mark.parametrize(
+    ("kind", "payload"),
+    [
+        ("HELLO", {"runtimeRevision": "mjlab-microduck@0.1.0"}),
+        ("LOAD", {"bundleDigest": "sha256:" + "2" * 64}),
+        (
+            "READY",
+            {
+                "runtimeRevision": "mjlab-microduck@0.1.0",
+                "bundleDigest": "sha256:" + "2" * 64,
+            },
+        ),
+        ("SHUTDOWN", {"reason": "SUPERVISOR_SHUTDOWN"}),
+    ],
+)
+def test_lifecycle_messages_require_a_null_task_id(kind: str, payload: dict[str, object]) -> None:
+    """Giving a lifecycle packet a task ID would bind process setup to the wrong task."""
+    message = RuntimeMessage(
+        kind=kind,
+        generation=7,
+        operationSequence=1,
+        taskId=None,
+        payload=payload,
+    )
+
+    assert decode_packet(encode_packet(message)).taskId is None
+
+
+@pytest.mark.parametrize(
+    ("kind", "task_id", "payload"),
+    [
+        ("HELLO", "0" * 32, {"runtimeRevision": "mjlab-microduck@0.1.0"}),
+        ("SHUTDOWN", "0" * 32, {"reason": "SUPERVISOR_SHUTDOWN"}),
+        ("START", None, _start_message().payload),
+        ("COMMAND", None, {"parameters": {"vxMps": 0.0}, "leaseMs": 500}),
+    ],
+)
+def test_message_rejects_task_id_in_the_wrong_lifecycle_scope(
+    kind: str, task_id: str | None, payload: object
+) -> None:
+    """Weak task scoping could apply a task operation to a process lifecycle packet."""
+    with pytest.raises(ValidationError, match="taskId"):
+        RuntimeMessage(
+            kind=kind,
+            generation=7,
+            operationSequence=1,
+            taskId=task_id,
+            payload=payload,
+        )
+
+
+def test_status_request_and_response_have_unambiguous_wire_forms() -> None:
+    """Conflating a status poll with a snapshot would force a parent to invent robot state."""
+    request = RuntimeMessage(
+        kind="STATUS",
+        generation=7,
+        operationSequence=2,
+        taskId="0" * 32,
+        payload={},
+    )
+    response = RuntimeMessage(
+        kind="STATUS",
+        generation=7,
+        operationSequence=2,
+        taskId="0" * 32,
+        payload={"status": _robot_status_wire()},
+    )
+
+    assert decode_packet(encode_packet(request)).payload.model_dump() == {}
+    assert decode_packet(encode_packet(response)).payload.model_dump(
+        mode="json", by_alias=True, exclude_none=True
+    ) == {
+        "status": _robot_status_wire()
+    }
+
+
+def test_ready_echoes_only_the_verified_runtime_and_bundle_identity() -> None:
+    """Dropping the bundle digest would let an unqualified child claim readiness."""
+    message = RuntimeMessage(
+        kind="READY",
+        generation=7,
+        operationSequence=3,
+        taskId=None,
+        payload={
+            "runtimeRevision": "mjlab-microduck@0.1.0",
+            "bundleDigest": "sha256:" + "2" * 64,
+        },
+    )
+
+    assert decode_packet(encode_packet(message)).payload.model_dump() == {
+        "runtimeRevision": "mjlab-microduck@0.1.0",
+        "bundleDigest": "sha256:" + "2" * 64,
+    }
+    with pytest.raises(ValidationError):
+        RuntimeMessage(
+            kind="READY",
+            generation=7,
+            operationSequence=3,
+            taskId=None,
+            payload={"runtimeRevision": "mjlab-microduck@0.1.0"},
+        )
+
+
+def test_error_payload_allows_only_code_owned_sanitized_detail() -> None:
+    """Permitting free-form native error text could leak host internals across IPC."""
+    message = RuntimeMessage(
+        kind="ERROR",
+        generation=7,
+        operationSequence=4,
+        taskId="0" * 32,
+        payload={"code": "OPERATION_FAILED", "detail": {"retryable": False}},
+    )
+
+    assert decode_packet(encode_packet(message)).payload.model_dump() == {
+        "code": "OPERATION_FAILED",
+        "detail": {"retryable": False},
+    }
+    with pytest.raises(ValidationError):
+        RuntimeMessage(
+            kind="ERROR",
+            generation=7,
+            operationSequence=4,
+            taskId="0" * 32,
+            payload={
+                "code": "OPERATION_FAILED",
+                "detail": {"retryable": False, "message": "/proc/123/cmdline"},
+            },
+        )
+
+
+def _robot_status_wire() -> dict[str, object]:
+    return {
+        "schema": "BIPED_POSE_V1",
+        "timestamp": "2026-08-29T00:00:00Z",
+        "basePositionM": [0.0, 0.0, 0.0],
+        "baseOrientationXyzw": [0.0, 0.0, 0.0, 1.0],
+        "baseLinearVelocityMps": [0.0, 0.0, 0.0],
+        "baseAngularVelocityRadps": [0.0, 0.0, 0.0],
+        "jointPositionsRad": [0.0] * 14,
+        "jointVelocitiesRadps": [0.0] * 14,
+        "policyTarget": {},
+        "requestedMotion": {},
+        "appliedMotion": {},
+        "simulationTimeS": 0.0,
+        "loopFrequencyHz": 50.0,
+        "fallen": False,
+        "limp": False,
+        "health": {},
+    }

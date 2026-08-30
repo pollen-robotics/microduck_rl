@@ -10,12 +10,18 @@ from __future__ import annotations
 
 import json
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    Field,
+    StrictBool,
+    StringConstraints,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from .contracts import (
-    BoundedDescription,
     BoundedIdentifier,
     BoundedPath,
     ContractModel,
@@ -31,6 +37,12 @@ PACKET_MAX_BYTES = 65_536
 _TASK_ID_PATTERN = r"^[0-9a-f]{32}$"
 _DIGEST_PATTERN = r"^sha256:[0-9a-f]{64}$"
 _UINT64_MAX = 2**64 - 1
+ErrorCode = Annotated[
+    str,
+    StringConstraints(
+        strict=True, min_length=1, max_length=64, pattern=r"^[A-Z][A-Z0-9_]*$"
+    ),
+]
 
 
 class ProtocolViolation(ValueError):
@@ -73,7 +85,13 @@ class CommandPayload(ContractModel):
     leaseMs: int = Field(strict=True, gt=0, le=60_000)
 
 
+class StatusRequestPayload(ContractModel):
+    """The empty parent-to-child status poll payload."""
+
+
 class StatusPayload(ContractModel):
+    """The child-to-parent status snapshot payload."""
+
     status: RobotStatus
 
 
@@ -87,6 +105,7 @@ class ShutdownPayload(ContractModel):
 
 class ReadyPayload(ContractModel):
     runtimeRevision: BoundedIdentifier
+    bundleDigest: str = Field(pattern=_DIGEST_PATTERN)
 
 
 class AckPayload(ContractModel):
@@ -106,9 +125,15 @@ class TerminalPayload(ContractModel):
     evidence: TaskEvidence
 
 
+class ErrorDetail(ContractModel):
+    """Code-owned error metadata safe to expose to the supervisor."""
+
+    retryable: StrictBool
+
+
 class ErrorPayload(ContractModel):
-    code: BoundedIdentifier
-    message: BoundedDescription
+    code: ErrorCode
+    detail: ErrorDetail
 
 
 type RuntimePayload = (
@@ -116,6 +141,7 @@ type RuntimePayload = (
     | LoadPayload
     | StartPayload
     | CommandPayload
+    | StatusRequestPayload
     | StatusPayload
     | ZeroAndStopPayload
     | ShutdownPayload
@@ -130,7 +156,6 @@ _PAYLOAD_TYPES: dict[RuntimeMessageKind, type[RuntimePayload]] = {
     RuntimeMessageKind.LOAD: LoadPayload,
     RuntimeMessageKind.START: StartPayload,
     RuntimeMessageKind.COMMAND: CommandPayload,
-    RuntimeMessageKind.STATUS: StatusPayload,
     RuntimeMessageKind.ZERO_AND_STOP: ZeroAndStopPayload,
     RuntimeMessageKind.SHUTDOWN: ShutdownPayload,
     RuntimeMessageKind.READY: ReadyPayload,
@@ -138,6 +163,25 @@ _PAYLOAD_TYPES: dict[RuntimeMessageKind, type[RuntimePayload]] = {
     RuntimeMessageKind.TERMINAL: TerminalPayload,
     RuntimeMessageKind.ERROR: ErrorPayload,
 }
+
+_LIFECYCLE_MESSAGE_KINDS = frozenset(
+    {
+        RuntimeMessageKind.HELLO,
+        RuntimeMessageKind.LOAD,
+        RuntimeMessageKind.READY,
+        RuntimeMessageKind.SHUTDOWN,
+    }
+)
+
+
+def _payload_type(kind: RuntimeMessageKind, payload: object) -> type[RuntimePayload]:
+    if kind is RuntimeMessageKind.STATUS:
+        return (
+            StatusRequestPayload
+            if isinstance(payload, StatusRequestPayload) or payload == {}
+            else StatusPayload
+        )
+    return _PAYLOAD_TYPES[kind]
 
 
 class RuntimeMessage(ContractModel):
@@ -147,7 +191,7 @@ class RuntimeMessage(ContractModel):
     kind: RuntimeMessageKind
     generation: int = Field(strict=True, ge=0, le=_UINT64_MAX)
     operationSequence: int = Field(strict=True, ge=0, le=_UINT64_MAX)
-    taskId: str = Field(pattern=_TASK_ID_PATTERN)
+    taskId: str | None = Field(default=None, pattern=_TASK_ID_PATTERN)
     payload: RuntimePayload
 
     @model_validator(mode="before")
@@ -160,8 +204,8 @@ class RuntimeMessage(ContractModel):
             parsed_kind = RuntimeMessageKind(kind)
         except (TypeError, ValueError):
             return value
-        payload_type = _PAYLOAD_TYPES[parsed_kind]
         payload = value.get("payload")
+        payload_type = _payload_type(parsed_kind, payload)
         value = value.copy()
         value["kind"] = parsed_kind
         if not isinstance(payload, payload_type):
@@ -170,8 +214,13 @@ class RuntimeMessage(ContractModel):
 
     @model_validator(mode="after")
     def payload_matches_kind(self) -> RuntimeMessage:
-        if not isinstance(self.payload, _PAYLOAD_TYPES[self.kind]):
+        payload_type = _payload_type(self.kind, self.payload)
+        if not isinstance(self.payload, payload_type):
             raise TypeError("IPC payload does not match message kind")
+        if self.kind in _LIFECYCLE_MESSAGE_KINDS and self.taskId is not None:
+            raise ValueError("lifecycle IPC messages require taskId to be null")
+        if self.kind not in _LIFECYCLE_MESSAGE_KINDS and self.taskId is None:
+            raise ValueError("task-scoped IPC messages require a taskId")
         return self
 
     @classmethod

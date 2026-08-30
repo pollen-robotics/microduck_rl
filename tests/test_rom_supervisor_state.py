@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+import mjlab_microduck.rom.supervisor_state as supervisor_state_module
 from mjlab_microduck.rom.supervisor_state import (
     SupervisorEffect,
     SupervisorEvent,
@@ -11,28 +12,33 @@ from mjlab_microduck.rom.supervisor_state import (
 
 
 @pytest.mark.parametrize(
-    ("state", "event", "next_state", "releases_slot"),
+    ("state", "event", "next_state", "effects", "releases_slot"),
     [
-        ("NO_CHILD", "SPAWN_REQUESTED", "SPAWNING", False),
-        ("SPAWNING", "READY_RECEIVED", "IDLE", True),
-        ("IDLE", "START_SENT", "STARTING", False),
-        ("STARTING", "START_ACK", "RUNNING", False),
-        ("RUNNING", "STOP_CLAIMED", "STOPPING", False),
-        ("STOPPING", "TERMINAL_ACK", "IDLE", True),
-        ("STARTING", "OPERATION_TIMEOUT", "QUARANTINED", False),
-        ("QUARANTINED", "SIGTERM_SENT", "TERMINATING", False),
-        ("TERMINATING", "TERM_TIMEOUT", "KILLING", False),
-        ("KILLING", "SIGKILL_SENT", "REAPING", False),
-        ("REAPING", "CHILD_REAPED", "NO_CHILD", True),
+        ("NO_CHILD", "SPAWN_REQUESTED", "SPAWNING", ("SPAWN_CHILD",), False),
+        ("SPAWNING", "READY_RECEIVED", "IDLE", ("RELEASE_SLOT",), True),
+        ("IDLE", "START_SENT", "STARTING", ("SEND_START",), False),
+        ("STARTING", "START_ACK", "RUNNING", ("PERSIST_RUNNING",), False),
+        ("RUNNING", "STOP_CLAIMED", "STOPPING", ("SEND_STOP",), False),
+        ("STOPPING", "TERMINAL_ACK", "IDLE", ("RELEASE_SLOT",), True),
+        ("STARTING", "OPERATION_TIMEOUT", "QUARANTINED", ("QUARANTINE",), False),
+        ("QUARANTINED", "SIGTERM_SENT", "TERMINATING", ("SEND_SIGTERM",), False),
+        ("TERMINATING", "TERM_TIMEOUT", "KILLING", ("SEND_SIGKILL",), False),
+        ("KILLING", "SIGKILL_SENT", "REAPING", ("REAP",), False),
+        ("REAPING", "CHILD_REAPED", "NO_CHILD", ("RELEASE_SLOT",), True),
     ],
 )
 def test_supervisor_transition_table(
-    state: str, event: str, next_state: str, releases_slot: bool
+    state: str,
+    event: str,
+    next_state: str,
+    effects: tuple[str, ...],
+    releases_slot: bool,
 ) -> None:
     """Changing a lifecycle edge can lose exclusive motion-slot ownership."""
     result = transition(SupervisorState(state), SupervisorEvent(event))
 
     assert result.next_state == SupervisorState(next_state)
+    assert result.effects == tuple(SupervisorEffect(effect) for effect in effects)
     assert result.releases_slot is releases_slot
 
 
@@ -68,3 +74,15 @@ def test_every_state_event_pair_is_explicit_or_quarantines() -> None:
             else:
                 assert result.next_state is SupervisorState.QUARANTINED
                 assert result.effects == (SupervisorEffect.QUARANTINE,)
+
+
+def test_transition_table_cannot_be_mutated_by_an_importer() -> None:
+    """Mutable lifecycle data would let unrelated code disable process quarantine."""
+    key = (SupervisorState.RUNNING, SupervisorEvent.STOP_CLAIMED)
+
+    with pytest.raises(TypeError):
+        supervisor_state_module._TRANSITIONS[key] = supervisor_state_module.SupervisorTransition(
+            SupervisorState.IDLE
+        )
+
+    assert transition(*key).effects == (SupervisorEffect.SEND_STOP,)
