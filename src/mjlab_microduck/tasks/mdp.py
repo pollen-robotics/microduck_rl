@@ -12706,6 +12706,63 @@ def roll_sprint_straightness_penalty(
     return lane_offset * roll_activity
 
 
+def _roll_sprint_roll_penalty_mask(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """One only while rolling, not during recovery or lane repositioning."""
+    transition_mode = (
+        env._roll_sprint_awaiting_recovery
+        | env._roll_sprint_self_righting
+        | env._roll_sprint_self_righted_now
+        | env._roll_sprint_awaiting_reposition
+    )
+    return (~transition_mode).float()
+
+
+def _roll_sprint_lane_reward_mask(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Pause lane shaping while getting up, but keep it for repositioning."""
+    recovery_mode = (
+        env._roll_sprint_awaiting_recovery
+        | env._roll_sprint_self_righting
+        | env._roll_sprint_self_righted_now
+    )
+    return (~recovery_mode).float()
+
+
+def roll_sprint_sagittal_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Apply roll-plane angular pressure only during roll attempts."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return roulade_sagittal_penalty(
+        env, asset_cfg
+    ) * _roll_sprint_roll_penalty_mask(env)
+
+
+def roll_sprint_lateral_velocity_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Apply lateral-speed pressure only during roll attempts."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return roulade_lateral_velocity_penalty(
+        env, asset_cfg
+    ) * _roll_sprint_roll_penalty_mask(env)
+
+
+def roll_sprint_flatness_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Apply shoulder/side pressure only during roll attempts."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return roulade_flatness_penalty(
+        env, asset_cfg
+    ) * _roll_sprint_roll_penalty_mask(env)
+
+
 def roll_sprint_lane_centering_progress(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -12713,7 +12770,11 @@ def roll_sprint_lane_centering_progress(
     """Potential-based reward for reducing lane offset, with no idle annuity."""
     asset = env.scene[asset_cfg.name]
     _update_roll_sprint_state(env, asset)
-    return env._roll_sprint_lane_centering_delta / env.step_dt
+    return (
+        env._roll_sprint_lane_centering_delta
+        / env.step_dt
+        * _roll_sprint_lane_reward_mask(env)
+    )
 
 
 def roll_sprint_reposition_command(
@@ -12778,20 +12839,20 @@ def roll_sprint_self_right_upright_progress(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Self-right-only delta cosine tilt, with no upright annuity."""
+    """Self-right-only cosine-tilt potential rate, with no upright annuity."""
     asset = env.scene[asset_cfg.name]
     _update_roll_sprint_state(env, asset)
-    return env._roll_sprint_self_right_upright_delta
+    return env._roll_sprint_self_right_upright_delta / env.step_dt
 
 
 def roll_sprint_self_right_height_progress(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Self-right-only capped trunk-height potential progress."""
+    """Self-right-only capped trunk-height potential rate."""
     asset = env.scene[asset_cfg.name]
     _update_roll_sprint_state(env, asset)
-    return env._roll_sprint_self_right_height_delta
+    return env._roll_sprint_self_right_height_delta / env.step_dt
 
 
 def roll_sprint_self_right_upward_velocity(

@@ -131,11 +131,11 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         params={"omega_max": 7.0},
     )
     cfg.rewards["roll_sprint_sagittal"] = RewardTermCfg(
-        func=microduck_mdp.roulade_sagittal_penalty,
+        func=microduck_mdp.roll_sprint_sagittal_penalty,
         weight=-0.05,
     )
     cfg.rewards["roll_sprint_lateral_vel"] = RewardTermCfg(
-        func=microduck_mdp.roulade_lateral_velocity_penalty,
+        func=microduck_mdp.roll_sprint_lateral_velocity_penalty,
         weight=-0.35,
     )
     cfg.rewards["roll_sprint_straightness"] = RewardTermCfg(
@@ -148,7 +148,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         weight=4.0,
     )
     cfg.rewards["roll_sprint_flatness"] = RewardTermCfg(
-        func=microduck_mdp.roulade_flatness_penalty,
+        func=microduck_mdp.roll_sprint_flatness_penalty,
         weight=-0.25,
     )
     cfg.rewards["roll_sprint_impact"] = RewardTermCfg(

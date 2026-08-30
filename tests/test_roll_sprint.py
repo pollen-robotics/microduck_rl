@@ -33,6 +33,7 @@ def _fake_env(num_envs: int = 1):
     identity[:, 0] = 1.0
     data = SimpleNamespace(
         root_link_ang_vel_b=torch.zeros(num_envs, 3),
+        root_link_lin_vel_b=torch.zeros(num_envs, 3),
         root_link_lin_vel_w=torch.zeros(num_envs, 3),
         root_link_pos_w=torch.zeros(num_envs, 3),
         root_link_quat_w=identity,
@@ -650,6 +651,57 @@ def test_self_right_rewards_are_one_shot_and_lying_cannot_farm(monkeypatch):
     assert mdp.roll_sprint_self_right_success_rate(env)[0] == 0.0
     assert mdp.roll_sprint_self_right_upright_progress(env)[0] == 0.0
     assert mdp.roll_sprint_self_right_height_progress(env)[0] == 0.0
+
+
+def test_self_right_potentials_are_rates_and_roll_costs_pause_during_recovery(
+    monkeypatch,
+):
+    env, asset = _fake_env(4)
+    mdp._roll_sprint_state(env)
+    monkeypatch.setattr(mdp, "_update_roll_sprint_state", lambda env, asset: None)
+    monkeypatch.setattr(
+        mdp,
+        "_lateral_axis_z",
+        lambda quat: torch.ones(env.num_envs),
+    )
+    env._roll_sprint_self_righting[:] = torch.tensor([True, False, False, False])
+    env._roll_sprint_self_righted_now[:] = False
+    env._roll_sprint_awaiting_recovery[:] = torch.tensor(
+        [True, False, True, False]
+    )
+    env._roll_sprint_awaiting_reposition[:] = torch.tensor(
+        [False, True, False, False]
+    )
+    env._roll_sprint_self_right_upright_delta[:] = torch.tensor(
+        [0.20, 0.0, 0.0, 0.0]
+    )
+    env._roll_sprint_self_right_height_delta[:] = torch.tensor(
+        [0.01, 0.0, 0.0, 0.0]
+    )
+    env._roll_sprint_lane_centering_delta[:] = torch.tensor(
+        [-0.04, 0.04, -0.04, -0.04]
+    )
+    asset.data.root_link_ang_vel_b[:, 0] = 2.0
+    asset.data.root_link_lin_vel_b[:, 1] = 0.5
+
+    assert mdp.roll_sprint_self_right_upright_progress(env).tolist() == pytest.approx(
+        [10.0, 0.0, 0.0, 0.0]
+    )
+    assert mdp.roll_sprint_self_right_height_progress(env).tolist() == pytest.approx(
+        [0.5, 0.0, 0.0, 0.0]
+    )
+    assert mdp.roll_sprint_sagittal_penalty(env).tolist() == pytest.approx(
+        [0.0, 0.0, 0.0, 4.0]
+    )
+    assert mdp.roll_sprint_lateral_velocity_penalty(env).tolist() == pytest.approx(
+        [0.0, 0.0, 0.0, 0.25]
+    )
+    assert mdp.roll_sprint_flatness_penalty(env).tolist() == pytest.approx(
+        [0.0, 0.0, 0.0, 1.0]
+    )
+    assert mdp.roll_sprint_lane_centering_progress(env).tolist() == pytest.approx(
+        [0.0, 2.0, 0.0, -2.0]
+    )
 
 
 def test_roll_recover_reroll_credits_two_cycles(monkeypatch):
