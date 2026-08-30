@@ -47,7 +47,7 @@ from mjlab_microduck.rom.qualification import (
     ReleaseConfiguration,
     qualify_and_promote,
 )
-from mjlab_microduck.rom.runtime import canonical_tracking_mean
+from mjlab_microduck.rom.runtime import RuntimeHandle, canonical_tracking_mean
 from mjlab_microduck.rom.service import SimulatorTaskService
 from mjlab_microduck.rom.store import SqliteTaskStore
 
@@ -738,6 +738,58 @@ def test_emergency_stop_is_independent_of_the_primary_runtime_lock(
         holder.join(timeout=0.2)
 
 
+def test_emergency_retains_handle_until_idempotent_handle_specific_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Clearing the emergency handle makes the only valid thread cleanup impossible."""
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root)
+    runtime = MicroduckMujocoRuntime(root, bundle, realtime=True)
+    request = _request().model_copy(update={"bundleDigest": bundle.bundleDigest})
+    handle = runtime.start(bundle.actions[0], request)
+    policy_thread = runtime._thread
+    assert policy_thread is not None
+
+    runtime.emergency_stop("RUNTIME_UNRESPONSIVE")
+
+    assert runtime._active_handle == handle
+    assert runtime._active_request == request
+    assert runtime._thread is policy_thread
+    assert runtime._emergency_cleanup_required is True
+    replacement = request.model_copy(update={"taskId": "2" * 32})
+    with pytest.raises(RuntimeError):
+        runtime.start(bundle.actions[0], replacement)
+
+    first = runtime.safe_stop(handle, "RUNTIME_UNRESPONSIVE")
+    second = runtime.safe_stop(handle, "RUNTIME_UNRESPONSIVE")
+
+    assert second == first
+    assert first.stopReason == "RUNTIME_UNRESPONSIVE"
+    assert runtime._active_handle is None
+    assert runtime._active_action is None
+    assert runtime._active_request is None
+    assert runtime._active_policy is None
+    assert runtime._active_session is None
+    assert runtime._thread is None
+    assert runtime._emergency_cleanup_required is False
+    assert not policy_thread.is_alive()
+    np.testing.assert_array_equal(runtime._requested_command.twist, np.zeros(3))
+    np.testing.assert_array_equal(runtime._command.twist, np.zeros(3))
+    np.testing.assert_array_equal(
+        runtime._data.ctrl[runtime._actuator_indices], np.zeros(14)
+    )
+    np.testing.assert_array_equal(
+        runtime._model.actuator_gainprm[runtime._actuator_indices],
+        np.zeros((14, 10)),
+    )
+    np.testing.assert_array_equal(
+        runtime._model.actuator_biasprm[runtime._actuator_indices],
+        np.zeros((14, 10)),
+    )
+    with pytest.raises(RuntimeError, match="restart"):
+        runtime.start(bundle.actions[0], replacement)
+
+
 def test_late_blocked_command_cannot_overwrite_emergency_zero_intent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1174,6 +1226,130 @@ def test_realtime_emergency_after_final_start_check_revokes_publication(
         policy_thread = runtime._thread
         if policy_thread is not None:
             policy_thread.join(timeout=1.0)
+        create_thread.join(timeout=0.2)
+        stop_thread.join(timeout=0.2)
+
+
+@pytest.mark.parametrize("stop_kind", ["cancel", "watchdog"])
+def test_realtime_stop_after_runtime_start_return_uses_retained_cleanup_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop_kind: str
+) -> None:
+    """The service must still clean the handle returned just before registration."""
+    root = tmp_path / "bundle"
+    bundle = _write_verified_bundle(root)
+    runtime = MicroduckMujocoRuntime(root, bundle, realtime=True)
+    service = SimulatorTaskService(
+        bundle,
+        SqliteTaskStore(tmp_path / "tasks.sqlite3"),
+        runtime,
+        runtimeCallTimeoutS=0.5,
+    )
+    request = _request().model_copy(update={"bundleDigest": bundle.bundleDigest})
+    original_start = runtime.start
+    start_returned = threading.Event()
+    registration_release = threading.Event()
+    captured: dict[str, object] = {}
+
+    def block_after_runtime_start(action, runtime_request):
+        handle = original_start(action, runtime_request)
+        captured["handle"] = handle
+        captured["thread"] = runtime._thread
+        start_returned.set()
+        assert registration_release.wait(timeout=1.0)
+        return handle
+
+    monkeypatch.setattr(runtime, "start", block_after_runtime_start)
+    create_done = threading.Event()
+    stop_done = threading.Event()
+    create_outcome: dict[str, object] = {}
+    stop_outcome: dict[str, object] = {}
+
+    def invoke_create() -> None:
+        try:
+            create_outcome["result"] = service.create_task(request)
+        except BaseException as exc:  # noqa: BLE001 - assert concurrent outcome.
+            create_outcome["error"] = exc
+        finally:
+            create_done.set()
+
+    def invoke_stop() -> None:
+        try:
+            stop_outcome["result"] = (
+                service.cancel_task(request.taskId)
+                if stop_kind == "cancel"
+                else service.watchdog_failed()
+            )
+        except BaseException as exc:  # noqa: BLE001 - assert concurrent outcome.
+            stop_outcome["error"] = exc
+        finally:
+            stop_done.set()
+
+    create_thread = threading.Thread(target=invoke_create, daemon=True)
+    stop_thread = threading.Thread(target=invoke_stop, daemon=True)
+    create_thread.start()
+    assert start_returned.wait(timeout=0.2)
+    handle = captured["handle"]
+    policy_thread = captured["thread"]
+    assert isinstance(handle, RuntimeHandle)
+    assert isinstance(policy_thread, threading.Thread)
+    with service._lock:
+        first_generation = service._active
+        assert first_generation is not None
+        assert first_generation.handle is None
+        assert first_generation.start_pending is True
+
+    stop_thread.start()
+    assert runtime._emergency_event.wait(timeout=0.2)
+
+    try:
+        with service._lock:
+            assert service._active is first_generation
+            assert service._active.handle is None
+        assert runtime._active_handle == handle
+        assert runtime._active_request == request
+        assert runtime._emergency_cleanup_required is True
+
+        registration_release.set()
+        assert create_done.wait(timeout=0.5)
+        assert stop_done.wait(timeout=0.5)
+        expected_state = "CANCELLED" if stop_kind == "cancel" else "FAILED"
+        expected_reason = "CANCELLED" if stop_kind == "cancel" else "WATCHDOG_FAILURE"
+        terminal = service.get_task(request.taskId)
+        assert terminal.state == expected_state
+        assert terminal.stopReason == expected_reason
+        assert terminal.evidence is not None
+        assert terminal.evidence.metrics.get("safetyFailure") != "SAFE_STOP_FAILED"
+        assert "safetyCode" not in service.events_after(request.taskId, -1)[-1].payload
+        assert "error" not in create_outcome
+        assert "error" not in stop_outcome
+        assert service._active is None
+        assert service._next_generation == first_generation.generation + 1
+
+        repeated = runtime.safe_stop(handle, expected_reason)
+        assert repeated == runtime._stopped_evidence[request.taskId]
+        assert runtime._active_handle is None
+        assert runtime._active_action is None
+        assert runtime._active_request is None
+        assert runtime._active_policy is None
+        assert runtime._active_session is None
+        assert runtime._thread is None
+        assert runtime._emergency_cleanup_required is False
+        assert not policy_thread.is_alive()
+        np.testing.assert_array_equal(runtime._requested_command.twist, np.zeros(3))
+        np.testing.assert_array_equal(runtime._command.twist, np.zeros(3))
+        np.testing.assert_array_equal(
+            runtime._data.ctrl[runtime._actuator_indices], np.zeros(14)
+        )
+        np.testing.assert_array_equal(
+            runtime._model.actuator_gainprm[runtime._actuator_indices],
+            np.zeros((14, 10)),
+        )
+        np.testing.assert_array_equal(
+            runtime._model.actuator_biasprm[runtime._actuator_indices],
+            np.zeros((14, 10)),
+        )
+    finally:
+        registration_release.set()
         create_thread.join(timeout=0.2)
         stop_thread.join(timeout=0.2)
 

@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import Enum
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from typing import Any
@@ -120,6 +121,7 @@ class _RuntimeOperation:
     completed: Event = field(default_factory=Event)
     result: Any = None
     error: BaseException | None = None
+    finalizer: Callable[[], None] | None = None
 
 
 class _RuntimeDispatcher:
@@ -184,9 +186,20 @@ class _RuntimeDispatcher:
             except BaseException as exc:  # noqa: BLE001 - preserve runtime-defined faults.
                 operation.error = exc
             finally:
-                operation.completed.set()
+                try:
+                    operation.completed.set()
+                finally:
+                    if operation.finalizer is not None:
+                        operation.finalizer()
                 self._queue.task_done()
                 del operation  # release service closures while idle
+
+
+class _StartLifecycle(Enum):
+    PENDING = "PENDING"
+    HANDLE_REGISTERED = "HANDLE_REGISTERED"
+    COMPLETION_OBSERVED = "COMPLETION_OBSERVED"
+    CLEANUP_DONE = "CLEANUP_DONE"
 
 
 @dataclass
@@ -197,8 +210,8 @@ class _ActiveTask:
     stop_event: Event = field(default_factory=Event)
     cancel_recorded: bool = False
     handle: RuntimeHandle | None = None
-    start_pending: bool = False
-    cleanup_pending: bool = False
+    start_lifecycle: _StartLifecycle | None = None
+    emergency_completed: Event = field(default_factory=Event)
     deadline: float | None = None
     continuous: bool = False
     stop_claimed: bool = False
@@ -207,6 +220,21 @@ class _ActiveTask:
     command_epoch: int = 0
     latest_command_sequence: int | None = None
     latest_command_hash: str | None = None
+
+    @property
+    def start_pending(self) -> bool:
+        return self.start_lifecycle in {
+            _StartLifecycle.PENDING,
+            _StartLifecycle.HANDLE_REGISTERED,
+        }
+
+    @property
+    def cleanup_pending(self) -> bool:
+        return (
+            self.terminalized
+            and self.start_lifecycle is not None
+            and self.start_lifecycle is not _StartLifecycle.CLEANUP_DONE
+        )
 
 
 @dataclass
@@ -599,11 +627,15 @@ class SimulatorTaskService:
             with self._lock:
                 if not self._normal_operation_is_current_locked(active):
                     raise _RuntimeCallSuperseded("start")
-                active.start_pending = True
+                active.start_lifecycle = _StartLifecycle.PENDING
             handle = self._invoke_runtime(
                 "start",
                 lambda: self._start_and_register_handle(active, action, request),
                 active,
+                completion_observer=lambda operation: self._observe_start_completion(
+                    active, operation
+                ),
+                finalizer=lambda: self._finalize_start_operation(active),
             )
             assert request.leaseMs is not None
             deadline = self._monotonic_clock() + request.leaseMs / 1_000
@@ -639,7 +671,7 @@ class SimulatorTaskService:
     ):
         """Claim one stop, run bounded safety calls, and persist one terminal state."""
         with self._lock:
-            if self._active is not active or active.terminalized:
+            if not self._active_generation_is_locked(active) or active.terminalized:
                 return self._store.get(active.request.taskId)
             if active.stop_claimed:
                 return self._store.get(active.request.taskId)
@@ -658,6 +690,8 @@ class SimulatorTaskService:
                 self._runtime.emergency_stop(reason)
             except Exception:  # noqa: BLE001 - ordered cleanup must still be attempted.
                 safety_failures.append("EMERGENCY_STOP_FAILED")
+            finally:
+                active.emergency_completed.set()
         if not emergency:
             try:
                 self._invoke_runtime(
@@ -695,7 +729,7 @@ class SimulatorTaskService:
         if safety_code is not None:
             payload["safetyCode"] = safety_code
         with self._lock:
-            if self._active is not active or active.terminalized:
+            if not self._active_generation_is_locked(active) or active.terminalized:
                 return self._store.get(active.request.taskId)
             active.terminalized = True
             result = self._persist_terminal(
@@ -705,6 +739,10 @@ class SimulatorTaskService:
                 evidence=evidence,
                 payload=payload,
             )
+            if active.start_lifecycle is _StartLifecycle.HANDLE_REGISTERED:
+                return result
+            if active.start_lifecycle is _StartLifecycle.COMPLETION_OBSERVED:
+                active.start_lifecycle = _StartLifecycle.CLEANUP_DONE
             self._active = None
             return result
 
@@ -746,11 +784,15 @@ class SimulatorTaskService:
         active: _ActiveTask | None,
         *,
         guard: Callable[[], bool] | None = None,
+        completion_observer: Callable[[_RuntimeOperation], None] | None = None,
+        finalizer: Callable[[], None] | None = None,
     ) -> Any:
         """Submit one runtime call to the bounded worker and supervise its deadline."""
         if guard is None and active is not None:
             guard = lambda: self._normal_operation_is_current(active)
-        runtime_operation = _RuntimeOperation(operation, function, guard)
+        runtime_operation = _RuntimeOperation(
+            operation, function, guard, finalizer=finalizer
+        )
         try:
             self._runtime_dispatcher.submit(runtime_operation)
         except _RuntimeCallRejected as exc:
@@ -764,6 +806,8 @@ class SimulatorTaskService:
                 self._runtime_unresponsive(active, operation)
                 raise _RuntimeCallTimedOut(operation)
             runtime_operation.completed.wait(remaining)
+        if completion_observer is not None:
+            completion_observer(runtime_operation)
         error = runtime_operation.error
         if isinstance(error, _RuntimeCallRejected):
             self._runtime_unresponsive(active, operation)
@@ -793,30 +837,17 @@ class SimulatorTaskService:
         request: TaskCreateRequest,
     ) -> RuntimeHandle:
         """Retain every live start handle until ordered cleanup has consumed it."""
-        try:
-            handle = self._runtime.start(action, request)
-        except BaseException:
-            with self._lock:
-                if self._active is active:
-                    active.start_pending = False
-                    if active.cleanup_pending:
-                        active.cleanup_pending = False
-                        self._active = None
-            raise
+        handle = self._runtime.start(action, request)
         with self._lock:
-            if self._active is active:
+            if self._active_generation_is_locked(active):
                 active.handle = handle
-                active.start_pending = False
-                cleanup_pending = active.cleanup_pending
-                if not cleanup_pending and not active.terminalized:
-                    return handle
-            else:
-                cleanup_pending = False
-            active.start_pending = False
+                if active.start_lifecycle is _StartLifecycle.PENDING:
+                    active.start_lifecycle = _StartLifecycle.HANDLE_REGISTERED
+                return handle
             emergency = not active.emergency_claimed
             if emergency:
                 active.emergency_claimed = True
-        if cleanup_pending or emergency:
+        if emergency:
             try:
                 self._runtime.emergency_stop("RUNTIME_UNRESPONSIVE")
             except Exception:  # noqa: BLE001 - still attempt handle-specific cleanup.
@@ -826,13 +857,67 @@ class SimulatorTaskService:
             self._runtime.safe_stop(handle, "RUNTIME_UNRESPONSIVE")
         except Exception:  # noqa: BLE001 - the dispatcher is already fail closed.
             return handle
-        finally:
-            if cleanup_pending:
-                with self._lock:
-                    if self._active is active and active.cleanup_pending:
-                        active.cleanup_pending = False
-                        self._active = None
         return handle
+
+    def _observe_start_completion(
+        self, active: _ActiveTask, operation: _RuntimeOperation
+    ) -> None:
+        """Acknowledge start completion only from its submitting control path."""
+        with self._lock:
+            if not self._active_generation_is_locked(active):
+                return
+            if operation.error is None:
+                if (
+                    active.start_lifecycle is _StartLifecycle.HANDLE_REGISTERED
+                    and active.handle == operation.result
+                ):
+                    active.start_lifecycle = _StartLifecycle.COMPLETION_OBSERVED
+                    if active.terminalized:
+                        active.start_lifecycle = _StartLifecycle.CLEANUP_DONE
+                        self._active = None
+            elif active.start_lifecycle is _StartLifecycle.PENDING:
+                active.start_lifecycle = _StartLifecycle.COMPLETION_OBSERVED
+
+    def _finalize_start_operation(self, active: _ActiveTask) -> None:
+        """After completion publication, consume cleanup-only start ownership."""
+        handle: RuntimeHandle | None = None
+        with self._lock:
+            if not self._active_generation_is_locked(active) or not active.terminalized:
+                return
+            if active.start_lifecycle is _StartLifecycle.PENDING:
+                active.start_lifecycle = _StartLifecycle.COMPLETION_OBSERVED
+                active.start_lifecycle = _StartLifecycle.CLEANUP_DONE
+                self._active = None
+                return
+            if active.start_lifecycle is _StartLifecycle.HANDLE_REGISTERED:
+                active.start_lifecycle = _StartLifecycle.COMPLETION_OBSERVED
+            elif active.start_lifecycle is not _StartLifecycle.COMPLETION_OBSERVED:
+                return
+            handle = active.handle
+        assert handle is not None
+        try:
+            self._runtime.emergency_stop("RUNTIME_UNRESPONSIVE")
+        except Exception:  # noqa: BLE001 - still attempt handle-specific cleanup.
+            with self._lock:
+                self._emergency_stop_failed = True
+        try:
+            self._runtime.safe_stop(handle, "RUNTIME_UNRESPONSIVE")
+        except Exception:  # noqa: BLE001 - the failed dispatcher already requires restart.
+            return
+        finally:
+            active.emergency_completed.wait()
+            with self._lock:
+                if (
+                    self._active_generation_is_locked(active)
+                    and active.terminalized
+                    and active.start_lifecycle is _StartLifecycle.COMPLETION_OBSERVED
+                    and active.handle == handle
+                ):
+                    active.start_lifecycle = _StartLifecycle.CLEANUP_DONE
+                    self._active = None
+
+    def _active_generation_is_locked(self, active: _ActiveTask) -> bool:
+        return self._active is active and self._active.generation == active.generation
 
     def _cleanup_handle(self, active: _ActiveTask) -> RuntimeHandle | None:
         """Resolve cleanup ownership when its FIFO dispatcher job actually runs."""
@@ -888,7 +973,7 @@ class SimulatorTaskService:
             self._readiness_failure_reason = "RUNTIME_UNRESPONSIVE"
             if (
                 active is not None
-                and self._active is active
+                and self._active_generation_is_locked(active)
                 and not active.terminalized
             ):
                 active.stop_claimed = True
@@ -897,7 +982,6 @@ class SimulatorTaskService:
                 active.stop_event.set()
                 terminalize = True
                 retain_cleanup_owner = active.start_pending
-                active.cleanup_pending = retain_cleanup_owner
                 if not active.emergency_claimed:
                     active.emergency_claimed = True
                     emergency = True
@@ -910,6 +994,9 @@ class SimulatorTaskService:
             except Exception:  # noqa: BLE001 - durable fail-closed state remains authoritative.
                 with self._lock:
                     self._emergency_stop_failed = True
+            finally:
+                if active is not None:
+                    active.emergency_completed.set()
         if terminalize:
             assert active is not None and active.action is not None
             if not retain_cleanup_owner:

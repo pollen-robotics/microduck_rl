@@ -547,6 +547,108 @@ def test_start_timeout_quarantines_slot_until_late_handle_cleanup_finishes(
     replacement.cancel_task(replacement_request.taskId)
 
 
+def test_start_timeout_after_handle_registration_keeps_cleanup_quarantine(
+    bundle, store, runtime, clock, walk_request, monkeypatch
+):
+    """Publishing the handle before operation completion must not release its slot."""
+    service = SimulatorTaskService(
+        bundle,
+        store,
+        runtime,
+        monotonic_clock=clock,
+        runtimeCallTimeoutS=0.5,
+    )
+    completion_reached = Event()
+    completion_release = Event()
+    emergency_started = Event()
+    emergency_release = Event()
+    original_submit = service._runtime_dispatcher.submit
+    original_emergency_stop = runtime.emergency_stop
+    emergency_call_count = 0
+
+    def block_first_emergency(reason: str) -> None:
+        nonlocal emergency_call_count
+        emergency_call_count += 1
+        if emergency_call_count == 1:
+            emergency_started.set()
+            assert emergency_release.wait(timeout=1.0)
+        original_emergency_stop(reason)
+
+    def intercept_start_completion(operation) -> None:
+        if operation.name == "start":
+            service._runtime_call_timeout_s = 0.05
+            original_completion_set = operation.completed.set
+
+            def block_completion() -> None:
+                completion_reached.set()
+                assert runtime.active_handle == RuntimeHandle(
+                    taskId=walk_request.taskId
+                )
+                assert service._active is not None
+                assert service._active.handle == RuntimeHandle(
+                    taskId=walk_request.taskId
+                )
+                assert service._active.start_pending is True
+                assert completion_release.wait(timeout=1.0)
+                original_completion_set()
+
+            operation.completed.set = block_completion
+        original_submit(operation)
+
+    monkeypatch.setattr(
+        service._runtime_dispatcher, "submit", intercept_start_completion
+    )
+    monkeypatch.setattr(runtime, "emergency_stop", block_first_emergency)
+    runtime.safe_stop_release.clear()
+    create_done, create_outcome, create_thread = _invoke_daemon(
+        lambda: service.create_task(walk_request)
+    )
+    assert completion_reached.wait(timeout=0.5)
+    assert emergency_started.wait(timeout=0.2)
+
+    try:
+        with service._lock:
+            cleanup_owner = service._active
+            assert cleanup_owner is not None
+            assert cleanup_owner.handle == RuntimeHandle(taskId=walk_request.taskId)
+        replacement = walk_request.model_copy(update={"taskId": "8" * 32})
+        with pytest.raises((NotReady, RobotBusy)):
+            service.create_task(replacement)
+        assert store.get(replacement.taskId) is None
+
+        completion_release.set()
+        assert runtime.safe_stop_started.wait(timeout=0.2)
+        with service._lock:
+            assert service._active is cleanup_owner
+        assert runtime.safe_stop_calls[-1] == (
+            RuntimeHandle(taskId=walk_request.taskId),
+            "RUNTIME_UNRESPONSIVE",
+        )
+        runtime.safe_stop_release.set()
+        assert runtime.safe_stopped.wait(timeout=0.2)
+        with service._lock:
+            assert service._active is cleanup_owner
+
+        emergency_release.set()
+        assert create_done.wait(timeout=0.2)
+        terminal = _wait_for_terminal(service, walk_request.taskId)
+        assert terminal.stopReason == "RUNTIME_UNRESPONSIVE"
+    finally:
+        completion_release.set()
+        emergency_release.set()
+        runtime.safe_stop_release.set()
+        create_thread.join(timeout=0.2)
+
+    assert "error" in create_outcome
+    deadline = time.monotonic() + 0.2
+    while time.monotonic() < deadline:
+        with service._lock:
+            if service._active is None:
+                break
+        time.sleep(0.002)
+    assert service._active is None
+
+
 def test_start_timeout_retains_service_owner_until_emergency_attempt_finishes(
     bundle, store, runtime, clock, walk_request, monkeypatch
 ):

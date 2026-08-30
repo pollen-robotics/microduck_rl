@@ -134,6 +134,7 @@ class MicroduckMujocoRuntime:
         self._emergency_guard = threading.Lock()
         self._emergency_invoked = False
         self._emergency_generation = 0
+        self._emergency_cleanup_required = False
         self._wait: Callable[[float], bool] = self._stop_event.wait
         self._thread: threading.Thread | None = None
         self._active_handle: RuntimeHandle | None = None
@@ -857,6 +858,7 @@ class MicroduckMujocoRuntime:
             self._active_policy = None
             self._active_session = None
             self._thread = None
+            self._emergency_cleanup_required = False
             self._limp = self._fatal_reason is not None
             self._stopped_evidence[stopped_task_id] = evidence
             return evidence
@@ -871,11 +873,7 @@ class MicroduckMujocoRuntime:
         self._terminal_reason = reason
         self._limiting_reason = reason
         self._limp = True
-        self._active_handle = None
-        self._active_action = None
-        self._active_request = None
-        self._active_policy = None
-        self._active_session = None
+        self._emergency_cleanup_required = self._active_handle is not None
         zero = DeploymentCommand.zero()
         self._requested_command = zero
         self._command = zero
@@ -1215,6 +1213,7 @@ class MicroduckMujocoRuntime:
         self._active_request = None
         self._active_policy = None
         self._active_session = None
+        self._emergency_cleanup_required = False
         zero = DeploymentCommand.zero()
         self._requested_command = zero
         self._command = zero
