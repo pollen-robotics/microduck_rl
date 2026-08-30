@@ -72,10 +72,12 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     )
     # Primary race score: signed net forward frontier released only after a
     # valid full roll. The MDP term rejects revisits, backward travel, and
-    # positive-path integration within a cycle.
+    # positive-path integration within a cycle. A61 checkpoints 100 and 200
+    # recovered reliably but regressed frontier, so distance is dominant from
+    # iteration zero instead of waiting until iteration 500.
     cfg.rewards["roll_sprint_distance"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_distance,
-        weight=24.0,
+        weight=32.0,
     )
     cfg.rewards["roll_sprint_cycle_rate"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_cycle_rate,
@@ -90,7 +92,9 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     )
     cfg.rewards["roll_sprint_recovered_reroll"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_recovered_reroll_rate,
-        weight=0.5,
+        # One-shot only: reward the missing recovery-to-reroll transition,
+        # never standing or merely remaining upright after recovery.
+        weight=4.0,
     )
     cfg.rewards["roll_sprint_self_right_upright"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_self_right_upright_progress,
@@ -393,8 +397,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
         params={
             "reward_name": "roll_sprint_distance",
             "weight_stages": [
-                {"step": 0, "weight": 24.0},
-                {"step": 500 * 24, "weight": 32.0},
+                {"step": 0, "weight": 32.0},
             ],
         },
     )
