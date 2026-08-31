@@ -155,6 +155,47 @@ def test_start_command_stop_reuses_exact_healthy_child_pid() -> None:
         supervisor.close()
 
 
+def test_start_result_carries_exact_acknowledged_generation_and_task_identity() -> None:
+    supervisor, _launch = _supervisor()
+    try:
+        supervisor.ensure_ready()
+
+        result = supervisor.start(_request())
+
+        assert result.generation == 1
+        assert result.task_id == TASK_ID
+        assert result.acknowledgement.acknowledgedKind.value == "START"
+        supervisor.stop(TASK_ID, "CANCELLED")
+    finally:
+        supervisor.close()
+
+
+def test_start_registration_ambiguity_contains_exact_acknowledged_child() -> None:
+    supervisor, _launch = _supervisor()
+    supervisor.ensure_ready()
+    pid = supervisor.snapshot().pid
+    assert pid is not None
+    pidfd = os.pidfd_open(pid)
+
+    def reject_registration(_result) -> None:
+        raise RuntimeError("ambiguous service identity")
+
+    try:
+        with pytest.raises(
+            SupervisorOperationError,
+            match="START acknowledgement registration failed closed",
+        ):
+            supervisor.start(_request(), reject_registration)
+
+        _assert_pidfd_dead(pidfd)
+        assert "START_REGISTRATION_FAILED" in supervisor.trace
+        assert "BEST_EFFORT_STOP_ACK" in supervisor.trace
+        assert "CHILD_REAPED" in supervisor.trace
+        assert supervisor.snapshot().slot_releasable is True
+    finally:
+        supervisor.close()
+
+
 def test_idle_owner_consumes_unsolicited_terminal_and_releases_slot() -> None:
     delivered = threading.Event()
     supervisor, launch = _supervisor(

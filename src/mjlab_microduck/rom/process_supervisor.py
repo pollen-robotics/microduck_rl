@@ -70,6 +70,15 @@ class CorrelatedTerminalDelivery:
 
 
 @dataclass(frozen=True, slots=True)
+class StartAcknowledgement:
+    """Exact child identity accepted by the sole process owner at START ACK."""
+
+    generation: int
+    task_id: str
+    acknowledgement: AckPayload
+
+
+@dataclass(frozen=True, slots=True)
 class SupervisorSnapshot:
     state: SupervisorState
     generation: int
@@ -263,8 +272,12 @@ class RuntimeProcessSupervisor:
     def ensure_ready(self) -> SupervisorSnapshot:
         return self._submit("ready")
 
-    def start(self, request: TaskCreateRequest) -> AckPayload:
-        return self._submit("start", request)
+    def start(
+        self,
+        request: TaskCreateRequest,
+        register_acknowledgement: Callable[[StartAcknowledgement], None] | None = None,
+    ) -> StartAcknowledgement:
+        return self._submit("start", request, register_acknowledgement)
 
     def command(
         self,
@@ -451,7 +464,11 @@ class RuntimeProcessSupervisor:
         if self._process is None:
             self._spawn()
         if intent.kind == "start":
-            return self._start(intent.args[0])
+            if self._process is not None and self._process.poll() is not None:
+                self._record("IDLE_CHILD_EXITED")
+                self._terminate_and_reap()
+                self._spawn()
+            return self._start(intent.args[0], intent.args[1])
         if intent.kind == "command":
             return self._command(*intent.args)
         if intent.kind == "status":
@@ -530,7 +547,11 @@ class RuntimeProcessSupervisor:
             SupervisorEvent.READY_RECEIVED, healthy=True, reason=None, slot=True
         )
 
-    def _start(self, request: TaskCreateRequest) -> AckPayload:
+    def _start(
+        self,
+        request: TaskCreateRequest,
+        register_acknowledgement: Callable[[StartAcknowledgement], None] | None,
+    ) -> StartAcknowledgement:
         if (
             self.snapshot().state is not SupervisorState.IDLE
             or not self.snapshot().slot_releasable
@@ -553,8 +574,22 @@ class RuntimeProcessSupervisor:
         if response.payload.acknowledgedKind.value != "START":
             self._quarantine("START_ACK_MISMATCH")
             raise SupervisorOperationError("wrong START acknowledgment")
+        result = StartAcknowledgement(
+            generation=self._generation,
+            task_id=request.taskId,
+            acknowledgement=response.payload,
+        )
+        try:
+            if register_acknowledgement is not None:
+                register_acknowledgement(result)
+        except Exception as exc:
+            self._record("START_REGISTRATION_FAILED")
+            self._quarantine("START_REGISTRATION_FAILED", protocol_usable=True)
+            raise SupervisorOperationError(
+                "START acknowledgement registration failed closed"
+            ) from exc
         self._advance(SupervisorEvent.START_ACK, slot=False)
-        return response.payload
+        return result
 
     def _command(
         self,

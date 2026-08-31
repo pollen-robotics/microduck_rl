@@ -48,6 +48,7 @@ MODES = (
     "stale-event",
     "malformed-event",
     "lease-null-cleanup-failure",
+    "exit-after-ready",
 )
 
 PROOF_MODES = (
@@ -279,6 +280,11 @@ def main() -> int:
                 )
             )
         )
+        if args.mode == "exit-after-ready" and request.kind is RuntimeMessageKind.LOAD:
+            test_control.sendall(b"READY")
+            if not test_control.recv(1):
+                return 0
+            return 17
         if request.kind is RuntimeMessageKind.START and args.mode in {
             "terminal-event",
             "terminal-fallen",

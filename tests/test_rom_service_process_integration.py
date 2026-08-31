@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 import importlib
 import inspect
+import os
+import select
 import sqlite3
 import threading
 import time
@@ -416,8 +418,8 @@ def test_immediate_post_start_terminal_is_durable_before_callback_retries_expire
     )
     original_start = supervisor.start
 
-    def start_then_complete_before_return(candidate):
-        acknowledgement = original_start(candidate)
+    def start_then_complete_before_return(candidate, register_acknowledgement=None):
+        acknowledgement = original_start(candidate, register_acknowledgement)
         _emit_terminal(launch)
         deadline = time.monotonic() + 0.4
         while (
@@ -438,6 +440,46 @@ def test_immediate_post_start_terminal_is_durable_before_callback_retries_expire
             time.sleep(0.005)
         assert supervisor.snapshot().slot_releasable is True
     finally:
+        supervisor.close()
+
+
+def test_reap_between_readiness_and_start_registers_exact_new_generation(tmp_path):
+    service, request, supervisor, launch = _process_service(
+        tmp_path, "exit-after-ready"
+    )
+    first_peer = launch.test_peer
+    assert first_peer is not None
+    first_peer.settimeout(1)
+    assert first_peer.recv(64) == b"READY"
+    first_pid = supervisor.snapshot().pid
+    assert first_pid is not None
+    pidfd = os.pidfd_open(first_pid)
+    original_start = supervisor.start
+
+    def reap_then_start(candidate, register_acknowledgement=None):
+        first_peer.sendall(b"X")
+        readable, _, _ = select.select([pidfd], [], [], 1)
+        assert readable == [pidfd]
+        launch.mode = "normal"
+        return original_start(candidate, register_acknowledgement)
+
+    supervisor.start = reap_then_start  # type: ignore[method-assign]
+
+    try:
+        running = service.create_task(request)
+
+        assert running.state == "RUNNING"
+        assert supervisor.snapshot().generation == 2
+        assert service._active is not None
+        assert service._active.supervisor_generation == 2
+        cancelled = service.cancel_task(request.taskId)
+        assert cancelled.state == "CANCELLED"
+        deadline = time.monotonic() + 1
+        while not supervisor.snapshot().slot_releasable and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert supervisor.snapshot().slot_releasable is True
+    finally:
+        os.close(pidfd)
         supervisor.close()
 
 
@@ -575,6 +617,124 @@ def test_terminal_winning_after_command_ack_gives_duplicates_same_error(tmp_path
     supervisor.close()
 
 
+def test_unexpected_supervisor_command_error_completes_duplicate_reservation(tmp_path):
+    service, request, supervisor, _launch = _process_service(tmp_path, "normal")
+    service.create_task(request)
+    command = TaskCommandRequest(
+        commandSequence=11,
+        parameters={"vxMps": 0.1, "vyMps": 0.0, "yawRateRadps": 0.0},
+        leaseMs=500,
+    )
+    entered, release = threading.Event(), threading.Event()
+
+    def fail_unexpectedly(_task_id, _command):
+        entered.set()
+        assert release.wait(timeout=1)
+        raise RuntimeError("raw supervisor defect")
+
+    supervisor.command = fail_unexpectedly  # type: ignore[method-assign]
+    outcomes = [{}, {}]
+    callers = [
+        threading.Thread(
+            target=lambda outcome=outcome: _capture(
+                outcome, lambda: service.command(request.taskId, command)
+            ),
+            daemon=True,
+        )
+        for outcome in outcomes
+    ]
+    callers[0].start()
+    assert entered.wait(timeout=1)
+    callers[1].start()
+    pending = service._active.pending_command
+    assert pending is not None
+    release.set()
+    for caller in callers:
+        caller.join(timeout=2)
+
+    errors = [outcome.get("error") for outcome in outcomes]
+    assert all(isinstance(error, RuntimeException) for error in errors)
+    assert [str(error) for error in errors] == [
+        "simulator command was unresponsive",
+        "simulator command was unresponsive",
+    ]
+    assert errors[0] is errors[1] is pending.error
+    assert pending.done.is_set()
+    assert service._active is None or service._active.pending_command is None
+    assert service.get_task(request.taskId).state == "FAILED"
+    deadline = time.monotonic() + 1
+    while not supervisor.snapshot().slot_releasable and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert supervisor.snapshot().slot_releasable is True
+    supervisor.close()
+
+
+def test_store_failure_completes_owner_and_duplicate_with_same_error(
+    tmp_path, monkeypatch
+):
+    service, request, supervisor, launch = _process_service(tmp_path, "block-command")
+    service.create_task(request)
+    command = TaskCommandRequest(
+        commandSequence=12,
+        parameters={"vxMps": 0.1, "vyMps": 0.0, "yawRateRadps": 0.0},
+        leaseMs=500,
+    )
+    owner_ident = [None]
+    fail_owner_read = threading.Event()
+    original_get = service._store.get
+
+    def failing_get(task_id):
+        if fail_owner_read.is_set() and threading.get_ident() == owner_ident[0]:
+            fail_owner_read.clear()
+            raise RuntimeError("store read defect")
+        return original_get(task_id)
+
+    monkeypatch.setattr(service._store, "get", failing_get)
+    outcomes = [{}, {}]
+
+    def owner_call():
+        owner_ident[0] = threading.get_ident()
+        _capture(outcomes[0], lambda: service.command(request.taskId, command))
+
+    callers = [
+        threading.Thread(target=owner_call, daemon=True),
+        threading.Thread(
+            target=lambda: _capture(
+                outcomes[1], lambda: service.command(request.taskId, command)
+            ),
+            daemon=True,
+        ),
+    ]
+    callers[0].start()
+    peer = launch.test_peer
+    assert peer is not None
+    peer.settimeout(1)
+    assert peer.recv(64) == b"COMMAND"
+    callers[1].start()
+    pending = service._active.pending_command
+    assert pending is not None
+    fail_owner_read.set()
+    peer.sendall(b"R")
+    for caller in callers:
+        caller.join(timeout=2)
+
+    errors = [outcome.get("error") for outcome in outcomes]
+    assert all(isinstance(error, RuntimeException) for error in errors)
+    assert [str(error) for error in errors] == [
+        "command durability failed",
+        "command durability failed",
+    ]
+    assert errors[0] is errors[1] is pending.error
+    assert pending.done.is_set()
+    assert service._active is None or service._active.pending_command is None
+    assert service.get_task(request.taskId).state == "FAILED"
+    deadline = time.monotonic() + 1
+    while not supervisor.snapshot().slot_releasable and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert supervisor.snapshot().slot_releasable is True
+    supervisor.close()
+
+
 @pytest.mark.parametrize(
     ("mode", "reason"),
     [
@@ -611,10 +771,10 @@ def test_stale_delivery_and_cached_old_terminal_cannot_mutate_fresh_task(tmp_pat
         original_start = supervisor.start
         entered, release = threading.Event(), threading.Event()
 
-        def delayed_start(candidate):
+        def delayed_start(candidate, register_acknowledgement=None):
             entered.set()
             assert release.wait(timeout=1)
-            return original_start(candidate)
+            return original_start(candidate, register_acknowledgement)
 
         supervisor.start = delayed_start  # type: ignore[method-assign]
         creator = threading.Thread(

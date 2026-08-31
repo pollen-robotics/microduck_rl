@@ -27,6 +27,7 @@ from .contracts import (
 from .process_protocol import AckPayload, TerminalPayload
 from .process_supervisor import (
     CorrelatedTerminalDelivery,
+    StartAcknowledgement,
     SupervisorOperationError,
     SupervisorSnapshot,
     SupervisorTaskTerminalized,
@@ -89,7 +90,11 @@ class ProcessSupervisor(Protocol):
     def ensure_ready(self) -> SupervisorSnapshot: ...
     def snapshot(self) -> SupervisorSnapshot: ...
     def readiness(self) -> bool: ...
-    def start(self, request: TaskCreateRequest) -> AckPayload: ...
+    def start(
+        self,
+        request: TaskCreateRequest,
+        register_acknowledgement: Callable[[StartAcknowledgement], None] | None = None,
+    ) -> StartAcknowledgement: ...
     def command(self, task_id: str, command: TaskCommandRequest) -> AckPayload: ...
     def status(self, task_id: str) -> RobotStatus: ...
     def stop(self, task_id: str, reason: str) -> TerminalPayload: ...
@@ -189,7 +194,6 @@ class SimulatorTaskService:
                 request,
                 action,
                 action.executionMode == "CONTINUOUS_LEASE",
-                supervisor_generation=self._supervisor.snapshot().generation,
             )
             self._next_generation += 1
             self._active = active
@@ -197,10 +201,30 @@ class SimulatorTaskService:
                 request.taskId, "VALIDATING", event_type="TASK_VALIDATING"
             )
         try:
-            self._supervisor.start(request)
-            if self._supervisor.snapshot().generation != active.supervisor_generation:
+            registered: StartAcknowledgement | None = None
+
+            def register_acknowledgement(result: StartAcknowledgement) -> None:
+                nonlocal registered
+                with self._lock:
+                    if (
+                        self._active is not active
+                        or result.task_id != request.taskId
+                        or result.generation <= 0
+                        or registered is not None
+                    ):
+                        raise SupervisorOperationError(
+                            "ambiguous START acknowledgement identity"
+                        )
+                    active.supervisor_generation = result.generation
+                    registered = result
+
+            start_result = self._supervisor.start(request, register_acknowledgement)
+            if start_result != registered:
+                with self._lock:
+                    active.stop_claimed = True
+                self._request_stop(active, "RUNTIME_UNRESPONSIVE")
                 raise SupervisorOperationError(
-                    "runtime generation changed during START acknowledgement"
+                    "runtime START acknowledgement was not registered atomically"
                 )
             deadline = (
                 self._monotonic_clock() + request.leaseMs / 1000
@@ -342,38 +366,31 @@ class SimulatorTaskService:
             operation_error = RuntimeException("simulator command was unresponsive")
             operation_error.__cause__ = exc
             containment_failure = True
+        except Exception as exc:  # noqa: BLE001 - normalize the supervisor boundary.
+            operation_error = RuntimeException("simulator command was unresponsive")
+            operation_error.__cause__ = exc
+            containment_failure = True
         else:
             operation_error = None
-        deadline = self._monotonic_clock() + command.leaseMs / 1000
         with self._lock:
-            if pending.done.is_set():
-                pass
-            elif operation_error is not None:
-                pending.error = operation_error
-            elif (
-                self._active is not active
-                or active.pending_command is not pending
-                or active.stop_claimed
-                or (current := self._store.get(task_id)) is None
-                or current.state != "RUNNING"
-            ):
-                pending.error = RuntimeException("task terminalized during command")
-            else:
-                try:
+            try:
+                if pending.done.is_set():
+                    pass
+                elif operation_error is not None:
+                    pending.error = operation_error
+                elif (
+                    self._active is not active
+                    or active.pending_command is not pending
+                    or active.stop_claimed
+                    or (current := self._store.get(task_id)) is None
+                    or current.state != "RUNNING"
+                ):
+                    pending.error = RuntimeException("task terminalized during command")
+                else:
+                    deadline = self._monotonic_clock() + command.leaseMs / 1000
                     accepted, _ = self._store.record_command(
                         task_id, command, digest, deadline
                     )
-                except StoreStaleCommand as exc:
-                    pending.error = StaleCommand(str(exc))
-                except StoreCommandSequenceConflict as exc:
-                    pending.error = CommandSequenceConflict(str(exc))
-                except IllegalTaskTransition:
-                    pending.error = RuntimeException("task terminalized during command")
-                except Exception as exc:  # noqa: BLE001 - all duplicates share failure.
-                    failure = RuntimeException("command durability failed")
-                    failure.__cause__ = exc
-                    pending.error = failure
-                else:
                     if accepted is None:
                         pending.error = RuntimeException(
                             "command completed without a durable result"
@@ -384,11 +401,35 @@ class SimulatorTaskService:
                         active.latest_command_sequence = command.commandSequence
                         active.latest_command_digest = digest
                         active.latest_command_result = accepted
-            if self._active is active and active.pending_command is pending:
-                active.pending_command = None
-            pending.done.set()
+            except StoreStaleCommand as exc:
+                pending.error = StaleCommand(str(exc))
+            except StoreCommandSequenceConflict as exc:
+                pending.error = CommandSequenceConflict(str(exc))
+            except IllegalTaskTransition:
+                pending.error = RuntimeException("task terminalized during command")
+            except Exception as exc:  # noqa: BLE001 - all duplicates share failure.
+                if not pending.done.is_set():
+                    failure = RuntimeException("command durability failed")
+                    failure.__cause__ = exc
+                    pending.error = failure
+                    containment_failure = True
+            finally:
+                if self._active is active and active.pending_command is pending:
+                    active.pending_command = None
+                if not pending.done.is_set():
+                    pending.done.set()
         if containment_failure:
-            self._persist_failure(active, "RUNTIME_UNRESPONSIVE")
+            try:
+                self._request_stop(active, "RUNTIME_UNRESPONSIVE")
+                self._persist_failure(active, "RUNTIME_UNRESPONSIVE")
+            except Exception as exc:  # noqa: BLE001 - preserve shared public error.
+                # The reservation is already completed with the normalized
+                # shared error. Keep durable ownership fail-closed if even the
+                # containment boundary itself violates its exception contract.
+                self._watchdog_healthy = False
+                self._readiness_failure_reason = "RUNTIME_UNAVAILABLE"
+                if pending.error is not None and pending.error.__cause__ is None:
+                    pending.error.__cause__ = exc
         if pending.error is not None:
             raise pending.error
         if pending.result is None:

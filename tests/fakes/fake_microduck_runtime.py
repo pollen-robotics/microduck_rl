@@ -225,7 +225,9 @@ class FakeRuntimeProcessSupervisor:
         self.runtime.status()
         return self.snapshot()
 
-    def start(self, request):
+    def start(self, request, register_acknowledgement=None):
+        from mjlab_microduck.rom.process_supervisor import StartAcknowledgement
+
         with self._operation_lock:
             self.runtime.validate(request, request)
             try:
@@ -234,8 +236,15 @@ class FakeRuntimeProcessSupervisor:
                 self.runtime.safe_stop(None, "RUNTIME_EXCEPTION")
                 raise
             self.active_request = request
+            result = StartAcknowledgement(
+                generation=self._generation,
+                task_id=request.taskId,
+                acknowledgement=AckPayload(acknowledgedKind="START"),
+            )
+            if register_acknowledgement is not None:
+                register_acknowledgement(result)
             Thread(target=self._monitor, daemon=True).start()
-            return AckPayload(acknowledgedKind="START")
+            return result
 
     def _monitor(self):
         from mjlab_microduck.rom import process_service
