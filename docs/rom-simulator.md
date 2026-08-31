@@ -27,7 +27,11 @@ uv run scripts/build_rom_bundle.py \
   --checkpoint model_3000.pt \
   --experiment-ref entity/project/run-id \
   --created-at 2026-08-29T12:00:00+00:00 \
-  --license-file LICENSE
+  --software-license-id Apache-2.0 \
+  --software-license-file LICENSE \
+  --model-license-id Apache-2.0 \
+  --model-license-status DISTRIBUTION_CLEARED \
+  --model-license-file LICENSE
 ```
 
 Never hand-convert a checkpoint. Candidate and promoted outputs must live
