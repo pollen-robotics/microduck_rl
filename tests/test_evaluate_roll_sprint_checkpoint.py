@@ -335,7 +335,11 @@ def test_auditor_requires_shared_road_reposition_before_roll_restart() -> None:
         )
     assert auditor.awaiting_reposition.item()
 
-    _recover(auditor, forward_position=0.35)
+    _observe(auditor, omega=0.0, forward_position=0.35)
+    assert auditor.awaiting_reposition.item()
+    assert auditor.reposition_count.item() == 0
+
+    _observe(auditor, omega=0.0, forward_position=0.35)
     assert not auditor.awaiting_reposition.item()
     assert auditor.reposition_count.item() == 1
     assert auditor.recovery_count.item() == 0
@@ -348,7 +352,7 @@ def test_auditor_requires_shared_road_reposition_before_roll_restart() -> None:
     report = auditor.summary(6.0)
     assert report["mean_lane_reposition_count"] == pytest.approx(1.0)
     assert report["mean_lane_reposition_latency_s"] == pytest.approx(
-        (2 * MODULE.RECOVERY_HOLD_STEPS + 1) * 0.02
+        (MODULE.RECOVERY_HOLD_STEPS + MODULE.REARM_HOLD_STEPS + 1) * 0.02
     )
 
 
@@ -503,7 +507,7 @@ def test_auditor_requires_recovery_before_second_credited_roll() -> None:
     assert auditor.recovered_and_rerolled_count.item() == 1
     report = auditor.summary(6.0)
     assert report["mean_recovery_latency_s"] == pytest.approx(
-        MODULE.RECOVERY_HOLD_STEPS * 0.02
+        MODULE.REARM_HOLD_STEPS * 0.02
     )
     assert report["repeated_roll_rate"] == pytest.approx(1.0)
     assert report["maximum_forward_speed_mps"] == pytest.approx(1.25)
@@ -512,13 +516,13 @@ def test_auditor_requires_recovery_before_second_credited_roll() -> None:
     assert report["target_distance_reach_rate"] == pytest.approx(0.0)
     assert not report["four_robot_batch_target_10m_pass"]
     assert report["recovery_gate_diagnostics"] == {
-        "awaiting_steps": MODULE.RECOVERY_HOLD_STEPS,
-        "foot_supported_head_released_steps": MODULE.RECOVERY_HOLD_STEPS,
-        "upright_ready_steps": MODULE.RECOVERY_HOLD_STEPS,
-        "sagittal_ready_steps": MODULE.RECOVERY_HOLD_STEPS,
-        "rate_ready_steps": MODULE.RECOVERY_HOLD_STEPS,
-        "candidate_steps": MODULE.RECOVERY_HOLD_STEPS,
-        "max_consecutive_candidate_steps": MODULE.RECOVERY_HOLD_STEPS,
+        "awaiting_steps": MODULE.REARM_HOLD_STEPS,
+        "foot_supported_head_released_steps": MODULE.REARM_HOLD_STEPS,
+        "upright_ready_steps": MODULE.REARM_HOLD_STEPS,
+        "sagittal_ready_steps": MODULE.REARM_HOLD_STEPS,
+        "rate_ready_steps": MODULE.REARM_HOLD_STEPS,
+        "candidate_steps": MODULE.REARM_HOLD_STEPS,
+        "max_consecutive_candidate_steps": MODULE.REARM_HOLD_STEPS,
         "foot_release_fraction": 1.0,
         "upright_given_foot_release_fraction": 1.0,
         "sagittal_given_upright_fraction": 1.0,

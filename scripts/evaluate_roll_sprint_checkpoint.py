@@ -42,6 +42,7 @@ RECOVERY_UPRIGHT_COS = microduck_mdp._ROLL_SPRINT_RECOVERY_UPRIGHT_COS
 RECOVERY_LATERAL_Z = microduck_mdp._ROLL_SPRINT_RECOVERY_LATERAL_Z
 RECOVERY_MIN_HEIGHT_M = microduck_mdp._ROLL_SPRINT_RECOVERY_MIN_HEIGHT_M
 RECOVERY_HOLD_STEPS = microduck_mdp._ROLL_SPRINT_RECOVERY_HOLD_STEPS
+REARM_HOLD_STEPS = microduck_mdp._ROLL_SPRINT_REARM_HOLD_STEPS
 REPOSITION_HEADING_TRIGGER_RAD = (
     microduck_mdp._ROLL_SPRINT_REPOSITION_HEADING_TRIGGER_RAD
 )
@@ -368,8 +369,8 @@ class RollCycleAuditor:
         )
         regular_transitioned = (
             regular_transition_candidate
-            & (old_recovery_hold < RECOVERY_HOLD_STEPS)
-            & (recovery_hold >= RECOVERY_HOLD_STEPS)
+            & (old_recovery_hold < REARM_HOLD_STEPS)
+            & (recovery_hold >= REARM_HOLD_STEPS)
         )
         self_right_rearmed = (
             self_righted_now

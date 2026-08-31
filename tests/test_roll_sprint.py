@@ -118,6 +118,7 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert TARGET_DISTANCE_M == 10.0
     assert mdp._ROLL_SPRINT_RECOVERY_MAX_FORWARD_RATE == 6.0
     assert mdp._ROLL_SPRINT_RECOVERY_HOLD_STEPS == 5
+    assert mdp._ROLL_SPRINT_REARM_HOLD_STEPS == 2
     assert mdp._ROLL_SPRINT_RECOVERY_MIN_HEIGHT_M == 0.09
     assert mdp._ROLL_SPRINT_SELF_RIGHT_STALL_SECONDS == 0.30
     assert mdp._ROLL_SPRINT_ROAD_HALF_WIDTH == 0.56
@@ -1232,7 +1233,13 @@ def test_roll_sprint_excessive_drift_requires_reposition_before_restart(monkeypa
     assert env._roll_sprint_awaiting_reposition[0]
 
     asset.data.root_link_pos_w[:, 1] = 0.0
-    _recover(env, asset)
+    env.common_step_counter += 1
+    mdp._update_roll_sprint_state(env, asset)
+    assert env._roll_sprint_awaiting_reposition[0]
+    assert not env._roll_sprint_repositioned_now[0]
+
+    env.common_step_counter += 1
+    mdp._update_roll_sprint_state(env, asset)
     assert env._roll_sprint_repositioned_now[0]
     assert not env._roll_sprint_awaiting_reposition[0]
     assert env._roll_sprint_reposition_count[0] == 1.0
@@ -1391,7 +1398,9 @@ def test_roll_recovery_waits_for_lane_reposition_before_reroll(monkeypatch):
     assert env._roll_sprint_recovery_count[0] == 0.0
 
     asset.data.root_link_pos_w[:, 1] = 0.0
-    _recover(env, asset)
+    for _ in range(mdp._ROLL_SPRINT_REARM_HOLD_STEPS):
+        env.common_step_counter += 1
+        mdp._update_roll_sprint_state(env, asset)
     assert env._roll_sprint_recovered_now[0]
     assert env._roll_sprint_repositioned_now[0]
     assert mdp.roll_sprint_reposition_rate(env)[0] == pytest.approx(1.0 / env.step_dt)

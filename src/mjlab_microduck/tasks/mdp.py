@@ -11505,6 +11505,7 @@ _ROLL_SPRINT_RECOVERY_UPRIGHT_COS = math.cos(math.radians(25.0))
 _ROLL_SPRINT_RECOVERY_LATERAL_Z = math.sin(math.radians(35.0))
 _ROLL_SPRINT_RECOVERY_MIN_HEIGHT_M = 0.09
 _ROLL_SPRINT_RECOVERY_HOLD_STEPS = 5
+_ROLL_SPRINT_REARM_HOLD_STEPS = 2
 _ROLL_SPRINT_SELF_RIGHT_TILT_COS = math.cos(math.radians(60.0))
 _ROLL_SPRINT_SELF_RIGHT_STALL_RATE = 1.0
 _ROLL_SPRINT_SELF_RIGHT_STALL_SECONDS = 0.30
@@ -11982,8 +11983,8 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
     )
     regular_transitioned_now = (
         regular_transition_candidate
-        & (old_recovery_hold < _ROLL_SPRINT_RECOVERY_HOLD_STEPS)
-        & (recovery_hold >= _ROLL_SPRINT_RECOVERY_HOLD_STEPS)
+        & (old_recovery_hold < _ROLL_SPRINT_REARM_HOLD_STEPS)
+        & (recovery_hold >= _ROLL_SPRINT_REARM_HOLD_STEPS)
     )
     self_right_rearmed_now = self_righted_now & (
         lateral_position.abs() <= _ROLL_SPRINT_REPOSITION_REARM_M
