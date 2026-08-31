@@ -423,13 +423,10 @@ def _camera_follow_x(
     """Advance a critically damped camera without position or velocity snaps."""
     if not np.isfinite(robot_x_m) or not np.isfinite(dt_s) or dt_s <= 0.0:
         return state
-    target_x_m = float(
-        np.clip(
-            robot_x_m + RACE_CAMERA_LEAD_M,
-            -RACE_CAMERA_LEAD_M,
-            TARGET_DISTANCE_M,
-        )
-    )
+    # Do not stop the camera at the 10 m line. Valid frontier can lag physical
+    # position while a roll is still being verified, so a hard 10 m camera cap
+    # leaves every contender off-screen during the decisive final seconds.
+    target_x_m = max(robot_x_m + RACE_CAMERA_LEAD_M, -RACE_CAMERA_LEAD_M)
     acceleration_mps2 = float(
         np.clip(
             RACE_CAMERA_SPRING_GAIN_S2 * (target_x_m - state.x_m)

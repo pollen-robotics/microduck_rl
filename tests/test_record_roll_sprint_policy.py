@@ -285,6 +285,17 @@ def test_follow_camera_does_not_snap_when_leader_resets_behind() -> None:
     )
 
 
+def test_follow_camera_continues_beyond_finish_line() -> None:
+    state = MODULE.CameraFollowState(x_m=10.0, velocity_mps=0.0)
+
+    after_finish = state
+    for _ in range(100):
+        after_finish = MODULE._camera_follow_x(after_finish, 14.0, 0.02)
+
+    assert after_finish.x_m > MODULE.TARGET_DISTANCE_M
+    assert after_finish.x_m < 14.0 + MODULE.RACE_CAMERA_LEAD_M
+
+
 def test_recording_fps_preserves_real_simulation_time() -> None:
     assert MODULE._recording_fps(0.02, 4) == pytest.approx(12.5)
 
