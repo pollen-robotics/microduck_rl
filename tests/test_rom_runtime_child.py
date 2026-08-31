@@ -1031,10 +1031,13 @@ def test_sigterm_wakes_child_and_extra_inherited_fd_is_closed() -> None:
 def test_environment_filtering_removes_unrelated_platform_configuration() -> None:
     script = (
         "import os; from mjlab_microduck.rom.runtime_child import clear_runtime_environment; "
-        "clear_runtime_environment(); print('MICRODUCK_ROM_BEARER_TOKEN' in os.environ)"
+        "clear_runtime_environment(); "
+        "print('MICRODUCK_ROM_BEARER_TOKEN' in os.environ, "
+        "'MICRODUCK_ROM_BEARER_TOKEN_FILE' in os.environ)"
     )
     environment = os.environ.copy()
     environment["MICRODUCK_ROM_BEARER_TOKEN"] = "must-not-survive"
+    environment["MICRODUCK_ROM_BEARER_TOKEN_FILE"] = "/must/not/survive"
     completed = subprocess.run(
         [sys.executable, "-c", script],
         env=environment,
@@ -1042,7 +1045,7 @@ def test_environment_filtering_removes_unrelated_platform_configuration() -> Non
         text=True,
         check=True,
     )
-    assert completed.stdout.strip() == "False"
+    assert completed.stdout.strip() == "False False"
 
 
 def test_blocked_start_cannot_defeat_local_emergency_zero() -> None:

@@ -811,6 +811,57 @@ def test_configuration_allows_explicit_container_wildcard_listener_opt_in():
     assert configuration.host == "0.0.0.0"
 
 
+def test_configuration_keeps_direct_bearer_token_compatibility() -> None:
+    configuration = read_configuration(
+        {"MICRODUCK_ROM_BEARER_TOKEN": "direct-test-token"}
+    )
+
+    assert configuration.bearer_token == "direct-test-token"
+
+
+def test_configuration_loads_bearer_token_from_file(tmp_path: Path) -> None:
+    source = tmp_path / "bearer"
+    source.write_bytes(b"file-test-token\n")
+    source.chmod(0o400)
+
+    configuration = read_configuration(
+        {"MICRODUCK_ROM_BEARER_TOKEN_FILE": str(source)}
+    )
+
+    assert configuration.bearer_token == "file-test-token"
+
+
+@pytest.mark.parametrize(
+    ("direct", "file_value"),
+    [("direct-test-token", None), ("", None), ("direct-test-token", "")],
+)
+def test_configuration_rejects_two_present_bearer_sources(
+    tmp_path: Path, direct: str, file_value: str | None
+) -> None:
+    source = tmp_path / "bearer"
+    source.write_bytes(b"file-test-token")
+    source.chmod(0o400)
+    configured_file = str(source) if file_value is None else file_value
+
+    with pytest.raises(
+        ValueError, match=r"^bearer token sources are mutually exclusive$"
+    ):
+        read_configuration(
+            {
+                "MICRODUCK_ROM_BEARER_TOKEN": direct,
+                "MICRODUCK_ROM_BEARER_TOKEN_FILE": configured_file,
+            }
+        )
+
+
+def test_configuration_without_bearer_source_preserves_not_ready_behavior() -> None:
+    configuration = read_configuration({})
+    app = create_configured_app({})
+
+    assert configuration.bearer_token == ""
+    assert "BEARER_TOKEN_MISSING" in app.state.readiness_reason_codes
+
+
 def test_configuration_rejects_symlinked_bundle_and_state_paths(tmp_path: Path):
     """Resolving configuration symlinks would let the API verify or persist outside its configured roots."""
     bundle = tmp_path / "bundle"

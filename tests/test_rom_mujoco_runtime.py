@@ -2352,11 +2352,14 @@ def test_configured_app_rejects_candidate_and_composes_promoted_runtime(
     store.create(interrupted, sha256_prefixed(interrupted))
     store.transition(interrupted.taskId, "VALIDATING", event_type="TASK_VALIDATING")
     store.transition(interrupted.taskId, "RUNNING", event_type="TASK_STARTED")
+    bearer_file = tmp_path / "rom-bearer"
+    bearer_file.write_bytes(b"secret-token\n")
+    bearer_file.chmod(0o400)
     ready_app = create_configured_app(
         {
             "MICRODUCK_ROM_BUNDLE_DIR": str(qualified_root),
             "MICRODUCK_ROM_STATE_DB": str(state_db),
-            "MICRODUCK_ROM_BEARER_TOKEN": "secret-token",
+            "MICRODUCK_ROM_BEARER_TOKEN_FILE": str(bearer_file),
             "MICRODUCK_ROM_HOST": "127.0.0.1",
             "MICRODUCK_ROM_PORT": "8000",
         }

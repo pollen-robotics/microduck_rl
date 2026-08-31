@@ -25,6 +25,7 @@ from .contracts import (
     unsigned_policy_bundle_manifest,
 )
 from .process_supervisor import ReapReceipt, RuntimeProcessSupervisor
+from .secret_file import read_secret_file
 from .service import SimulatorTaskService
 from .store import SqliteTaskStore
 
@@ -54,6 +55,12 @@ def _safe_host(value: str, *, allow_wildcard: bool = False) -> str:
 
 def read_configuration(environ: Mapping[str, str] = os.environ) -> ServerConfiguration:
     """Read only the documented ROM settings and reject unsafe server inputs."""
+    direct = environ.get("MICRODUCK_ROM_BEARER_TOKEN")
+    file_path = environ.get("MICRODUCK_ROM_BEARER_TOKEN_FILE")
+    if direct is not None and file_path is not None:
+        raise ValueError("bearer token sources are mutually exclusive")
+    bearer_token = read_secret_file(file_path) if file_path is not None else direct or ""
+
     raw_port = environ.get("MICRODUCK_ROM_PORT", "8000")
     try:
         port = int(raw_port)
@@ -85,7 +92,7 @@ def read_configuration(environ: Mapping[str, str] = os.environ) -> ServerConfigu
     return ServerConfiguration(
         bundle_dir=bundle_dir,
         state_db=state_db,
-        bearer_token=environ.get("MICRODUCK_ROM_BEARER_TOKEN", ""),
+        bearer_token=bearer_token,
         host=_safe_host(
             environ.get("MICRODUCK_ROM_HOST", "127.0.0.1"),
             allow_wildcard=wildcard_value == "true",
