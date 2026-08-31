@@ -170,6 +170,7 @@ def test_fake_child_exposes_every_required_environment_free_mode() -> None:
         "stale-event",
         "malformed-event",
         "lease-null-cleanup-failure",
+        "exit-after-ready",
     )
 
 
