@@ -1323,7 +1323,7 @@ def test_container_sigterm_reaps_exact_child_and_restart_reconciles_unknown(
                         request_result,
                         "cancel",
                         container.base_url,
-                        "PUT",
+                        "POST",
                         f"/v1/tasks/{task_id}/cancel",
                     ),
                     daemon=True,
@@ -1343,7 +1343,7 @@ def test_container_sigterm_reaps_exact_child_and_restart_reconciles_unknown(
                         request_result,
                         "command",
                         container.base_url,
-                        "POST",
+                        "PUT",
                         f"/v1/tasks/{task_id}/command",
                         {
                             "commandSequence": 1,
