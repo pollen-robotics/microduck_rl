@@ -455,54 +455,65 @@ def _launch_without_readiness_wait(
     *, image: str, bundle: Path, state_dir: Path, suffix: str
 ) -> tuple[str, int, tuple[int, ...]]:
     """Start the production entrypoint and return as soon as Docker owns PID 1."""
-    _prepare_state(image, state_dir)
-    secret_file = _prepare_secret(image, state_dir.parent / f"{state_dir.name}-secret")
     name = f"microduck-rom-task5-{os.getpid()}-{suffix}"
-    _run("docker", "rm", "--force", name, check=False)
-    _run(
-        "docker",
-        "run",
-        "--detach",
-        "--name",
-        name,
-        "--user",
-        "10001:10001",
-        "--read-only",
-        "--cap-drop=ALL",
-        "--security-opt=no-new-privileges",
-        "--tmpfs",
-        "/tmp:rw,noexec,nosuid,size=64m",
-        "--mount",
-        f"type=bind,src={bundle},dst=/bundle,readonly",
-        "--mount",
-        f"type=bind,src={state_dir},dst=/state",
-        "--mount",
-        _secret_mount(secret_file),
-        "--stop-timeout",
-        "60",
-        image,
-    )
-    deadline = time.monotonic() + 5.0
-    marker = "/tmp/.microduck-pid1-sigterm-ready"
-    while time.monotonic() < deadline:
-        observed = _run(
+    try:
+        _prepare_state(image, state_dir)
+        secret_file = _prepare_secret(
+            image, state_dir.parent / f"{state_dir.name}-secret"
+        )
+        _run("docker", "rm", "--force", name, check=False)
+        _run(
             "docker",
-            "exec",
+            "run",
+            "--detach",
+            "--name",
+            name,
             "--user",
             "10001:10001",
-            name,
-            "/usr/bin/test",
-            "-f",
-            marker,
-            check=False,
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
+            "--mount",
+            f"type=bind,src={bundle},dst=/bundle,readonly",
+            "--mount",
+            f"type=bind,src={state_dir},dst=/state",
+            "--mount",
+            _secret_mount(secret_file),
+            "--stop-timeout",
+            "60",
+            image,
         )
-        if observed.returncode == 0:
-            break
-        time.sleep(0.01)
-    else:
-        raise AssertionError("PID 1 did not publish its pre-import SIGTERM barrier")
-    parent_pid, descendants = _container_pids(name)
-    return name, parent_pid, descendants
+        deadline = time.monotonic() + 5.0
+        marker = "/tmp/.microduck-pid1-sigterm-ready"
+        while time.monotonic() < deadline:
+            observed = _run(
+                "docker",
+                "exec",
+                "--user",
+                "10001:10001",
+                name,
+                "/usr/bin/test",
+                "-f",
+                marker,
+                check=False,
+            )
+            if observed.returncode == 0:
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("PID 1 did not publish its pre-import SIGTERM barrier")
+        parent_pid, descendants = _container_pids(name)
+        return name, parent_pid, descendants
+    except BaseException as failure:
+        _cleanup_failed_container_launch(
+            image=image,
+            state_dir=state_dir,
+            name=name,
+            failure=failure,
+        )
+        raise
 
 
 def _assert_token_absent(channel: str, evidence: str) -> None:
@@ -1194,6 +1205,91 @@ def test_launch_leak_failure_removes_container_and_restores_state_ownership(
         real_run("docker", "rm", "--force", name, check=False)
         if state_dir.exists():
             _restore_state_ownership(image, state_dir)
+
+
+@pytest.mark.parametrize(
+    ("failure_point", "expected_error"),
+    (
+        ("marker", "PID 1 did not publish its pre-import SIGTERM barrier"),
+        ("pid", "container PID inspection failed"),
+    ),
+)
+def test_no_wait_launch_failure_removes_container_and_restores_state_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+    expected_error: str,
+) -> None:
+    """Marker/PID failures before return must not strand a container or state mount."""
+    suffix = f"no-wait-{failure_point}"
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    state_dir = tmp_path / "state"
+    live_containers: set[str] = set()
+    restored_state: set[Path] = set()
+
+    def prepare_state(_image: str, path: Path) -> None:
+        path.mkdir()
+
+    def prepare_secret(_image: str, secret_dir: Path, **_kwargs: object) -> Path:
+        secret_dir.mkdir()
+        secret = secret_dir / "bearer"
+        secret.write_text("opaque fixture")
+        return secret
+
+    def run(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        del check
+        if args[:3] == ("docker", "rm", "--force"):
+            live_containers.discard(args[3])
+            return subprocess.CompletedProcess(args, 0, _TOKEN, "")
+        if args[:2] == ("docker", "run"):
+            live_containers.add(args[args.index("--name") + 1])
+            return subprocess.CompletedProcess(args, 0, "fixture-container-id", "")
+        if args[:2] == ("docker", "exec"):
+            return subprocess.CompletedProcess(
+                args, 1 if failure_point == "marker" else 0, "", ""
+            )
+        raise AssertionError("unexpected fake Docker operation")
+
+    def container_pids(_name: str) -> tuple[int, tuple[int, ...]]:
+        if failure_point == "pid":
+            raise AssertionError("container PID inspection failed")
+        return 101, ()
+
+    def restore_state(_image: str, path: Path) -> None:
+        restored_state.add(path)
+
+    monotonic_values = iter((0.0, 6.0) if failure_point == "marker" else (0.0, 0.0))
+    monkeypatch.setattr(
+        "tests.test_rom_process_container._prepare_state", prepare_state
+    )
+    monkeypatch.setattr(
+        "tests.test_rom_process_container._prepare_secret", prepare_secret
+    )
+    monkeypatch.setattr("tests.test_rom_process_container._run", run)
+    monkeypatch.setattr(
+        "tests.test_rom_process_container._container_pids", container_pids
+    )
+    monkeypatch.setattr(
+        "tests.test_rom_process_container._restore_state_ownership", restore_state
+    )
+    monkeypatch.setattr(
+        "tests.test_rom_process_container.time.monotonic",
+        lambda: next(monotonic_values),
+    )
+
+    with pytest.raises(AssertionError) as caught:
+        _launch_without_readiness_wait(
+            image="fixture-image",
+            bundle=bundle,
+            state_dir=state_dir,
+            suffix=suffix,
+        )
+
+    assert str(caught.value) == expected_error
+    assert _TOKEN not in str(caught.value)
+    assert live_containers == set()
+    assert restored_state == {state_dir}
 
 
 def test_failed_launch_cleanup_error_does_not_echo_captured_output(

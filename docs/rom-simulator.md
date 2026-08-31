@@ -19,7 +19,7 @@ uv run scripts/export.py Mjlab-Velocity-Flat-MicroDuck \
 uv run scripts/build_rom_bundle.py \
   --release 1.0.0-candidate.1 \
   --artifact WALK_VELOCITY=output.onnx \
-  --output ../release/microduck-candidate.zip \
+  --output ../release/microduck-development-candidate.zip \
   --model src/mjlab_microduck/robot/microduck/scene_walk.xml \
   --terrain flat \
   --scenario-profile SEEDED_SERVO_RESET_V1 \
@@ -29,9 +29,9 @@ uv run scripts/build_rom_bundle.py \
   --created-at 2026-08-29T12:00:00+00:00 \
   --software-license-id Apache-2.0 \
   --software-license-file LICENSE \
-  --model-license-id Apache-2.0 \
-  --model-license-status DISTRIBUTION_CLEARED \
-  --model-license-file LICENSE
+  --model-license-id LicenseRef-MicroDuck-CC-BY-SA-NC \
+  --model-license-status DEVELOPMENT_ONLY \
+  --model-license-file README.md
 ```
 
 Never hand-convert a checkpoint. Candidate and promoted outputs must live
@@ -40,11 +40,20 @@ and protects that repository robot-source root in addition to the candidate
 bundle root. Additional protected roots can be repeated with
 `--protected-source-root`.
 
+This production-model example is intentionally `DEVELOPMENT_ONLY`. The
+repository's `README.md` is the checked-in evidence for its stated Creative
+Commons BY-SA-NC terms; the local `LicenseRef` avoids inventing an SPDX version
+that declaration does not state. Building or qualifying this bundle does not
+clear it for distribution, and the distribution handoff command will reject
+it. Cleared handoff verification uses only the separate minimal Apache-2.0 test
+MJCF fixture, never `scene_walk.xml` or its model closure.
+
 Extract the candidate into a new staging directory:
 
 ```bash
 mkdir -p ../release/candidate
-python -m zipfile -e ../release/microduck-candidate.zip ../release/candidate
+python -m zipfile -e ../release/microduck-development-candidate.zip \
+  ../release/candidate
 ```
 
 ## 2. Declare and run qualification
@@ -99,7 +108,7 @@ Run the bounded batteries and promote to a new immutable version/output:
 MUJOCO_GL=egl uv run scripts/qualify_rom_bundle.py \
   --bundle-dir ../release/candidate \
   --release-config ../release/release.json \
-  --output ../release/microduck-qualified-1.0.0.zip
+  --output ../release/microduck-development-qualified-1.0.0.zip
 ```
 
 The output path must not exist. Promotion never changes the candidate directory
@@ -122,11 +131,11 @@ continues, and the qualification parent does not import the native runtime.
 
 The auditable runtime-revision source set includes both executed package
 initializers and every governed module under `mjlab_microduck.rom`: action
-catalog/specs, API, bundle/contracts, composition, model semantics, native
-runtime/policy/observation, qualification, process protocol/service/supervisor,
-runtime child and parent-death handling, runtime identity, service/store, and
-the supervisor state machine. Tests require that changing any one of these files
-changes the revision.
+catalog/specs, API, bundle/contracts, composition and secret-file loading,
+model semantics, native runtime/policy/observation, qualification, process
+protocol/service/supervisor, runtime child and parent-death handling, runtime
+identity, service/store, and the supervisor state machine. Tests require that
+changing any one of these files changes the revision.
 
 Every runtime child crosses the image's `/usr/bin/setpriv --pdeathsig SIGTERM`
 boundary before Python starts. The supervisor PID captured before launch is a
@@ -184,12 +193,16 @@ remains bounded to 32 scalar fields and 1 KiB.
 
 ## 3. Build and run the container
 
+The commands below run the qualified `DEVELOPMENT_ONLY` production-model bundle
+for local validation. They do not create a distribution handoff or change its
+license status.
+
 ```bash
 docker build -f docker/rom-simulator/Dockerfile \
   -t microduck-rom-sim:1.0.0 .
 
 mkdir -p ../release/qualified-bundle
-python -m zipfile -e ../release/microduck-qualified-1.0.0.zip \
+python -m zipfile -e ../release/microduck-development-qualified-1.0.0.zip \
   ../release/qualified-bundle
 
 # The image runs as numeric UID/GID 10001. Create the only durable writable
@@ -419,14 +432,21 @@ docker stop microduck-rom-sim
 tar -C ../release -czf "state-backup-$(date -u +%Y%m%dT%H%M%SZ).tgz" state
 ```
 
-Rotate the bearer by creating a new mode-0400 file, stopping and replacing the
-container with the same hardening flags and a read-only mount of the new file,
-then removing the old file only after the replacement is ready. Docker cannot
-replace a bind-mounted file safely inside an existing container:
+Rotate the bearer by atomically reserving a unique filename, stopping and
+replacing the container with the same hardening flags and a read-only mount of
+that new file, then removing only the previously active file after the
+replacement is ready. Reusing a fixed `.next` name can overwrite the inode
+still mounted by an active container on a later rotation. Docker cannot replace
+a bind-mounted file safely inside an existing container:
 
 ```bash
-openssl rand -base64 48 | sudo install -o 10001 -g 10001 -m 0400 /dev/stdin \
-  ../release/secrets/microduck_rom_bearer_token.next
+: "${ROM_SECRET_FILE:=../release/secrets/microduck_rom_bearer_token}"
+ROM_SECRET_PREVIOUS=$ROM_SECRET_FILE
+ROM_SECRET_FILE=$(sudo mktemp -p ../release/secrets \
+  microduck_rom_bearer_token.XXXXXXXX)
+openssl rand -base64 48 | sudo tee "$ROM_SECRET_FILE" >/dev/null
+sudo chown 10001:10001 "$ROM_SECRET_FILE"
+sudo chmod 0400 "$ROM_SECRET_FILE"
 docker stop microduck-rom-sim
 docker run --name microduck-rom-sim --rm \
   --detach \
@@ -437,13 +457,16 @@ docker run --name microduck-rom-sim --rm \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   --mount type=bind,src="$(realpath ../release/qualified-bundle)",dst=/bundle,readonly \
   --mount type=bind,src="$(realpath ../release/state)",dst=/state \
-  --mount type=bind,src="$(realpath ../release/secrets/microduck_rom_bearer_token.next)",dst=/run/secrets/microduck_rom_bearer_token,readonly \
+  --mount type=bind,src="$(realpath "$ROM_SECRET_FILE")",dst=/run/secrets/microduck_rom_bearer_token,readonly \
   --publish 127.0.0.1:8000:8000 \
   --stop-timeout 60 \
   microduck-rom-sim:1.0.0
-ROM_SECRET_FILE=../release/secrets/microduck_rom_bearer_token.next
-rom_curl --fail --silent http://127.0.0.1:8000/v1/ready
-sudo rm ../release/secrets/microduck_rom_bearer_token
+rom_curl --fail --silent http://127.0.0.1:8000/v1/ready || {
+  echo "replacement is not ready; previous secret retained" >&2
+  exit 1
+}
+sudo rm -- "$ROM_SECRET_PREVIOUS"
+unset ROM_SECRET_PREVIOUS
 ```
 
 After final shutdown, explicitly remove the active credential and its now-empty
@@ -451,7 +474,7 @@ directory:
 
 ```bash
 docker stop microduck-rom-sim
-sudo rm ../release/secrets/microduck_rom_bearer_token.next
+sudo rm -- "$ROM_SECRET_FILE"
 sudo rmdir ../release/secrets
 ```
 
