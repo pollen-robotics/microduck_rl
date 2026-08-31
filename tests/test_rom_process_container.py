@@ -280,7 +280,7 @@ def _cross_running_child_protocol_barrier(
     before_pid = container.child_pid
     status, task = _request(
         container.base_url,
-        "POST",
+        "PUT",
         f"/v1/tasks/{task_id}/command",
         {
             "commandSequence": sequence,
@@ -1333,7 +1333,7 @@ def test_container_sigterm_reaps_exact_child_and_restart_reconciles_unknown(
                         request_result,
                         "cancel",
                         container.base_url,
-                        "POST",
+                        "PUT",
                         f"/v1/tasks/{task_id}/cancel",
                     ),
                     daemon=True,
