@@ -233,7 +233,12 @@ def _recorder_command(
     task_id: str,
     device: str,
     recovery_montage: bool = False,
+    video_steps: int = RECORDING_STEPS,
+    video_frame_stride: int = RECORDING_FRAME_STRIDE,
+    video_width: int = OUTPUT_WIDTH,
+    video_height: int = OUTPUT_HEIGHT,
 ) -> list[str]:
+    steps = RECOVERY_RECORDING_STEPS if recovery_montage else video_steps
     command = [
         sys.executable,
         str(RECORDER),
@@ -242,17 +247,17 @@ def _recorder_command(
         "--task-id",
         task_id,
         "--steps",
-        str(RECOVERY_RECORDING_STEPS if recovery_montage else RECORDING_STEPS),
+        str(steps),
         "--frame-stride",
-        str(RECORDING_FRAME_STRIDE),
+        str(video_frame_stride),
         "--output-fps",
         str(OUTPUT_FPS),
         "--playback-speed",
         str(PLAYBACK_SPEED),
         "--width",
-        str(OUTPUT_WIDTH),
+        str(video_width),
         "--height",
-        str(OUTPUT_HEIGHT),
+        str(video_height),
         "--device",
         device,
     ]
@@ -397,11 +402,16 @@ def sample_once(args: argparse.Namespace) -> bool:
         output=output,
         task_id=args.task_id,
         device=args.device,
+        video_steps=args.video_steps,
+        video_frame_stride=args.video_frame_stride,
+        video_width=args.video_width,
+        video_height=args.video_height,
     )
+    output_video_seconds = args.video_steps / SIMULATION_HZ / PLAYBACK_SPEED
     _log(
         f"recording checkpoint iteration {identity.iteration}: "
-        f"{RECORDING_STEPS / SIMULATION_HZ:g}s simulation as a "
-        f"{OUTPUT_VIDEO_SECONDS:g}s video to {output}"
+        f"{args.video_steps / SIMULATION_HZ:g}s simulation as a "
+        f"{output_video_seconds:g}s video to {output}"
     )
     result = subprocess.run(command, cwd=REPO_ROOT, check=False)
     if result.returncode != 0:
@@ -477,6 +487,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--task-id", default=DEFAULT_TASK_ID)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--video-steps", type=int, default=RECORDING_STEPS)
+    parser.add_argument(
+        "--video-frame-stride", type=int, default=RECORDING_FRAME_STRIDE
+    )
+    parser.add_argument("--video-width", type=int, default=OUTPUT_WIDTH)
+    parser.add_argument("--video-height", type=int, default=OUTPUT_HEIGHT)
     parser.add_argument(
         "--parent-frontier-m",
         type=float,
@@ -515,6 +531,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     if args.interval_seconds <= 0:
         parser.error("--interval-seconds must be greater than zero")
+    if args.video_steps <= 0:
+        parser.error("--video-steps must be greater than zero")
+    if args.video_frame_stride <= 0:
+        parser.error("--video-frame-stride must be greater than zero")
+    if args.video_width <= 0 or args.video_height <= 0:
+        parser.error("--video-width and --video-height must be greater than zero")
     return args
 
 

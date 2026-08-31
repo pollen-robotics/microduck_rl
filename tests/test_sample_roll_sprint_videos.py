@@ -27,6 +27,10 @@ def _args(tmp_path: Path, checkpoint_root: Path) -> argparse.Namespace:
         interval_seconds=150.0,
         task_id="Mjlab-Roll-Sprint-Flat-MicroDuck",
         device="cpu",
+        video_steps=sampler.RECORDING_STEPS,
+        video_frame_stride=sampler.RECORDING_FRAME_STRIDE,
+        video_width=sampler.OUTPUT_WIDTH,
+        video_height=sampler.OUTPUT_HEIGHT,
         parent_frontier_m=None,
         allow_repeats=False,
         video_only=False,
@@ -65,6 +69,29 @@ def test_defaults_record_long_race_every_150_seconds() -> None:
     assert sampler.EVALUATION_DURATION == 40.0
     assert sampler.EVALUATION_SCHEMA_VERSION == 8
     assert args.parent_frontier_m is None
+    assert args.video_steps == 2000
+    assert args.video_frame_stride == 3
+    assert (args.video_width, args.video_height) == (1920, 1080)
+
+
+def test_preview_size_and_duration_are_configurable() -> None:
+    args = sampler._parse_args(
+        [
+            "--once",
+            "--video-steps",
+            "1000",
+            "--video-frame-stride",
+            "3",
+            "--video-width",
+            "1280",
+            "--video-height",
+            "720",
+        ]
+    )
+
+    assert args.video_steps == 1000
+    assert args.video_frame_stride == 3
+    assert (args.video_width, args.video_height) == (1280, 720)
 
 
 def test_evaluator_command_carries_selected_parent_frontier() -> None:
@@ -244,6 +271,9 @@ def test_video_only_keeps_recording_independent_from_audit(
     (checkpoint_root / "model_100.pt").write_bytes(b"checkpoint")
     args = _args(tmp_path, checkpoint_root)
     args.video_only = True
+    args.video_steps = 1000
+    args.video_width = 1280
+    args.video_height = 720
     calls: list[list[str]] = []
 
     def fake_run(command, *, cwd, check):
@@ -259,6 +289,9 @@ def test_video_only_keeps_recording_independent_from_audit(
     assert len(calls) == 1
     assert all(command[1] == str(sampler.RECORDER) for command in calls)
     assert "--recovery-montage" not in calls[0]
+    assert calls[0][calls[0].index("--steps") + 1] == "1000"
+    assert calls[0][calls[0].index("--width") + 1] == "1280"
+    assert calls[0][calls[0].index("--height") + 1] == "720"
     state = json.loads(args.state_file.read_text(encoding="utf-8"))
     assert state["last_evaluation"] is None
     assert state["last_recovery_montage"] is None
