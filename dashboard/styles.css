@@ -100,6 +100,7 @@ h2 { margin-bottom: 0; font-size: 1.22rem; letter-spacing: -.035em; }
 .champion-meta dt { color: var(--muted); font-size: .62rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .champion-meta dd { margin: .2rem 0 0; color: var(--text); font-size: .75rem; font-variant-numeric: tabular-nums; font-weight: 700; overflow-wrap: anywhere; }
 .champion-video-empty { display: grid; min-height: 12rem; place-items: center; margin: 0; border: 1px solid var(--line); border-radius: .72rem; background: #0a0e12; }
+.champion-video-empty[hidden] { display: none; }
 .audit-heading { align-items: start; }
 .audit-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .65rem; margin: 0; }
 .audit-metric { min-width: 0; padding: .8rem .85rem; border: 1px solid var(--line); border-radius: .68rem; background: var(--panel); }
