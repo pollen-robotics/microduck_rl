@@ -20,6 +20,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     XDG_CACHE_HOME=/state/cache \
     MICRODUCK_ROM_BUNDLE_DIR=/bundle \
     MICRODUCK_ROM_STATE_DB=/state/tasks.sqlite3 \
+    MICRODUCK_ROM_BEARER_TOKEN_FILE=/run/secrets/microduck_rom_bearer_token \
     MICRODUCK_ROM_HOST=0.0.0.0 \
     MICRODUCK_ROM_ALLOW_WILDCARD_BIND=true \
     MICRODUCK_ROM_PORT=8000
@@ -54,6 +55,7 @@ COPY src/mjlab_microduck/rom/__init__.py \
     src/mjlab_microduck/rom/runtime.py \
     src/mjlab_microduck/rom/runtime_child.py \
     src/mjlab_microduck/rom/runtime_identity.py \
+    src/mjlab_microduck/rom/secret_file.py \
     src/mjlab_microduck/rom/service.py \
     src/mjlab_microduck/rom/store.py \
     src/mjlab_microduck/rom/supervisor_state.py \

@@ -31,6 +31,7 @@
 !src/mjlab_microduck/rom/runtime.py
 !src/mjlab_microduck/rom/runtime_child.py
 !src/mjlab_microduck/rom/runtime_identity.py
+!src/mjlab_microduck/rom/secret_file.py
 !src/mjlab_microduck/rom/service.py
 !src/mjlab_microduck/rom/store.py
 !src/mjlab_microduck/rom/supervisor_state.py

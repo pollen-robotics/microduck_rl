@@ -191,8 +191,10 @@ The runtime supports qualified continuous actions and governed `STAND` through
 the SitStand policy family; every other discrete catalog entry remains
 explicitly unavailable until its own reset and completion semantics exist. See
 [docs/rom-simulator.md](docs/rom-simulator.md)
-for the export, release-policy, Docker, curl, backup, timeout, and license
-workflow.
+for the export, release-policy, owner-only mounted-secret Docker workflow,
+safe credential rotation and cleanup, curl, backup, timeout, and license
+workflow. Production launches accept the bearer only from the documented
+read-only secret mount; do not pass it through Docker environment metadata.
 
 ## Related projects
 

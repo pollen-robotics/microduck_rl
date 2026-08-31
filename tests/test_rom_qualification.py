@@ -2170,10 +2170,10 @@ def test_qualification_cli_fails_closed_on_invalid_release_config(tmp_path: Path
     assert not output.exists()
 
 
-def test_container_entrypoint_fails_before_server_when_mounts_are_invalid(
+def test_container_entrypoint_rejects_direct_bearer_before_server(
     tmp_path: Path,
-):
-    """Starting without verified mount prerequisites would default the container to unready."""
+) -> None:
+    """Removing direct-env rejection would expose a production token in metadata."""
     entrypoint = Path(__file__).parents[1] / "docker/rom-simulator/entrypoint.sh"
     completed = subprocess.run(
         ["bash", str(entrypoint)],
@@ -2182,17 +2182,20 @@ def test_container_entrypoint_fails_before_server_when_mounts_are_invalid(
             "MICRODUCK_ROM_BUNDLE_DIR": str(tmp_path / "bundle"),
             "MICRODUCK_ROM_STATE_DB": str(tmp_path / "state/tasks.sqlite3"),
             "MICRODUCK_ROM_BEARER_TOKEN": "test-token",
+            "MICRODUCK_ROM_BEARER_TOKEN_FILE": (
+                "/run/secrets/microduck_rom_bearer_token"
+            ),
         },
         check=False,
         capture_output=True,
         text=True,
     )
 
-    assert completed.returncode != 0
+    assert completed.returncode == 64
     assert completed.stdout == ""
     assert (
         completed.stderr
-        == "container startup failed: /bundle must contain a readable manifest\n"
+        == "container startup failed: direct bearer environment input is forbidden\n"
     )
     assert "test-token" not in completed.stderr
 
@@ -2257,6 +2260,7 @@ def test_docker_context_policies_allow_only_exact_rom_copy_inputs() -> None:
         "src/mjlab_microduck/rom/runtime.py",
         "src/mjlab_microduck/rom/runtime_child.py",
         "src/mjlab_microduck/rom/runtime_identity.py",
+        "src/mjlab_microduck/rom/secret_file.py",
         "src/mjlab_microduck/rom/service.py",
         "src/mjlab_microduck/rom/store.py",
         "src/mjlab_microduck/rom/supervisor_state.py",

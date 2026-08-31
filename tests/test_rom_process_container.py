@@ -51,6 +51,7 @@ _REPOSITORY_FILES: Final[frozenset[str]] = frozenset(
         "src/mjlab_microduck/rom/runtime.py",
         "src/mjlab_microduck/rom/runtime_child.py",
         "src/mjlab_microduck/rom/runtime_identity.py",
+        "src/mjlab_microduck/rom/secret_file.py",
         "src/mjlab_microduck/rom/service.py",
         "src/mjlab_microduck/rom/store.py",
         "src/mjlab_microduck/rom/supervisor_state.py",
@@ -68,6 +69,8 @@ _IMAGE_RUNTIME_FILES: Final[frozenset[str]] = frozenset(
     }
 )
 _TOKEN: Final = "container-release-gate-token"
+_DIRECT_TOKEN_ENV: Final = "MICRODUCK_ROM_BEARER_TOKEN"
+_SECRET_CONTAINER_PATH: Final = "/run/secrets/microduck_rom_bearer_token"
 _IMAGE_DISTRIBUTIONS: Final[frozenset[str]] = frozenset(
     {
         "absl-py",
@@ -174,6 +177,48 @@ def _prepare_state(image: str, state_dir: Path) -> None:
         "0750",
         "/state",
     )
+
+
+def _prepare_secret(
+    image: str, secret_dir: Path, *, mode: int = 0o400
+) -> Path:
+    """Create a host fixture as image root without requiring host chown rights."""
+    secret_dir.mkdir()
+    completed = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--interactive",
+            "--user",
+            "0:0",
+            "--mount",
+            f"type=bind,src={secret_dir},dst=/secret-fixture",
+            "--entrypoint",
+            "/app/.venv/bin/python",
+            image,
+            "-P",
+            "-c",
+            (
+                "import os,pathlib,sys;"
+                "path=pathlib.Path('/secret-fixture/bearer');"
+                "path.write_bytes(sys.stdin.buffer.read()+b'\\n');"
+                "os.chown(path,10001,10001);"
+                "os.chmod(path,int(sys.argv[1],8))"
+            ),
+            f"{mode:o}",
+        ],
+        input=_TOKEN.encode(),
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        raise AssertionError("image root helper could not create secret fixture")
+    return secret_dir / "bearer"
+
+
+def _secret_mount(secret_file: Path) -> str:
+    return f"type=bind,src={secret_file},dst={_SECRET_CONTAINER_PATH},readonly"
 
 
 def _container_pids(name: str) -> tuple[int, tuple[int, ...]]:
@@ -300,6 +345,7 @@ def _launch_container(
     *, image: str, bundle: Path, state_dir: Path, suffix: str
 ) -> _Container:
     _prepare_state(image, state_dir)
+    secret_file = _prepare_secret(image, state_dir.parent / f"{state_dir.name}-secret")
     name = f"microduck-rom-task5-{os.getpid()}-{suffix}"
     _run("docker", "rm", "--force", name, check=False)
     _run(
@@ -319,8 +365,8 @@ def _launch_container(
         f"type=bind,src={bundle},dst=/bundle,readonly",
         "--mount",
         f"type=bind,src={state_dir},dst=/state",
-        "--env",
-        f"MICRODUCK_ROM_BEARER_TOKEN={_TOKEN}",
+        "--mount",
+        _secret_mount(secret_file),
         "--publish",
         "127.0.0.1::8000",
         "--stop-timeout",
@@ -344,6 +390,7 @@ def _launch_container(
         time.sleep(0.05)
     else:
         logs = _run("docker", "logs", name, check=False)
+        _assert_token_absent("container startup logs", logs.stdout + logs.stderr)
         _run("docker", "rm", "--force", name, check=False)
         _restore_state_ownership(image, state_dir)
         raise AssertionError(f"{last_error}; logs={logs.stderr[-2000:]}")
@@ -357,6 +404,7 @@ def _launch_without_readiness_wait(
 ) -> tuple[str, int, tuple[int, ...]]:
     """Start the production entrypoint and return as soon as Docker owns PID 1."""
     _prepare_state(image, state_dir)
+    secret_file = _prepare_secret(image, state_dir.parent / f"{state_dir.name}-secret")
     name = f"microduck-rom-task5-{os.getpid()}-{suffix}"
     _run("docker", "rm", "--force", name, check=False)
     _run(
@@ -376,8 +424,8 @@ def _launch_without_readiness_wait(
         f"type=bind,src={bundle},dst=/bundle,readonly",
         "--mount",
         f"type=bind,src={state_dir},dst=/state",
-        "--env",
-        f"MICRODUCK_ROM_BEARER_TOKEN={_TOKEN}",
+        "--mount",
+        _secret_mount(secret_file),
         "--stop-timeout",
         "60",
         image,
@@ -403,6 +451,67 @@ def _launch_without_readiness_wait(
         raise AssertionError("PID 1 did not publish its pre-import SIGTERM barrier")
     parent_pid, descendants = _container_pids(name)
     return name, parent_pid, descendants
+
+
+def _assert_token_absent(channel: str, evidence: str) -> None:
+    if _TOKEN in evidence:
+        raise AssertionError(f"bearer literal leaked through {channel}")
+
+
+def _run_invalid_secret_launch(
+    *,
+    image: str,
+    bundle: Path,
+    state_dir: Path,
+    suffix: str,
+    extra_args: tuple[str, ...] = (),
+    secret_mode: int | None = None,
+) -> tuple[int, str, str]:
+    _prepare_state(image, state_dir)
+    name = f"microduck-rom-task5-{os.getpid()}-{suffix}"
+    args = [
+        "docker",
+        "run",
+        "--name",
+        name,
+        "--user",
+        "10001:10001",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=64m",
+        "--mount",
+        f"type=bind,src={bundle},dst=/bundle,readonly",
+        "--mount",
+        f"type=bind,src={state_dir},dst=/state",
+    ]
+    if secret_mode is not None:
+        secret_file = _prepare_secret(
+            image,
+            state_dir.parent / f"{state_dir.name}-secret",
+            mode=secret_mode,
+        )
+        args.extend(("--mount", _secret_mount(secret_file)))
+    args.extend((*extra_args, image))
+    _run("docker", "rm", "--force", name, check=False)
+    try:
+        completed = _run(*args, check=False)
+        inspected = _run("docker", "inspect", name, check=False)
+        logs = _run("docker", "logs", name, check=False)
+        evidence = (
+            completed.stdout
+            + completed.stderr
+            + inspected.stdout
+            + inspected.stderr
+            + logs.stdout
+            + logs.stderr
+        )
+        _assert_token_absent("rejected container evidence", evidence)
+        return completed.returncode, inspected.stdout, logs.stdout + logs.stderr
+    finally:
+        _run("docker", "rm", "--force", name, check=False)
+        _restore_state_ownership(image, state_dir)
 
 
 def _request(
@@ -880,6 +989,161 @@ def test_built_image_contains_only_literal_runtime_source_inventory(
     assert not any(
         item.startswith("PYTHONPATH=") for item in inspected["Config"]["Env"]
     )
+
+
+@pytest.mark.parametrize(
+    ("suffix", "extra_args", "secret_mode", "expected_log"),
+    (
+        (
+            "direct-env-secret",
+            (f"--env={_DIRECT_TOKEN_ENV}=",),
+            0o400,
+            "direct bearer environment input is forbidden",
+        ),
+        (
+            "missing-secret",
+            (),
+            None,
+            "bearer secret file is invalid",
+        ),
+        (
+            "wrong-secret-path",
+            ("--env=MICRODUCK_ROM_BEARER_TOKEN_FILE=/run/secrets/wrong",),
+            0o400,
+            "fixed bearer secret file is required",
+        ),
+    ),
+)
+def test_production_container_rejects_nonmounted_bearer_sources_with_exit_64(
+    tmp_path: Path,
+    suffix: str,
+    extra_args: tuple[str, ...],
+    secret_mode: int | None,
+    expected_log: str,
+) -> None:
+    """A removed entrypoint check would let an unsafe credential source reach Python."""
+    image, bundle = _release_inputs(tmp_path)
+
+    returncode, inspected_text, logs = _run_invalid_secret_launch(
+        image=image,
+        bundle=bundle,
+        state_dir=tmp_path / f"state-{suffix}",
+        suffix=suffix,
+        extra_args=extra_args,
+        secret_mode=secret_mode,
+    )
+
+    assert returncode == 64
+    inspected = json.loads(inspected_text)[0]
+    assert inspected["State"]["ExitCode"] == 64
+    assert expected_log in logs
+
+
+def test_production_container_rejects_permissive_secret_before_api_startup(
+    tmp_path: Path,
+) -> None:
+    """Weakening the Python mode check would start the API with group-readable bytes."""
+    image, bundle = _release_inputs(tmp_path)
+
+    returncode, inspected_text, logs = _run_invalid_secret_launch(
+        image=image,
+        bundle=bundle,
+        state_dir=tmp_path / "state-permissive-secret",
+        suffix="permissive-secret",
+        secret_mode=0o440,
+    )
+
+    assert returncode != 0
+    inspected = json.loads(inspected_text)[0]
+    assert inspected["State"]["ExitCode"] != 0
+    assert "bearer token file must be owner-only" in logs
+    assert "Uvicorn running" not in logs
+
+
+def test_production_container_mounted_secret_authenticates_without_leaking_metadata(
+    tmp_path: Path,
+) -> None:
+    """Replacing the file mount with env/argv input would expose the bearer to Docker."""
+    image, bundle = _release_inputs(tmp_path)
+    container = _launch_container(
+        image=image,
+        bundle=bundle,
+        state_dir=tmp_path / "state-secret-metadata",
+        suffix="secret-metadata",
+    )
+    try:
+        status, ready = _request(container.base_url, "GET", "/v1/ready")
+        assert status == 200
+        assert ready["ready"] is True
+
+        image_inspect_result = _run("docker", "image", "inspect", image)
+        image_inspect = image_inspect_result.stdout
+        history_result = _run(
+            "docker", "history", "--no-trunc", "--format", "{{json .}}", image
+        )
+        history = history_result.stdout + history_result.stderr
+        container_inspect_result = _run("docker", "inspect", container.name)
+        container_inspect = container_inspect_result.stdout
+        top_result = _run(
+            "docker", "top", container.name, "-eo", "pid,ppid,args"
+        )
+        top = top_result.stdout + top_result.stderr
+        log_result = _run("docker", "logs", container.name)
+        logs = log_result.stdout + log_result.stderr
+        for channel, evidence in (
+            ("image history", history),
+            (
+                "image config",
+                image_inspect_result.stdout + image_inspect_result.stderr,
+            ),
+            (
+                "container Config.Env and Config.Cmd",
+                container_inspect_result.stdout + container_inspect_result.stderr,
+            ),
+            (
+                "container Path and Args",
+                container_inspect_result.stdout + container_inspect_result.stderr,
+            ),
+            ("docker top", top),
+            ("container logs", logs),
+        ):
+            _assert_token_absent(channel, evidence)
+
+        image_metadata = json.loads(image_inspect)[0]
+        image_environment = image_metadata["Config"]["Env"]
+        assert (
+            f"MICRODUCK_ROM_BEARER_TOKEN_FILE={_SECRET_CONTAINER_PATH}"
+            in image_environment
+        )
+        assert not any(
+            item.startswith(f"{_DIRECT_TOKEN_ENV}=")
+            for item in image_environment
+        )
+
+        container_metadata = json.loads(container_inspect)[0]
+        assert container_metadata["Config"]["Cmd"] in (None, [])
+        assert container_metadata["Path"] == "/usr/local/bin/rom-entrypoint"
+        assert container_metadata["Args"] == []
+        secret_mount = next(
+            item
+            for item in container_metadata["Mounts"]
+            if item["Destination"] == _SECRET_CONTAINER_PATH
+        )
+        assert secret_mount["Type"] == "bind"
+        assert secret_mount["RW"] is False
+        secret_metadata = _run(
+            "docker",
+            "exec",
+            "--user",
+            "10001:10001",
+            container.name,
+            "/usr/bin/stat",
+            "--format=%u:%g:%a",
+            _SECRET_CONTAINER_PATH,
+        ).stdout.strip()
+        assert secret_metadata == "10001:10001:400"
+    finally:
+        _remove_container(container)
 
 
 def test_immediate_docker_stop_is_caught_before_application_import(

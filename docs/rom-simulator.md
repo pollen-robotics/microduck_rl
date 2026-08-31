@@ -193,16 +193,17 @@ python -m zipfile -e ../release/microduck-qualified-1.0.0.zip \
   ../release/qualified-bundle
 
 # The image runs as numeric UID/GID 10001. Create the only durable writable
-# host directory explicitly; do not rely on Docker creating it as root.
+# host directory and the protected secret directory explicitly; do not rely
+# on Docker creating either one as root.
 sudo install -d -o 10001 -g 10001 -m 0750 ../release/state
 sudo chown -R 10001:10001 ../release/state
 sudo chmod 0750 ../release/state
-
-umask 077
-printf 'MICRODUCK_ROM_BEARER_TOKEN=%s\n' 'replace-with-a-random-token' \
-  > ../release/rom-token.env
+sudo install -d -o 10001 -g 10001 -m 0700 ../release/secrets
+openssl rand -base64 48 | sudo install -o 10001 -g 10001 -m 0400 /dev/stdin \
+  ../release/secrets/microduck_rom_bearer_token
 
 docker run --name microduck-rom-sim --rm \
+  --detach \
   --user 10001:10001 \
   --read-only \
   --cap-drop=ALL \
@@ -210,7 +211,7 @@ docker run --name microduck-rom-sim --rm \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   --mount type=bind,src="$(realpath ../release/qualified-bundle)",dst=/bundle,readonly \
   --mount type=bind,src="$(realpath ../release/state)",dst=/state \
-  --env-file ../release/rom-token.env \
+  --mount type=bind,src="$(realpath ../release/secrets/microduck_rom_bearer_token)",dst=/run/secrets/microduck_rom_bearer_token,readonly \
   --publish 127.0.0.1:8000:8000 \
   --stop-timeout 60 \
   microduck-rom-sim:1.0.0
@@ -224,6 +225,12 @@ mount; `/state` is the only persistent writable mount and must remain owned by
 ephemeral workspace for verified MJCF snapshots. A valid qualified mount
 activates the process-isolated runtime during startup. Invalid bundle, token,
 state, model, or policy inputs fail closed.
+
+The bearer file must be a regular, non-symlink file owned by UID/GID 10001,
+with mode 0400, mounted read-only at the exact path shown above. The image sets
+only that non-secret path; the bearer value is never placed in image or
+container environment metadata, command arguments, or image history. Keep
+shell tracing disabled while handling credentials.
 
 The image declares `STOPSIGNAL SIGTERM`, and the shell entrypoint uses `exec`,
 so the Python API parent is PID 1. A stop reaches its lifespan shutdown, which
@@ -261,28 +268,34 @@ from the verified `/bundle` mount.
 
 ## 4. Authenticated API checks
 
-Keep tokens out of source control, command arguments, screenshots, transcripts,
-and shell tracing. Load the token without printing it:
+Keep tokens out of source control, command arguments, environment variables,
+screenshots, transcripts, and shell tracing. This helper reads the protected
+file into an unexported subshell variable and streams a curl configuration over
+standard input, so neither the bearer nor the authorization header enters curl
+arguments:
 
 ```bash
-set -a
-. ../release/rom-token.env
-set +a
-AUTH="Authorization: Bearer ${MICRODUCK_ROM_BEARER_TOKEN}"
+ROM_SECRET_FILE=../release/secrets/microduck_rom_bearer_token
+rom_curl() {
+  sudo cat "$ROM_SECRET_FILE" | {
+    IFS= read -r bearer
+    printf 'header = "Authorization: Bearer %s"\n' "$bearer"
+  } | curl --config - "$@"
+}
 ```
 
 Liveness is public; all other endpoints require the exact bearer token:
 
 ```bash
 curl --fail --silent http://127.0.0.1:8000/v1/health
-curl --fail --silent -H "$AUTH" http://127.0.0.1:8000/v1/ready
-curl --fail --silent -H "$AUTH" http://127.0.0.1:8000/v1/catalog
+rom_curl --fail --silent http://127.0.0.1:8000/v1/ready
+rom_curl --fail --silent http://127.0.0.1:8000/v1/catalog
 ```
 
 Read the installed identities from the catalog before creating a task:
 
 ```bash
-CATALOG=$(curl --fail --silent -H "$AUTH" http://127.0.0.1:8000/v1/catalog)
+CATALOG=$(rom_curl --fail --silent http://127.0.0.1:8000/v1/catalog)
 BUNDLE_VERSION=$(printf '%s' "$CATALOG" | jq -r .bundleVersion)
 BUNDLE_DIGEST=$(printf '%s' "$CATALOG" | jq -r .bundleDigest)
 ```
@@ -308,15 +321,15 @@ Create a short continuous task, renew it once, then cancel it:
 
 ```bash
 TASK=11111111111111111111111111111111
-curl --fail --silent -H "$AUTH" -H 'Content-Type: application/json' \
+rom_curl --fail --silent -H 'Content-Type: application/json' \
   -X POST http://127.0.0.1:8000/v1/tasks \
   -d "{\"schema\":\"MICRODUCK_SIM_TASK_V1\",\"taskId\":\"$TASK\",\"actionCode\":\"WALK_VELOCITY\",\"bundleVersion\":\"$BUNDLE_VERSION\",\"bundleDigest\":\"$BUNDLE_DIGEST\",\"parameters\":{\"vxMps\":0.0,\"vyMps\":0.0,\"yawRateRadps\":0.0},\"scenario\":{\"terrain\":\"flat\",\"seed\":7},\"leaseMs\":500,\"requestedBy\":\"operator-smoke\"}"
 
-curl --fail --silent -H "$AUTH" -H 'Content-Type: application/json' \
+rom_curl --fail --silent -H 'Content-Type: application/json' \
   -X PUT "http://127.0.0.1:8000/v1/tasks/$TASK/command" \
   -d '{"commandSequence":1,"parameters":{"vxMps":0.0,"vyMps":0.0,"yawRateRadps":0.0},"leaseMs":500}'
 
-curl --fail --silent -H "$AUTH" -X POST \
+rom_curl --fail --silent -X POST \
   "http://127.0.0.1:8000/v1/tasks/$TASK/cancel"
 ```
 
@@ -327,7 +340,7 @@ and must be from 1 through 100. The cursor range is `-1` through the signed
 until the `events` array is empty. The exclusive cursor prevents duplicates:
 
 ```bash
-curl --fail --silent -H "$AUTH" \
+rom_curl --fail --silent \
   "http://127.0.0.1:8000/v1/tasks/$TASK/events?afterSequence=-1&pageSize=100"
 ```
 
@@ -372,12 +385,12 @@ send no renewal, wait more than 200 ms, and query it:
 
 ```bash
 DEADMAN_TASK=22222222222222222222222222222222
-curl --fail --silent -H "$AUTH" -H 'Content-Type: application/json' \
+rom_curl --fail --silent -H 'Content-Type: application/json' \
   -X POST http://127.0.0.1:8000/v1/tasks \
   -d "{\"schema\":\"MICRODUCK_SIM_TASK_V1\",\"taskId\":\"$DEADMAN_TASK\",\"actionCode\":\"WALK_VELOCITY\",\"bundleVersion\":\"$BUNDLE_VERSION\",\"bundleDigest\":\"$BUNDLE_DIGEST\",\"parameters\":{\"vxMps\":0.0,\"vyMps\":0.0,\"yawRateRadps\":0.0},\"scenario\":{\"terrain\":\"flat\",\"seed\":11},\"leaseMs\":200,\"requestedBy\":\"operator-deadman-smoke\"}"
 
 sleep 0.4
-curl --fail --silent -H "$AUTH" \
+rom_curl --fail --silent \
   "http://127.0.0.1:8000/v1/tasks/$DEADMAN_TASK"
 ```
 
@@ -399,11 +412,47 @@ stable `ACTION_UNAVAILABLE` error.
 
 The SQLite database and related state live under `/state`. For the simplest
 consistent backup, stop the container, archive the whole host state directory,
-then restart with the same mounts and token:
+then restart with the same mounts and secret file:
 
 ```bash
 docker stop microduck-rom-sim
 tar -C ../release -czf "state-backup-$(date -u +%Y%m%dT%H%M%SZ).tgz" state
+```
+
+Rotate the bearer by creating a new mode-0400 file, stopping and replacing the
+container with the same hardening flags and a read-only mount of the new file,
+then removing the old file only after the replacement is ready. Docker cannot
+replace a bind-mounted file safely inside an existing container:
+
+```bash
+openssl rand -base64 48 | sudo install -o 10001 -g 10001 -m 0400 /dev/stdin \
+  ../release/secrets/microduck_rom_bearer_token.next
+docker stop microduck-rom-sim
+docker run --name microduck-rom-sim --rm \
+  --detach \
+  --user 10001:10001 \
+  --read-only \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --mount type=bind,src="$(realpath ../release/qualified-bundle)",dst=/bundle,readonly \
+  --mount type=bind,src="$(realpath ../release/state)",dst=/state \
+  --mount type=bind,src="$(realpath ../release/secrets/microduck_rom_bearer_token.next)",dst=/run/secrets/microduck_rom_bearer_token,readonly \
+  --publish 127.0.0.1:8000:8000 \
+  --stop-timeout 60 \
+  microduck-rom-sim:1.0.0
+ROM_SECRET_FILE=../release/secrets/microduck_rom_bearer_token.next
+rom_curl --fail --silent http://127.0.0.1:8000/v1/ready
+sudo rm ../release/secrets/microduck_rom_bearer_token
+```
+
+After final shutdown, explicitly remove the active credential and its now-empty
+directory:
+
+```bash
+docker stop microduck-rom-sim
+sudo rm ../release/secrets/microduck_rom_bearer_token.next
+sudo rmdir ../release/secrets
 ```
 
 On process restart, tasks that were in a nonterminal state are reconciled to
@@ -424,7 +473,7 @@ Stable operator signals:
 
 | Signal | Meaning / action |
 |---|---|
-| `BEARER_TOKEN_MISSING` | Configure a nonempty secret through an env file or secret manager. |
+| `BEARER_TOKEN_MISSING` | Mount a nonempty owner-only bearer file at `/run/secrets/microduck_rom_bearer_token`. |
 | `BUNDLE_UNAVAILABLE` | Mount an extracted promoted bundle at `/bundle`; verify manifest and artifact bytes. |
 | `QUALIFICATION_UNAVAILABLE` | Candidate, missing, forged, duplicate, mismatched, or partial qualification data was rejected; mount the exact promoted output. |
 | `STATE_DB_UNAVAILABLE` | Make `/state` writable by UID/GID 10001 and verify free space. |
