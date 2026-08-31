@@ -84,6 +84,28 @@ def test_selector_uses_distance_until_all_robots_finish(tmp_path: Path) -> None:
     assert candidate.checkpoint == expected.resolve()
 
 
+def test_selector_prioritizes_more_finishers_before_speed_or_mean_distance(
+    tmp_path: Path,
+) -> None:
+    _write_candidate(
+        tmp_path,
+        iteration=100,
+        mean_credit=14.0,
+        finish_times=[18.0, 19.0],
+    )
+    expected = _write_candidate(
+        tmp_path,
+        iteration=200,
+        mean_credit=8.5,
+        finish_times=[35.0, 36.0, 37.0],
+    )
+
+    candidate = MODULE.select_best(tmp_path)
+
+    assert candidate is not None
+    assert candidate.checkpoint == expected.resolve()
+
+
 def test_selector_prefers_fastest_four_robot_finisher_and_keeps_one_file(
     tmp_path: Path,
 ) -> None:
