@@ -39,7 +39,10 @@ def materialize_distribution_bundle(bundle_dir: Path, destination: Path) -> Poli
     bundle = load_qualified_bundle(root)
     require_distribution_cleared(bundle)
 
-    files = {"microduck-policy-bundle.json", *(artifact.path for artifact in _promoted_artifacts(bundle))}
+    files = {
+        "microduck-policy-bundle.json",
+        *(artifact.path for artifact in _promoted_artifacts(bundle)),
+    }
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "x", compression=zipfile.ZIP_STORED) as archive:
         for relative in sorted(files):

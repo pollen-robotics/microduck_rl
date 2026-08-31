@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import zipfile
 from pathlib import Path
 
 import pytest
 
 from mjlab_microduck.rom.handoff import materialize_distribution_bundle
+from mjlab_microduck.rom.main import load_qualified_bundle
 from mjlab_microduck.rom.qualification import qualify_and_promote
 from tests.test_rom_mujoco_runtime import _write_verified_bundle
 from tests.test_rom_qualification import NOW, _config
@@ -57,3 +59,28 @@ def test_distribution_materialization_writes_deterministic_cleared_bundle(
     materialize_distribution_bundle(installed, second)
 
     assert first.read_bytes() == second.read_bytes()
+    bundle = load_qualified_bundle(installed)
+    expected = {
+        "microduck-policy-bundle.json",
+        bundle.model.path,
+        *(policy.path for policy in bundle.policies),
+        *(item.path for item in bundle.license.artifacts),
+    }
+    declared_artifacts = [bundle.model, *bundle.license.artifacts]
+    for key in ("artifacts", "modelClosure"):
+        declared = bundle.qualification.get(key, [])
+        assert isinstance(declared, list)
+        expected.update(item["path"] for item in declared)
+        declared_artifacts.extend(
+            type(bundle.model).model_validate(item) for item in declared
+        )
+
+    with zipfile.ZipFile(first) as archive:
+        assert set(archive.namelist()) == expected
+        assert archive.read("microduck-policy-bundle.json") == (
+            installed / "microduck-policy-bundle.json"
+        ).read_bytes()
+        for artifact in declared_artifacts:
+            content = archive.read(artifact.path)
+            assert content == (installed / artifact.path).read_bytes()
+            assert artifact.digest == "sha256:" + hashlib.sha256(content).hexdigest()
