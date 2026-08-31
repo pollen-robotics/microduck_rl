@@ -3,11 +3,11 @@
 <img width="2215" height="884" alt="image" src="https://github.com/user-attachments/assets/5db7cc83-b3ce-4f7c-83f0-0572a63baed7" />
 
 
-RL training environments for [Microduck](https://github.com/pollen-robotics/microduck) —
+RL training environments for [Microduck](https://github.com/unergybot/microduck) —
 a ~800 g, ~25 cm tall bipedal robot — built on
 [mjlab](https://github.com/mujocolab/mjlab) (MuJoCo Warp) with PPO.
 Policies are trained here at 50 Hz, exported to ONNX, and deployed on the real
-robot by the runtime in [pollen-robotics/microduck](https://github.com/pollen-robotics/microduck).
+robot by the runtime in [unergybot/microduck](https://github.com/unergybot/microduck).
 
 <!-- HERO VIDEO — real robot montage: walking, standup, roulade, roller skating.
      Keep it short (~30 s) and real-robot-first: this is the "why should I care" shot. -->
@@ -28,7 +28,7 @@ Requires a CUDA GPU (training runs through MuJoCo Warp) and [uv](https://docs.as
 > Export `UV_HTTP_TIMEOUT=600` for the first sync. 
 
 ```bash
-git clone https://github.com/pollen-robotics/microduck_rl
+git clone https://github.com/unergybot/microduck_rl.git
 cd microduck_rl
 
 # train the walking policy (uses your GPU; ~1-2 h for a usable gait at 4096 envs)
@@ -183,6 +183,45 @@ uv run --with pytest pytest tests/
 CPU-only config-invariant and reward-function regression tests — they lock in
 joint-index mappings, reward sign conventions, and NaN guards.
 
+## Blender motion validation
+
+Open Duck Blender exports native 50 Hz Microduck `.npz` motion archives. Before
+using one for imitation or reference-motion work, validate its exact 14-joint/
+15-body contract and forward kinematics against `robot_walk.xml`:
+
+```bash
+uv run scripts/validate_blender_motion.py /path/to/motion.npz
+```
+
+The command rejects reordered names, malformed or non-finite arrays, incorrect
+metadata, and body transforms that do not match a MuJoCo replay of the exported
+root pose and joint positions.
+
+## Headless policy rollout export
+
+Export an ONNX walking policy as a native, validated 50 Hz motion archive with
+the same canonical scene used by the Blender validator:
+
+```bash
+uv run scripts/export_policy_rollout.py \
+  /home/mcao/MyCode/microduck/policies/alpha_walking.onnx \
+  --output /tmp/alpha-walking-forward.npz \
+  --duration 4 \
+  --lin-vel-x 0.30 \
+  --seed 0
+```
+
+`--output` is required. The remaining defaults are a four-second rollout with
+command `(0.30, 0.0, 0.0)` for `(linear-x, linear-y, angular-z)` and seed `0`;
+use `--lin-vel-y` and `--ang-vel-z` to set the other command components. Each
+frame advances four 5 ms MuJoCo substeps, so the 200 samples cover exactly four
+seconds at 50 Hz. The archive provenance includes SHA-256 digests of the policy,
+scene, and a canonical rollout configuration containing the command, duration,
+seed, simulation timestep, control decimation, and control rate. On success the
+command prints the output path, frame count, command, policy SHA-256, and maximum
+position and orientation errors from the motion validator. On failure it prints
+one `Policy rollout failed: ...` error line and exits with status `2`.
+
 ## ROM simulator releases
 
 Policy bundles can be built, qualified through the exact governed MuJoCo/ONNX
@@ -198,7 +237,8 @@ read-only secret mount; do not pass it through Docker environment metadata.
 
 ## Related projects
 
-- [microduck](https://github.com/pollen-robotics/microduck) — the Microduck project home, including the onboard runtime that runs the exported policies
+- [microduck](https://github.com/unergybot/microduck) — the forked Microduck runtime that runs the exported policies
+- [Open Duck Blender](https://github.com/unergybot/Open_Duck_Blender) — the forked animation and native motion-export workflow
 - [mjlab](https://github.com/mujocolab/mjlab) — the training framework (MuJoCo Warp + rsl_rl)
 - [BAM](https://github.com/Rhoban/bam) — better actuator models, by Rhoban
 
