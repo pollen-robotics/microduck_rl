@@ -25,7 +25,7 @@ from .contracts import (
     unsigned_policy_bundle_manifest,
 )
 from .process_supervisor import ReapReceipt, RuntimeProcessSupervisor
-from .secret_file import read_secret_file
+from .secret_file import PRODUCTION_SECRET_PATH, read_secret_file
 from .service import SimulatorTaskService
 from .store import SqliteTaskStore
 
@@ -59,7 +59,14 @@ def read_configuration(environ: Mapping[str, str] = os.environ) -> ServerConfigu
     file_path = environ.get("MICRODUCK_ROM_BEARER_TOKEN_FILE")
     if direct is not None and file_path is not None:
         raise ValueError("bearer token sources are mutually exclusive")
-    bearer_token = read_secret_file(file_path) if file_path is not None else direct or ""
+    bearer_token = (
+        read_secret_file(
+            file_path,
+            require_read_only_mount=file_path == PRODUCTION_SECRET_PATH,
+        )
+        if file_path is not None
+        else direct or ""
+    )
 
     raw_port = environ.get("MICRODUCK_ROM_PORT", "8000")
     try:

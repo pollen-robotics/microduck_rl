@@ -17,6 +17,7 @@ from typing import Final
 
 import pytest
 
+from mjlab_microduck.rom.handoff import materialize_distribution_bundle
 from tests.test_rom_qualification import _docker_context_includes
 
 _REPOSITORY_FILES: Final[frozenset[str]] = frozenset(
@@ -180,7 +181,12 @@ def _prepare_state(image: str, state_dir: Path) -> None:
 
 
 def _prepare_secret(
-    image: str, secret_dir: Path, *, mode: int = 0o400
+    image: str,
+    secret_dir: Path,
+    *,
+    mode: int = 0o400,
+    uid: int = 10001,
+    gid: int = 10001,
 ) -> Path:
     """Create a host fixture as image root without requiring host chown rights."""
     secret_dir.mkdir()
@@ -203,9 +209,11 @@ def _prepare_secret(
                 "import os,pathlib,sys;"
                 "path=pathlib.Path('/secret-fixture/bearer');"
                 "path.write_bytes(sys.stdin.buffer.read()+b'\\n');"
-                "os.chown(path,10001,10001);"
-                "os.chmod(path,int(sys.argv[1],8))"
+                "os.chown(path,int(sys.argv[1]),int(sys.argv[2]));"
+                "os.chmod(path,int(sys.argv[3],8))"
             ),
+            str(uid),
+            str(gid),
             f"{mode:o}",
         ],
         input=_TOKEN.encode(),
@@ -217,8 +225,9 @@ def _prepare_secret(
     return secret_dir / "bearer"
 
 
-def _secret_mount(secret_file: Path) -> str:
-    return f"type=bind,src={secret_file},dst={_SECRET_CONTAINER_PATH},readonly"
+def _secret_mount(secret_file: Path, *, readonly: bool = True) -> str:
+    mount = f"type=bind,src={secret_file},dst={_SECRET_CONTAINER_PATH}"
+    return f"{mount},readonly" if readonly else mount
 
 
 def _container_pids(name: str) -> tuple[int, tuple[int, ...]]:
@@ -375,7 +384,7 @@ def _launch_container(
     )
     deadline = time.monotonic() + 30
     base_url = ""
-    last_error = "container did not publish a port"
+    failure_label = "container did not publish a port"
     while time.monotonic() < deadline:
         port = _run("docker", "port", name, "8000/tcp", check=False).stdout.strip()
         if port:
@@ -384,16 +393,22 @@ def _launch_container(
                 status, body = _request(base_url, "GET", "/v1/ready")
                 if status == 200 and body.get("ready") is True:
                     break
-                last_error = f"readiness={status}:{body}"
+                _assert_token_absent(
+                    "container readiness response",
+                    json.dumps(body, separators=(",", ":")),
+                )
+                failure_label = f"container readiness returned HTTP {status}"
             except (OSError, ValueError) as exc:
-                last_error = type(exc).__name__
+                failure_label = (
+                    f"container readiness request failed with {type(exc).__name__}"
+                )
         time.sleep(0.05)
     else:
         logs = _run("docker", "logs", name, check=False)
         _assert_token_absent("container startup logs", logs.stdout + logs.stderr)
         _run("docker", "rm", "--force", name, check=False)
         _restore_state_ownership(image, state_dir)
-        raise AssertionError(f"{last_error}; logs={logs.stderr[-2000:]}")
+        raise AssertionError(f"{failure_label}; container did not become ready")
     parent_pid, descendants = _container_pids(name)
     assert len(descendants) == 1
     return _Container(name, image, base_url, state_dir, parent_pid, descendants[0])
@@ -458,6 +473,52 @@ def _assert_token_absent(channel: str, evidence: str) -> None:
         raise AssertionError(f"bearer literal leaked through {channel}")
 
 
+def _assert_mounted_evidence_has_no_token(
+    image: str, evidence_path: Path, channel: str
+) -> None:
+    completed = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--interactive",
+            "--read-only",
+            "--user",
+            "0:0",
+            "--mount",
+            f"type=bind,src={evidence_path},dst=/evidence,readonly",
+            "--entrypoint",
+            "/app/.venv/bin/python",
+            image,
+            "-P",
+            "-c",
+            (
+                "import pathlib,sys,zipfile\n"
+                "needle=sys.stdin.buffer.read()\n"
+                "root=pathlib.Path('/evidence')\n"
+                "paths=[root] if root.is_file() else "
+                "[p for p in root.rglob('*') if p.is_file()]\n"
+                "leaked=False\n"
+                "for path in paths:\n"
+                " data=path.read_bytes()\n"
+                " leaked=leaked or needle in data\n"
+                " if zipfile.is_zipfile(path):\n"
+                "  with zipfile.ZipFile(path) as archive:\n"
+                "   leaked=leaked or any(needle in archive.read(name) "
+                "for name in archive.namelist())\n"
+                "raise SystemExit(86 if leaked else 0)\n"
+            ),
+        ],
+        input=_TOKEN.encode(),
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode == 86:
+        raise AssertionError(f"bearer literal leaked through {channel}")
+    if completed.returncode != 0:
+        raise AssertionError(f"could not inspect {channel}")
+
+
 def _run_invalid_secret_launch(
     *,
     image: str,
@@ -466,6 +527,9 @@ def _run_invalid_secret_launch(
     suffix: str,
     extra_args: tuple[str, ...] = (),
     secret_mode: int | None = None,
+    secret_uid: int = 10001,
+    secret_gid: int = 10001,
+    secret_readonly: bool = True,
 ) -> tuple[int, str, str]:
     _prepare_state(image, state_dir)
     name = f"microduck-rom-task5-{os.getpid()}-{suffix}"
@@ -491,24 +555,38 @@ def _run_invalid_secret_launch(
             image,
             state_dir.parent / f"{state_dir.name}-secret",
             mode=secret_mode,
+            uid=secret_uid,
+            gid=secret_gid,
         )
-        args.extend(("--mount", _secret_mount(secret_file)))
-    args.extend((*extra_args, image))
+        args.extend(
+            ("--mount", _secret_mount(secret_file, readonly=secret_readonly))
+        )
+    args.extend(("--detach", *extra_args, image))
     _run("docker", "rm", "--force", name, check=False)
     try:
-        completed = _run(*args, check=False)
-        inspected = _run("docker", "inspect", name, check=False)
+        started = _run(*args, check=False)
+        if started.returncode != 0:
+            raise AssertionError("Docker could not create rejected-secret fixture")
+        deadline = time.monotonic() + 10.0
+        inspected = _run("docker", "inspect", name)
+        while json.loads(inspected.stdout)[0]["State"]["Running"]:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+            inspected = _run("docker", "inspect", name)
+        state = json.loads(inspected.stdout)[0]["State"]
+        exit_code = 0 if state["Running"] else int(state["ExitCode"])
         logs = _run("docker", "logs", name, check=False)
         evidence = (
-            completed.stdout
-            + completed.stderr
+            started.stdout
+            + started.stderr
             + inspected.stdout
             + inspected.stderr
             + logs.stdout
             + logs.stderr
         )
         _assert_token_absent("rejected container evidence", evidence)
-        return completed.returncode, inspected.stdout, logs.stdout + logs.stderr
+        return exit_code, inspected.stdout, logs.stdout + logs.stderr
     finally:
         _run("docker", "rm", "--force", name, check=False)
         _restore_state_ownership(image, state_dir)
@@ -991,6 +1069,25 @@ def test_built_image_contains_only_literal_runtime_source_inventory(
     )
 
 
+def test_persisted_evidence_leak_failure_names_only_stable_channel(
+    tmp_path: Path,
+) -> None:
+    """Echoing captured evidence on failure would disclose the bearer a second time."""
+    image = os.environ.get("MICRODUCK_ROM_CONTAINER_TEST_IMAGE")
+    if not image:
+        pytest.skip("set MICRODUCK_ROM_CONTAINER_TEST_IMAGE for evidence scanning")
+    planted = tmp_path / "planted-evidence"
+    planted.write_text(_TOKEN)
+
+    with pytest.raises(AssertionError) as caught:
+        _assert_mounted_evidence_has_no_token(
+            image, planted, "persisted test evidence"
+        )
+
+    assert str(caught.value) == "bearer literal leaked through persisted test evidence"
+    assert _TOKEN not in str(caught.value)
+
+
 @pytest.mark.parametrize(
     ("suffix", "extra_args", "secret_mode", "expected_log"),
     (
@@ -1057,6 +1154,72 @@ def test_production_container_rejects_permissive_secret_before_api_startup(
     inspected = json.loads(inspected_text)[0]
     assert inspected["State"]["ExitCode"] != 0
     assert "bearer token file must be owner-only" in logs
+    assert "Uvicorn running" not in logs
+
+
+@pytest.mark.parametrize(
+    (
+        "suffix",
+        "secret_mode",
+        "secret_uid",
+        "secret_gid",
+        "secret_readonly",
+        "message",
+    ),
+    (
+        (
+            "wrong-secret-uid",
+            0o040,
+            10002,
+            10001,
+            True,
+            "bearer token file ownership must match process identity",
+        ),
+        (
+            "wrong-secret-gid",
+            0o400,
+            10001,
+            10002,
+            True,
+            "bearer token file ownership must match process identity",
+        ),
+        (
+            "writable-secret-mount",
+            0o400,
+            10001,
+            10001,
+            False,
+            "bearer token file must be a read-only bind mount",
+        ),
+    ),
+)
+def test_production_container_rejects_wrong_secret_identity_or_writable_mount(
+    tmp_path: Path,
+    suffix: str,
+    secret_mode: int,
+    secret_uid: int,
+    secret_gid: int,
+    secret_readonly: bool,
+    message: str,
+) -> None:
+    """Dropping descriptor identity or mount checks would start with unsafe bytes."""
+    image, bundle = _release_inputs(tmp_path)
+
+    returncode, inspected_text, logs = _run_invalid_secret_launch(
+        image=image,
+        bundle=bundle,
+        state_dir=tmp_path / f"state-{suffix}",
+        suffix=suffix,
+        secret_mode=secret_mode,
+        secret_uid=secret_uid,
+        secret_gid=secret_gid,
+        secret_readonly=secret_readonly,
+    )
+
+    assert returncode != 0
+    inspected = json.loads(inspected_text)[0]
+    assert inspected["State"]["ExitCode"] != 0
+    assert message in logs
     assert "Uvicorn running" not in logs
 
 
@@ -1142,6 +1305,59 @@ def test_production_container_mounted_secret_authenticates_without_leaking_metad
             _SECRET_CONTAINER_PATH,
         ).stdout.strip()
         assert secret_metadata == "10001:10001:400"
+    finally:
+        _remove_container(container)
+
+
+def test_authenticated_activity_leaves_no_bearer_in_state_shutdown_or_handoff(
+    tmp_path: Path,
+) -> None:
+    """Persisting request authorization would leak the bearer beyond container memory."""
+    image, bundle = _release_inputs(tmp_path)
+    handoff = tmp_path / "cleared-handoff.zip"
+    materialize_distribution_bundle(bundle, handoff)
+    container = _launch_container(
+        image=image,
+        bundle=bundle,
+        state_dir=tmp_path / "state-persistence-leak",
+        suffix="persistence-leak",
+    )
+    try:
+        task_id = "a" * 32
+        status, _created = _request(
+            container.base_url,
+            "POST",
+            "/v1/tasks",
+            _walk_request(container, task_id, 5_000),
+        )
+        assert status == 202
+        _wait_task(container, task_id, {"RUNNING"})
+        status, cancelled = _request(
+            container.base_url, "POST", f"/v1/tasks/{task_id}/cancel"
+        )
+        assert status == 200
+        assert cancelled["state"] == "CANCELLED"
+        _wait_task(container, task_id, {"CANCELLED"})
+
+        assert _stop_and_assert_exact_reap(container) == 0
+        logs = _run("docker", "logs", container.name)
+        _assert_token_absent("post-shutdown container logs", logs.stdout + logs.stderr)
+        _assert_mounted_evidence_has_no_token(
+            image,
+            container.state_dir / "tasks.sqlite3",
+            "SQLite state database",
+        )
+        _assert_mounted_evidence_has_no_token(
+            image, container.state_dir, "persisted simulator state"
+        )
+        _assert_mounted_evidence_has_no_token(
+            image,
+            container.state_dir / "tasks.sqlite3.shutdown-v1.json",
+            "shutdown evidence",
+        )
+        _assert_mounted_evidence_has_no_token(
+            image, handoff, "cleared handoff output"
+        )
     finally:
         _remove_container(container)
 

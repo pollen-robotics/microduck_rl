@@ -97,6 +97,117 @@ def test_group_or_other_file_permissions_are_rejected(
         read_secret_file(str(source))
 
 
+@pytest.mark.parametrize("identity", ("uid", "gid"))
+def test_descriptor_owner_must_match_running_process_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    identity: str,
+) -> None:
+    """Trusting path/mode alone would accept a credential owned by another identity."""
+    source = _write_owner_only(tmp_path / "bearer", b"secret")
+    real_fstat = os.fstat
+
+    def wrong_owner(fd: int) -> SimpleNamespace:
+        metadata = real_fstat(fd)
+        return SimpleNamespace(
+            st_mode=metadata.st_mode,
+            st_size=metadata.st_size,
+            st_dev=metadata.st_dev,
+            st_uid=metadata.st_uid + (1 if identity == "uid" else 0),
+            st_gid=metadata.st_gid + (1 if identity == "gid" else 0),
+        )
+
+    monkeypatch.setattr(os, "fstat", wrong_owner)
+
+    with pytest.raises(
+        ValueError,
+        match=r"^bearer token file ownership must match process identity$",
+    ):
+        read_secret_file(str(source), require_read_only_mount=True)
+
+
+def test_noncontainer_owner_only_file_allows_inaccessible_different_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-container compatibility depends on owner UID, not its unused group."""
+    source = _write_owner_only(tmp_path / "bearer", b"secret")
+    real_fstat = os.fstat
+
+    def different_group(fd: int) -> SimpleNamespace:
+        metadata = real_fstat(fd)
+        return SimpleNamespace(
+            st_mode=metadata.st_mode,
+            st_size=metadata.st_size,
+            st_dev=metadata.st_dev,
+            st_uid=metadata.st_uid,
+            st_gid=metadata.st_gid + 1,
+        )
+
+    monkeypatch.setattr(os, "fstat", different_group)
+
+    assert read_secret_file(str(source)) == "secret"
+
+
+@pytest.mark.parametrize("mount_options", ("rw,nosuid", "ro,nosuid"))
+def test_required_read_only_mount_uses_exact_decoded_mountinfo_entry(
+    tmp_path: Path,
+    mount_options: str,
+) -> None:
+    """A writable or merely ancestor-mounted secret must not satisfy production."""
+    source = _write_owner_only(tmp_path / "bearer secret", b"secret")
+    metadata = source.stat()
+    encoded_mountpoint = str(source).replace(" ", r"\040")
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        f"91 42 {os.major(metadata.st_dev)}:{os.minor(metadata.st_dev)} "
+        f"/host/secret {encoded_mountpoint} {mount_options} - ext4 /dev/root ro\n"
+    )
+
+    if mount_options.startswith("ro"):
+        assert (
+            read_secret_file(
+                str(source),
+                require_read_only_mount=True,
+                mountinfo_path=mountinfo,
+            )
+            == "secret"
+        )
+    else:
+        with pytest.raises(
+            ValueError,
+            match=r"^bearer token file must be a read-only bind mount$",
+        ):
+            read_secret_file(
+                str(source),
+                require_read_only_mount=True,
+                mountinfo_path=mountinfo,
+            )
+
+
+def test_required_read_only_mount_rejects_read_only_ancestor(
+    tmp_path: Path,
+) -> None:
+    """A read-only ancestor is not proof that the secret file is its own bind mount."""
+    source = _write_owner_only(tmp_path / "bearer", b"secret")
+    metadata = source.stat()
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        f"91 42 {os.major(metadata.st_dev)}:{os.minor(metadata.st_dev)} "
+        f"/host/secret {tmp_path} ro,nosuid - ext4 /dev/root ro\n"
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"^bearer token file must be a read-only bind mount$",
+    ):
+        read_secret_file(
+            str(source),
+            require_read_only_mount=True,
+            mountinfo_path=mountinfo,
+        )
+
+
 @pytest.mark.parametrize(
     ("content", "message"),
     [
@@ -135,7 +246,13 @@ def test_size_limit_uses_bounded_read_when_fstat_size_lies(
 
     def lying_fstat(fd: int) -> SimpleNamespace:
         metadata = real_fstat(fd)
-        return SimpleNamespace(st_mode=metadata.st_mode, st_size=0)
+        return SimpleNamespace(
+            st_mode=metadata.st_mode,
+            st_size=0,
+            st_dev=metadata.st_dev,
+            st_uid=metadata.st_uid,
+            st_gid=metadata.st_gid,
+        )
 
     monkeypatch.setattr(os, "fstat", lying_fstat)
 
