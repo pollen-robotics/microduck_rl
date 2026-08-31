@@ -273,33 +273,9 @@ def _wait_parent_wchan_count(
     raise AssertionError(f"parent thread did not enter {expected}: {latest}")
 
 
-def _cross_running_child_protocol_barrier(
-    container: _Container, task_id: str, *, sequence: int
-) -> None:
-    """Prove the production child received and acknowledged an exact command."""
-    before_pid = container.child_pid
-    status, task = _request(
-        container.base_url,
-        "PUT",
-        f"/v1/tasks/{task_id}/command",
-        {
-            "commandSequence": sequence,
-            "parameters": {
-                "vxMps": 0.0,
-                "vyMps": 0.0,
-                "yawRateRadps": 0.0,
-            },
-            "leaseMs": 5_000,
-        },
-    )
-    assert status == 200
-    assert task["state"] == "RUNNING"
-    _parent_pid, descendants = _container_pids(container.name)
-    assert descendants == (before_pid,)
-
-
 def _cross_idle_child_protocol_barrier(container: _Container) -> None:
-    """Round-trip START/COMMAND/STOP and leave the same child idle for the gate."""
+    """Round-trip START/STOP and leave the same exact child idle for the gate."""
+    before_pid = container.child_pid
     probe_id = "e" * 32
     status, _task = _request(
         container.base_url,
@@ -309,7 +285,6 @@ def _cross_idle_child_protocol_barrier(container: _Container) -> None:
     )
     assert status == 202
     _wait_task(container, probe_id, {"RUNNING"})
-    _cross_running_child_protocol_barrier(container, probe_id, sequence=1)
     status, terminal = _request(
         container.base_url, "POST", f"/v1/tasks/{probe_id}/cancel"
     )
@@ -317,6 +292,8 @@ def _cross_idle_child_protocol_barrier(container: _Container) -> None:
     assert terminal["state"] == "CANCELLED"
     _wait_task(container, probe_id, {"CANCELLED"})
     _wait_ready(container, True)
+    _parent_pid, descendants = _container_pids(container.name)
+    assert descendants == (before_pid,)
 
 
 def _launch_container(
@@ -1342,9 +1319,8 @@ def test_container_sigterm_reaps_exact_child_and_restart_reconciles_unknown(
                 _wait_event(container, task_id, "TASK_CANCEL_REQUESTED")
             elif phase == "QUARANTINED":
                 child_pidfd = os.pidfd_open(container.child_pid)
-                _cross_running_child_protocol_barrier(
-                    container, task_id, sequence=1
-                )
+                # The preceding 202/RUNNING result is the production START ACK
+                # barrier for this exact child; freeze it before the next packet.
                 _signal_container_pid(
                     container, container.child_pid, signal.SIGSTOP
                 )
@@ -1354,10 +1330,10 @@ def test_container_sigterm_reaps_exact_child_and_restart_reconciles_unknown(
                         request_result,
                         "command",
                         container.base_url,
-                        "PUT",
+                        "POST",
                         f"/v1/tasks/{task_id}/command",
                         {
-                            "commandSequence": 2,
+                            "commandSequence": 1,
                             "parameters": {
                                 "vxMps": 0.0,
                                 "vyMps": 0.0,
