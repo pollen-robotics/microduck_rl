@@ -211,6 +211,9 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert MicroduckRollSprintRlCfg.experiment_name == "microduck_roll_sprint"
     assert MicroduckRollSprintRlCfg.save_interval == 100
     assert MicroduckRollSprintRlCfg.algorithm.entropy_coef == 0.0
+    assert MicroduckRollSprintRlCfg.algorithm.clip_param == pytest.approx(0.1)
+    assert MicroduckRollSprintRlCfg.algorithm.learning_rate == pytest.approx(2.5e-5)
+    assert MicroduckRollSprintRlCfg.algorithm.desired_kl == pytest.approx(0.005)
     reset_params = cfg.events["set_roll_sprint_state"].params
     assert reset_params["standing_prob"] == 0.45
     assert reset_params["midroll_prob"] == 0.10
@@ -223,7 +226,7 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
         reset_params["road_return_prob"],
     ) == (0.70, 0.20, 0.10)
     assert reset_params["recovery_road_return_prob"] == 0.35
-    assert reset_params["heading_return_prob"] == 0.30
+    assert reset_params["heading_return_prob"] == 0.10
     assert reset_params["heading_return_min_rad"] == pytest.approx(math.radians(20.0))
     assert reset_params["heading_return_max_rad"] == pytest.approx(math.radians(40.0))
     assert tuple(
@@ -277,7 +280,7 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     ] == [0.35, 0.30, 0.20, 0.10]
     assert [
         stage["params"]["heading_return_prob"] for stage in spawn_stages
-    ] == [0.30, 0.25, 0.20, 0.15]
+    ] == [0.10, 0.10, 0.08, 0.05]
     assert [
         tuple(
             stage["params"][name]

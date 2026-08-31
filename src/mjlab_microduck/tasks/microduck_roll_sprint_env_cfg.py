@@ -214,7 +214,11 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
             "road_edge_prob": 0.0 if play else 0.20,
             "road_return_prob": 0.0 if play else 0.10,
             "recovery_road_return_prob": 0.0 if play else 0.35,
-            "heading_return_prob": 0.0 if play else 0.30,
+            # A71 learned useful course correction by checkpoint 100, then a
+            # 30% forced-heading bucket erased the roll skill by checkpoints
+            # 200-300. Keep the targeted state present without making it the
+            # dominant fine-tuning distribution.
+            "heading_return_prob": 0.0 if play else 0.10,
             "heading_return_min_rad": (
                 microduck_mdp._ROLL_SPRINT_HEADING_RETURN_RESET_MIN_RAD
             ),
@@ -323,7 +327,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                         "ground_left_prob": 0.25,
                         "ground_right_prob": 0.25,
                         "recovery_road_return_prob": 0.35,
-                        "heading_return_prob": 0.30,
+                        "heading_return_prob": 0.10,
                     },
                 },
                 {
@@ -339,7 +343,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                         "ground_left_prob": 0.25,
                         "ground_right_prob": 0.25,
                         "recovery_road_return_prob": 0.30,
-                        "heading_return_prob": 0.25,
+                        "heading_return_prob": 0.10,
                     },
                 },
                 {
@@ -355,7 +359,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                         "ground_left_prob": 0.25,
                         "ground_right_prob": 0.25,
                         "recovery_road_return_prob": 0.20,
-                        "heading_return_prob": 0.20,
+                        "heading_return_prob": 0.08,
                     },
                 },
                 {
@@ -371,7 +375,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                         "ground_left_prob": 0.25,
                         "ground_right_prob": 0.25,
                         "recovery_road_return_prob": 0.10,
-                        "heading_return_prob": 0.15,
+                        "heading_return_prob": 0.05,
                     },
                 },
             ],
@@ -533,7 +537,11 @@ MicroduckRollSprintRlCfg = RslRlOnPolicyRunnerCfg(
     algorithm=PpoWithSymmetryCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
-        clip_param=0.2,
+        # The compatible race champion is already a narrow local optimum.
+        # A71 at 1e-4 improved through checkpoint 100 and catastrophically
+        # forgot the roll by 200-300, so use conservative trust-region updates
+        # for champion continuation instead of rediscovering the skill.
+        clip_param=0.1,
         # Warm-started roll policies already have broad stochasticity. An
         # entropy bonus drove distribution.std_param from 0.67 to 8.20 and
         # erased the learned roll within 700 iterations, so fine-tuning must
@@ -541,11 +549,11 @@ MicroduckRollSprintRlCfg = RslRlOnPolicyRunnerCfg(
         entropy_coef=0.0,
         num_learning_epochs=5,
         num_mini_batches=4,
-        learning_rate=1.0e-4,
+        learning_rate=2.5e-5,
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,
-        desired_kl=0.01,
+        desired_kl=0.005,
         max_grad_norm=1.0,
         symmetry_cfg=SYMMETRY_CFG if ENABLE_SYMMETRY else None,
     ),
