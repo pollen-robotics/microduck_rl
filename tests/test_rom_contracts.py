@@ -92,6 +92,27 @@ def valid_action_contract() -> dict[str, object]:
     }
 
 
+def _license_contract(*, status: str = "DISTRIBUTION_CLEARED") -> dict[str, object]:
+    return {
+        "software": {
+            "identifier": "Apache-2.0",
+            "artifactPaths": ["licenses/LICENSE"],
+        },
+        "modelAssets": {
+            "identifier": "LicenseRef-MicroDuck-Model",
+            "distributionStatus": status,
+            "artifactPaths": ["licenses/MODEL-LICENSE"],
+        },
+        "artifacts": [
+            {"path": "licenses/LICENSE", "digest": "sha256:" + "1" * 64},
+            {
+                "path": "licenses/MODEL-LICENSE",
+                "digest": "sha256:" + "2" * 64,
+            },
+        ],
+    }
+
+
 def valid_bundle() -> dict[str, object]:
     return {
         "schema": "MICRODUCK_POLICY_BUNDLE_V1",
@@ -108,8 +129,139 @@ def valid_bundle() -> dict[str, object]:
         "policies": [],
         "actions": [],
         "qualification": {},
-        "license": {},
+        "license": _license_contract(),
     }
+
+
+def test_bundle_license_accepts_complete_typed_evidence_contract():
+    """Removing typed declarations would let a bundle omit software/model permission evidence."""
+    accepted = PolicyBundle.model_validate(valid_bundle())
+
+    assert accepted.license.software.identifier == "Apache-2.0"
+    assert accepted.license.modelAssets.identifier == "LicenseRef-MicroDuck-Model"
+    assert accepted.license.modelAssets.distributionStatus == "DISTRIBUTION_CLEARED"
+
+
+@pytest.mark.parametrize(
+    ("name", "license"),
+    [
+        (
+            "unknown field",
+            _license_contract() | {"unreviewedLicenseMetadata": "allowed"},
+        ),
+        (
+            "missing model declaration",
+            {
+                key: value
+                for key, value in _license_contract().items()
+                if key != "modelAssets"
+            },
+        ),
+        (
+            "empty artifact references",
+            _license_contract()
+            | {
+                "software": _license_contract()["software"]
+                | {"artifactPaths": []}
+            },
+        ),
+        (
+            "duplicate artifact references",
+            _license_contract()
+            | {
+                "software": _license_contract()["software"]
+                | {"artifactPaths": ["licenses/LICENSE", "licenses/LICENSE"]}
+            },
+        ),
+        (
+            "path outside licenses",
+            _license_contract()
+            | {
+                "software": _license_contract()["software"]
+                | {"artifactPaths": ["models/LICENSE"]},
+                "artifacts": [
+                    {"path": "models/LICENSE", "digest": "sha256:" + "1" * 64},
+                    {
+                        "path": "licenses/MODEL-LICENSE",
+                        "digest": "sha256:" + "2" * 64,
+                    },
+                ],
+            },
+        ),
+        (
+            "dangling artifact reference",
+            _license_contract()
+            | {
+                "software": _license_contract()["software"]
+                | {"artifactPaths": ["licenses/MISSING"]}
+            },
+        ),
+        (
+            "unreferenced artifact",
+            _license_contract()
+            | {
+                "artifacts": _license_contract()["artifacts"]
+                + [
+                    {
+                        "path": "licenses/UNREFERENCED",
+                        "digest": "sha256:" + "3" * 64,
+                    }
+                ]
+            },
+        ),
+        (
+            "duplicate artifact path",
+            _license_contract()
+            | {
+                "artifacts": _license_contract()["artifacts"]
+                + [
+                    {"path": "licenses/LICENSE", "digest": "sha256:" + "3" * 64}
+                ]
+            },
+        ),
+        (
+            "SPDX expression",
+            _license_contract()
+            | {
+                "software": _license_contract()["software"]
+                | {"identifier": "Apache-2.0 OR MIT"}
+            },
+        ),
+        (
+            "invalid model LicenseRef",
+            _license_contract()
+            | {
+                "modelAssets": _license_contract()["modelAssets"]
+                | {"identifier": "LicenseRef-"}
+            },
+        ),
+        (
+            "unknown distribution status",
+            _license_contract(status="REVIEW_PENDING"),
+        ),
+    ],
+)
+def test_bundle_license_rejects_incomplete_or_ambiguous_evidence(
+    name: str, license: dict[str, object]
+):
+    """Relaxing each named rule would admit ambiguous or unverifiable V1 license evidence."""
+    with pytest.raises(ValidationError):
+        PolicyBundle.model_validate(valid_bundle() | {"license": license})
+
+
+def test_bundle_license_allows_shared_evidence_between_declarations():
+    """Rejecting one shared file would force duplicate bytes for identical permission evidence."""
+    license = _license_contract()
+    license["modelAssets"] = license["modelAssets"] | {
+        "artifactPaths": ["licenses/LICENSE"]
+    }
+    license["artifacts"] = [license["artifacts"][0]]
+
+    accepted = PolicyBundle.model_validate(valid_bundle() | {"license": license})
+
+    assert [artifact.path for artifact in accepted.license.artifacts] == [
+        "licenses/LICENSE"
+    ]
 
 
 def valid_robot_status() -> dict[str, object]:

@@ -138,7 +138,31 @@
       "policies": [],
       "actions": [],
       "qualification": {},
-      "license": {}
+      "license": {
+        "software": {
+          "identifier": "Apache-2.0",
+          "artifactPaths": [
+            "licenses/LICENSE"
+          ]
+        },
+        "modelAssets": {
+          "identifier": "LicenseRef-MicroDuck-Model",
+          "distributionStatus": "DISTRIBUTION_CLEARED",
+          "artifactPaths": [
+            "licenses/MODEL-LICENSE"
+          ]
+        },
+        "artifacts": [
+          {
+            "path": "licenses/LICENSE",
+            "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          {
+            "path": "licenses/MODEL-LICENSE",
+            "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+          }
+        ]
+      }
     },
     "robotStatus": {
       "schema": "BIPED_POSE_V1",

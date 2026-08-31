@@ -114,6 +114,17 @@ BoundedJsonKey = Annotated[
     str, StringConstraints(strict=True, min_length=1, max_length=128)
 ]
 BoundedJsonString = Annotated[str, StringConstraints(strict=True, max_length=1_024)]
+LicenseIdentifier = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        min_length=1,
+        max_length=128,
+        pattern=r"^(?:[A-Za-z0-9][A-Za-z0-9.-]*|LicenseRef-[A-Za-z0-9.-]+)$",
+    ),
+]
+
+SPDX_LICENSE_IDENTIFIERS = frozenset({"Apache-2.0", "CC-BY-NC-SA-4.0"})
 
 
 def _strict_finite_float(value: Any) -> float:
@@ -448,6 +459,58 @@ class ModelArtifact(ContractModel):
     digest: str = Field(pattern=_DIGEST_PATTERN)
 
 
+class LicenseDeclaration(ContractModel):
+    identifier: LicenseIdentifier
+    artifactPaths: list[BoundedPath] = Field(min_length=1, max_length=32)
+
+    @field_validator("artifactPaths")
+    @classmethod
+    def validate_artifact_paths(cls, paths: list[BoundedPath]) -> list[BoundedPath]:
+        if len(paths) != len(set(paths)):
+            raise ValueError("license artifactPaths must be unique")
+        for path in paths:
+            parts = path.split("/")
+            if (
+                not path.startswith("licenses/")
+                or "\\" in path
+                or any(part in {"", ".", ".."} for part in parts)
+            ):
+                raise ValueError("license artifactPaths must be safe licenses-relative paths")
+        return paths
+
+
+class ModelAssetLicenseDeclaration(LicenseDeclaration):
+    distributionStatus: Literal["DEVELOPMENT_ONLY", "DISTRIBUTION_CLEARED"]
+
+
+class BundleLicense(ContractModel):
+    software: LicenseDeclaration
+    modelAssets: ModelAssetLicenseDeclaration
+    artifacts: list[ModelArtifact] = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_license_contract(self) -> BundleLicense:
+        if self.software.identifier not in SPDX_LICENSE_IDENTIFIERS:
+            raise ValueError("software license identifier must be an allowed SPDX identifier")
+        if (
+            self.modelAssets.identifier not in SPDX_LICENSE_IDENTIFIERS
+            and not re.fullmatch(r"LicenseRef-[A-Za-z0-9.-]+", self.modelAssets.identifier)
+        ):
+            raise ValueError(
+                "model asset license identifier must be an allowed SPDX identifier or LicenseRef"
+            )
+        artifact_paths = [artifact.path for artifact in self.artifacts]
+        if len(artifact_paths) != len(set(artifact_paths)):
+            raise ValueError("license artifact paths must be unique")
+        referenced_paths = {
+            *self.software.artifactPaths,
+            *self.modelAssets.artifactPaths,
+        }
+        if referenced_paths != set(artifact_paths):
+            raise ValueError("license artifact references must exactly match declared artifacts")
+        return self
+
+
 class ActionDefinition(ContractModel):
     model_config = ConfigDict(
         json_schema_extra={
@@ -539,7 +602,7 @@ class UnsignedPolicyBundleManifest(ContractModel):
     policies: list[PolicyArtifact] = Field(max_length=_MAX_MANIFEST_COLLECTION_ITEMS)
     actions: list[ActionDefinition] = Field(max_length=_MAX_MANIFEST_COLLECTION_ITEMS)
     qualification: ManifestObject
-    license: ManifestObject
+    license: BundleLicense
 
     @property
     def schema(self) -> str:

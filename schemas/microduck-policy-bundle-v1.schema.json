@@ -391,6 +391,33 @@
       "title": "ActionDefinition",
       "type": "object"
     },
+    "BundleLicense": {
+      "additionalProperties": false,
+      "properties": {
+        "software": {
+          "$ref": "#/$defs/LicenseDeclaration"
+        },
+        "modelAssets": {
+          "$ref": "#/$defs/ModelAssetLicenseDeclaration"
+        },
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/ModelArtifact"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Artifacts",
+          "type": "array"
+        }
+      },
+      "required": [
+        "software",
+        "modelAssets",
+        "artifacts"
+      ],
+      "title": "BundleLicense",
+      "type": "object"
+    },
     "CompletionContract": {
       "additionalProperties": false,
       "properties": {
@@ -553,6 +580,35 @@
         "commandCadenceMs <= minLeaseMs"
       ]
     },
+    "LicenseDeclaration": {
+      "additionalProperties": false,
+      "properties": {
+        "identifier": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9.-]*|LicenseRef-[A-Za-z0-9.-]+)$",
+          "title": "Identifier",
+          "type": "string"
+        },
+        "artifactPaths": {
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Artifactpaths",
+          "type": "array"
+        }
+      },
+      "required": [
+        "identifier",
+        "artifactPaths"
+      ],
+      "title": "LicenseDeclaration",
+      "type": "object"
+    },
     "ModelArtifact": {
       "additionalProperties": false,
       "properties": {
@@ -573,6 +629,44 @@
         "digest"
       ],
       "title": "ModelArtifact",
+      "type": "object"
+    },
+    "ModelAssetLicenseDeclaration": {
+      "additionalProperties": false,
+      "properties": {
+        "identifier": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9.-]*|LicenseRef-[A-Za-z0-9.-]+)$",
+          "title": "Identifier",
+          "type": "string"
+        },
+        "artifactPaths": {
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Artifactpaths",
+          "type": "array"
+        },
+        "distributionStatus": {
+          "enum": [
+            "DEVELOPMENT_ONLY",
+            "DISTRIBUTION_CLEARED"
+          ],
+          "title": "Distributionstatus",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identifier",
+        "artifactPaths",
+        "distributionStatus"
+      ],
+      "title": "ModelAssetLicenseDeclaration",
       "type": "object"
     },
     "ObservationContract": {
@@ -992,21 +1086,7 @@
       }
     },
     "license": {
-      "additionalProperties": {
-        "$ref": "#/$defs/JsonValue"
-      },
-      "maxProperties": 128,
-      "propertyNames": {
-        "maxLength": 128,
-        "minLength": 1
-      },
-      "title": "License",
-      "type": "object",
-      "x-unergy-invariants": {
-        "finiteNumbers": true,
-        "maxCanonicalJsonBytes": 65536,
-        "maxDepth": 8
-      }
+      "$ref": "#/$defs/BundleLicense"
     },
     "bundleDigest": {
       "pattern": "^sha256:[0-9a-f]{64}$",

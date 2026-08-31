@@ -156,7 +156,27 @@ def service(tmp_path: Path) -> SimulatorTaskService:
         ],
         actions=actions,
         qualification={},
-        license={},
+        license={
+            "software": {
+                "identifier": "Apache-2.0",
+                "artifactPaths": ["licenses/LICENSE"],
+            },
+            "modelAssets": {
+                "identifier": "LicenseRef-MicroDuck-Model",
+                "distributionStatus": "DISTRIBUTION_CLEARED",
+                "artifactPaths": ["licenses/MODEL-LICENSE"],
+            },
+            "artifacts": [
+                {
+                    "path": "licenses/LICENSE",
+                    "digest": "sha256:" + "1" * 64,
+                },
+                {
+                    "path": "licenses/MODEL-LICENSE",
+                    "digest": "sha256:" + "2" * 64,
+                },
+            ],
+        },
     )
     return SimulatorTaskService(
         bundle,
