@@ -511,6 +511,7 @@ def _camera_follow_x(
     state: CameraFollowState,
     robot_x_m: float,
     dt_s: float,
+    minimum_x_m: float | None = -RACE_CAMERA_LEAD_M,
 ) -> CameraFollowState:
     """Advance a critically damped camera without position or velocity snaps."""
     if not np.isfinite(robot_x_m) or not np.isfinite(dt_s) or dt_s <= 0.0:
@@ -518,7 +519,9 @@ def _camera_follow_x(
     # Do not stop the camera at the 10 m line. Valid frontier can lag physical
     # position while a roll is still being verified, so a hard 10 m camera cap
     # leaves every contender off-screen during the decisive final seconds.
-    target_x_m = max(robot_x_m + RACE_CAMERA_LEAD_M, -RACE_CAMERA_LEAD_M)
+    target_x_m = robot_x_m + RACE_CAMERA_LEAD_M
+    if minimum_x_m is not None:
+        target_x_m = max(target_x_m, minimum_x_m)
     acceleration_mps2 = float(
         np.clip(
             RACE_CAMERA_SPRING_GAIN_S2 * (target_x_m - state.x_m)
@@ -627,6 +630,7 @@ def _follow_on_road_leader(
     camera_state: CameraFollowState,
     previous_leader_index: int | None,
     dt_s: float,
+    minimum_camera_x_m: float | None = -RACE_CAMERA_LEAD_M,
 ) -> tuple[CameraFollowState, float, int]:
     """Travel longitudinally with the on-road leader while showing the full road."""
     renderer = base_env._offline_renderer
@@ -636,7 +640,12 @@ def _follow_on_road_leader(
     # the offscreen backend can lag the physics state and let the leader leave.
     leader_index = _select_on_road_leader(base_env, previous_leader_index)
     leader_x_m = float(base_env._roll_sprint_forward_position[leader_index].item())
-    camera_state = _camera_follow_x(camera_state, leader_x_m, dt_s)
+    camera_state = _camera_follow_x(
+        camera_state,
+        leader_x_m,
+        dt_s,
+        minimum_x_m=minimum_camera_x_m,
+    )
     camera_y_m = 0.0
     renderer._cam.lookat[:] = (
         camera_state.x_m,
@@ -722,6 +731,11 @@ def main() -> int:
     )
     camera_state = CameraFollowState(RACE_CAMERA_LOOKAT[0])
     leader_index = 0
+    minimum_camera_x_m = (
+        None
+        if _roll_direction_for_task(args.task_id) < 0.0
+        else -RACE_CAMERA_LEAD_M
+    )
 
     writer: subprocess.Popen[bytes] | None = None
     try:
@@ -749,6 +763,7 @@ def main() -> int:
                     camera_state,
                     leader_index,
                     policy_dt,
+                    minimum_camera_x_m=minimum_camera_x_m,
                 )
             if (step + 1) % args.frame_stride != 0:
                 continue

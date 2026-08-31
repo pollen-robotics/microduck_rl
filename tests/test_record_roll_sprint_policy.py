@@ -339,6 +339,21 @@ def test_follow_camera_does_not_snap_when_leader_resets_behind() -> None:
     )
 
 
+def test_backroll_camera_can_follow_wrong_way_motion_before_policy_improves() -> None:
+    state = MODULE.CameraFollowState(x_m=0.60, velocity_mps=0.0)
+
+    for _ in range(200):
+        state = MODULE._camera_follow_x(
+            state,
+            robot_x_m=-5.0,
+            dt_s=0.02,
+            minimum_x_m=None,
+        )
+
+    assert state.x_m < -0.60
+    assert state.x_m > -5.0 + MODULE.RACE_CAMERA_LEAD_M
+
+
 def test_follow_camera_continues_beyond_finish_line() -> None:
     state = MODULE.CameraFollowState(x_m=10.0, velocity_mps=0.0)
 
