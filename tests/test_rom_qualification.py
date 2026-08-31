@@ -783,7 +783,7 @@ def test_qualification_executes_native_runtime_only_in_reaped_child(
         process = original_popen(*args, **kwargs)
         argv = args[0] if args else kwargs.get("args", ())
         if (
-            "mjlab_microduck.rom.runtime_child" in argv
+            "mjlab_microduck.rom.runtime_child" in " ".join(argv)
             and "--qualification-max-steps" in argv
         ):
             runtime_child_pids.append(process.pid)
