@@ -75,6 +75,12 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
             ),
         },
     )
+    cfg.rewards["roll_sprint_directional_bootstrap"] = RewardTermCfg(
+        func=microduck_mdp.roll_sprint_directional_bootstrap,
+        # Forward continuation needs no partial-cycle translation reward. The
+        # separate backroll task enables and later removes this discovery aid.
+        weight=0.0,
+    )
     # Primary race score: signed net forward frontier released only after a
     # valid full roll. The MDP term rejects revisits, backward travel, and
     # positive-path integration within a cycle. A61 checkpoints 100 and 200
@@ -241,6 +247,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
             "midroll_z_min": 0.05,
             "midroll_z_max": 0.10,
             "midroll_omega_range": MIDROLL_OMEGA_RANGE,
+            "midroll_forward_vel_range": (0.0, 0.0),
             "tuck_overrides": TUCK_OVERRIDES,
             "tuck_factor_range": old_reset.params["tuck_factor_range"],
             "joint_noise_std": old_reset.params["joint_noise_std"],
@@ -532,21 +539,22 @@ def make_microduck_backroll_sprint_env_cfg(
     cfg = make_microduck_roll_sprint_env_cfg(play=play)
     reset_params = cfg.events["set_roll_sprint_state"].params
     reset_params["roll_direction"] = -1.0
+    reset_params["midroll_forward_vel_range"] = (0.15, 0.45)
     if not play:
         reset_params.update(
-            standing_prob=0.35,
-            midroll_prob=0.35,
+            standing_prob=0.25,
+            midroll_prob=0.50,
             postroll_prob=0.10,
             crouch_prob=0.05,
-            ground_recovery_prob=0.15,
+            ground_recovery_prob=0.10,
         )
         spawn_stages = cfg.curriculum["roll_sprint_spawn_mix"].params[
             "param_stages"
         ]
         stage_mixes = (
-            (0.35, 0.35, 0.10, 0.05, 0.15),
-            (0.45, 0.25, 0.10, 0.05, 0.15),
-            (0.55, 0.15, 0.10, 0.05, 0.15),
+            (0.25, 0.50, 0.10, 0.05, 0.10),
+            (0.35, 0.40, 0.10, 0.05, 0.10),
+            (0.50, 0.25, 0.10, 0.05, 0.10),
             (0.65, 0.10, 0.10, 0.05, 0.10),
         )
         for stage, mix in zip(spawn_stages, stage_mixes, strict=True):
@@ -573,6 +581,21 @@ def make_microduck_backroll_sprint_env_cfg(
         {"step": 1000 * 24, "weight": 0.25},
         {"step": 3000 * 24, "weight": 0.10},
     ]
+    cfg.rewards["roll_sprint_directional_bootstrap"].weight = 6.0
+    cfg.curriculum["roll_sprint_directional_bootstrap_weight"] = (
+        CurriculumTermCfg(
+            func=microduck_mdp.reward_weight,
+            params={
+                "reward_name": "roll_sprint_directional_bootstrap",
+                "weight_stages": [
+                    {"step": 0, "weight": 6.0},
+                    {"step": 500 * 24, "weight": 3.0},
+                    {"step": 1000 * 24, "weight": 1.0},
+                    {"step": 1500 * 24, "weight": 0.0},
+                ],
+            },
+        )
+    )
     return cfg
 
 

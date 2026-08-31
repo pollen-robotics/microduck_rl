@@ -379,6 +379,12 @@ def test_backroll_sprint_is_separate_directional_61d_policy():
         "roll_direction", 1.0
     ) == 1.0
     assert reverse.events["set_roll_sprint_state"].params["roll_direction"] == -1.0
+    assert forward.events["set_roll_sprint_state"].params[
+        "midroll_forward_vel_range"
+    ] == (0.0, 0.0)
+    assert reverse.events["set_roll_sprint_state"].params[
+        "midroll_forward_vel_range"
+    ] == (0.15, 0.45)
     assert list(reverse.observations["actor"].terms) == list(
         forward.observations["actor"].terms
     )
@@ -393,13 +399,23 @@ def test_backroll_sprint_is_separate_directional_61d_policy():
     )
     assert reverse.rewards["roll_sprint_progress"].weight == 3.0
     assert reverse.rewards["roll_sprint_head_pivot"].weight == 0.5
+    assert forward.rewards["roll_sprint_directional_bootstrap"].weight == 0.0
+    assert reverse.rewards["roll_sprint_directional_bootstrap"].weight == 6.0
+    assert reverse.curriculum[
+        "roll_sprint_directional_bootstrap_weight"
+    ].params["weight_stages"] == [
+        {"step": 0, "weight": 6.0},
+        {"step": 500 * 24, "weight": 3.0},
+        {"step": 1000 * 24, "weight": 1.0},
+        {"step": 1500 * 24, "weight": 0.0},
+    ]
     spawn_stages = reverse.curriculum["roll_sprint_spawn_mix"].params[
         "param_stages"
     ]
     assert [stage["params"]["midroll_prob"] for stage in spawn_stages] == [
-        0.35,
+        0.50,
+        0.40,
         0.25,
-        0.15,
         0.10,
     ]
 
@@ -465,6 +481,70 @@ def test_backroll_midroll_bootstrap_gets_dense_progress_but_no_cycle_credit(
     assert mdp.roll_sprint_cycle_rate(env)[0] == 0.0
     assert mdp.roll_sprint_distance(env)[0] == 0.0
     assert env._roll_sprint_completed[0] == 0.0
+
+
+def test_backroll_directional_bootstrap_pays_only_new_phase_linked_goal_advance(
+    monkeypatch,
+):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    mdp._reset_roll_sprint_buffers(
+        env,
+        torch.tensor([0]),
+        roll_direction=-1.0,
+    )
+    _prime_roll_heading(env, asset)
+
+    # Body faces +x, so a real backroll must translate opposite-body toward
+    # the frozen -x course. Signed reverse rotation and -x motion pay once.
+    asset.data.root_link_pos_w[:, 0] = -0.05
+    asset.data.root_link_ang_vel_b[:, 1] = -1.0
+    first = mdp.roll_sprint_directional_bootstrap(env)
+    assert first[0] > 0.0
+
+    # Backtracking and revisiting the same course point cannot repay the
+    # per-cycle potential frontier, even while reverse phase keeps advancing.
+    env.common_step_counter += 1
+    asset.data.root_link_pos_w[:, 0] = -0.02
+    assert mdp.roll_sprint_directional_bootstrap(env)[0] == 0.0
+    env.common_step_counter += 1
+    asset.data.root_link_pos_w[:, 0] = -0.05
+    assert mdp.roll_sprint_directional_bootstrap(env)[0] == 0.0
+
+    env.common_step_counter += 1
+    asset.data.root_link_pos_w[:, 0] = -0.08
+    extension = mdp.roll_sprint_directional_bootstrap(env)
+    assert extension[0] > 0.0
+    assert env._roll_sprint_completed[0] == 0.0
+    assert env._roll_sprint_completed_distance[0] == 0.0
+
+
+def test_backroll_directional_bootstrap_rejects_sliding_and_wrong_way_motion(
+    monkeypatch,
+):
+    slide_env, slide_asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, slide_env)
+    mdp._reset_roll_sprint_buffers(
+        slide_env,
+        torch.tensor([0]),
+        roll_direction=-1.0,
+    )
+    _prime_roll_heading(slide_env, slide_asset)
+    slide_asset.data.root_link_pos_w[:, 0] = -0.20
+    slide_asset.data.root_link_ang_vel_b.zero_()
+    assert mdp.roll_sprint_directional_bootstrap(slide_env)[0] == 0.0
+
+    wrong_env, wrong_asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, wrong_env)
+    mdp._reset_roll_sprint_buffers(
+        wrong_env,
+        torch.tensor([0]),
+        roll_direction=-1.0,
+    )
+    _prime_roll_heading(wrong_env, wrong_asset)
+    wrong_asset.data.root_link_pos_w[:, 0] = 0.20
+    wrong_asset.data.root_link_ang_vel_b[:, 1] = -1.0
+    assert mdp.roll_sprint_directional_bootstrap(wrong_env)[0] == 0.0
 
 
 def test_roll_sprint_and_backlash_tasks_are_registered():
