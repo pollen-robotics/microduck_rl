@@ -124,6 +124,18 @@ runtime child and parent-death handling, runtime identity, service/store, and
 the supervisor state machine. Tests require that changing any one of these files
 changes the revision.
 
+Every runtime child crosses the image's `/usr/bin/setpriv --pdeathsig SIGTERM`
+boundary before Python starts. The supervisor PID captured before launch is a
+strict positional argument: a minimal `-P` bootstrap checks `getppid()` before
+importing the runtime module, and the child checks the same identity again when
+it installs its catchable SIGTERM contract. This closes both the exec/import
+orphan window and parent replacement ambiguity without Python `preexec_fn`
+(which is unsafe in the multithreaded API daemon). `setpriv` is supplied by the
+base image's Debian `util-linux` package and remains covered by the base-image
+package/license inventory. SIGTERM deliberately preserves the child-local
+zero-stop opportunity; EOF plus the supervisor's exact-PID TERM/KILL/reap
+barrier remain the other containment layers.
+
 The qualification report contains bounded per-seed success, fall, stepwise
 tracking statistics, distance, normalized-action energy proxy, separately
 counted actuator-clamp steps and physical joint-limit violations, max-action, and

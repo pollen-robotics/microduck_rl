@@ -529,6 +529,19 @@ def _wait_ready(container: _Container, expected: bool, timeout: float = 10.0) ->
     raise AssertionError(f"readiness did not become {expected}: {latest}")
 
 
+def _wait_ready_reason(
+    container: _Container, reason: str, timeout: float = 15.0
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout
+    latest: dict[str, object] = {}
+    while time.monotonic() < deadline:
+        status, latest = _request(container.base_url, "GET", "/v1/ready")
+        if status == 200 and reason in latest.get("reasonCodes", []):
+            return latest
+        time.sleep(0.005)
+    raise AssertionError(f"readiness did not expose {reason}: {latest}")
+
+
 def _wait_event(
     container: _Container, task_id: str, event_type: str, timeout: float = 10.0
 ) -> None:
@@ -1310,7 +1323,7 @@ def test_container_sigterm_reaps_exact_child_and_restart_reconciles_unknown(
                         request_result,
                         "cancel",
                         container.base_url,
-                        "POST",
+                        "PUT",
                         f"/v1/tasks/{task_id}/cancel",
                     ),
                     daemon=True,
@@ -1346,7 +1359,10 @@ def test_container_sigterm_reaps_exact_child_and_restart_reconciles_unknown(
                 )
                 operation.start()
                 assert child_pidfd is not None
-                _wait_ready(container, False, timeout=30.0)
+                ready = _wait_ready_reason(
+                    container, "OPERATION_TIMEOUT", timeout=30.0
+                )
+                assert ready["ready"] is False
                 assert select.select([child_pidfd], [], [], 0.0)[0] == []
 
         assert _stop_and_assert_exact_reap(
@@ -1356,6 +1372,10 @@ def test_container_sigterm_reaps_exact_child_and_restart_reconciles_unknown(
         if operation is not None:
             operation.join(timeout=20)
             assert not operation.is_alive()
+            if phase == "QUARANTINED":
+                result = request_result.get("command")
+                assert isinstance(result, tuple), result
+                assert result[0] == 503
 
         restarted = _launch_container(
             image=image,

@@ -125,8 +125,10 @@ def test_wrong_runtime_revision_returns_bounded_error_then_exits() -> None:
             sys.executable,
             "-m",
             "mjlab_microduck.rom.runtime_child",
-            "--socket-fd",
-            str(child.fileno()),
+                "--socket-fd",
+                str(child.fileno()),
+                "--expected-parent-pid",
+                str(os.getpid()),
         ],
         pass_fds=(child.fileno(),),
     )
@@ -547,12 +549,71 @@ def test_blocked_discrete_sample_forces_process_retirement_on_cleanup() -> None:
     parent.close()
 
 
-def _active_host() -> tuple[
+def test_discrete_deadline_requests_safety_while_sample_is_blocked() -> None:
+    now = [0.0]
+    host, runtime, parent, thread = _active_host(clock=lambda: now[0])
+    host._active_action_code = "STAND"
+    host._bundle.actions[0].actionCode = "STAND"
+    runtime.sample_release.clear()
+    host._start_discrete_monitor()
+    assert runtime.sample_started.wait(timeout=1)
+    now[0] = 60.0
+    assert host._safety_started.wait(timeout=1)
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    parent.settimeout(1)
+    assert parent.recv(65_537) == b""
+    runtime.sample_release.set()
+    parent.close()
+
+
+def test_completion_cleanup_deadline_retires_transport_when_safe_stop_blocks() -> None:
+    host, runtime, parent, thread = _active_host(fatal_cleanup_timeout_s=0.05)
+    host._active_action_code = "STAND"
+    host._bundle.actions[0].actionCode = "STAND"
+    runtime.safe_stop_release.clear()
+    runtime.complete_next(state="SUCCEEDED", metrics={})
+    host._start_discrete_monitor()
+    assert runtime.safe_stop_started.wait(timeout=1)
+    assert host._safety_started.wait(timeout=1)
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert host._cleanup_timed_out.is_set()
+    parent.settimeout(1)
+    assert parent.recv(65_537) == b""
+    runtime.safe_stop_release.set()
+    parent.close()
+
+
+def test_failed_completion_terminal_send_retires_transport(monkeypatch) -> None:
+    host, runtime, parent, thread = _active_host()
+    host._active_action_code = "STAND"
+    host._bundle.actions[0].actionCode = "STAND"
+    original_send = host._send
+
+    def fail_terminal(message):
+        if message.kind is RuntimeMessageKind.TERMINAL_EVENT:
+            return False
+        return original_send(message)
+
+    monkeypatch.setattr(host, "_send", fail_terminal)
+    runtime.complete_next(state="SUCCEEDED", metrics={})
+    host._start_discrete_monitor()
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert host._cleanup_timed_out.is_set()
+    assert host._task_id == "1" * 32
+    parent.settimeout(1)
+    assert parent.recv(65_537) == b""
+    parent.close()
+
+
+def _active_host(**host_kwargs) -> tuple[
     RuntimeChildHost, FakeMicroduckRuntime, socket.socket, threading.Thread
 ]:
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     runtime = FakeMicroduckRuntime()
-    host = RuntimeChildHost(child)
+    host = RuntimeChildHost(child, **host_kwargs)
     host._runtime = runtime
     host._bundle = SimpleNamespace(
         bundleVersion="1.0.0",
@@ -909,8 +970,10 @@ def test_sigterm_wakes_child_and_extra_inherited_fd_is_closed() -> None:
             sys.executable,
             "-m",
             "mjlab_microduck.rom.runtime_child",
-            "--socket-fd",
-            str(child.fileno()),
+                "--socket-fd",
+                str(child.fileno()),
+                "--expected-parent-pid",
+                str(os.getpid()),
         ],
         pass_fds=(child.fileno(), extra_a.fileno()),
     )

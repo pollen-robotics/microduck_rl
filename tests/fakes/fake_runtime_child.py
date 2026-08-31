@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 from datetime import UTC, datetime
 
@@ -200,7 +201,9 @@ def main() -> int:
     args = _args()
     control = verify_seqpacket_socket(args.socket_fd)
     test_control = verify_seqpacket_socket(args.test_socket_fd)
-    install_parent_death_signal()
+    # Production supervisor already installed the same contract pre-exec; this
+    # second check covers the fake's post-import bootstrap too.
+    install_parent_death_signal(os.getppid())
     close_unrelated_fds({args.socket_fd, args.test_socket_fd})
     if args.mode == "ignore-sigterm":
         signal.signal(signal.SIGTERM, signal.SIG_IGN)

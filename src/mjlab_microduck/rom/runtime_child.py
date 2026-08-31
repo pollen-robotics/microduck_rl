@@ -174,6 +174,8 @@ class RuntimeChildHost:
         self._generation: int | None = None
         self._task_id: str | None = None
         self._lease_deadline: float | None = None
+        self._discrete_deadline: float | None = None
+        self._completion_cleanup_deadline: float | None = None
         self._last_sequence = -1
         self._last_request: RuntimeMessage | None = None
         self._operation_active = threading.Event()
@@ -304,8 +306,14 @@ class RuntimeChildHost:
         while not self._stop.wait(0.01):
             with self._state_lock:
                 deadline = self._lease_deadline
+                discrete_deadline = self._discrete_deadline
+                cleanup_deadline = self._completion_cleanup_deadline
             if deadline is not None and self._clock() >= deadline:
                 self._request_safety("LEASE_EXPIRED")
+            if discrete_deadline is not None and self._clock() >= discrete_deadline:
+                self._request_safety("MAX_DURATION_EXCEEDED")
+            if cleanup_deadline is not None and time.monotonic() >= cleanup_deadline:
+                self._retire_uncertain_cleanup()
             if not self._safety_requested.is_set():
                 continue
             self._perform_safety_stop()
@@ -501,6 +509,8 @@ class RuntimeChildHost:
             )
             else None
         )
+        with self._state_lock:
+            self._discrete_deadline = deadline
         self._sample_stop.clear()
         self._qualification_monitor_started = True
 
@@ -608,16 +618,44 @@ class RuntimeChildHost:
                 ):
                     return
             assert self._runtime is not None
-            try:
-                raw_stopped = self._runtime.safe_stop(
-                    completion.handle, completion.reason
+            cleanup_result: list[RuntimeEvidence | BaseException] = []
+
+            def cleanup() -> None:
+                try:
+                    raw_stopped = self._runtime.safe_stop(
+                        completion.handle, completion.reason
+                    )
+                    cleanup_result.append(
+                        RuntimeEvidence(
+                            metrics=raw_stopped.metrics,
+                            stopReason=raw_stopped.stopReason,
+                        )
+                    )
+                except BaseException as exc:  # noqa: BLE001 - native boundary
+                    cleanup_result.append(exc)
+
+            with self._state_lock:
+                self._completion_cleanup_deadline = (
+                    time.monotonic() + self._fatal_cleanup_timeout_s
                 )
-                stopped = RuntimeEvidence(
-                    metrics=raw_stopped.metrics, stopReason=raw_stopped.stopReason
-                )
-            except Exception:  # noqa: BLE001 - uncertain cleanup requires exact reap
+            cleanup_thread = threading.Thread(
+                target=cleanup,
+                name="runtime-child-completion-cleanup",
+                daemon=True,
+            )
+            cleanup_thread.start()
+            cleanup_thread.join(timeout=self._fatal_cleanup_timeout_s)
+            with self._state_lock:
+                self._completion_cleanup_deadline = None
+            if cleanup_thread.is_alive() or not cleanup_result:
+                self._request_safety("RUNTIME_UNRESPONSIVE")
                 self._retire_uncertain_cleanup()
                 return
+            result = cleanup_result[0]
+            if isinstance(result, BaseException):
+                self._retire_uncertain_cleanup()
+                return
+            stopped = result
             if not _cleanup_evidence_is_truthful(stopped):
                 self._retire_uncertain_cleanup()
                 return
@@ -655,12 +693,10 @@ class RuntimeChildHost:
                 if generation != completion.generation or task_id != completion.task_id:
                     self._retire_uncertain_cleanup()
                     return
-                self._handle = None
-                self._lease_deadline = None
                 self._event_sequence += 1
                 event_sequence = self._event_sequence
             assert generation is not None and task_id is not None
-            self._send(
+            published = self._send(
                 RuntimeMessage(
                     kind=RuntimeMessageKind.TERMINAL_EVENT,
                     generation=generation,
@@ -671,7 +707,13 @@ class RuntimeChildHost:
                     ),
                 )
             )
+            if not published:
+                self._retire_uncertain_cleanup()
+                return
             with self._state_lock:
+                self._handle = None
+                self._lease_deadline = None
+                self._discrete_deadline = None
                 self._completed_identity = (generation, task_id)
                 self._generation = None
                 self._task_id = None
@@ -832,6 +874,7 @@ class RuntimeChildHost:
                 self._generation = None
                 self._task_id = None
                 self._lease_deadline = None
+                self._discrete_deadline = None
                 self._last_request = None
 
     def _matches_active(self, message: RuntimeMessage) -> bool:
@@ -878,6 +921,13 @@ class RuntimeChildHost:
             self._lease_deadline = (
                 self._clock() + message.payload.leaseMs / 1000
                 if message.payload.leaseMs is not None
+                else None
+            )
+            template = action_template(message.payload.actionCode)
+            self._discrete_deadline = (
+                self._clock() + template.completion.maxDurationMs / 1000
+                if template.completion is not None
+                and self._qualification_max_steps is None
                 else None
             )
             self._latest_sample_metrics = {}
@@ -978,6 +1028,7 @@ class RuntimeChildHost:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket-fd", type=int, required=True)
+    parser.add_argument("--expected-parent-pid", type=int, required=True)
     parser.add_argument("--bundle-root", type=Path)
     parser.add_argument("--qualification-max-steps", type=int)
     return parser
@@ -985,11 +1036,11 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _parser().parse_args()
+    install_parent_death_signal(args.expected_parent_pid)
     control = verify_seqpacket_socket(args.socket_fd)
     close_unrelated_fds({args.socket_fd})
     termination = threading.Event()
     signal.signal(signal.SIGTERM, lambda _signum, _frame: termination.set())
-    install_parent_death_signal()
     clear_runtime_environment()
     if args.qualification_max_steps is not None and not (
         100 <= args.qualification_max_steps <= 2_000

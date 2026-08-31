@@ -41,12 +41,18 @@ def close_unrelated_fds(preserve: set[int]) -> None:
             continue
 
 
-def install_parent_death_signal() -> None:
-    """Request SIGTERM on parent death and close the fork/exec race."""
-    parent_before = os.getppid()
+def install_parent_death_signal(expected_parent_pid: int) -> None:
+    """Bind SIGTERM delivery to the parent identity captured before ``fork``."""
+    if (
+        not isinstance(expected_parent_pid, int)
+        or isinstance(expected_parent_pid, bool)
+        or expected_parent_pid <= 1
+        or os.getppid() != expected_parent_pid
+    ):
+        os._exit(70)
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
         error = ctypes.get_errno()
         raise OSError(error, "unable to install parent-death signal")
-    if os.getppid() != parent_before:
-        os.kill(os.getpid(), signal.SIGTERM)
+    if os.getppid() != expected_parent_pid:
+        os._exit(70)

@@ -138,6 +138,12 @@ class _TerminalDelivery:
 # service.  This process-wide sequence gives every successfully spawned Popen a
 # distinct ownership identity for the lifetime of PID 1.
 _PROCESS_OWNERSHIP_IDENTITIES = count(1)
+_CHILD_BOOTSTRAP = (
+    "import os,runpy,sys;"
+    "expected=int(sys.argv.pop(1));"
+    "os.getppid()==expected or os._exit(70);"
+    "runpy.run_module('mjlab_microduck.rom.runtime_child',run_name='__main__',alter_sys=True)"
+)
 
 
 class RuntimeProcessSupervisor:
@@ -256,12 +262,18 @@ class RuntimeProcessSupervisor:
             "PATH",
         }
         argv = (
+                "/usr/bin/setpriv",
+                "--pdeathsig",
+                "SIGTERM",
                 sys.executable,
                 "-P",
-                "-m",
-                "mjlab_microduck.rom.runtime_child",
+                "-c",
+                _CHILD_BOOTSTRAP,
+                str(os.getpid()),
                 "--socket-fd",
                 str(socket_fd),
+                "--expected-parent-pid",
+                str(os.getpid()),
                 "--bundle-root",
                 self._bundle_root,
             )

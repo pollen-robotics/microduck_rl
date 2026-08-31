@@ -45,7 +45,10 @@ def test_production_child_launch_uses_safe_module_path_and_null_stdio(
     supervisor = RuntimeProcessSupervisor(bundle_root="/bundle", bundle_digest=DIGEST)
     try:
         launch = supervisor._default_launch(17)
-        assert launch.argv[:3] == (sys.executable, "-P", "-m")
+        assert launch.argv[:3] == ("/usr/bin/setpriv", "--pdeathsig", "SIGTERM")
+        assert launch.argv[3:6] == (sys.executable, "-P", "-c")
+        assert "runpy.run_module" in launch.argv[6]
+        assert "os.getppid()==expected" in launch.argv[6]
         assert launch.env is not None and "PYTHONPATH" not in launch.env
         assert launch.stdin == subprocess.DEVNULL
         assert launch.stdout == subprocess.DEVNULL
@@ -63,7 +66,8 @@ def test_qualification_launch_uses_the_same_runtime_child_with_bounded_mode() ->
     try:
         launch = supervisor._default_launch(17)
         assert launch.argv[-2:] == ("--qualification-max-steps", "100")
-        assert "mjlab_microduck.rom.runtime_child" in launch.argv
+        assert "mjlab_microduck.rom.runtime_child" in " ".join(launch.argv)
+        assert launch.argv[:3] == ("/usr/bin/setpriv", "--pdeathsig", "SIGTERM")
         assert "qualification_worker" not in " ".join(launch.argv)
     finally:
         supervisor.close()
@@ -1254,3 +1258,66 @@ def test_killed_parent_harness_leaves_no_orphan_exact_child() -> None:
             harness.kill()
             harness.wait(timeout=2)
         report_parent.close()
+
+
+def test_supervisor_launch_never_uses_unsafe_preexec(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    real_popen = subprocess.Popen
+
+    def recording_popen(*args, **kwargs):
+        captured.update(kwargs)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", recording_popen)
+    supervisor, _launch = _supervisor()
+    supervisor.ensure_ready()
+    supervisor.close()
+    assert "preexec_fn" not in captured
+
+
+def test_parent_killed_before_python_bootstrap_cannot_leave_orphan_with_peer_open() -> None:
+    report_parent, report_child = socket.socketpair(
+        socket.AF_UNIX, socket.SOCK_SEQPACKET
+    )
+    retained_peer, child_peer = socket.socketpair(
+        socket.AF_UNIX, socket.SOCK_SEQPACKET
+    )
+    harness = subprocess.Popen(
+        [
+            sys.executable,
+            str(Path(__file__).parent / "fakes" / "parent_death_bootstrap_harness.py"),
+            "--report-fd",
+            str(report_child.fileno()),
+            "--retained-peer-fd",
+            str(child_peer.fileno()),
+        ],
+        pass_fds=(report_child.fileno(), child_peer.fileno()),
+    )
+    report_child.close()
+    child_peer.close()
+    try:
+        report_parent.settimeout(2)
+        child_pid = int(report_parent.recv(32).decode("ascii"))
+        child_pidfd = os.pidfd_open(child_pid)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            status = Path(f"/proc/{child_pid}/status").read_text()
+            if "State:\tT" in status:
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("launcher child did not stop before bootstrap")
+        harness.kill()
+        harness.wait(timeout=2)
+        os.kill(child_pid, signal.SIGCONT)
+        assert select.select([child_pidfd], [], [], 2)[0] == [child_pidfd]
+        os.close(child_pidfd)
+        # Keeping the IPC peer open proves EOF was not the containment mechanism.
+        assert retained_peer.fileno() >= 0
+    finally:
+        retained_peer.close()
+        report_parent.close()
+        try:
+            harness.kill()
+        except ProcessLookupError:
+            pass
