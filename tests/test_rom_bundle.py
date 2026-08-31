@@ -25,6 +25,13 @@ from mjlab_microduck.rom.contracts import UnsignedPolicyBundleManifest, sha256_p
 from mjlab_microduck.rom.main import load_verified_bundle
 
 WALK_ONNX = "walk.onnx"
+TEST_LICENSE_FIELDS = {
+    "software_license_id": "Apache-2.0",
+    "software_license_files": (Path(__file__),),
+    "model_license_id": "Apache-2.0",
+    "model_license_status": "DISTRIBUTION_CLEARED",
+    "model_license_files": (Path(__file__),),
+}
 
 
 def _export_module():
@@ -167,7 +174,11 @@ def minimal_request(
         checkpoint="model_100.pt",
         experiment_ref="mjlab_microduck/test-run",
         qualification_files=(qualification,),
-        license_files=(license_file,),
+        software_license_id="Apache-2.0",
+        software_license_files=(license_file,),
+        model_license_id="Apache-2.0",
+        model_license_status="DISTRIBUTION_CLEARED",
+        model_license_files=(license_file,),
     )
 
 
@@ -243,6 +254,69 @@ def test_builder_emits_the_complete_code_owned_action_envelope(tmp_path: Path) -
         == CODE_OWNED_ACTION_CODES
     )
     validate_bundle_action_envelope(manifest)
+
+
+def test_builder_emits_explicit_shared_license_declarations(tmp_path: Path) -> None:
+    """Replacing either declaration or duplicating shared evidence would break ROM license review."""
+    policy = write_minimal_onnx(tmp_path / WALK_ONNX)
+
+    built = build_bundle(
+        minimal_request(tmp_path, artifacts={"WALK_VELOCITY": policy})
+    )
+
+    assert built.manifest.license.software.artifactPaths == ["licenses/LICENSE.txt"]
+    assert (
+        built.manifest.license.modelAssets.distributionStatus
+        == "DISTRIBUTION_CLEARED"
+    )
+    assert len(built.manifest.license.artifacts) == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("software_license_id", ""),
+        ("software_license_files", ()),
+        ("model_license_id", ""),
+        ("model_license_files", ()),
+    ],
+)
+def test_builder_rejects_missing_explicit_license_evidence(
+    tmp_path: Path, field: str, value: str | tuple[Path, ...]
+) -> None:
+    """A blank declaration value must not become a release-time license default."""
+    policy = write_minimal_onnx(tmp_path / WALK_ONNX)
+    request = minimal_request(tmp_path, artifacts={"WALK_VELOCITY": policy})
+    invalid = BundleBuildRequest(**(request.__dict__ | {field: value}))
+
+    with pytest.raises(ValueError):
+        build_bundle(invalid)
+
+
+def test_builder_rejects_license_basename_collision_with_different_bytes(
+    tmp_path: Path,
+) -> None:
+    """Two distinct evidence files cannot silently overwrite one archive path."""
+    policy = write_minimal_onnx(tmp_path / WALK_ONNX)
+    request = minimal_request(tmp_path, artifacts={"WALK_VELOCITY": policy})
+    software_license = tmp_path / "software" / "LICENSE.txt"
+    model_license = tmp_path / "model-license" / "LICENSE.txt"
+    software_license.parent.mkdir()
+    model_license.parent.mkdir()
+    software_license.write_text("Apache-2.0 software\n")
+    model_license.write_text("Apache-2.0 model\n")
+    collision = BundleBuildRequest(
+        **(
+            request.__dict__
+            | {
+                "software_license_files": (software_license,),
+                "model_license_files": (model_license,),
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="license archive path"):
+        build_bundle(collision)
 
 
 def test_candidate_loader_rejects_a_resigned_widened_action_envelope(
@@ -356,6 +430,7 @@ def test_real_scene_floor_emits_qualified_terrain_and_available_walk(tmp_path: P
             source_repository="microduck-rl",
             source_commit="a" * 40,
             created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            **TEST_LICENSE_FIELDS,
             checkpoint="model_100.pt",
             experiment_ref="mjlab_microduck/test-run",
         )
@@ -415,6 +490,7 @@ def test_builder_rejects_unusable_or_collision_incompatible_flat_floor(
             source_repository="microduck-rl",
             source_commit="a" * 40,
             created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            **TEST_LICENSE_FIELDS,
             checkpoint="model_100.pt",
             experiment_ref="mjlab_microduck/test-run",
         )
@@ -466,6 +542,7 @@ def test_builder_rejects_roller_masks_incompatible_with_usable_floor(
             source_repository="microduck-rl",
             source_commit="a" * 40,
             created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            **TEST_LICENSE_FIELDS,
             checkpoint="model_100.pt",
             experiment_ref="mjlab_microduck/test-run",
         )
@@ -500,6 +577,7 @@ def test_identical_policy_bytes_do_not_cross_deduplicate_task_identities(
             source_repository="microduck-rl",
             source_commit="a" * 40,
             created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            **TEST_LICENSE_FIELDS,
             checkpoint="model_100.pt",
             experiment_ref="mjlab_microduck/test-run",
         )
@@ -555,6 +633,7 @@ def test_roller_mesh_and_joint_names_without_collision_topology_do_not_qualify(
             source_repository="microduck-rl",
             source_commit="a" * 40,
             created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            **TEST_LICENSE_FIELDS,
             checkpoint="model_100.pt",
             experiment_ref="mjlab_microduck/test-run",
         )
@@ -585,6 +664,7 @@ def test_checked_in_roller_scene_qualifies_exact_passive_wheel_topology(
             source_repository="microduck-rl",
             source_commit="a" * 40,
             created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            **TEST_LICENSE_FIELDS,
             checkpoint="model_100.pt",
             experiment_ref="mjlab_microduck/test-run",
         )
@@ -639,6 +719,7 @@ def test_builder_rejects_tiny_ankle_fixtures_when_intended_feet_are_disabled(
             source_repository="microduck-rl",
             source_commit="a" * 40,
             created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            **TEST_LICENSE_FIELDS,
             checkpoint="model_100.pt",
             experiment_ref="mjlab_microduck/test-run",
         )
@@ -682,6 +763,7 @@ def test_builder_rejects_tiny_mesh_spoofing_canonical_foot_names(
             source_repository="microduck-rl",
             source_commit="a" * 40,
             created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            **TEST_LICENSE_FIELDS,
             checkpoint="model_100.pt",
             experiment_ref="mjlab_microduck/test-run",
         )
@@ -741,6 +823,7 @@ def test_builder_rejects_noncanonical_complete_roller_topology(
             source_repository="microduck-rl",
             source_commit="a" * 40,
             created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            **TEST_LICENSE_FIELDS,
             checkpoint="model_100.pt",
             experiment_ref="mjlab_microduck/test-run",
         )
@@ -780,6 +863,7 @@ def test_floor_scene_without_exact_position_actuator_contract_is_unavailable(
             source_repository="microduck-rl",
             source_commit="a" * 40,
             created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            **TEST_LICENSE_FIELDS,
             checkpoint="model_100.pt",
             experiment_ref="mjlab_microduck/test-run",
         )
@@ -821,6 +905,7 @@ def test_builder_rejects_non_position_affine_actuator_terms(
             source_repository="microduck-rl",
             source_commit="a" * 40,
             created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            **TEST_LICENSE_FIELDS,
             checkpoint="model_100.pt",
             experiment_ref="mjlab_microduck/test-run",
         )
@@ -868,6 +953,7 @@ def test_builder_rejects_non_finite_position_actuator_semantics(
             source_repository="microduck-rl",
             source_commit="a" * 40,
             created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            **TEST_LICENSE_FIELDS,
             checkpoint="model_100.pt",
             experiment_ref="mjlab_microduck/test-run",
         )
@@ -893,6 +979,7 @@ def test_builder_marks_dead_or_bypassed_normalizer_graph_unavailable(tmp_path: P
             source_repository="microduck-rl",
             source_commit="a" * 40,
             created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            **TEST_LICENSE_FIELDS,
             checkpoint="model_100.pt",
             experiment_ref="mjlab_microduck/test-run",
         )
@@ -928,6 +1015,7 @@ def test_builder_marks_non_finite_cpu_policy_inference_unavailable(tmp_path: Pat
             source_repository="microduck-rl",
             source_commit="a" * 40,
             created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            **TEST_LICENSE_FIELDS,
             checkpoint="model_100.pt",
             experiment_ref="mjlab_microduck/test-run",
         )
@@ -1043,6 +1131,7 @@ def test_bundle_resolves_compiler_mesh_and_texture_directories_through_includes(
             source_repository="microduck-rl",
             source_commit="a" * 40,
             created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            **TEST_LICENSE_FIELDS,
         )
     )
 
@@ -1066,6 +1155,7 @@ def test_bundle_accepts_the_default_walk_mjcf_compiler_meshdir(tmp_path: Path):
             source_repository="microduck-rl",
             source_commit="a" * 40,
             created_at=datetime(2026, 8, 29, tzinfo=UTC),
+            **TEST_LICENSE_FIELDS,
         )
     )
 
@@ -1250,8 +1340,16 @@ def test_bundle_cli_writes_release_archive_from_named_artifact(tmp_path: Path):
             "mjlab_microduck/test-run",
             "--qualification-file",
             str(request.qualification_files[0]),
-            "--license-file",
-            str(request.license_files[0]),
+            "--software-license-id",
+            request.software_license_id,
+            "--software-license-file",
+            str(request.software_license_files[0]),
+            "--model-license-id",
+            request.model_license_id,
+            "--model-license-status",
+            request.model_license_status,
+            "--model-license-file",
+            str(request.model_license_files[0]),
             "--output",
             str(output),
         ],
@@ -1271,6 +1369,92 @@ def test_bundle_cli_writes_release_archive_from_named_artifact(tmp_path: Path):
         item for item in manifest["actions"] if item["actionCode"] == "WALK_VELOCITY"
     )
     assert walk["availability"] == "AVAILABLE"
+
+
+@pytest.mark.parametrize(
+    "omitted_option",
+    (
+        "--software-license-id",
+        "--software-license-file",
+        "--model-license-id",
+        "--model-license-status",
+        "--model-license-file",
+    ),
+)
+def test_bundle_cli_requires_each_explicit_license_option(
+    tmp_path: Path, omitted_option: str
+) -> None:
+    """Allowing any omitted license option would create a bundle without reviewed evidence."""
+    license_file = tmp_path / "LICENSE.txt"
+    license_file.write_text("Apache-2.0\n")
+    option_values = {
+        "--software-license-id": "Apache-2.0",
+        "--software-license-file": str(license_file),
+        "--model-license-id": "Apache-2.0",
+        "--model-license-status": "DISTRIBUTION_CLEARED",
+        "--model-license-file": str(license_file),
+    }
+    command = [
+        "uv",
+        "run",
+        "scripts/build_rom_bundle.py",
+        "--release",
+        "1.0.0",
+        "--output",
+        str(tmp_path / "cli.zip"),
+    ]
+    for option, value in option_values.items():
+        if option != omitted_option:
+            command.extend((option, value))
+
+    completed = subprocess.run(
+        command,
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "required" in completed.stderr
+    assert omitted_option in completed.stderr
+
+
+def test_bundle_cli_rejects_the_removed_license_file_option(tmp_path: Path) -> None:
+    """Retaining the legacy option would bypass the separate declaration contract."""
+    license_file = tmp_path / "LICENSE.txt"
+    license_file.write_text("Apache-2.0\n")
+    completed = subprocess.run(
+        [
+            "uv",
+            "run",
+            "scripts/build_rom_bundle.py",
+            "--release",
+            "1.0.0",
+            "--output",
+            str(tmp_path / "cli.zip"),
+            "--software-license-id",
+            "Apache-2.0",
+            "--software-license-file",
+            str(license_file),
+            "--model-license-id",
+            "Apache-2.0",
+            "--model-license-status",
+            "DISTRIBUTION_CLEARED",
+            "--model-license-file",
+            str(license_file),
+            "--license-file",
+            str(license_file),
+        ],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "unrecognized arguments" in completed.stderr
+    assert "--license-file" in completed.stderr
 
 
 def test_export_metadata_preserves_baked_normalizer_graph(tmp_path: Path):

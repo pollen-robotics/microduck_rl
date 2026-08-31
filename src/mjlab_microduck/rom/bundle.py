@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal
 
 import mujoco
 import numpy as np
@@ -23,7 +23,10 @@ from .contracts import (
     OBSERVATION_CONTRACT,
     ActionContract,
     ActionDefinition,
+    BundleLicense,
+    LicenseDeclaration,
     ModelArtifact,
+    ModelAssetLicenseDeclaration,
     ObservationContract,
     PolicyArtifact,
     PolicyBundle,
@@ -52,12 +55,16 @@ class BundleBuildRequest:
     source_repository: str
     source_commit: str
     created_at: datetime
+    software_license_id: str
+    software_license_files: tuple[Path, ...]
+    model_license_id: str
+    model_license_status: Literal["DEVELOPMENT_ONLY", "DISTRIBUTION_CLEARED"]
+    model_license_files: tuple[Path, ...]
     model_terrain: str | None = None
     scenario_profile: str | None = None
     checkpoint: str | None = None
     experiment_ref: str | None = None
     qualification_files: tuple[Path, ...] = ()
-    license_files: tuple[Path, ...] = ()
     mirroring_transforms: Mapping[str, Mapping[str, Any]] | None = None
 
 
@@ -173,6 +180,50 @@ def _supporting_artifacts(
         staged.append((archive_path, source))
         artifacts.append(ModelArtifact(path=archive_path, digest=_file_digest(source)))
     return staged, artifacts
+
+
+def _license_artifacts(
+    software_files: tuple[Path, ...],
+    model_files: tuple[Path, ...],
+) -> tuple[list[tuple[str, Path]], list[ModelArtifact], list[str], list[str]]:
+    """Return unique staged files, artifacts, software refs, and model refs."""
+
+    def resolved_archive_paths(files: tuple[Path, ...]) -> list[tuple[str, Path]]:
+        resolved: list[tuple[str, Path]] = []
+        for source in files:
+            source = source.resolve()
+            if not source.is_file():
+                raise FileNotFoundError(source)
+            resolved.append((str(PurePosixPath("licenses", source.name)), source))
+        return resolved
+
+    software_sources = resolved_archive_paths(software_files)
+    model_sources = resolved_archive_paths(model_files)
+    staged_by_archive_path: dict[str, tuple[str, Path]] = {}
+    for archive_path, source in sorted(
+        [*software_sources, *model_sources], key=lambda item: (item[0], str(item[1]))
+    ):
+        digest = _file_digest(source)
+        existing = staged_by_archive_path.get(archive_path)
+        if existing is not None and existing[0] != digest:
+            raise ValueError(
+                f"license archive path has differing bytes: {archive_path}"
+            )
+        if existing is None:
+            staged_by_archive_path[archive_path] = (digest, source)
+
+    def references(sources: list[tuple[str, Path]]) -> list[str]:
+        return sorted({archive_path for archive_path, _ in sources})
+
+    staged = [
+        (archive_path, source)
+        for archive_path, (_, source) in sorted(staged_by_archive_path.items())
+    ]
+    artifacts = [
+        ModelArtifact(path=archive_path, digest=digest)
+        for archive_path, (digest, _) in sorted(staged_by_archive_path.items())
+    ]
+    return staged, artifacts, references(software_sources), references(model_sources)
 
 
 def _contracts() -> tuple[ObservationContract, ActionContract]:
@@ -472,8 +523,13 @@ def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
     qualification_staged, qualification_artifacts = _supporting_artifacts(
         "qualification", request.qualification_files
     )
-    license_staged, license_artifacts = _supporting_artifacts(
-        "licenses", request.license_files
+    (
+        license_staged,
+        license_artifacts,
+        software_license_refs,
+        model_license_refs,
+    ) = _license_artifacts(
+        request.software_license_files, request.model_license_files
     )
     staged.extend(qualification_staged)
     staged.extend(license_staged)
@@ -511,9 +567,18 @@ def build_bundle(request: BundleBuildRequest) -> BuiltBundle:
             if model_qualified
             else {}
         ),
-        license={
-            "artifacts": [artifact.model_dump() for artifact in license_artifacts]
-        },
+        license=BundleLicense(
+            software=LicenseDeclaration(
+                identifier=request.software_license_id,
+                artifactPaths=software_license_refs,
+            ),
+            modelAssets=ModelAssetLicenseDeclaration(
+                identifier=request.model_license_id,
+                distributionStatus=request.model_license_status,
+                artifactPaths=model_license_refs,
+            ),
+            artifacts=license_artifacts,
+        ),
     )
     artifact_digests = {
         archive_path: _file_digest(source) for archive_path, source in sorted(staged)

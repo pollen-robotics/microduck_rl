@@ -43,7 +43,17 @@ def main() -> None:
     parser.add_argument("--checkpoint")
     parser.add_argument("--experiment-ref")
     parser.add_argument("--qualification-file", action="append", default=[], type=Path)
-    parser.add_argument("--license-file", action="append", default=[], type=Path)
+    parser.add_argument("--software-license-id", required=True)
+    parser.add_argument(
+        "--software-license-file", action="append", required=True, type=Path
+    )
+    parser.add_argument("--model-license-id", required=True)
+    parser.add_argument(
+        "--model-license-status",
+        required=True,
+        choices=("DEVELOPMENT_ONLY", "DISTRIBUTION_CLEARED"),
+    )
+    parser.add_argument("--model-license-file", action="append", required=True, type=Path)
     arguments = parser.parse_args()
     source_commit = (
         arguments.source_commit
@@ -68,7 +78,11 @@ def main() -> None:
             checkpoint=arguments.checkpoint,
             experiment_ref=arguments.experiment_ref,
             qualification_files=tuple(arguments.qualification_file),
-            license_files=tuple(arguments.license_file),
+            software_license_id=arguments.software_license_id,
+            software_license_files=tuple(arguments.software_license_file),
+            model_license_id=arguments.model_license_id,
+            model_license_status=arguments.model_license_status,
+            model_license_files=tuple(arguments.model_license_file),
         )
     )
     print(f"Written {built.output_zip} ({built.manifest.bundleDigest})")
