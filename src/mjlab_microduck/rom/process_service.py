@@ -189,6 +189,7 @@ class SimulatorTaskService:
                 request,
                 action,
                 action.executionMode == "CONTINUOUS_LEASE",
+                supervisor_generation=self._supervisor.snapshot().generation,
             )
             self._next_generation += 1
             self._active = active
@@ -197,7 +198,10 @@ class SimulatorTaskService:
             )
         try:
             self._supervisor.start(request)
-            active.supervisor_generation = self._supervisor.snapshot().generation
+            if self._supervisor.snapshot().generation != active.supervisor_generation:
+                raise SupervisorOperationError(
+                    "runtime generation changed during START acknowledgement"
+                )
             deadline = (
                 self._monotonic_clock() + request.leaseMs / 1000
                 if active.continuous and request.leaseMs
@@ -220,7 +224,6 @@ class SimulatorTaskService:
                 )
                 return snapshot
         except SupervisorTaskTerminalized:
-            active.supervisor_generation = self._supervisor.snapshot().generation
             return self._store.get(request.taskId)
         except (SupervisorUnavailable, SupervisorOperationError) as exc:
             self._persist_failure(active, "RUNTIME_UNRESPONSIVE")
@@ -324,40 +327,72 @@ class SimulatorTaskService:
             if not pending.done.wait(self._runtime_call_timeout_s):
                 raise RuntimeException("command acknowledgement is still pending")
             if pending.error is not None:
-                raise RuntimeException("command delivery failed") from pending.error
+                raise pending.error
+            if pending.result is None:
+                raise RuntimeException("command completed without a durable result")
             return pending.result
+        containment_failure = False
         try:
             self._supervisor.command(task_id, command)
         except SupervisorTaskTerminalized:
-            pending.error = RuntimeException("task terminalized during command")
+            operation_error: BaseException | None = RuntimeException(
+                "task terminalized during command"
+            )
         except (SupervisorUnavailable, SupervisorOperationError) as exc:
-            pending.error = exc
-            self._persist_failure(active, "RUNTIME_UNRESPONSIVE")
+            operation_error = RuntimeException("simulator command was unresponsive")
+            operation_error.__cause__ = exc
+            containment_failure = True
         else:
-            deadline = self._monotonic_clock() + command.leaseMs / 1000
-            try:
-                accepted, _ = self._store.record_command(
-                    task_id, command, digest, deadline
-                )
-            except (StoreStaleCommand, StoreCommandSequenceConflict) as exc:
-                pending.error = exc
+            operation_error = None
+        deadline = self._monotonic_clock() + command.leaseMs / 1000
+        with self._lock:
+            if pending.done.is_set():
+                pass
+            elif operation_error is not None:
+                pending.error = operation_error
+            elif (
+                self._active is not active
+                or active.pending_command is not pending
+                or active.stop_claimed
+                or (current := self._store.get(task_id)) is None
+                or current.state != "RUNNING"
+            ):
+                pending.error = RuntimeException("task terminalized during command")
             else:
-                pending.result = accepted
-                with self._lock:
-                    if self._active is active and active.pending_command is pending:
+                try:
+                    accepted, _ = self._store.record_command(
+                        task_id, command, digest, deadline
+                    )
+                except StoreStaleCommand as exc:
+                    pending.error = StaleCommand(str(exc))
+                except StoreCommandSequenceConflict as exc:
+                    pending.error = CommandSequenceConflict(str(exc))
+                except IllegalTaskTransition:
+                    pending.error = RuntimeException("task terminalized during command")
+                except Exception as exc:  # noqa: BLE001 - all duplicates share failure.
+                    failure = RuntimeException("command durability failed")
+                    failure.__cause__ = exc
+                    pending.error = failure
+                else:
+                    if accepted is None:
+                        pending.error = RuntimeException(
+                            "command completed without a durable result"
+                        )
+                    else:
+                        pending.result = accepted
                         active.deadline = deadline
                         active.latest_command_sequence = command.commandSequence
                         active.latest_command_digest = digest
                         active.latest_command_result = accepted
-        finally:
-            with self._lock:
-                if self._active is active and active.pending_command is pending:
-                    active.pending_command = None
+            if self._active is active and active.pending_command is pending:
+                active.pending_command = None
             pending.done.set()
+        if containment_failure:
+            self._persist_failure(active, "RUNTIME_UNRESPONSIVE")
         if pending.error is not None:
-            raise RuntimeException(
-                "simulator command was unresponsive"
-            ) from pending.error
+            raise pending.error
+        if pending.result is None:
+            raise RuntimeException("command completed without a durable result")
         return pending.result
 
     def events_after(self, task_id: str, sequence: int, *, page_size: int = 100):
@@ -430,6 +465,17 @@ class SimulatorTaskService:
             self._request_stop(active, "LEASE_EXPIRED")
         # Unsolicited child terminals arrive only through the supervisor's
         # correlated callback. Cached snapshots are diagnostic, never replayed.
+        snap = self._supervisor.snapshot()
+        if (
+            active is not None
+            and active.supervisor_generation == snap.generation
+            and snap.state.value == "NO_CHILD"
+            and not snap.child_healthy
+            and snap.slot_releasable
+        ):
+            current = self._store.get(active.request.taskId)
+            if current is not None and current.state not in TERMINAL:
+                self._persist_failure(active, "RUNTIME_UNRESPONSIVE")
 
     def watchdog_failed(self) -> None:
         self._watchdog_healthy, self._readiness_failure_reason = (
@@ -464,6 +510,7 @@ class SimulatorTaskService:
         return self._store.get(active.request.taskId)
 
     def _terminal_callback(self, delivery: CorrelatedTerminalDelivery) -> None:
+        pending: _PendingCommand | None = None
         with self._lock:
             active = self._active
             if active is None:
@@ -478,6 +525,13 @@ class SimulatorTaskService:
             if current is None:
                 raise RuntimeError("active durable task is missing")
             if current.state in TERMINAL:
+                pending = active.pending_command
+                if pending is not None and not pending.done.is_set():
+                    pending.error = RuntimeException(
+                        "task terminalized during command"
+                    )
+                    active.pending_command = None
+                    pending.done.set()
                 self._active = None
                 return
             reason = terminal.evidence.stopReason or (
@@ -492,7 +546,13 @@ class SimulatorTaskService:
                 evidence=terminal.evidence,
                 stop_reason=reason,
             )
+            pending = active.pending_command
+            if pending is not None and not pending.done.is_set():
+                pending.error = RuntimeException("task terminalized during command")
+                active.pending_command = None
             self._active = None
+            if pending is not None:
+                pending.done.set()
 
     def _persist_failure(self, active: _ActiveTask, reason: str) -> None:
         with self._lock:

@@ -93,3 +93,96 @@ final focused review regression: 80 passed in 55.75s
 Ruff: all checks passed
 git diff --check: clean
 ```
+
+## Scoped-review fix round 2
+
+### Race fixes
+
+- Registered the supervisor generation from the ready snapshot before START is
+  submitted. A terminal sent immediately after the exact START ACK is therefore
+  eligible for correlated persistence even while the public `start()` call has not
+  returned. The service rejects a generation change across the ACK boundary.
+- Serialized ACK-to-durable COMMAND finalization and terminal persistence with the
+  service lock while keeping all child IPC outside that lock. A pending command now
+  has exactly one explicit durable result or service error, and both its owner and
+  identical duplicates observe that same outcome. Terminal-first ordering rejects
+  the command without an accepted event; command-first ordering durably records the
+  command before the terminal event.
+- Restored child publication order: a bounded `SOCK_SEQPACKET` send must complete
+  before `_safety_complete` is published. Lock acquisition, socket writability, and
+  nonblocking send all share the fatal cleanup deadline. Send failure withholds the
+  completion claim and falls back to EOF plus exact parent reap.
+- Reconciled a malformed unsolicited packet after the supervisor quarantines and
+  exactly reaps the child, producing durable `FAILED/RUNTIME_UNRESPONSIVE` instead of
+  leaving a stale RUNNING record.
+
+### Exact skipped-test replacement mapping
+
+Every remaining skip is an obsolete parent-thread/direct-runtime service fixture;
+the behavioral contract is exercised by these live replacements (the mapping test
+imports and resolves every referenced test function):
+
+- `test_blocked_sample_fails_closed_without_holding_service_ownership` -> blocked
+  child monitor retirement + malformed process packet durability.
+- `test_blocked_command_fails_closed_and_late_return_cannot_renew_ownership` ->
+  blocked real-supervisor command, duplicate shared failure, and no renewal.
+- `test_blocked_safe_stop_becomes_unresponsive_without_duplicate_stop_attempts` ->
+  blocked real-supervisor STOP containment + child refusal of untruthful terminal.
+- `test_newer_accepted_command_skips_older_delayed_publication` -> atomic
+  COMMAND-ACK/durable-command ordering against a concurrent terminal.
+- `test_stop_claim_invalidates_queued_commands_before_zero_publication` ->
+  terminal-first COMMAND finalization with identical duplicate errors.
+- `test_runtime_supervisor_bounds_twenty_four_stalled_callers` -> real process owner
+  24-caller bound.
+- `test_constructor_status_stall_is_bounded_and_fail_closed` -> blocked child LOAD
+  readiness failure and exact reap.
+- `test_cancel_during_start_repeatedly_stops_the_returned_handle` -> cancel during
+  real-supervisor START + child-local blocked-START emergency zero.
+- `test_watchdog_during_start_publishes_emergency_before_fifo_cleanup` -> watchdog
+  during real-supervisor START + child-local blocked-START emergency zero.
+- `test_start_timeout_quarantines_slot_until_late_handle_cleanup_finishes` -> blocked
+  real START, responsive reads, quarantine, exact reap.
+- `test_start_timeout_after_handle_registration_keeps_cleanup_quarantine` -> fresh
+  generation rejected until exact reap, then succeeds.
+- `test_start_timeout_retains_service_owner_until_emergency_attempt_finishes` ->
+  START failure quarantine and exact child reap.
+- `test_safety_operation_failure_persists_requested_terminal_and_releases_slot` ->
+  blocked real STOP with durable failure only after containment.
+- `test_realtime_stop_during_blocked_start_leaves_no_runtime_owner_or_control` ->
+  process cancel-during-START + child emergency-zero proof.
+- `test_realtime_emergency_after_final_start_check_revokes_publication` -> process
+  watchdog-during-START + child emergency-zero proof.
+- `test_realtime_stop_after_runtime_start_return_uses_retained_cleanup_handle` ->
+  immediate post-ACK terminal correlation + child blocked-START cleanup proof.
+- `test_service_tick_observes_concrete_runtime_fault_and_zeros_applied_motion` ->
+  process-service fault durability, concrete MuJoCo non-finite fail-safe actuator
+  disablement, and the qualified service-to-child-to-MuJoCo HTTP completion path.
+
+The last item is intentionally a three-layer replacement: production does not
+expose child MuJoCo memory to the parent merely for a test. The real child/API path
+proves composition and durable results, while the concrete runtime test directly
+proves zero/disable behavior under an injected non-finite state.
+
+### TDD and verification evidence
+
+The three focused race tests failed before production edits:
+
+```text
+immediate terminal: task never reached SUCCEEDED
+COMMAND race: owner leaked IllegalTaskTransition while duplicate returned None
+paused safety send: _safety_complete was already set before send release
+```
+
+After the fixes:
+
+```text
+focused process service + runtime child: 82 passed
+process/supervisor/child/service/API sweep: 197 passed, 14 mapped skips
+required 20x gate: 1900 passed, 280 mapped skips in 1830.41s (0:30:30)
+whole ROM suite before commit: 526 passed, 21 mapped/architecture skips in 249.57s
+Ruff: all checks passed
+git diff --check: clean
+```
+
+Commit `db7728e9fed0e08adb92797bdde032e04a294891` was then verified without
+working-tree changes: `526 passed, 21 skipped in 266.68s (0:04:26)`.

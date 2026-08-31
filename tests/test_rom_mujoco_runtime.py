@@ -65,7 +65,10 @@ _REPLACED_DIRECT_SERVICE_TESTS = {
 @pytest.fixture(autouse=True)
 def _process_replaces_direct_runtime_service_tests(request):
     if request.node.name.split("[", 1)[0] in _REPLACED_DIRECT_SERVICE_TESTS:
-        pytest.skip("parent runtime ownership was replaced by child-process coverage")
+        pytest.skip(
+            "implementation-shape-only direct-runtime service test; exact child-process "
+            "replacement is mapped in test_rom_service_process_integration.py"
+        )
 
 
 def _digest(path: Path) -> str:

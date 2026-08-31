@@ -58,7 +58,10 @@ _REPLACED_THREAD_LIFECYCLE_TESTS = {
 @pytest.fixture(autouse=True)
 def _process_replaces_parent_thread_lifecycle_tests(request):
     if request.node.name.split("[", 1)[0] in _REPLACED_THREAD_LIFECYCLE_TESTS:
-        pytest.skip("replaced by deterministic process-supervisor integration coverage")
+        pytest.skip(
+            "implementation-shape-only parent-thread test; exact behavioral replacement "
+            "is mapped in test_rom_service_process_integration.py"
+        )
 
 
 class ControllableClock:

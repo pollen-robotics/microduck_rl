@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import queue
+import select
 import signal
 import socket
 import threading
@@ -180,12 +181,30 @@ class RuntimeChildHost:
         return self._sample_thread is not None and self._sample_thread.is_alive()
 
     def _send(self, message: RuntimeMessage) -> bool:
-        try:
-            with self._send_lock:
-                self._socket.sendall(encode_packet(message))
-            return True
-        except OSError:
+        packet = encode_packet(message)
+        deadline = time.monotonic() + self._fatal_cleanup_timeout_s
+        acquired = self._send_lock.acquire(timeout=self._fatal_cleanup_timeout_s)
+        if not acquired:
             return False
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                _readable, writable, _exceptional = select.select(
+                    [], [self._socket], [], remaining
+                )
+                if not writable:
+                    return False
+                try:
+                    sent = self._socket.send(packet, socket.MSG_DONTWAIT)
+                except BlockingIOError:
+                    continue
+                return sent == len(packet)
+        except (OSError, ValueError):
+            return False
+        finally:
+            self._send_lock.release()
 
     def _response(
         self, request: RuntimeMessage, kind: RuntimeMessageKind, payload: object
@@ -382,9 +401,7 @@ class RuntimeChildHost:
         if not _cleanup_evidence_is_truthful(evidence):
             self._retire_uncertain_cleanup()
             return
-        # Publish local completion before the terminal becomes externally
-        # observable; receipt must imply the child has crossed its safety barrier.
-        self._safety_complete.set()
+        published = True
         if (
             request is not None
             and request.taskId is not None
@@ -405,7 +422,16 @@ class RuntimeChildHost:
                         terminal=terminal.payload,
                     ),
                 )
-            self._send(terminal)
+            published = self._send(terminal)
+        if published:
+            # The main loop may close transport only after the correlated terminal
+            # is fully handed to the kernel. Receipt therefore implies the child
+            # has crossed its local cleanup barrier.
+            self._safety_complete.set()
+        else:
+            # Publication uncertainty is contained by EOF and exact parent reap;
+            # never claim the acknowledged safety barrier on a failed send.
+            self._cleanup_timed_out.set()
 
     def _bundle_action_code(self) -> str:
         return self._active_action_code

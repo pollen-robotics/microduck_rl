@@ -532,9 +532,53 @@ def test_lease_expiry_initiates_zero_stop_without_parent_watchdog() -> None:
     assert terminal.payload.eventSequence == 1
     assert terminal.payload.terminal.outcome == "TIMED_OUT"
     assert not host.sample_monitor_alive
-    assert host._safety_complete.is_set()
+    assert host._safety_complete.wait(timeout=1)
     parent.close()
     thread.join(timeout=1)
+
+
+def test_safety_completion_waits_until_terminal_packet_is_published() -> None:
+    """The main loop must not close transport while safety terminal send is paused."""
+    host, runtime, parent, thread = _active_host()
+    host._last_request = RuntimeMessage(
+        kind="COMMAND",
+        generation=7,
+        operationSequence=1,
+        taskId="1" * 32,
+        payload=CommandPayload(
+            parameters={"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0},
+            leaseMs=100,
+        ),
+    )
+    send_entered, send_release = threading.Event(), threading.Event()
+    original_send = host._send
+
+    def paused_terminal_send(message: RuntimeMessage) -> bool:
+        if message.kind is RuntimeMessageKind.TERMINAL_EVENT:
+            send_entered.set()
+            assert send_release.wait(timeout=1)
+        return original_send(message)
+
+    host._send = paused_terminal_send  # type: ignore[method-assign]
+    host._request_safety("LEASE_EXPIRED")
+    assert runtime.safe_stopped.wait(timeout=1)
+    assert send_entered.wait(timeout=1)
+    time.sleep(0.02)
+    assert not host._safety_complete.is_set()
+    assert thread.is_alive()
+    parent.setblocking(False)
+    with pytest.raises(BlockingIOError):
+        parent.recv(65_537)
+    parent.setblocking(True)
+
+    send_release.set()
+    parent.settimeout(1)
+    terminal = decode_packet(parent.recv(65_537))
+    assert terminal.kind is RuntimeMessageKind.TERMINAL_EVENT
+    assert host._safety_complete.wait(timeout=1)
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    parent.close()
 
 
 @pytest.mark.parametrize(
