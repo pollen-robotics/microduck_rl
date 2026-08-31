@@ -146,6 +146,7 @@ EXPECTED_GOVERNED_RUNTIME_MODULES = (
     "rom/parent_death.py",
     "rom/runtime.py",
     "rom/runtime_identity.py",
+    "rom/secret_file.py",
     "rom/service.py",
     "rom/store.py",
     "rom/supervisor_state.py",

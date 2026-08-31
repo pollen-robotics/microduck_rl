@@ -12,6 +12,7 @@ MAX_SECRET_BYTES = 4096
 PRODUCTION_SECRET_PATH = "/run/secrets/microduck_rom_bearer_token"
 _UNAVAILABLE_MESSAGE = "bearer token file is unavailable"
 _MOUNTINFO_PATH = Path("/proc/self/mountinfo")
+_FDINFO_ROOT = Path("/proc/self/fdinfo")
 _MOUNT_ESCAPE = re.compile(r"\\(040|011|012|134)")
 _MOUNT_ESCAPE_VALUES = {"040": " ", "011": "\t", "012": "\n", "134": "\\"}
 
@@ -26,27 +27,48 @@ def _is_read_only_bind_mount(
     path: Path,
     *,
     device: int,
+    mount_id: int,
     mountinfo_path: Path,
 ) -> bool:
     try:
         mount_lines = mountinfo_path.read_text().splitlines()
     except (OSError, UnicodeError):
         return False
-    expected_device = f"{os.major(device)}:{os.minor(device)}"
+    matching_fields: list[list[str]] = []
     for line in mount_lines:
-        mount_fields = line.partition(" - ")[0].split()
-        if len(mount_fields) < 6:
-            continue
-        root = _decode_mount_field(mount_fields[3])
-        mountpoint = _decode_mount_field(mount_fields[4])
-        options = mount_fields[5].split(",")
-        if (
-            mount_fields[2] == expected_device
-            and root != "/"
-            and mountpoint == str(path)
-        ):
-            return "ro" in options
-    return False
+        mount_record, separator, _filesystem = line.partition(" - ")
+        mount_fields = mount_record.split()
+        if separator and mount_fields and mount_fields[0] == str(mount_id):
+            matching_fields.append(mount_fields)
+    if len(matching_fields) != 1 or len(matching_fields[0]) < 6:
+        return False
+    mount_fields = matching_fields[0]
+    expected_device = f"{os.major(device)}:{os.minor(device)}"
+    root = _decode_mount_field(mount_fields[3])
+    mountpoint = _decode_mount_field(mount_fields[4])
+    options = mount_fields[5].split(",")
+    return (
+        mount_fields[2] == expected_device
+        and root.startswith("/")
+        and root != "/"
+        and mountpoint == str(path)
+        and "ro" in options
+    )
+
+
+def _descriptor_mount_id(fd: int, fdinfo_path: Path | None) -> int | None:
+    source = fdinfo_path if fdinfo_path is not None else _FDINFO_ROOT / str(fd)
+    try:
+        lines = source.read_text().splitlines()
+    except (OSError, UnicodeError):
+        return None
+    values = []
+    for line in lines:
+        key, separator, raw_value = line.partition(":")
+        value = raw_value.strip()
+        if key == "mnt_id" and separator and value.isdecimal():
+            values.append(int(value))
+    return values[0] if len(values) == 1 and values[0] > 0 else None
 
 
 def read_secret_file(
@@ -54,6 +76,7 @@ def read_secret_file(
     *,
     require_read_only_mount: bool = False,
     mountinfo_path: Path = _MOUNTINFO_PATH,
+    fdinfo_path: Path | None = None,
 ) -> str:
     """Read one bounded token from an owner-only regular file."""
     path = Path(path_value)
@@ -61,7 +84,13 @@ def read_secret_file(
         raise ValueError("bearer token file path must be absolute")
 
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        fd = os.open(
+            path,
+            os.O_RDONLY
+            | os.O_CLOEXEC
+            | os.O_NOFOLLOW
+            | getattr(os, "O_NONBLOCK", 0),
+        )
     except OSError:
         raise ValueError(_UNAVAILABLE_MESSAGE) from None
 
@@ -77,12 +106,15 @@ def read_secret_file(
             )
         if metadata.st_mode & 0o077:
             raise ValueError("bearer token file must be owner-only")
-        if require_read_only_mount and not _is_read_only_bind_mount(
-            path,
-            device=metadata.st_dev,
-            mountinfo_path=mountinfo_path,
-        ):
-            raise ValueError("bearer token file must be a read-only bind mount")
+        if require_read_only_mount:
+            mount_id = _descriptor_mount_id(fd, fdinfo_path)
+            if mount_id is None or not _is_read_only_bind_mount(
+                path,
+                device=metadata.st_dev,
+                mount_id=mount_id,
+                mountinfo_path=mountinfo_path,
+            ):
+                raise ValueError("bearer token file must be a read-only bind mount")
         raw = os.read(fd, MAX_SECRET_BYTES + 1)
     except OSError:
         raise ValueError(_UNAVAILABLE_MESSAGE) from None

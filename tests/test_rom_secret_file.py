@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +16,11 @@ from mjlab_microduck.rom.secret_file import MAX_SECRET_BYTES, read_secret_file
 def _write_owner_only(path: Path, content: bytes) -> Path:
     path.write_bytes(content)
     path.chmod(0o400)
+    return path
+
+
+def _write_fdinfo(path: Path, mount_id: int) -> Path:
+    path.write_text(f"pos:\t0\nflags:\t0104000\nmnt_id:\t{mount_id}\n")
     return path
 
 
@@ -81,6 +88,35 @@ def test_fifo_secret_source_is_rejected_before_any_blocking_read(
             read_secret_file(str(source))
     finally:
         os.close(write_fd)
+
+
+def test_real_fifo_is_rejected_in_a_bounded_subprocess(tmp_path: Path) -> None:
+    """Removing nonblocking open would hang before the reader can reject a real FIFO."""
+    source = tmp_path / "secret-fifo"
+    os.mkfifo(source, 0o400)
+    program = """
+import sys
+from mjlab_microduck.rom.secret_file import read_secret_file
+
+try:
+    read_secret_file(sys.argv[1])
+except ValueError as exc:
+    print(exc)
+    raise SystemExit(0)
+raise SystemExit(2)
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", program, str(source)],
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout.strip() == "bearer token source must be a regular file"
+    assert completed.stderr == ""
 
 
 @pytest.mark.parametrize("mode", [0o440, 0o404])
@@ -159,6 +195,7 @@ def test_required_read_only_mount_uses_exact_decoded_mountinfo_entry(
     metadata = source.stat()
     encoded_mountpoint = str(source).replace(" ", r"\040")
     mountinfo = tmp_path / "mountinfo"
+    fdinfo = _write_fdinfo(tmp_path / "fdinfo", 91)
     mountinfo.write_text(
         f"91 42 {os.major(metadata.st_dev)}:{os.minor(metadata.st_dev)} "
         f"/host/secret {encoded_mountpoint} {mount_options} - ext4 /dev/root ro\n"
@@ -170,6 +207,7 @@ def test_required_read_only_mount_uses_exact_decoded_mountinfo_entry(
                 str(source),
                 require_read_only_mount=True,
                 mountinfo_path=mountinfo,
+                fdinfo_path=fdinfo,
             )
             == "secret"
         )
@@ -182,6 +220,47 @@ def test_required_read_only_mount_uses_exact_decoded_mountinfo_entry(
                 str(source),
                 require_read_only_mount=True,
                 mountinfo_path=mountinfo,
+                fdinfo_path=fdinfo,
+            )
+
+
+@pytest.mark.parametrize(("top_options", "accepted"), [("rw", False), ("ro", True)])
+def test_required_mount_uses_open_descriptor_mount_id_not_lower_matching_record(
+    tmp_path: Path, top_options: str, accepted: bool
+) -> None:
+    """A lower read-only record must not hide the opened descriptor's writable top mount."""
+    source = _write_owner_only(tmp_path / "bearer secret", b"secret")
+    metadata = source.stat()
+    encoded_mountpoint = str(source).replace(" ", r"\040")
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        f"91 42 {os.major(metadata.st_dev)}:{os.minor(metadata.st_dev)} "
+        f"/host/lower {encoded_mountpoint} ro,nosuid - ext4 /dev/root ro\n"
+        f"92 91 {os.major(metadata.st_dev)}:{os.minor(metadata.st_dev)} "
+        f"/host/top {encoded_mountpoint} {top_options},nosuid - ext4 /dev/root ro\n"
+    )
+    fdinfo = _write_fdinfo(tmp_path / "fdinfo", 92)
+
+    if accepted:
+        assert (
+            read_secret_file(
+                str(source),
+                require_read_only_mount=True,
+                mountinfo_path=mountinfo,
+                fdinfo_path=fdinfo,
+            )
+            == "secret"
+        )
+    else:
+        with pytest.raises(
+            ValueError,
+            match=r"^bearer token file must be a read-only bind mount$",
+        ):
+            read_secret_file(
+                str(source),
+                require_read_only_mount=True,
+                mountinfo_path=mountinfo,
+                fdinfo_path=fdinfo,
             )
 
 
@@ -192,6 +271,7 @@ def test_required_read_only_mount_rejects_read_only_ancestor(
     source = _write_owner_only(tmp_path / "bearer", b"secret")
     metadata = source.stat()
     mountinfo = tmp_path / "mountinfo"
+    fdinfo = _write_fdinfo(tmp_path / "fdinfo", 91)
     mountinfo.write_text(
         f"91 42 {os.major(metadata.st_dev)}:{os.minor(metadata.st_dev)} "
         f"/host/secret {tmp_path} ro,nosuid - ext4 /dev/root ro\n"
@@ -205,6 +285,7 @@ def test_required_read_only_mount_rejects_read_only_ancestor(
             str(source),
             require_read_only_mount=True,
             mountinfo_path=mountinfo,
+            fdinfo_path=fdinfo,
         )
 
 
@@ -283,7 +364,12 @@ def test_open_flags_and_single_read_are_hardened_and_bounded(
     monkeypatch.setattr(os, "read", recording_read)
 
     assert read_secret_file(str(source)) == "secret"
-    assert opened_flags == [os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW]
+    assert opened_flags == [
+        os.O_RDONLY
+        | os.O_CLOEXEC
+        | os.O_NOFOLLOW
+        | getattr(os, "O_NONBLOCK", 0)
+    ]
     assert read_amounts == [MAX_SECRET_BYTES + 1]
 
 
