@@ -70,9 +70,11 @@
       : "Not reported";
     $("#champion-frontier").textContent = formatDistance(champion.meanFrontierM);
     $("#champion-finish-time").textContent = formatSeconds(champion.meanTimeTo10mS);
-    $("#champion-status").textContent = hasNumber(champion.targetDistanceReachCount)
-      ? `${formatCount(champion.targetDistanceReachCount)} / 4 at 10 m`
-      : "Retained best";
+    $("#champion-status").textContent = champion.videoIsFeatured
+      ? `Featured clip${hasNumber(champion.featuredVideoCheckpointIteration) ? ` · iter ${formatCount(champion.featuredVideoCheckpointIteration)}` : ""}`
+      : hasNumber(champion.targetDistanceReachCount)
+        ? `${formatCount(champion.targetDistanceReachCount)} / 4 at 10 m`
+        : "Retained best";
 
     const preview = $("#champion-preview");
     const empty = $("#champion-video-empty");
@@ -85,6 +87,13 @@
       video.load();
       return;
     }
+    video.setAttribute(
+      "aria-label",
+      champion.videoIsFeatured ? "Featured roll-race video" : "Best retained roll-race policy",
+    );
+    video.title = champion.videoIsFeatured && champion.featuredVideoCheckpointHash
+      ? `Featured checkpoint ${champion.featuredVideoCheckpointHash}`
+      : "";
     if (video.getAttribute("src") !== videoUrl) {
       video.src = videoUrl;
       video.load();

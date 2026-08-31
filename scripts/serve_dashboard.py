@@ -792,6 +792,22 @@ def _roll_sprint_champion(media: list[dict[str, Any]]) -> dict[str, Any]:
     retained = Path(retained_value)
     source = Path(source_value)
     match = re.fullmatch(r"model_(\d+)\.pt", retained.name)
+    featured_video = None
+    featured_value = payload.get("featured_video")
+    if isinstance(featured_value, str) and featured_value:
+        featured_path = Path(featured_value).expanduser().resolve()
+        featured_video = next(
+            (
+                dict(item)
+                for item in media
+                if item.get("kind") == "video"
+                and _media_absolute_path(item) == featured_path
+            ),
+            None,
+        )
+    featured_sha256 = payload.get("featured_video_checkpoint_sha256")
+    if not isinstance(featured_sha256, str) or not featured_sha256:
+        featured_sha256 = None
     return {
         "available": True,
         "manifest": ROLL_SPRINT_CHAMPION_MANIFEST.name,
@@ -815,7 +831,15 @@ def _roll_sprint_champion(media: list[dict[str, Any]]) -> dict[str, Any]:
         "slowestTimeTo10mS": _dashboard_number(
             payload, "slowest_time_to_valid_10m_s"
         ),
-        "video": _champion_video(checkpoint_sha256, media),
+        "featuredVideoCheckpointIteration": _dashboard_number(
+            payload, "featured_video_checkpoint_iteration"
+        ),
+        "featuredVideoCheckpointSha256": featured_sha256,
+        "featuredVideoCheckpointHash": (
+            featured_sha256[:12] if featured_sha256 else None
+        ),
+        "videoIsFeatured": featured_video is not None,
+        "video": featured_video or _champion_video(checkpoint_sha256, media),
     }
 
 

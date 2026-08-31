@@ -158,12 +158,39 @@ def test_dashboard_pins_exact_retained_champion_above_latest_videos(
         f"/media/artifacts/training/roll-sprint-champion/{champion_video.name}"
     )
 
+    featured_hash = "c" * 64
+    featured_video = champion_root / "champion-featured-000300-cccccccccccc.mp4"
+    featured_video.write_bytes(b"featured-video")
+    manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_payload.update(
+        {
+            "featured_video": str(featured_video),
+            "featured_video_checkpoint_iteration": 300,
+            "featured_video_checkpoint_sha256": featured_hash,
+        }
+    )
+    manifest.write_text(json.dumps(manifest_payload), encoding="utf-8")
+
+    featured_state = serve_dashboard.dashboard_state(include_metrics=False)
+    featured_champion = featured_state["rollSprintChampion"]
+    assert featured_champion["retainedCheckpoint"] == "model_25.pt"
+    assert featured_champion["checkpointSha256"] == champion_hash
+    assert featured_champion["videoIsFeatured"] is True
+    assert featured_champion["featuredVideoCheckpointIteration"] == 300
+    assert featured_champion["featuredVideoCheckpointSha256"] == featured_hash
+    assert featured_champion["featuredVideoCheckpointHash"] == featured_hash[:12]
+    assert featured_champion["video"]["name"] == featured_video.name
+    assert featured_champion["video"]["url"] == (
+        f"/media/artifacts/training/roll-sprint-champion/{featured_video.name}"
+    )
+
     dashboard_root = Path(__file__).resolve().parents[1] / "dashboard"
     html = (dashboard_root / "index.html").read_text(encoding="utf-8")
     assert html.index('id="roll-champion"') < html.index('id="media-grid"')
     app = (dashboard_root / "app.js").read_text(encoding="utf-8")
     assert "champion.retainedCheckpoint" in app
     assert "champion.checkpointHash" in app
+    assert "champion.videoIsFeatured" in app
 
 
 def test_dashboard_normalizes_latest_self_righting_evaluation(tmp_path, monkeypatch) -> None:
