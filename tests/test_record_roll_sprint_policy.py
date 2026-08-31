@@ -619,3 +619,32 @@ def test_showcase_draws_finish_arch_and_animated_celebration() -> None:
     assert len(arch) == 13
     assert len(celebration) == 32
     assert all(segment[3] > 0.0 for segment in celebration)
+
+
+def test_five_robot_showcase_stops_after_third_finish_and_short_hold() -> None:
+    state = MODULE.FinishCelebrationState(5)
+    state.update(torch.tensor([0.0, 10.0, 10.0, 0.0, 0.0]), elapsed_s=21.9)
+    state.arm_stop_after_finishers(
+        MODULE.SHOWCASE_FINISHER_TARGET,
+        MODULE.SHOWCASE_POST_FINISH_HOLD_SECONDS,
+    )
+    assert state.finished_count == 2
+    assert state.stop_time_s is None
+
+    state.update(torch.tensor([0.0, 10.0, 10.0, 10.0, 0.0]), elapsed_s=23.24)
+    state.arm_stop_after_finishers(
+        MODULE.SHOWCASE_FINISHER_TARGET,
+        MODULE.SHOWCASE_POST_FINISH_HOLD_SECONDS,
+    )
+    assert state.finished_count == 3
+    assert state.stop_time_s == pytest.approx(24.74)
+    assert not state.stop_due
+
+    state.update(torch.tensor([10.0] * 5), elapsed_s=24.74)
+    state.arm_stop_after_finishers(
+        MODULE.SHOWCASE_FINISHER_TARGET,
+        MODULE.SHOWCASE_POST_FINISH_HOLD_SECONDS,
+    )
+    assert state.finished_count == 5
+    assert state.stop_time_s == pytest.approx(24.74)
+    assert state.stop_due

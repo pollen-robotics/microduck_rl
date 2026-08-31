@@ -47,6 +47,8 @@ RACE_LINE_HEIGHT = 0.008
 RACE_LINE_RADIUS = 0.018
 FINISH_ARCH_HEIGHT_M = 0.72
 FINISH_CELEBRATION_SECONDS = 4.0
+SHOWCASE_FINISHER_TARGET = 3
+SHOWCASE_POST_FINISH_HOLD_SECONDS = 1.5
 FINISH_EFFECT_COLORS = (
     (0.20, 0.72, 1.00, 1.0),
     (1.00, 0.32, 0.42, 1.0),
@@ -70,6 +72,7 @@ class FinishCelebrationState:
     def __init__(self, num_robots: int) -> None:
         self.current_time_s = 0.0
         self.finish_times_s: list[float | None] = [None] * num_robots
+        self.stop_time_s: float | None = None
 
     def update(self, credited_frontier_m: torch.Tensor, elapsed_s: float) -> None:
         """Latch each robot once, using only valid roll-linked frontier."""
@@ -79,6 +82,27 @@ class FinishCelebrationState:
         for index, frontier_m in enumerate(credited_frontier_m.detach().cpu().tolist()):
             if self.finish_times_s[index] is None and frontier_m >= TARGET_DISTANCE_M:
                 self.finish_times_s[index] = self.current_time_s
+
+    @property
+    def finished_count(self) -> int:
+        """Return the number of racers with a latched valid finish."""
+        return sum(finish_time_s is not None for finish_time_s in self.finish_times_s)
+
+    def arm_stop_after_finishers(
+        self,
+        required_finishers: int,
+        post_finish_hold_s: float,
+    ) -> None:
+        """Latch one cutoff once enough racers finish, leaving time to celebrate."""
+        if required_finishers < 1 or post_finish_hold_s < 0.0:
+            raise ValueError("finish target and celebration hold must be non-negative")
+        if self.stop_time_s is None and self.finished_count >= required_finishers:
+            self.stop_time_s = self.current_time_s + post_finish_hold_s
+
+    @property
+    def stop_due(self) -> bool:
+        """Return whether the latched celebration cutoff has elapsed."""
+        return self.stop_time_s is not None and self.current_time_s >= self.stop_time_s
 
 
 def _parse_args() -> argparse.Namespace:
@@ -684,6 +708,10 @@ def main() -> int:
                     credited_frontier_m,
                     elapsed_s=(step + 1) * policy_dt,
                 )
+                celebration_state.arm_stop_after_finishers(
+                    SHOWCASE_FINISHER_TARGET,
+                    SHOWCASE_POST_FINISH_HOLD_SECONDS,
+                )
             if not args.recovery_montage:
                 camera_state, _camera_y_m, leader_index = _follow_on_road_leader(
                     base_env,
@@ -711,6 +739,8 @@ def main() -> int:
                 )
             assert writer.stdin is not None
             writer.stdin.write(frame.tobytes())
+            if celebration_state is not None and celebration_state.stop_due:
+                break
     finally:
         env.close()
         if writer is not None and writer.stdin is not None:
@@ -733,6 +763,11 @@ def main() -> int:
         print(
             "[roll-sprint-video] valid 10 m finishers: "
             f"{finishers} at {celebration_state.finish_times_s}"
+        )
+        print(
+            "[roll-sprint-video] stopped after "
+            f"{SHOWCASE_FINISHER_TARGET} of {len(celebration_state.finish_times_s)} "
+            f"finishers at {celebration_state.current_time_s:.2f}s simulation time"
         )
     return 0
 
