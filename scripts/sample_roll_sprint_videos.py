@@ -198,6 +198,8 @@ def _recorder_command(
         str(RECOVERY_RECORDING_STEPS if recovery_montage else RECORDING_STEPS),
         "--frame-stride",
         str(RECORDING_FRAME_STRIDE),
+        "--output-fps",
+        str(OUTPUT_FPS),
         "--device",
         device,
     ]

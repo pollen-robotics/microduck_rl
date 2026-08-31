@@ -74,6 +74,11 @@ def _parse_args() -> argparse.Namespace:
         default=1,
         help="Render every Nth simulation step while still evaluating every step.",
     )
+    parser.add_argument(
+        "--output-fps",
+        type=float,
+        help="Encode at this frame rate; defaults to the real simulation-time cadence.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--width", type=int, default=960)
@@ -668,9 +673,16 @@ def main() -> int:
     temporary_output = temporary_dir / f"roll-sprint-recording-{os.getpid()}.mp4"
     if not checkpoint.is_file():
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
-    if args.steps < 1 or args.frame_stride < 1 or args.width < 2 or args.height < 2:
+    if (
+        args.steps < 1
+        or args.frame_stride < 1
+        or args.width < 2
+        or args.height < 2
+        or (args.output_fps is not None and args.output_fps <= 0.0)
+    ):
         raise SystemExit(
-            "--steps, --frame-stride, --width, and --height must be positive"
+            "--steps, --frame-stride, --width, --height, and --output-fps "
+            "must be positive"
         )
 
     configure_torch_backends()
@@ -753,7 +765,11 @@ def main() -> int:
                     temporary_output,
                     width=frame_width,
                     height=frame_height,
-                    fps=_recording_fps(policy_dt, args.frame_stride),
+                    fps=(
+                        args.output_fps
+                        if args.output_fps is not None
+                        else _recording_fps(policy_dt, args.frame_stride)
+                    ),
                 )
             assert writer.stdin is not None
             writer.stdin.write(frame.tobytes())

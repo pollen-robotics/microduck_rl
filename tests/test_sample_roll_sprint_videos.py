@@ -111,6 +111,7 @@ def test_sample_once_records_four_robot_video_and_persists_state(
     assert command[2] == str(checkpoint)
     assert command[command.index("--steps") + 1] == "2000"
     assert command[command.index("--frame-stride") + 1] == "10"
+    assert command[command.index("--output-fps") + 1] == "10.0"
     assert command[command.index("--task-id") + 1] == args.task_id
     assert "--recovery-montage" not in command
     assert "--recovery-montage" in recovery_command
