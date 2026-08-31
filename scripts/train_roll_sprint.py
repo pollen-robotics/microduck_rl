@@ -63,6 +63,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--num-envs", type=int, default=1024)
     parser.add_argument("--iterations", type=int, default=4000)
+    parser.add_argument(
+        "--save-interval",
+        type=int,
+        default=100,
+        help="Save a checkpoint every N PPO iterations.",
+    )
     parser.add_argument("--run-name", default="from_a35_roll_sprint")
     return parser.parse_args()
 
@@ -72,6 +78,8 @@ def main() -> int:
     source = args.source_checkpoint.expanduser().resolve()
     if not source.is_file() or source.suffix.lower() != ".pt":
         raise SystemExit(f"Source checkpoint is not a .pt file: {source}")
+    if args.num_envs < 1 or args.iterations < 1 or args.save_interval < 1:
+        raise SystemExit("--num-envs, --iterations, and --save-interval must be positive")
 
     experiment_root = REPO_ROOT / "logs" / "rsl_rl" / EXPERIMENT
     staged = experiment_root / BOOTSTRAP_DIR_NAME / "model_0.pt"
@@ -88,6 +96,8 @@ def main() -> int:
             str(args.num_envs),
             "--agent.max-iterations",
             str(args.iterations),
+            "--agent.save-interval",
+            str(args.save_interval),
             "--agent.run-name",
             args.run_name,
             "--agent.load-run",
