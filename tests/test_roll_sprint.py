@@ -397,25 +397,25 @@ def test_backroll_sprint_is_separate_directional_61d_policy():
     assert MicroduckBackrollSprintRlCfg.algorithm is not (
         MicroduckRollSprintRlCfg.algorithm
     )
-    assert reverse.rewards["roll_sprint_progress"].weight == 3.0
+    assert reverse.rewards["roll_sprint_progress"].weight == 8.0
     assert reverse.rewards["roll_sprint_head_pivot"].weight == 0.5
     assert forward.rewards["roll_sprint_directional_bootstrap"].weight == 0.0
-    assert reverse.rewards["roll_sprint_directional_bootstrap"].weight == 6.0
+    assert reverse.rewards["roll_sprint_directional_bootstrap"].weight == 24.0
     assert reverse.curriculum[
         "roll_sprint_directional_bootstrap_weight"
     ].params["weight_stages"] == [
-        {"step": 0, "weight": 6.0},
-        {"step": 500 * 24, "weight": 3.0},
-        {"step": 1000 * 24, "weight": 1.0},
-        {"step": 1500 * 24, "weight": 0.0},
+        {"step": 0, "weight": 24.0},
+        {"step": 400 * 24, "weight": 12.0},
+        {"step": 800 * 24, "weight": 4.0},
+        {"step": 1200 * 24, "weight": 0.0},
     ]
     spawn_stages = reverse.curriculum["roll_sprint_spawn_mix"].params[
         "param_stages"
     ]
     assert [stage["params"]["midroll_prob"] for stage in spawn_stages] == [
-        0.50,
-        0.40,
-        0.25,
+        0.65,
+        0.55,
+        0.35,
         0.10,
     ]
 

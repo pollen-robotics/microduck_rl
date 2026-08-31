@@ -539,6 +539,9 @@ def make_microduck_backroll_sprint_env_cfg(
     cfg = make_microduck_roll_sprint_env_cfg(play=play)
     reset_params = cfg.events["set_roll_sprint_state"].params
     reset_params["roll_direction"] = -1.0
+    # Reverse discovery needs many direction-matched mid-roll examples.  Keep
+    # a small standing bucket for launch learning, but avoid letting the
+    # easier self-right-only basin dominate the first policy updates.
     reset_params["midroll_forward_vel_range"] = (0.15, 0.45)
     if not play:
         reset_params.update(
@@ -552,9 +555,9 @@ def make_microduck_backroll_sprint_env_cfg(
             "param_stages"
         ]
         stage_mixes = (
-            (0.25, 0.50, 0.10, 0.05, 0.10),
-            (0.35, 0.40, 0.10, 0.05, 0.10),
-            (0.50, 0.25, 0.10, 0.05, 0.10),
+            (0.15, 0.65, 0.05, 0.05, 0.10),
+            (0.25, 0.55, 0.05, 0.05, 0.10),
+            (0.45, 0.35, 0.10, 0.05, 0.05),
             (0.65, 0.10, 0.10, 0.05, 0.10),
         )
         for stage, mix in zip(spawn_stages, stage_mixes, strict=True):
@@ -569,11 +572,12 @@ def make_microduck_backroll_sprint_env_cfg(
     # Backroll discovery needs more dense supported-rotation signal than a
     # continuation of an already learned forward roll. It remains far below
     # the valid frontier objective and decays once complete backrolls emerge.
-    cfg.rewards["roll_sprint_progress"].weight = 3.0
+    cfg.rewards["roll_sprint_progress"].weight = 8.0
     cfg.curriculum["roll_sprint_progress_weight"].params["weight_stages"] = [
-        {"step": 0, "weight": 3.0},
+        {"step": 0, "weight": 8.0},
+        {"step": 500 * 24, "weight": 5.0},
         {"step": 1000 * 24, "weight": 2.0},
-        {"step": 2000 * 24, "weight": 1.5},
+        {"step": 2000 * 24, "weight": 1.0},
     ]
     cfg.rewards["roll_sprint_head_pivot"].weight = 0.5
     cfg.curriculum["roll_sprint_head_pivot_weight"].params["weight_stages"] = [
@@ -581,21 +585,48 @@ def make_microduck_backroll_sprint_env_cfg(
         {"step": 1000 * 24, "weight": 0.25},
         {"step": 3000 * 24, "weight": 0.10},
     ]
-    cfg.rewards["roll_sprint_directional_bootstrap"].weight = 6.0
+    cfg.rewards["roll_sprint_directional_bootstrap"].weight = 24.0
     cfg.curriculum["roll_sprint_directional_bootstrap_weight"] = (
         CurriculumTermCfg(
             func=microduck_mdp.reward_weight,
             params={
                 "reward_name": "roll_sprint_directional_bootstrap",
                 "weight_stages": [
-                    {"step": 0, "weight": 6.0},
-                    {"step": 500 * 24, "weight": 3.0},
-                    {"step": 1000 * 24, "weight": 1.0},
-                    {"step": 1500 * 24, "weight": 0.0},
+                    {"step": 0, "weight": 24.0},
+                    {"step": 400 * 24, "weight": 12.0},
+                    {"step": 800 * 24, "weight": 4.0},
+                    {"step": 1200 * 24, "weight": 0.0},
                 ],
             },
         )
     )
+    # The previous run found a recovery basin before it found a reverse roll.
+    # Keep recovery shaping available at reset, then taper the two largest
+    # potentials once the directional roll signal has had time to bootstrap.
+    for curriculum_name, reward_name, weight_stages in (
+        (
+            "backroll_self_right_upright_weight",
+            "roll_sprint_self_right_upright",
+            [
+                {"step": 0, "weight": 5.0},
+                {"step": 300 * 24, "weight": 2.0},
+                {"step": 800 * 24, "weight": 1.0},
+            ],
+        ),
+        (
+            "backroll_self_right_height_weight",
+            "roll_sprint_self_right_height",
+            [
+                {"step": 0, "weight": 30.0},
+                {"step": 300 * 24, "weight": 12.0},
+                {"step": 800 * 24, "weight": 4.0},
+            ],
+        ),
+    ):
+        cfg.curriculum[curriculum_name] = CurriculumTermCfg(
+            func=microduck_mdp.reward_weight,
+            params={"reward_name": reward_name, "weight_stages": weight_stages},
+        )
     return cfg
 
 
