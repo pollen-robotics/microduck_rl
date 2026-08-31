@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 
 from scripts import serve_dashboard
 
@@ -82,6 +83,87 @@ def test_dashboard_separates_roll_sprint_and_stair_video_collections(tmp_path, m
     assert state["defaultVideoCollection"] == "roll-sprint"
     counts = {item["id"]: item["videoCount"] for item in state["videoCollections"]}
     assert counts == {"roll-sprint": 1, "stairs": 1}
+
+
+def test_dashboard_pins_exact_retained_champion_above_latest_videos(
+    tmp_path, monkeypatch
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    champion_root = artifacts / "training" / "roll-sprint-champion"
+    sample_root = artifacts / "training" / "roll-sprint-samples"
+    champion_root.mkdir(parents=True)
+    sample_root.mkdir(parents=True)
+    champion_hash = "a" * 64
+    newer_hash = "b" * 64
+    retained = champion_root / "model_25.pt"
+    retained.write_bytes(b"policy")
+    champion_video = champion_root / f"champion-000025-{champion_hash[:12]}.mp4"
+    champion_video.write_bytes(b"champion-video")
+    newer_video = sample_root / "newer-checkpoint-000026.mp4"
+    newer_video.write_bytes(b"newer-video")
+    os.utime(champion_video, (1, 1))
+    os.utime(newer_video, (2, 2))
+    manifest = champion_root / "champion.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "evaluation_schema_version": 8,
+                "source_checkpoint": str(
+                    tmp_path
+                    / "logs"
+                    / "2026-08-31_13-48-51_a72_conservative_champion_4096x4000"
+                    / "model_25.pt"
+                ),
+                "retained_checkpoint": str(retained),
+                "checkpoint_sha256": champion_hash,
+                "target_distance_reach_count": 3,
+                "mean_credited_forward_frontier_m": 8.95,
+                "mean_time_to_valid_10m_s": 36.59,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (sample_root / "newer-video-state.json").write_text(
+        json.dumps(
+            {
+                "last_checkpoint": {"sha256": newer_hash},
+                "last_video": str(newer_video),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(serve_dashboard, "MEDIA_ROOTS", {"artifacts": artifacts})
+    monkeypatch.setattr(
+        serve_dashboard, "FEATURED_MEDIA_FILE", tmp_path / "missing.json"
+    )
+    monkeypatch.setattr(serve_dashboard, "ROLL_SPRINT_SAMPLE_ROOT", sample_root)
+    monkeypatch.setattr(serve_dashboard, "ROLL_SPRINT_CHAMPION_ROOT", champion_root)
+    monkeypatch.setattr(serve_dashboard, "ROLL_SPRINT_CHAMPION_MANIFEST", manifest)
+
+    state = serve_dashboard.dashboard_state(include_metrics=False)
+    champion = state["rollSprintChampion"]
+
+    assert champion["available"] is True
+    assert champion["evaluationSchemaVersion"] == 8
+    assert champion["version"] == (
+        "2026-08-31_13-48-51_a72_conservative_champion_4096x4000"
+    )
+    assert champion["retainedCheckpoint"] == "model_25.pt"
+    assert champion["checkpointIteration"] == 25
+    assert champion["checkpointSha256"] == champion_hash
+    assert champion["checkpointHash"] == champion_hash[:12]
+    assert champion["video"]["name"] == champion_video.name
+    assert champion["video"]["url"] == (
+        f"/media/artifacts/training/roll-sprint-champion/{champion_video.name}"
+    )
+
+    dashboard_root = Path(__file__).resolve().parents[1] / "dashboard"
+    html = (dashboard_root / "index.html").read_text(encoding="utf-8")
+    assert html.index('id="roll-champion"') < html.index('id="media-grid"')
+    app = (dashboard_root / "app.js").read_text(encoding="utf-8")
+    assert "champion.retainedCheckpoint" in app
+    assert "champion.checkpointHash" in app
 
 
 def test_dashboard_normalizes_latest_self_righting_evaluation(tmp_path, monkeypatch) -> None:

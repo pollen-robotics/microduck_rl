@@ -41,11 +41,21 @@ def test_defaults_record_long_race_every_150_seconds() -> None:
     assert args.task_id == "Mjlab-Roll-Sprint-Flat-MicroDuck"
     assert sampler.RECORDING_STEPS == 2000
     assert sampler.RECOVERY_RECORDING_STEPS == 600
-    assert sampler.RECORDING_FRAME_STRIDE == 10
+    assert sampler.RECORDING_FRAME_STRIDE == 2
+    assert sampler.PLAYBACK_SPEED == 2.0
+    assert sampler.OUTPUT_FPS == 60.0
+    assert (sampler.OUTPUT_WIDTH, sampler.OUTPUT_HEIGHT) == (1920, 1080)
+    assert sampler.RECORDING_STEPS / sampler.SIMULATION_HZ == 40.0
+    distinct_motion_fps = (
+        sampler.SIMULATION_HZ
+        / sampler.RECORDING_FRAME_STRIDE
+        * sampler.PLAYBACK_SPEED
+    )
+    assert distinct_motion_fps == 50.0
     assert (
         sampler.RECORDING_STEPS
         / sampler.RECORDING_FRAME_STRIDE
-        / sampler.OUTPUT_FPS
+        / distinct_motion_fps
         == sampler.OUTPUT_VIDEO_SECONDS
         == 20.0
     )
@@ -110,8 +120,11 @@ def test_sample_once_records_four_robot_video_and_persists_state(
     assert evaluation_command[evaluation_command.index("--duration") + 1] == "40"
     assert command[2] == str(checkpoint)
     assert command[command.index("--steps") + 1] == "2000"
-    assert command[command.index("--frame-stride") + 1] == "10"
-    assert command[command.index("--output-fps") + 1] == "10.0"
+    assert command[command.index("--frame-stride") + 1] == "2"
+    assert command[command.index("--output-fps") + 1] == "60.0"
+    assert command[command.index("--playback-speed") + 1] == "2.0"
+    assert command[command.index("--width") + 1] == "1920"
+    assert command[command.index("--height") + 1] == "1080"
     assert command[command.index("--task-id") + 1] == args.task_id
     assert "--recovery-montage" not in command
     assert "--recovery-montage" in recovery_command
@@ -128,6 +141,38 @@ def test_sample_once_records_four_robot_video_and_persists_state(
     assert "race-40s-v8" in Path(state["last_evaluation"]).name
     assert state["last_video"] == str(output.resolve())
     assert Path(state["last_recovery_montage"]).is_file()
+
+
+def test_champion_video_is_retained_by_exact_checkpoint_hash(tmp_path: Path) -> None:
+    champion_dir = tmp_path / "champion"
+    champion_dir.mkdir()
+    checkpoint = champion_dir / "model_25.pt"
+    checkpoint.write_bytes(b"champion-checkpoint")
+    identity = sampler.checkpoint_identity(checkpoint)
+    (champion_dir / "champion.json").write_text(
+        json.dumps(
+            {
+                "retained_checkpoint": str(checkpoint.resolve()),
+                "checkpoint_sha256": identity.sha256,
+            }
+        ),
+        encoding="utf-8",
+    )
+    recording = tmp_path / "race.mp4"
+    recording.write_bytes(b"clean-hd-video")
+
+    retained = sampler._retain_champion_video(checkpoint, identity, recording)
+
+    assert retained == (
+        champion_dir / f"champion-000025-{identity.sha256[:12]}.mp4"
+    )
+    assert retained.read_bytes() == b"clean-hd-video"
+
+    other = champion_dir / "model_26.pt"
+    other.write_bytes(b"other-checkpoint")
+    other_identity = sampler.checkpoint_identity(other)
+    assert sampler._retain_champion_video(other, other_identity, recording) is None
+    assert list(champion_dir.glob("champion-*.mp4")) == [retained]
 
 
 def test_duplicate_checkpoint_is_skipped(tmp_path: Path, monkeypatch) -> None:

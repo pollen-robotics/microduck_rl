@@ -43,8 +43,15 @@ MEDIA_ROOTS = {
     "artifacts": REPO_ROOT / "artifacts",
     "dashboard-media": REPO_ROOT / "dashboard" / "media",
 }
+ROLL_SPRINT_SAMPLE_ROOT = (
+    REPO_ROOT / "artifacts" / "training" / "roll-sprint-samples"
+)
+ROLL_SPRINT_CHAMPION_ROOT = (
+    REPO_ROOT / "artifacts" / "training" / "roll-sprint-champion"
+)
+ROLL_SPRINT_CHAMPION_MANIFEST = ROLL_SPRINT_CHAMPION_ROOT / "champion.json"
 ROLL_SPRINT_EVALUATION_ROOT = (
-    REPO_ROOT / "artifacts" / "training" / "roll-sprint-samples" / "evaluations"
+    ROLL_SPRINT_SAMPLE_ROOT / "evaluations"
 )
 EVENT_NAME = re.compile(r"(?:events?\.out\.)?tfevents\.")
 MEDIA_EXTENSIONS = {
@@ -709,6 +716,109 @@ def _media_collection(source: str, relative_path: str) -> str:
     return "stairs"
 
 
+def _media_absolute_path(item: dict[str, Any]) -> Path | None:
+    root = MEDIA_ROOTS.get(str(item.get("source", "")))
+    relative = item.get("path")
+    if root is None or not isinstance(relative, str):
+        return None
+    return (root / relative).resolve()
+
+
+def _champion_video(
+    checkpoint_sha256: str,
+    media: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the newest visible MP4 recorded from this exact champion hash."""
+
+    companion_suffix = f"-{checkpoint_sha256[:12]}.mp4"
+    for item in media:
+        name = str(item.get("name", ""))
+        if (
+            item.get("kind") == "video"
+            and name.startswith("champion-")
+            and name.endswith(companion_suffix)
+        ):
+            return dict(item)
+    if not ROLL_SPRINT_SAMPLE_ROOT.is_dir():
+        return None
+    recorded_paths: set[Path] = set()
+    try:
+        state_files = list(ROLL_SPRINT_SAMPLE_ROOT.glob("*.json"))
+    except OSError:
+        return None
+    for state_file in state_files:
+        try:
+            payload = json.loads(state_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        checkpoint = payload.get("last_checkpoint") if isinstance(payload, dict) else None
+        video = payload.get("last_video") if isinstance(payload, dict) else None
+        if (
+            isinstance(checkpoint, dict)
+            and checkpoint.get("sha256") == checkpoint_sha256
+            and isinstance(video, str)
+        ):
+            candidate = Path(video).expanduser().resolve()
+            if candidate.is_file() and candidate.suffix.lower() == ".mp4":
+                recorded_paths.add(candidate)
+    for item in media:
+        if item.get("kind") != "video":
+            continue
+        absolute = _media_absolute_path(item)
+        if absolute in recorded_paths:
+            return dict(item)
+    return None
+
+
+def _roll_sprint_champion(media: list[dict[str, Any]]) -> dict[str, Any]:
+    """Normalize the retained champion and its exact-hash video for the UI."""
+
+    try:
+        payload = json.loads(
+            ROLL_SPRINT_CHAMPION_MANIFEST.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return {"available": False}
+    if not isinstance(payload, dict):
+        return {"available": False}
+    checkpoint_sha256 = payload.get("checkpoint_sha256")
+    retained_value = payload.get("retained_checkpoint")
+    source_value = payload.get("source_checkpoint")
+    if not all(
+        isinstance(value, str) and value
+        for value in (checkpoint_sha256, retained_value, source_value)
+    ):
+        return {"available": False}
+    retained = Path(retained_value)
+    source = Path(source_value)
+    match = re.fullmatch(r"model_(\d+)\.pt", retained.name)
+    return {
+        "available": True,
+        "manifest": ROLL_SPRINT_CHAMPION_MANIFEST.name,
+        "manifestSchemaVersion": _dashboard_number(payload, "schema_version"),
+        "evaluationSchemaVersion": _dashboard_number(
+            payload, "evaluation_schema_version"
+        ),
+        "version": source.parent.name,
+        "sourceCheckpoint": source.name,
+        "retainedCheckpoint": retained.name,
+        "checkpointIteration": int(match.group(1)) if match else None,
+        "checkpointSha256": checkpoint_sha256,
+        "checkpointHash": checkpoint_sha256[:12],
+        "targetDistanceReachCount": _dashboard_number(
+            payload, "target_distance_reach_count"
+        ),
+        "meanFrontierM": _dashboard_number(
+            payload, "mean_credited_forward_frontier_m"
+        ),
+        "meanTimeTo10mS": _dashboard_number(payload, "mean_time_to_valid_10m_s"),
+        "slowestTimeTo10mS": _dashboard_number(
+            payload, "slowest_time_to_valid_10m_s"
+        ),
+        "video": _champion_video(checkpoint_sha256, media),
+    }
+
+
 def dashboard_state(*, include_metrics: bool = True) -> dict[str, Any]:
     media = _discover_media()
     video_counts = {
@@ -732,6 +842,7 @@ def dashboard_state(*, include_metrics: bool = True) -> dict[str, Any]:
         "media": media,
         "videoCollections": video_collections,
         "defaultVideoCollection": "roll-sprint",
+        "rollSprintChampion": _roll_sprint_champion(media),
         "rollSprintEvaluation": (
             _latest_roll_sprint_evaluation()
             if include_metrics

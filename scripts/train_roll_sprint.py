@@ -23,6 +23,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENT = "microduck_roll_sprint"
 BOOTSTRAP_DIR_NAME = ".bootstrap-a35-roll-sprint"
+DEFAULT_SEED = 42
 DEFAULT_SOURCE = (
     REPO_ROOT
     / "logs"
@@ -31,6 +32,13 @@ DEFAULT_SOURCE = (
     / "2026-08-30_07-54-17_a35_round1_sol_stratified_hard_1024_gate10"
     / "model_9.pt"
 )
+
+
+def _nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be a nonnegative integer")
+    return parsed
 
 
 def stage_checkpoint(source: Path, destination: Path) -> None:
@@ -63,6 +71,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--num-envs", type=int, default=1024)
     parser.add_argument("--iterations", type=int, default=4000)
+    parser.add_argument("--seed", type=_nonnegative_int, default=DEFAULT_SEED)
     parser.add_argument(
         "--save-interval",
         type=int,
@@ -96,6 +105,8 @@ def main() -> int:
             str(args.num_envs),
             "--agent.max-iterations",
             str(args.iterations),
+            "--agent.seed",
+            str(args.seed),
             "--agent.save-interval",
             str(args.save_interval),
             "--agent.run-name",

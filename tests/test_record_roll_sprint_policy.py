@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
-from itertools import pairwise
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -300,11 +300,53 @@ def test_recording_fps_preserves_real_simulation_time() -> None:
     assert MODULE._recording_fps(0.02, 4) == pytest.approx(12.5)
 
 
-def test_race_header_uses_requested_rollout_duration() -> None:
-    assert MODULE._race_header_text(19.1, 20.0, 2) == (
-        "10 m ROLL RACE  |  t 019.1 s / 20.0 s"
-        "  |  camera follows on-road standing leader R3"
+def test_canonical_video_defaults_to_clean_1080p_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["record_roll_sprint_policy.py", "model_0.pt", "race.mp4"],
     )
+
+    args = MODULE._parse_args()
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert (args.width, args.height) == (1920, 1080)
+    assert "_overlay_race_labels" not in source
+    assert "ImageDraw" not in source
+
+
+def test_ffmpeg_writes_hd_motion_at_constant_sixty_fps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = {}
+
+    def popen(command, *, stdin):
+        observed["command"] = command
+        observed["stdin"] = stdin
+        return "writer"
+
+    monkeypatch.setattr(MODULE.shutil, "which", lambda _name: "ffmpeg")
+    monkeypatch.setattr(MODULE.subprocess, "Popen", popen)
+
+    writer = MODULE._ffmpeg_writer(
+        tmp_path / "race.mp4",
+        width=1920,
+        height=1080,
+        input_fps=50.0,
+        output_fps=60.0,
+    )
+
+    command = observed["command"]
+    input_index = command.index("-i")
+    assert writer == "writer"
+    assert command[command.index("-s:v") + 1] == "1920x1080"
+    assert command[command.index("-r") + 1] == "50"
+    assert command[input_index + 1] == "pipe:0"
+    assert command[command.index("-r", input_index) + 1] == "60"
+    assert command[command.index("-crf") + 1] == "18"
 
 
 def test_recovery_montage_uses_all_four_deterministic_orientations(
@@ -334,9 +376,6 @@ def test_recovery_montage_uses_all_four_deterministic_orientations(
         "seed": 3,
         "orientations": ("face_down", "face_up", "left", "right"),
     }
-    assert MODULE._recovery_header_text(11.5, 12.0) == (
-        "SELF-RIGHT -> REPOSITION -> REROLL  |  t 011.5 s / 12.0 s"
-    )
 
 
 def test_recovery_montage_is_arranged_after_policy_load(
@@ -525,78 +564,3 @@ def test_corridor_visualizer_installs_when_no_existing_callback() -> None:
     env.update_visualizers(visualizer)
 
     assert len(observed) == len(MODULE._race_corridor_segments())
-
-
-def test_race_label_reports_credited_average_speed_and_target_distance() -> None:
-    label = MODULE._race_label_text(0, 8.0, 20.0)
-
-    assert label == "R1  VALID AVG 0.40 m/s  |  8.0/10.0 m"
-
-
-def test_video_distance_uses_bounded_credit_not_raw_frontier() -> None:
-    env = SimpleNamespace(
-        _roll_sprint_credited_distance=torch.tensor([0.754, 6.071, 2.934, 0.559]),
-        _roll_sprint_forward_frontier=torch.tensor([2.0, 9.4, 8.4, 8.0]),
-        _roll_sprint_forward_origin=torch.zeros(4),
-    )
-
-    credited = MODULE._race_credited_distances(env)
-
-    assert credited.tolist() == pytest.approx([0.754, 6.071, 2.934, 0.559])
-    assert credited.tolist() != pytest.approx(
-        (env._roll_sprint_forward_frontier - env._roll_sprint_forward_origin).tolist()
-    )
-    assert MODULE._race_label_text(1, float(credited[1]), 20.0) == (
-        "R2  VALID AVG 0.30 m/s  |  6.1/10.0 m"
-    )
-
-
-def test_credited_average_speed_matches_ten_meter_twenty_second_finish() -> None:
-    assert MODULE._credited_average_speed_mps(10.0, 20.0) == pytest.approx(0.5)
-    assert MODULE._credited_average_speed_mps(8.0, 20.0) == pytest.approx(0.4)
-    assert MODULE._credited_average_speed_mps(10.0, 0.0) == 0.0
-
-
-def test_video_overlay_uses_compact_fonts() -> None:
-    assert MODULE.ROBOT_LABEL_FONT_SIZE <= 13
-    assert MODULE.HEADER_FONT_SIZE <= 15
-
-
-def test_world_projection_anchors_label_to_robot_screen_position() -> None:
-    camera = SimpleNamespace(
-        pos=[0.0, 0.0, 0.0],
-        forward=[1.0, 0.0, 0.0],
-        up=[0.0, 0.0, 1.0],
-        frustum_near=1.0,
-        frustum_top=1.0,
-        frustum_bottom=-1.0,
-        frustum_center=0.0,
-        frustum_width=4.0,
-        orthographic=False,
-    )
-
-    pixels, visible = MODULE._project_world_points(
-        MODULE.np.array([[2.0, 0.0, 0.0], [2.0, -1.0, 0.0]]),
-        camera,
-        width=200,
-        height=100,
-    )
-
-    assert visible.tolist() == [True, True]
-    assert pixels[0].tolist() == pytest.approx([100.0, 50.0])
-    assert pixels[1, 0] > pixels[0, 0]
-
-
-def test_label_layout_does_not_overlap_aligned_robot_labels() -> None:
-    positions = MODULE._label_positions(
-        MODULE.np.array([[100.0, 200.0]] * 4),
-        MODULE.np.ones(4, dtype=bool),
-        [(150, 22)] * 4,
-        width=960,
-        height=540,
-    )
-
-    boxes = [
-        (x, y, x + 150, y + 22) for index in range(4) for x, y in [positions[index]]
-    ]
-    assert all(first[3] + 7.0 <= second[1] for first, second in pairwise(boxes))

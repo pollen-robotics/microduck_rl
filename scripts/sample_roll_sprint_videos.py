@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -30,11 +31,15 @@ RECOVERY_RECORDING_STEPS = 600
 SIMULATION_HZ = 50
 # Compress the full 40 s race horizon into a readable 20 s clip while leaving
 # enough wall-clock margin to start a fresh clip every 150 s.
-OUTPUT_FPS = 10.0
+OUTPUT_WIDTH = 1920
+OUTPUT_HEIGHT = 1080
+OUTPUT_FPS = 60.0
 OUTPUT_VIDEO_SECONDS = 20.0
-RECORDING_FRAME_STRIDE = round(
-    RECORDING_STEPS / (OUTPUT_FPS * OUTPUT_VIDEO_SECONDS)
-)
+PLAYBACK_SPEED = 2.0
+# Rendering every second physics step supplies 50 distinct motion updates per
+# playback second. The encoder writes a browser-friendly constant 60 fps by
+# repeating the remaining frames without changing the 20 s clip duration.
+RECORDING_FRAME_STRIDE = 2
 EVALUATION_ENVS = 4
 EVALUATION_DURATION = 40.0
 EVALUATION_SCHEMA_VERSION = 8
@@ -154,6 +159,48 @@ def _recovery_montage_path(
     )
 
 
+def _champion_companion_path(
+    checkpoint: Path,
+    identity: CheckpointIdentity,
+) -> Path | None:
+    """Return a stable exact-hash video path for a retained champion."""
+
+    manifest = checkpoint.parent / "champion.json"
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    retained = payload.get("retained_checkpoint") if isinstance(payload, dict) else None
+    if (
+        not isinstance(retained, str)
+        or Path(retained).expanduser().resolve() != checkpoint.resolve()
+        or payload.get("checkpoint_sha256") != identity.sha256
+    ):
+        return None
+    return checkpoint.parent / (
+        f"champion-{identity.iteration:06d}-{identity.sha256[:12]}.mp4"
+    )
+
+
+def _retain_champion_video(
+    checkpoint: Path,
+    identity: CheckpointIdentity,
+    video: Path,
+) -> Path | None:
+    """Atomically retain one dashboard video beside the exact champion policy."""
+
+    destination = _champion_companion_path(checkpoint, identity)
+    if destination is None:
+        return None
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    shutil.copy2(video, temporary)
+    os.replace(temporary, destination)
+    for old_video in destination.parent.glob("champion-*.mp4"):
+        if old_video != destination:
+            old_video.unlink()
+    return destination
+
+
 def _evaluator_command(
     *,
     checkpoint: Path,
@@ -200,6 +247,12 @@ def _recorder_command(
         str(RECORDING_FRAME_STRIDE),
         "--output-fps",
         str(OUTPUT_FPS),
+        "--playback-speed",
+        str(PLAYBACK_SPEED),
+        "--width",
+        str(OUTPUT_WIDTH),
+        "--height",
+        str(OUTPUT_HEIGHT),
         "--device",
         device,
     ]
@@ -357,6 +410,9 @@ def sample_once(args: argparse.Namespace) -> bool:
     if not output.is_file():
         _log("recorder returned success without an output video; state unchanged")
         return False
+    champion_video = _retain_champion_video(checkpoint, identity, output)
+    if champion_video is not None:
+        _log(f"retained champion video: {champion_video}")
 
     if not args.video_only and not recovery_montage.is_file():
         recovery_montage.parent.mkdir(parents=True, exist_ok=True)

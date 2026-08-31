@@ -13,14 +13,12 @@ from pathlib import Path
 from typing import NamedTuple
 
 import mjlab.tasks  # noqa: F401  # Populate the task registry.
-import mujoco
 import numpy as np
 import torch
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
-from PIL import Image, ImageDraw, ImageFont
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
 
@@ -32,6 +30,8 @@ ROAD_SAFE_FULL_REWARD_HALF_WIDTH_M = microduck_mdp._ROLL_SPRINT_ROAD_SAFE_HALF_W
 ROAD_REPOSITION_TRIGGER_M = microduck_mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M
 ROAD_REPOSITION_REARM_M = microduck_mdp._ROLL_SPRINT_REPOSITION_REARM_M
 TARGET_DISTANCE_M = 10.0
+DEFAULT_OUTPUT_WIDTH = 1920
+DEFAULT_OUTPUT_HEIGHT = 1080
 RACE_CAMERA_LOOKAT = (0.60, 0.0, 0.08)
 RACE_CAMERA_DISTANCE = 3.2
 RACE_CAMERA_FOVY = 45.0
@@ -44,14 +44,6 @@ RACE_CAMERA_MAX_SPEED_MPS = 3.0
 RACE_CAMERA_MAX_ACCEL_MPS2 = 4.0
 RACE_LINE_HEIGHT = 0.008
 RACE_LINE_RADIUS = 0.018
-ROBOT_LABEL_FONT_SIZE = 13
-HEADER_FONT_SIZE = 15
-LABEL_COLORS = (
-    (64, 180, 255),
-    (255, 91, 91),
-    (119, 221, 119),
-    (255, 200, 74),
-)
 RECOVERY_ORIENTATIONS = ("face_down", "face_up", "left", "right")
 
 
@@ -77,12 +69,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-fps",
         type=float,
-        help="Encode at this frame rate; defaults to the real simulation-time cadence.",
+        help="Write a constant-frame-rate video at this cadence.",
+    )
+    parser.add_argument(
+        "--playback-speed",
+        type=float,
+        default=1.0,
+        help="Play simulation time this many times faster than real time.",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--width", type=int, default=960)
-    parser.add_argument("--height", type=int, default=540)
+    parser.add_argument("--width", type=int, default=DEFAULT_OUTPUT_WIDTH)
+    parser.add_argument("--height", type=int, default=DEFAULT_OUTPUT_HEIGHT)
     parser.add_argument(
         "--recovery-montage",
         action="store_true",
@@ -100,64 +98,58 @@ def _as_rgb8(frame: np.ndarray) -> np.ndarray:
 
 
 def _ffmpeg_writer(
-    output: Path, *, width: int, height: int, fps: float
+    output: Path,
+    *,
+    width: int,
+    height: int,
+    input_fps: float,
+    output_fps: float | None,
 ) -> subprocess.Popen[bytes]:
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise RuntimeError("ffmpeg is required to record roll-sprint videos")
     output.parent.mkdir(parents=True, exist_ok=True)
-    return subprocess.Popen(
-        [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "-s:v",
-            f"{width}x{height}",
-            "-r",
-            f"{fps:g}",
-            "-i",
-            "pipe:0",
-            "-an",
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-s:v",
+        f"{width}x{height}",
+        "-r",
+        f"{input_fps:g}",
+        "-i",
+        "pipe:0",
+        "-an",
+    ]
+    if output_fps is not None:
+        command.extend(("-r", f"{output_fps:g}"))
+    command.extend(
+        (
             "-c:v",
             "libx264",
             "-preset",
             "veryfast",
             "-crf",
-            "21",
+            "18",
             "-pix_fmt",
             "yuv420p",
             "-movflags",
             "+faststart",
             str(output),
-        ],
-        stdin=subprocess.PIPE,
+        )
     )
+    return subprocess.Popen(command, stdin=subprocess.PIPE)
 
 
 def _recording_fps(policy_dt: float, frame_stride: int) -> float:
     """Encode sampled frames at their real simulation-time cadence."""
     return 1.0 / (policy_dt * frame_stride)
-
-
-def _race_header_text(elapsed_s: float, total_s: float, leader_index: int) -> str:
-    return (
-        f"{TARGET_DISTANCE_M:g} m ROLL RACE  |  "
-        f"t {elapsed_s:05.1f} s / {total_s:.1f} s"
-        f"  |  camera follows on-road standing leader R{leader_index + 1}"
-    )
-
-
-def _recovery_header_text(elapsed_s: float, total_s: float) -> str:
-    return (
-        "SELF-RIGHT -> REPOSITION -> REROLL"
-        f"  |  t {elapsed_s:05.1f} s / {total_s:.1f} s"
-    )
 
 
 def _race_lane_origins(
@@ -238,33 +230,6 @@ def _load_policy_then_arrange_start(
     return env, policy
 
 
-def _credited_average_speed_mps(valid_distance_m: float, elapsed_s: float) -> float:
-    """Return finish-relevant average speed from credited frontier only."""
-    if not math.isfinite(valid_distance_m) or not math.isfinite(elapsed_s):
-        return 0.0
-    if elapsed_s <= 0.0:
-        return 0.0
-    return max(valid_distance_m, 0.0) / elapsed_s
-
-
-def _race_credited_distances(base_env: ManagerBasedRlEnv) -> torch.Tensor:
-    """Return cumulative bounded valid-cycle credit, never the raw position frontier."""
-    return base_env._roll_sprint_credited_distance.clamp_min(0.0)
-
-
-def _race_label_text(
-    robot_index: int,
-    valid_distance_m: float,
-    elapsed_s: float,
-    target_distance_m: float = TARGET_DISTANCE_M,
-) -> str:
-    valid_average_mps = _credited_average_speed_mps(valid_distance_m, elapsed_s)
-    return (
-        f"R{robot_index + 1}  VALID AVG {valid_average_mps:.2f} m/s"
-        f"  |  {valid_distance_m:.1f}/{target_distance_m:.1f} m"
-    )
-
-
 def _race_corridor_segments(
     *,
     lane_spacing: float = RACE_LANE_SPACING,
@@ -321,98 +286,6 @@ def _install_race_corridor_visualizer(base_env: ManagerBasedRlEnv) -> None:
         _draw_race_corridor(visualizer)
 
     base_env.update_visualizers = update_visualizers
-
-
-def _label_positions(
-    pixels: np.ndarray,
-    visible: np.ndarray,
-    label_sizes: list[tuple[int, int]],
-    *,
-    width: int,
-    height: int,
-) -> dict[int, tuple[float, float]]:
-    """Place robot-anchored labels without overlapping one another."""
-    margin = 8.0
-    gap = 7.0
-    top = 54.0
-    order = sorted(
-        (index for index, is_visible in enumerate(visible) if is_visible),
-        key=lambda index: (float(pixels[index, 1]), float(pixels[index, 0])),
-    )
-    positions: dict[int, tuple[float, float]] = {}
-    previous_bottom = top
-    for index in order:
-        label_width, label_height = label_sizes[index]
-        anchor_x = float(pixels[index, 0])
-        desired_x = (
-            anchor_x + 14.0
-            if anchor_x <= width / 2.0
-            else anchor_x - label_width - 14.0
-        )
-        x = min(max(desired_x, margin), width - label_width - margin)
-        desired_y = float(pixels[index, 1]) - label_height / 2.0
-        y = max(desired_y, previous_bottom + gap)
-        positions[index] = (x, y)
-        previous_bottom = y + label_height
-
-    if positions and previous_bottom > height - margin:
-        shift = previous_bottom - (height - margin)
-        for index, (x, y) in positions.items():
-            positions[index] = (x, max(top, y - shift))
-    return positions
-
-
-def _project_world_points(
-    points_w: np.ndarray,
-    camera: mujoco.MjvGLCamera,
-    *,
-    width: int,
-    height: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Project world points through MuJoCo's rendered OpenGL camera."""
-    position = np.asarray(camera.pos, dtype=np.float64)
-    forward = np.asarray(camera.forward, dtype=np.float64)
-    up = np.asarray(camera.up, dtype=np.float64)
-    right = np.cross(forward, up)
-    right /= max(float(np.linalg.norm(right)), 1.0e-12)
-    up /= max(float(np.linalg.norm(up)), 1.0e-12)
-
-    relative = np.asarray(points_w, dtype=np.float64) - position
-    depth = relative @ forward
-    horizontal = relative @ right
-    vertical = relative @ up
-    near = max(float(camera.frustum_near), 1.0e-6)
-    if not bool(camera.orthographic):
-        scale = near / np.maximum(depth, near)
-        horizontal *= scale
-        vertical *= scale
-
-    vertical_center = 0.5 * (float(camera.frustum_top) + float(camera.frustum_bottom))
-    vertical_half = max(
-        0.5 * (float(camera.frustum_top) - float(camera.frustum_bottom)),
-        1.0e-6,
-    )
-    horizontal_center = float(camera.frustum_center)
-    horizontal_half = 0.5 * float(camera.frustum_width)
-    if horizontal_half <= 1.0e-6:
-        horizontal_half = vertical_half * width / height
-
-    x_ndc = (horizontal - horizontal_center) / horizontal_half
-    y_ndc = (vertical - vertical_center) / vertical_half
-    pixels = np.column_stack(
-        (
-            (x_ndc + 1.0) * 0.5 * width,
-            (1.0 - y_ndc) * 0.5 * height,
-        )
-    )
-    visible = (
-        (depth > near)
-        & (x_ndc >= -1.1)
-        & (x_ndc <= 1.1)
-        & (y_ndc >= -1.1)
-        & (y_ndc <= 1.1)
-    )
-    return pixels, visible
 
 
 def _camera_follow_x(
@@ -554,113 +427,6 @@ def _follow_on_road_leader(
     return camera_state, camera_y_m, leader_index
 
 
-def _overlay_race_labels(
-    frame: np.ndarray,
-    base_env: ManagerBasedRlEnv,
-    *,
-    valid_distances_m: torch.Tensor,
-    elapsed_s: float,
-    total_s: float,
-    leader_index: int,
-    recovery_montage: bool = False,
-) -> np.ndarray:
-    """Draw per-robot metrics at the rendered screen position of each robot."""
-    renderer = base_env._offline_renderer
-    if renderer is None:
-        raise RuntimeError("Offline renderer is not initialized")
-    scene = renderer.renderer.scene
-    camera = mujoco.mjv_averageCamera(scene.camera[0], scene.camera[1])
-    robot_positions = (
-        base_env.scene["robot"].data.root_link_pos_w.detach().cpu().numpy().copy()
-    )
-    robot_positions[:, 2] += 0.24
-    height, width = frame.shape[:2]
-    pixels, visible = _project_world_points(
-        robot_positions,
-        camera,
-        width=width,
-        height=height,
-    )
-
-    image = Image.fromarray(frame).convert("RGBA")
-    draw = ImageDraw.Draw(image)
-    try:
-        font = ImageFont.truetype("arial.ttf", ROBOT_LABEL_FONT_SIZE)
-        header_font = ImageFont.truetype("arialbd.ttf", HEADER_FONT_SIZE)
-    except OSError:
-        font = ImageFont.load_default(size=ROBOT_LABEL_FONT_SIZE)
-        header_font = ImageFont.load_default(size=HEADER_FONT_SIZE)
-
-    header = (
-        _recovery_header_text(elapsed_s, total_s)
-        if recovery_montage
-        else _race_header_text(elapsed_s, total_s, leader_index)
-    )
-    header_box = draw.textbbox((0, 0), header, font=header_font)
-    header_width = header_box[2] - header_box[0]
-    header_height = header_box[3] - header_box[1]
-    draw.rounded_rectangle(
-        (12, 10, 28 + header_width, 22 + header_height),
-        radius=5,
-        fill=(10, 14, 22, 215),
-        outline=(235, 239, 245),
-        width=1,
-    )
-    draw.text((20, 14), header, font=header_font, fill=(255, 255, 255))
-
-    valid_distances = valid_distances_m.detach().cpu().tolist()
-    if recovery_montage:
-        self_righting = base_env._roll_sprint_self_righting.detach().cpu().tolist()
-        rerolled = base_env._roll_sprint_recovered_and_rerolled.detach().cpu().tolist()
-        labels = [
-            f"{RECOVERY_ORIENTATIONS[index].replace('_', ' ')}"
-            f"  |  {'self-righting' if self_righting[index] else 'upright'}"
-            f"  |  rerolls {int(rerolled[index])}"
-            for index in range(len(pixels))
-        ]
-    else:
-        labels = [
-            _race_label_text(index, valid_distances[index], elapsed_s)
-            for index in range(len(pixels))
-        ]
-    label_sizes = []
-    for label in labels:
-        text_box = draw.textbbox((0, 0), label, font=font)
-        label_sizes.append((text_box[2] - text_box[0], text_box[3] - text_box[1]))
-    positions = _label_positions(
-        pixels,
-        visible,
-        label_sizes,
-        width=width,
-        height=height,
-    )
-    for index, (x, y) in positions.items():
-        pixel = pixels[index]
-        label = labels[index]
-        label_width, label_height = label_sizes[index]
-        color = LABEL_COLORS[index % len(LABEL_COLORS)]
-        draw.rounded_rectangle(
-            (x - 4, y - 3, x + label_width + 4, y + label_height + 4),
-            radius=4,
-            fill=(8, 12, 18, 220),
-            outline=color,
-            width=1,
-        )
-        draw.text((x, y), label, font=font, fill=color)
-        label_edge_x = x if float(pixel[0]) < x else x + label_width
-        draw.line(
-            (
-                float(pixel[0]),
-                float(pixel[1]),
-                label_edge_x,
-                y + label_height / 2.0,
-            ),
-            fill=color,
-            width=2,
-        )
-    return np.ascontiguousarray(np.asarray(image.convert("RGB")))
-
-
 def main() -> int:
     args = _parse_args()
     checkpoint = args.checkpoint.expanduser().resolve()
@@ -675,11 +441,12 @@ def main() -> int:
         or args.frame_stride < 1
         or args.width < 2
         or args.height < 2
+        or args.playback_speed <= 0.0
         or (args.output_fps is not None and args.output_fps <= 0.0)
     ):
         raise SystemExit(
-            "--steps, --frame-stride, --width, --height, and --output-fps "
-            "must be positive"
+            "--steps, --frame-stride, --width, --height, --playback-speed, "
+            "and --output-fps must be positive"
         )
 
     configure_torch_backends()
@@ -733,7 +500,6 @@ def main() -> int:
                 observations = env.get_observations()
                 actions = policy(observations)
                 env.step(actions)
-                valid_distances_m = _race_credited_distances(base_env)
             if not args.recovery_montage:
                 camera_state, _camera_y_m, leader_index = _follow_on_road_leader(
                     base_env,
@@ -747,26 +513,17 @@ def main() -> int:
             if rendered is None:
                 raise RuntimeError("MuJoCo returned no RGB frame")
             frame = _as_rgb8(rendered)
-            frame = _overlay_race_labels(
-                frame,
-                base_env,
-                valid_distances_m=valid_distances_m,
-                elapsed_s=(step + 1) * policy_dt,
-                total_s=args.steps * policy_dt,
-                leader_index=leader_index,
-                recovery_montage=args.recovery_montage,
-            )
             if writer is None:
                 frame_height, frame_width = frame.shape[:2]
                 writer = _ffmpeg_writer(
                     temporary_output,
                     width=frame_width,
                     height=frame_height,
-                    fps=(
-                        args.output_fps
-                        if args.output_fps is not None
-                        else _recording_fps(policy_dt, args.frame_stride)
+                    input_fps=(
+                        _recording_fps(policy_dt, args.frame_stride)
+                        * args.playback_speed
                     ),
+                    output_fps=args.output_fps,
                 )
             assert writer.stdin is not None
             writer.stdin.write(frame.tobytes())

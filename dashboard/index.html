@@ -25,6 +25,30 @@
 
     <main id="main-content" class="page-shell video-only-shell">
       <div id="error-banner" class="notice notice-error" hidden role="alert"></div>
+      <section id="roll-champion" class="panel champion-panel" aria-labelledby="roll-champion-title" hidden>
+        <div class="section-heading champion-heading">
+          <div>
+            <p class="eyebrow accent">Best retained policy</p>
+            <h2 id="roll-champion-title">Roll-race champion</h2>
+            <p id="champion-version" class="gallery-copy"></p>
+          </div>
+          <span id="champion-status" class="gate-badge is-pass">Retained best</span>
+        </div>
+        <div class="champion-layout">
+          <div id="champion-preview" class="champion-preview">
+            <video id="champion-video" controls playsinline preload="metadata" aria-label="Best retained roll-race policy"></video>
+          </div>
+          <div id="champion-video-empty" class="empty-state champion-video-empty" hidden>The retained policy video is being prepared.</div>
+          <dl class="champion-meta" aria-label="Best retained policy identity">
+            <div><dt>Version</dt><dd id="champion-run"></dd></div>
+            <div><dt>Checkpoint</dt><dd id="champion-checkpoint"></dd></div>
+            <div><dt>Policy hash</dt><dd id="champion-hash"></dd></div>
+            <div><dt>10 m finishers</dt><dd id="champion-finishers"></dd></div>
+            <div><dt>Mean valid frontier</dt><dd id="champion-frontier"></dd></div>
+            <div><dt>Mean finish time</dt><dd id="champion-finish-time"></dd></div>
+          </dl>
+        </div>
+      </section>
       <section id="roll-audit" class="panel audit-panel" aria-labelledby="roll-audit-title">
         <div class="section-heading audit-heading">
           <div>

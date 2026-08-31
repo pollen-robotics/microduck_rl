@@ -52,6 +52,45 @@
     return badge;
   }
 
+  function renderChampion(data) {
+    const champion = data.rollSprintChampion || {};
+    const panel = $("#roll-champion");
+    panel.hidden = state.collectionId !== "roll-sprint" || !champion.available;
+    if (!champion.available) return;
+
+    const version = champion.version || "Unknown run";
+    $("#champion-version").textContent = version;
+    $("#champion-run").textContent = version;
+    $("#champion-checkpoint").textContent = champion.retainedCheckpoint || "Not reported";
+    const hash = champion.checkpointHash || "Not reported";
+    $("#champion-hash").textContent = hash;
+    $("#champion-hash").title = champion.checkpointSha256 || hash;
+    $("#champion-finishers").textContent = hasNumber(champion.targetDistanceReachCount)
+      ? `${formatCount(champion.targetDistanceReachCount)} / 4`
+      : "Not reported";
+    $("#champion-frontier").textContent = formatDistance(champion.meanFrontierM);
+    $("#champion-finish-time").textContent = formatSeconds(champion.meanTimeTo10mS);
+    $("#champion-status").textContent = hasNumber(champion.targetDistanceReachCount)
+      ? `${formatCount(champion.targetDistanceReachCount)} / 4 at 10 m`
+      : "Retained best";
+
+    const preview = $("#champion-preview");
+    const empty = $("#champion-video-empty");
+    const video = $("#champion-video");
+    const videoUrl = champion.video?.url;
+    preview.hidden = !videoUrl;
+    empty.hidden = Boolean(videoUrl);
+    if (!videoUrl) {
+      video.removeAttribute("src");
+      video.load();
+      return;
+    }
+    if (video.getAttribute("src") !== videoUrl) {
+      video.src = videoUrl;
+      video.load();
+    }
+  }
+
   function renderRollAudit(data) {
     const panel = $("#roll-audit");
     panel.hidden = state.collectionId !== "roll-sprint";
@@ -213,6 +252,7 @@
       const data = await response.json();
       state.data = data;
       renderCollectionSelector(data);
+      renderChampion(data);
       renderRollAudit(data);
       renderMedia(data, state.collectionId);
       $("#loaded-at").textContent = `Loaded ${new Date(data.generatedAt).toLocaleTimeString()}`;
@@ -231,6 +271,7 @@
       (item) => item.id === state.collectionId,
     );
     $("#gallery-copy").textContent = collection?.description || "A rollout from the selected policy run.";
+    renderChampion(state.data || {});
     renderRollAudit(state.data || {});
     renderMedia(state.data || {}, state.collectionId);
   });
