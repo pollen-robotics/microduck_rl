@@ -188,6 +188,7 @@ class RuntimeProcessSupervisor:
         self._sequence = 0
         self._active_task: str | None = None
         self._last_event_sequence = 0
+        self._last_reaped_pid: int | None = None
         self._terminal_delivery_sequence = 0
         self._terminal_delivery_outstanding: int | None = None
         self._pending_terminal_delivery: _TerminalDelivery | None = None
@@ -260,6 +261,11 @@ class RuntimeProcessSupervisor:
     def trace(self) -> tuple[str, ...]:
         with self._trace_lock:
             return tuple(self._trace)
+
+    @property
+    def last_reaped_pid(self) -> int | None:
+        """Return the exact most-recent owned PID only after `Popen.wait()` reaped it."""
+        return self._last_reaped_pid
 
     def _record(self, value: str) -> None:
         with self._trace_lock:
@@ -983,6 +989,7 @@ class RuntimeProcessSupervisor:
         process.wait(timeout=max(self._operation_timeout, 0.1))
         if process.poll() is None:
             raise RuntimeError("exact child reap was not confirmed")
+        self._last_reaped_pid = process.pid
         self._record("CHILD_REAPED")
         if owned_socket is not None:
             owned_socket.close()

@@ -273,6 +273,35 @@ def _wait_parent_wchan_count(
     raise AssertionError(f"parent thread did not enter {expected}: {latest}")
 
 
+def _wait_child_protocol_receive(container: _Container, timeout: float = 5.0) -> None:
+    """Observe the production child blocked on its inherited seqpacket receiver."""
+    namespace_pid = _namespace_pid(container.child_pid)
+    deadline = time.monotonic() + timeout
+    latest = ""
+    while time.monotonic() < deadline:
+        completed = _run(
+            "docker",
+            "exec",
+            "--user",
+            "10001:10001",
+            container.name,
+            "/app/.venv/bin/python",
+            "-P",
+            "-c",
+            (
+                "from pathlib import Path;"
+                f"print('\\n'.join(p.read_text().strip() for p in "
+                f"Path('/proc/{namespace_pid}/task').glob('*/wchan')))"
+            ),
+            check=False,
+        )
+        latest = completed.stdout.strip()
+        if "skb_wait_for_more_packets" in latest:
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"child did not enter inherited protocol receive: {latest}")
+
+
 def _launch_container(
     *, image: str, bundle: Path, state_dir: Path, suffix: str
 ) -> _Container:
@@ -541,22 +570,60 @@ def _assert_proc_absent(pid: int, timeout: float = 5.0) -> None:
     assert not path.exists(), f"PID {pid} exited but was not reaped"
 
 
+def _read_shutdown_evidence(container: _Container) -> dict[str, object]:
+    completed = _run(
+        "docker",
+        "run",
+        "--rm",
+        "--read-only",
+        "--user",
+        "0:0",
+        "--mount",
+        f"type=bind,src={container.state_dir},dst=/state,readonly",
+        "--entrypoint",
+        "/bin/cat",
+        container.image,
+        "/state/tasks.sqlite3.shutdown-v1.json",
+    )
+    return json.loads(completed.stdout)
+
+
 def _stop_and_assert_exact_reap(
-    container: _Container, *, child_pidfd: int | None = None
+    container: _Container,
+    *,
+    child_pidfd: int | None = None,
+    require_ordered_evidence: bool = True,
 ) -> int:
     parent_pidfd = os.pidfd_open(container.parent_pid)
     owned_child_pidfd = (
         os.pidfd_open(container.child_pid) if child_pidfd is None else child_pidfd
     )
-    stopped = _run("docker", "stop", "--timeout", "60", container.name)
-    assert stopped.stdout.strip() == container.name
+    child_namespace_pid = (
+        _namespace_pid(container.child_pid) if require_ordered_evidence else None
+    )
+    signalled = _run("docker", "kill", "--signal", "SIGTERM", container.name)
+    assert signalled.stdout.strip() == container.name
     _assert_pidfd_dead(owned_child_pidfd)
     _assert_pidfd_dead(parent_pidfd)
     _assert_proc_absent(container.child_pid)
     _assert_proc_absent(container.parent_pid)
     inspected = json.loads(_run("docker", "inspect", container.name).stdout)[0]
     assert inspected["State"]["Running"] is False
-    return int(inspected["State"]["ExitCode"])
+    exit_code = int(inspected["State"]["ExitCode"])
+    if require_ordered_evidence:
+        evidence = _read_shutdown_evidence(container)
+        assert evidence == {
+            "events": [
+                {"event": "CHILD_REAPED", "sequence": 0},
+                {"event": "PID1_EXITING", "sequence": 1},
+            ],
+            "exitCode": exit_code,
+            "exactReapConfirmed": True,
+            "pid1Pid": 1,
+            "reapedChildPid": child_namespace_pid,
+            "schema": "MICRODUCK_ROM_PID1_SHUTDOWN_V1",
+        }
+    return exit_code
 
 
 def _remove_container(container: _Container) -> None:
@@ -999,6 +1066,116 @@ def test_real_read_only_container_api_and_child_replacement_matrix(
         _remove_container(container)
 
 
+def test_real_container_cancel_queued_while_exact_child_start_is_blocked(
+    tmp_path: Path,
+) -> None:
+    """Final-image cancellation crosses a START held at the inherited IPC receiver."""
+    image, bundle = _release_inputs(tmp_path)
+    container = _launch_container(
+        image=image,
+        bundle=bundle,
+        state_dir=tmp_path / "state",
+        suffix="cancel-blocked-start",
+    )
+    old_pid = container.child_pid
+    old_pidfd = os.pidfd_open(old_pid)
+    create_result: dict[str, object] = {}
+    cancel_result: dict[str, object] = {}
+    try:
+        _wait_child_protocol_receive(container)
+        _signal_container_pid(container, old_pid, signal.SIGSTOP)
+        task_id = "c" * 32
+        creator = threading.Thread(
+            target=_capture_request,
+            args=(
+                create_result,
+                "create",
+                container.base_url,
+                "POST",
+                "/v1/tasks",
+                _walk_request(container, task_id, 5_000),
+            ),
+            daemon=True,
+        )
+        creator.start()
+        validating = _wait_task(container, task_id, {"VALIDATING"})
+        assert validating["state"] == "VALIDATING"
+        _wait_ready(container, False)
+
+        canceller = threading.Thread(
+            target=_capture_request,
+            args=(
+                cancel_result,
+                "cancel",
+                container.base_url,
+                "POST",
+                f"/v1/tasks/{task_id}/cancel",
+            ),
+            daemon=True,
+        )
+        canceller.start()
+        assert creator.is_alive() and canceller.is_alive()
+
+        blocked_id = "d" * 32
+        blocked_status, blocked = _request(
+            container.base_url,
+            "POST",
+            "/v1/tasks",
+            _walk_request(container, blocked_id, 5_000),
+        )
+        assert blocked_status == 409
+        assert blocked["code"] == "ROBOT_BUSY"
+
+        _signal_container_pid(container, old_pid, signal.SIGCONT)
+        creator.join(timeout=20)
+        canceller.join(timeout=20)
+        assert not creator.is_alive() and not canceller.is_alive()
+        assert create_result["create"][0] == 202  # type: ignore[index]
+        assert cancel_result["cancel"][0] == 200  # type: ignore[index]
+        assert cancel_result["cancel"][1]["state"] == "FAILED"  # type: ignore[index]
+        cancelled = _wait_task(container, task_id, {"FAILED"})
+        assert cancelled["stopReason"] == "RUNTIME_UNRESPONSIVE"
+        _wait_event(container, task_id, "TASK_CANCEL_REQUESTED")
+
+        _assert_pidfd_dead(old_pidfd)
+        old_pidfd = -1
+        _assert_proc_absent(old_pid)
+
+        fresh_status, _fresh = _post_after_slot_resolution(
+            container,
+            "/v1/tasks",
+            _walk_request(container, blocked_id, 5_000),
+            expected_status=202,
+        )
+        assert fresh_status == 202
+        parent_pid, descendants = _container_pids(container.name)
+        assert parent_pid == container.parent_pid
+        assert len(descendants) == 1
+        assert descendants[0] != old_pid
+        container = _Container(
+            container.name,
+            container.image,
+            container.base_url,
+            container.state_dir,
+            container.parent_pid,
+            descendants[0],
+        )
+        cancel_status, _cancelled = _request(
+            container.base_url, "POST", f"/v1/tasks/{blocked_id}/cancel"
+        )
+        assert cancel_status == 200
+        _wait_task(container, blocked_id, {"CANCELLED"})
+        assert _stop_and_assert_exact_reap(container) == 0
+    finally:
+        if old_pidfd >= 0:
+            os.close(old_pidfd)
+        try:
+            _signal_container_pid(container, old_pid, signal.SIGCONT, check=False)
+        except (FileNotFoundError, StopIteration):
+            pass
+        _remove_container(container)
+
+
 def test_container_shutdown_surfaces_blocked_terminal_callback_and_reaps_all(
     tmp_path: Path,
 ) -> None:
@@ -1014,6 +1191,7 @@ def test_container_shutdown_surfaces_blocked_terminal_callback_and_reaps_all(
     locker_pidfd: int | None = None
     locker_pid: int | None = None
     child_pidfd: int | None = None
+    restarted: _Container | None = None
     try:
         task_id = "b" * 32
         baseline_busy_threads = sum(
@@ -1036,7 +1214,9 @@ def test_container_shutdown_surfaces_blocked_terminal_callback_and_reaps_all(
             container, "hrtimer_nanosleep", baseline_busy_threads + 1
         )
         exit_code = _stop_and_assert_exact_reap(
-            container, child_pidfd=child_pidfd
+            container,
+            child_pidfd=child_pidfd,
+            require_ordered_evidence=False,
         )
         child_pidfd = None
         assert exit_code == 70
@@ -1044,6 +1224,22 @@ def test_container_shutdown_surfaces_blocked_terminal_callback_and_reaps_all(
         locker_pidfd = None
         _assert_proc_absent(locker_pid)
         locker.wait(timeout=10)
+        restarted = _launch_container(
+            image=image,
+            bundle=bundle,
+            state_dir=container.state_dir,
+            suffix="callback-delivery-restart",
+        )
+        reconciled = _wait_task(restarted, task_id, {"UNKNOWN"})
+        assert reconciled["stopReason"] is None
+        event_status, event_page = _request(
+            restarted.base_url,
+            "GET",
+            f"/v1/tasks/{task_id}/events?afterSequence=-1&pageSize=100",
+        )
+        assert event_status == 200
+        assert event_page["events"][-1]["eventType"] == "TASK_INTERRUPTED"  # type: ignore[index]
+        assert _stop_and_assert_exact_reap(restarted) == 0
     finally:
         if child_pidfd is not None:
             os.close(child_pidfd)
@@ -1052,6 +1248,8 @@ def test_container_shutdown_surfaces_blocked_terminal_callback_and_reaps_all(
         if locker is not None and locker.poll() is None:
             locker.kill()
             locker.wait(timeout=5)
+        if restarted is not None:
+            _remove_container(restarted)
         _remove_container(container)
 
 
@@ -1125,6 +1323,7 @@ def test_container_sigterm_reaps_exact_child_and_restart_reconciles_unknown(
                 _wait_event(container, task_id, "TASK_CANCEL_REQUESTED")
             elif phase == "QUARANTINED":
                 child_pidfd = os.pidfd_open(container.child_pid)
+                _wait_child_protocol_receive(container)
                 _signal_container_pid(
                     container, container.child_pid, signal.SIGSTOP
                 )
@@ -1150,9 +1349,8 @@ def test_container_sigterm_reaps_exact_child_and_restart_reconciles_unknown(
                 )
                 operation.start()
                 assert child_pidfd is not None
-                assert select.select([child_pidfd], [], [], 30.0)[0] == [
-                    child_pidfd
-                ]
+                _wait_ready(container, False, timeout=30.0)
+                assert select.select([child_pidfd], [], [], 0.0)[0] == []
 
         assert _stop_and_assert_exact_reap(
             container, child_pidfd=child_pidfd
@@ -1171,7 +1369,7 @@ def test_container_sigterm_reaps_exact_child_and_restart_reconciles_unknown(
         try:
             expected_state = (
                 {"FAILED"}
-                if phase in {"START", "STOPPING", "QUARANTINED"}
+                if phase in {"START", "STOPPING"}
                 else {"UNKNOWN"}
             )
             reconciled = _wait_task(restarted, task_id, expected_state)

@@ -217,6 +217,14 @@ waits for exact reap, and exits nonzero if that containment barrier fails. The
 operation, termination, kill, and reap envelope; Docker's final `SIGKILL` is a
 last resort rather than the normal child cleanup path.
 
+After `Popen.wait()` confirms the exact owned child was reaped and while PID 1
+is still executing its shutdown path, the parent atomically writes and fsyncs
+`/state/tasks.sqlite3.shutdown-v1.json`. The bounded record identifies the
+namespace child PID, final API exit code, and the ordered `CHILD_REAPED` then
+`PID1_EXITING` events. It is replaced at the next shutdown and removed at the
+next startup; operators can use it to distinguish a proved PID-1 reap from
+Docker's eventual cgroup cleanup.
+
 The build syncs only the exact-pinned `rom` dependency group from the frozen
 lockfile. The ROM runtime does not import BAM, Torch, CUDA, or `mjlab`; it
 executes the verified deployment bundle with the governed position-actuator

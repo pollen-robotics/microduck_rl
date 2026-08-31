@@ -237,20 +237,29 @@ class PromotedBundle:
     artifact_digests: dict[str, str]
 
 
-def _number(metrics: Mapping[str, object], key: str) -> float | None:
-    value = metrics.get(key)
-    if (
-        isinstance(value, int | float)
-        and not isinstance(value, bool)
-        and math.isfinite(float(value))
-    ):
-        return float(value)
-    return None
+def _raw_boolean(metrics: Mapping[str, object], key: str) -> bool:
+    """Read one required raw Boolean without truthiness or wire coercion."""
+    if key not in metrics or type(metrics[key]) is not bool:
+        raise ValueError(f"qualification raw evidence {key} must be a boolean")
+    return metrics[key]  # type: ignore[return-value]
 
 
-def _integer(metrics: Mapping[str, object], key: str) -> int:
-    value = metrics.get(key)
-    return int(value) if isinstance(value, int) and not isinstance(value, bool) else 0
+def _raw_float(metrics: Mapping[str, object], key: str) -> float:
+    """Read one required finite JSON float without accepting integers or booleans."""
+    if key not in metrics or type(metrics[key]) is not float:
+        raise ValueError(f"qualification raw evidence {key} must be a float")
+    value = metrics[key]
+    assert isinstance(value, float)
+    if not math.isfinite(value):
+        raise ValueError(f"qualification raw evidence {key} must be finite")
+    return value
+
+
+def _raw_integer(metrics: Mapping[str, object], key: str) -> int:
+    """Read one required JSON integer without accepting booleans or floats."""
+    if key not in metrics or type(metrics[key]) is not int:
+        raise ValueError(f"qualification raw evidence {key} must be an integer")
+    return metrics[key]  # type: ignore[return-value]
 
 
 def _mean(values: list[float]) -> float:
@@ -902,6 +911,55 @@ def _qualification_rollout_from_terminal(
         )
         if terminal.outcome != expected_horizon_outcome:
             raise ValueError("qualification horizon outcome is invalid")
+    steps = _raw_integer(metrics, "steps")
+    fallen = _raw_boolean(metrics, "fallen")
+    distance_m = _raw_float(metrics, "baseTravelM")
+    energy_proxy = _raw_float(metrics, "energyProxy")
+    max_abs_action = _raw_float(metrics, "maxAbsAction")
+    actuator_clamp_steps = _raw_integer(metrics, "actuatorClampSteps")
+    physical_joint_limit_violations = _raw_integer(
+        metrics, "physicalJointLimitViolations"
+    )
+    tracking_error = _raw_float(metrics, "trackingError")
+    tracking_error_sum = _raw_float(metrics, "trackingErrorSum")
+    tracking_error_max = _raw_float(metrics, "trackingErrorMax")
+    tracking_sample_count = _raw_integer(metrics, "trackingErrorSamples")
+    action_metric_value = _raw_float(
+        metrics, declaration.thresholds.actionMetric
+    )
+    upright_steps = (
+        _raw_integer(metrics, "uprightSteps")
+        if declaration.actionCode == "VELSTAND_VELOCITY"
+        else 0
+    )
+    yaw_rotation_rad = (
+        _raw_float(metrics, "yawRotationRad")
+        if declaration.actionCode == "SWIZZLE"
+        else None
+    )
+    stand_pose_error = (
+        _raw_float(metrics, "standPoseError")
+        if declaration.actionCode == "STAND"
+        else None
+    )
+    settled_steps = (
+        _raw_integer(metrics, "standSettledSteps")
+        if declaration.actionCode == "STAND"
+        else 0
+    )
+    settled_pose_error_max: float | None = None
+    settled_trunk_height_min_m: float | None = None
+    settled_trunk_height_max_m: float | None = None
+    settled_trunk_tilt_max_rad: float | None = None
+    settled_joint_speed_max_radps: float | None = None
+    if declaration.actionCode == "STAND" and settled_steps:
+        settled_pose_error_max = _raw_float(metrics, "settledPoseErrorMax")
+        settled_trunk_height_min_m = _raw_float(metrics, "settledHeightMinM")
+        settled_trunk_height_max_m = _raw_float(metrics, "settledHeightMaxM")
+        settled_trunk_tilt_max_rad = _raw_float(metrics, "settledTiltMaxRad")
+        settled_joint_speed_max_radps = _raw_float(
+            metrics, "settledJointSpeedMaxRadps"
+        )
     terminal_state: Literal["RUNNING", "SUCCEEDED", "FAILED"]
     if stop_reason == "MAX_STEPS_REACHED":
         terminal_state = "RUNNING"
@@ -909,13 +967,12 @@ def _qualification_rollout_from_terminal(
         terminal_state = "SUCCEEDED"
     else:
         terminal_state = "FAILED"
-    fallen = metrics.get("fallen") is True
     success = (
         terminal_state == "SUCCEEDED"
         if spec.execution_mode == "DISCRETE"
         else (
             terminal_state == "RUNNING"
-            and _integer(metrics, "steps") == declaration.maxSteps
+            and steps == declaration.maxSteps
             and not fallen
         )
     )
@@ -939,32 +996,30 @@ def _qualification_rollout_from_terminal(
         appliedMotion=dict(status.appliedMotion),
         startedAt=started_at,
         finishedAt=datetime.now(UTC),
-        steps=_integer(metrics, "steps"),
+        steps=steps,
         terminalState=terminal_state,
         success=success,
         fallen=fallen,
-        trackingError=_number(metrics, "trackingError"),
-        trackingErrorSum=_number(metrics, "trackingErrorSum"),
-        trackingErrorMax=_number(metrics, "trackingErrorMax"),
-        trackingSampleCount=_integer(metrics, "trackingErrorSamples"),
-        distanceM=_number(metrics, "baseTravelM") or 0.0,
-        energyProxy=_number(metrics, "energyProxy") or 0.0,
-        actuatorClampSteps=_integer(metrics, "actuatorClampSteps"),
-        physicalJointLimitViolations=_integer(
-            metrics, "physicalJointLimitViolations"
-        ),
-        settledSteps=_integer(metrics, "standSettledSteps"),
-        uprightSteps=_integer(metrics, "uprightSteps"),
-        maxAbsAction=_number(metrics, "maxAbsAction") or 0.0,
+        trackingError=tracking_error,
+        trackingErrorSum=tracking_error_sum,
+        trackingErrorMax=tracking_error_max,
+        trackingSampleCount=tracking_sample_count,
+        distanceM=distance_m,
+        energyProxy=energy_proxy,
+        actuatorClampSteps=actuator_clamp_steps,
+        physicalJointLimitViolations=physical_joint_limit_violations,
+        settledSteps=settled_steps,
+        uprightSteps=upright_steps,
+        maxAbsAction=max_abs_action,
         actionMetric=declaration.thresholds.actionMetric,
-        actionMetricValue=_number(metrics, declaration.thresholds.actionMetric),
-        yawRotationRad=_number(metrics, "yawRotationRad"),
-        standPoseError=_number(metrics, "standPoseError"),
-        settledPoseErrorMax=_number(metrics, "settledPoseErrorMax"),
-        settledTrunkHeightMinM=_number(metrics, "settledHeightMinM"),
-        settledTrunkHeightMaxM=_number(metrics, "settledHeightMaxM"),
-        settledTrunkTiltMaxRad=_number(metrics, "settledTiltMaxRad"),
-        settledJointSpeedMaxRadps=_number(metrics, "settledJointSpeedMaxRadps"),
+        actionMetricValue=action_metric_value,
+        yawRotationRad=yaw_rotation_rad,
+        standPoseError=stand_pose_error,
+        settledPoseErrorMax=settled_pose_error_max,
+        settledTrunkHeightMinM=settled_trunk_height_min_m,
+        settledTrunkHeightMaxM=settled_trunk_height_max_m,
+        settledTrunkTiltMaxRad=settled_trunk_tilt_max_rad,
+        settledJointSpeedMaxRadps=settled_joint_speed_max_radps,
         stopReason=stop_reason,
     )
 

@@ -167,6 +167,7 @@ class SimulatorTaskService:
         # one supervisor-owned COMMAND acknowledgement.
         self._runtime_call_timeout_s = runtimeCallTimeoutS
         self._supervisor = supervisor_factory(self._terminal_callback)
+        self._shutdown_reaped_pid: int | None = None
         try:
             self._supervisor.ensure_ready()
         except Exception:  # noqa: BLE001 - startup diagnostics fail closed.
@@ -539,7 +540,20 @@ class SimulatorTaskService:
             self._request_stop(active, "WATCHDOG_FAILURE")
 
     def close(self) -> None:
-        self._supervisor.close()
+        owned_pid = self._supervisor.snapshot().pid
+        try:
+            self._supervisor.close()
+        finally:
+            if (
+                owned_pid is not None
+                and getattr(self._supervisor, "last_reaped_pid", None) == owned_pid
+            ):
+                self._shutdown_reaped_pid = owned_pid
+
+    @property
+    def shutdown_reaped_pid(self) -> int | None:
+        """Expose only a PID whose exact owned process crossed the reap barrier."""
+        return self._shutdown_reaped_pid
 
     def _request_stop(self, active: _ActiveTask, reason: str):
         dispatch_callback: Callable[[], None] | None = None

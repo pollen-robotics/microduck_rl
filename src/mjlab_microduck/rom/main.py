@@ -330,6 +330,53 @@ def _state_db_path_is_usable(state_db: Path) -> bool:
     return state_db.parent.is_dir() and os.access(state_db.parent, os.W_OK | os.X_OK)
 
 
+def _shutdown_evidence_path(state_db: Path) -> Path:
+    return state_db.with_name(f"{state_db.name}.shutdown-v1.json")
+
+
+def _write_shutdown_evidence(
+    state_db: Path, *, reaped_child_pid: int, exit_code: int
+) -> Path:
+    """Durably publish exact-reap ordering while this API parent is still PID 1."""
+    if reaped_child_pid <= 1 or exit_code not in {0, 70}:
+        raise ValueError("shutdown evidence values are invalid")
+    destination = _shutdown_evidence_path(state_db)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    payload = canonical_json(
+        {
+            "schema": "MICRODUCK_ROM_PID1_SHUTDOWN_V1",
+            "pid1Pid": os.getpid(),
+            "reapedChildPid": reaped_child_pid,
+            "exactReapConfirmed": True,
+            "exitCode": exit_code,
+            "events": [
+                {"sequence": 0, "event": "CHILD_REAPED"},
+                {"sequence": 1, "event": "PID1_EXITING"},
+            ],
+        }
+    )
+    temporary.unlink(missing_ok=True)
+    descriptor = os.open(
+        temporary,
+        os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_CLOEXEC,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as target:
+            target.write(payload)
+            target.flush()
+            os.fsync(target.fileno())
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, destination)
+    directory = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    return destination
+
+
 class UnconfiguredRuntime:
     """Legacy diagnostic placeholder; it is never a service execution fallback."""
 
@@ -396,6 +443,9 @@ def create_configured_app(
                     bundle_digest=bundle.bundleDigest,
                     terminal_callback=callback,
                     operation_timeout_s=10.0,
+                    # Preserve a bounded observable termination window so PID 1
+                    # can join an in-flight quarantine before SIGKILL/reap.
+                    terminate_timeout_s=2.0,
                     owner_thread_name="microduck-runtime-supervisor-production",
                 )
             )
@@ -414,6 +464,9 @@ def create_configured_app(
 def main() -> None:
     """Launch the configured HTTP server without logging authorization material."""
     configuration = read_configuration()
+    state_db = getattr(configuration, "state_db", None)
+    if isinstance(state_db, Path):
+        _shutdown_evidence_path(state_db).unlink(missing_ok=True)
     applications: list[Any] = []
 
     def application_factory():
@@ -445,9 +498,24 @@ def main() -> None:
     try:
         server.run()
         app = applications[0] if applications else None
-        if (
+        shutdown_failed = (
             app is not None and app.state.shutdown_failure is not None
-        ) or getattr(server.lifespan, "shutdown_failed", False):
+        ) or getattr(server.lifespan, "shutdown_failed", False)
+        reaped_child_pid = (
+            getattr(app.state, "shutdown_reaped_pid", None)
+            if app is not None
+            else None
+        )
+        if isinstance(state_db, Path) and isinstance(reaped_child_pid, int):
+            try:
+                _write_shutdown_evidence(
+                    state_db,
+                    reaped_child_pid=reaped_child_pid,
+                    exit_code=70 if shutdown_failed else 0,
+                )
+            except Exception:  # noqa: BLE001 - missing reap evidence fails closed.
+                shutdown_failed = True
+        if shutdown_failed:
             raise SystemExit(70)
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)

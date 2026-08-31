@@ -1169,6 +1169,7 @@ def test_close_is_bounded_and_exactly_reaps_from_owned_lifecycle_state(
         assert not operation_thread.is_alive()
         assert len(operation_errors) == 1
     _assert_pidfd_dead(pidfd)
+    assert supervisor.last_reaped_pid == pid
     assert supervisor.snapshot().pid is None
     assert supervisor.snapshot().slot_releasable
     assert supervisor.snapshot().state is SupervisorState.NO_CHILD

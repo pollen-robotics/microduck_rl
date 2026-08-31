@@ -46,6 +46,7 @@ from tests.test_rom_mujoco_runtime import (
 )
 
 NOW = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+_MISSING = object()
 
 
 def _unsigned_hash_document(document: dict[str, object]) -> dict[str, object]:
@@ -211,6 +212,184 @@ def _qualified_components(installed: Path):
         if action.actionCode == declaration.actionCode
     )
     return subject, declaration, definition, result
+
+
+def _valid_walk_terminal_metrics(
+    bundle: PolicyBundle,
+    declaration: ActionQualificationConfig,
+    definition,
+    seed: int,
+) -> dict[str, object]:
+    """Literal raw child evidence whose safety zeros are all explicitly present."""
+    policy = next(
+        item for item in bundle.policies if item.policyRef == definition.policyRef
+    )
+    return {
+        "actionCode": "WALK_VELOCITY",
+        "bundleDigest": bundle.bundleDigest,
+        "onnxDigest": policy.digest,
+        "mjcfDigest": bundle.model.digest,
+        "sourceCommit": bundle.sourceCommit,
+        "checkpoint": policy.checkpoint,
+        "runIdentity": policy.experimentRef,
+        "terrainIdentity": "flat",
+        "rngSeed": seed,
+        "scenarioProfile": "SEEDED_SERVO_RESET_V1",
+        "resetProfile": "DEFAULT_STANDING",
+        "steps": declaration.maxSteps,
+        "fallen": False,
+        "baseTravelM": 0.0,
+        "energyProxy": 0.0,
+        "maxAbsAction": 0.0,
+        "actuatorClampSteps": 0,
+        "physicalJointLimitViolations": 0,
+        "trackingError": 0.0,
+        "trackingErrorSum": 0.0,
+        "trackingErrorMax": 0.0,
+        "trackingErrorSamples": declaration.maxSteps,
+    }
+
+
+def _adapt_walk_battery_and_recompute(
+    bundle: PolicyBundle,
+    declaration: ActionQualificationConfig,
+    definition,
+    *,
+    field: str | None = None,
+    value: object = _MISSING,
+):
+    motion = {
+        "twist": [0.1, 0.0, 0.0],
+        "headPose": [0.0, 0.0, 0.0, 0.0],
+        "bodyPose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    }
+    status = robot_status().model_copy(
+        update={"requestedMotion": motion, "appliedMotion": motion}
+    )
+    rollouts = []
+    for seed in declaration.seeds:
+        metrics = _valid_walk_terminal_metrics(bundle, declaration, definition, seed)
+        if field is not None:
+            if value is _MISSING:
+                metrics.pop(field)
+            else:
+                metrics[field] = value
+        terminal = TerminalPayload(
+            outcome="SUCCEEDED",
+            evidence=TaskEvidence.model_construct(
+                bundleDigest=bundle.bundleDigest,
+                policyDigest=metrics["onnxDigest"],
+                modelDigest=bundle.model.digest,
+                metrics=metrics,
+                stopReason="MAX_STEPS_REACHED",
+            ),
+        )
+        rollouts.append(
+            qualification_module._qualification_rollout_from_terminal(
+                bundle,
+                declaration,
+                definition,
+                seed,
+                status,
+                terminal,
+                runtime_revision(),
+                NOW,
+            )
+        )
+    return recompute_action_qualification(
+        bundle,
+        declaration,
+        definition,
+        tuple(rollouts),
+        runtime_revision(),
+    )
+
+
+def _adapt_stand_battery_and_recompute(
+    bundle: PolicyBundle,
+    declaration: ActionQualificationConfig,
+    definition,
+    *,
+    field: str,
+    value: object = _MISSING,
+):
+    zero_motion = {
+        "twist": [0.0, 0.0, 0.0],
+        "headPose": [0.0, 0.0, 0.0, 0.0],
+        "bodyPose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    }
+    status = robot_status().model_copy(
+        update={"requestedMotion": zero_motion, "appliedMotion": zero_motion}
+    )
+    policy = next(
+        item for item in bundle.policies if item.policyRef == definition.policyRef
+    )
+    rollouts = []
+    for seed in declaration.seeds:
+        metrics: dict[str, object] = {
+            "actionCode": "STAND",
+            "bundleDigest": bundle.bundleDigest,
+            "onnxDigest": policy.digest,
+            "mjcfDigest": bundle.model.digest,
+            "sourceCommit": bundle.sourceCommit,
+            "checkpoint": policy.checkpoint,
+            "runIdentity": policy.experimentRef,
+            "terrainIdentity": "flat",
+            "rngSeed": seed,
+            "scenarioProfile": "SEEDED_SERVO_RESET_V1",
+            "resetProfile": "TRAINED_SITTING",
+            "steps": 10,
+            "fallen": False,
+            "baseTravelM": 0.0,
+            "energyProxy": 0.0,
+            "maxAbsAction": 0.0,
+            "actuatorClampSteps": 0,
+            "physicalJointLimitViolations": 0,
+            "trackingError": 0.0,
+            "trackingErrorSum": 0.0,
+            "trackingErrorMax": 0.0,
+            "trackingErrorSamples": 10,
+            "standPoseError": 0.0,
+            "standSettledSteps": 10,
+            "settledPoseErrorMax": 0.0,
+            "settledHeightMinM": 0.1,
+            "settledHeightMaxM": 0.1,
+            "settledTiltMaxRad": 0.0,
+            "settledJointSpeedMaxRadps": 0.0,
+        }
+        if value is _MISSING:
+            metrics.pop(field)
+        else:
+            metrics[field] = value
+        terminal = TerminalPayload(
+            outcome="SUCCEEDED",
+            evidence=TaskEvidence.model_construct(
+                bundleDigest=bundle.bundleDigest,
+                policyDigest=policy.digest,
+                modelDigest=bundle.model.digest,
+                metrics=metrics,
+                stopReason="STAND_POSE_SETTLED",
+            ),
+        )
+        rollouts.append(
+            qualification_module._qualification_rollout_from_terminal(
+                bundle,
+                declaration,
+                definition,
+                seed,
+                status,
+                terminal,
+                runtime_revision(),
+                NOW,
+            )
+        )
+    return recompute_action_qualification(
+        bundle,
+        declaration,
+        definition,
+        tuple(rollouts),
+        runtime_revision(),
+    )
 
 
 def _resign_mutated_promoted_bundle(
@@ -693,6 +872,179 @@ def test_stand_qualification_promotes_exact_discrete_runtime_success(
         action for action in promoted.manifest.actions if action.actionCode == "STAND"
     )
     assert stand.availability == "AVAILABLE"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "fallen",
+        "baseTravelM",
+        "energyProxy",
+        "maxAbsAction",
+        "actuatorClampSteps",
+        "physicalJointLimitViolations",
+        "steps",
+        "trackingError",
+        "trackingErrorSum",
+        "trackingErrorMax",
+        "trackingErrorSamples",
+    ],
+)
+def test_qualification_rejects_each_missing_raw_safety_or_action_metric(
+    tmp_path: Path, field: str
+) -> None:
+    """Deleting any release input must not project an invented favorable value."""
+    source = tmp_path / "candidate"
+    bundle = _write_verified_bundle(source)
+    declaration = _config(mandatory=True).actions[0]
+    definition = next(
+        action for action in bundle.actions if action.actionCode == "WALK_VELOCITY"
+    )
+
+    with pytest.raises(ValueError, match="raw evidence"):
+        _adapt_walk_battery_and_recompute(
+            bundle, declaration, definition, field=field
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("fallen", 0),
+        ("fallen", None),
+        ("baseTravelM", 0),
+        ("baseTravelM", True),
+        ("baseTravelM", None),
+        ("baseTravelM", math.inf),
+        ("energyProxy", 0),
+        ("energyProxy", True),
+        ("energyProxy", None),
+        ("energyProxy", math.nan),
+        ("maxAbsAction", 0),
+        ("maxAbsAction", True),
+        ("maxAbsAction", None),
+        ("maxAbsAction", -math.inf),
+        ("actuatorClampSteps", 0.0),
+        ("actuatorClampSteps", True),
+        ("actuatorClampSteps", None),
+        ("physicalJointLimitViolations", 0.0),
+        ("physicalJointLimitViolations", False),
+        ("physicalJointLimitViolations", None),
+        ("steps", 100.0),
+        ("steps", True),
+        ("steps", None),
+        ("trackingError", 0),
+        ("trackingError", True),
+        ("trackingError", None),
+        ("trackingError", math.inf),
+        ("trackingErrorSum", 0),
+        ("trackingErrorSum", False),
+        ("trackingErrorSum", None),
+        ("trackingErrorSum", math.nan),
+        ("trackingErrorMax", 0),
+        ("trackingErrorMax", True),
+        ("trackingErrorMax", None),
+        ("trackingErrorMax", -math.inf),
+        ("trackingErrorSamples", 100.0),
+        ("trackingErrorSamples", True),
+        ("trackingErrorSamples", None),
+    ],
+)
+def test_qualification_rejects_wrong_scalar_type_or_nonfinite_raw_evidence(
+    tmp_path: Path, field: str, wrong_value: object
+) -> None:
+    """JSON coercion must not turn malformed child evidence into trusted evidence."""
+    source = tmp_path / "candidate"
+    bundle = _write_verified_bundle(source)
+    declaration = _config(mandatory=True).actions[0]
+    definition = next(
+        action for action in bundle.actions if action.actionCode == "WALK_VELOCITY"
+    )
+
+    with pytest.raises(ValueError, match="raw evidence"):
+        _adapt_walk_battery_and_recompute(
+            bundle,
+            declaration,
+            definition,
+            field=field,
+            value=wrong_value,
+        )
+
+
+def test_qualification_accepts_explicit_truthful_zero_raw_safety_evidence(
+    tmp_path: Path,
+) -> None:
+    """Zero is valid evidence only when the child actually supplied every field."""
+    source = tmp_path / "candidate"
+    bundle = _write_verified_bundle(source)
+    declaration = _config(mandatory=True).actions[0]
+    definition = next(
+        action for action in bundle.actions if action.actionCode == "WALK_VELOCITY"
+    )
+
+    result = _adapt_walk_battery_and_recompute(bundle, declaration, definition)
+
+    assert result.status == "PASSED"
+    assert result.meanDistanceM == 0.0
+    assert result.meanEnergyProxy == 0.0
+    assert result.actuatorClampSteps == 0
+    assert result.physicalJointLimitViolations == 0
+    assert all(rollout.maxAbsAction == 0.0 for rollout in result.rollouts)
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("standPoseError", _MISSING),
+        ("standPoseError", 0),
+        ("standPoseError", None),
+        ("standSettledSteps", _MISSING),
+        ("standSettledSteps", 10.0),
+        ("standSettledSteps", True),
+        ("settledPoseErrorMax", _MISSING),
+        ("settledPoseErrorMax", 0),
+        ("settledPoseErrorMax", None),
+        ("settledHeightMinM", _MISSING),
+        ("settledHeightMinM", 0),
+        ("settledHeightMinM", None),
+        ("settledHeightMaxM", _MISSING),
+        ("settledHeightMaxM", 0),
+        ("settledHeightMaxM", None),
+        ("settledTiltMaxRad", _MISSING),
+        ("settledTiltMaxRad", 0),
+        ("settledTiltMaxRad", None),
+        ("settledJointSpeedMaxRadps", _MISSING),
+        ("settledJointSpeedMaxRadps", 0),
+        ("settledJointSpeedMaxRadps", None),
+    ],
+)
+def test_qualification_rejects_missing_or_wrong_typed_stand_specific_evidence(
+    tmp_path: Path, field: str, wrong_value: object
+) -> None:
+    """STAND promotion requires its exact completion metric and bounded window."""
+    source = tmp_path / "candidate"
+    bundle = _rewrite_as_stand_bundle(
+        source,
+        _write_verified_bundle(
+            source,
+            policy_output=[0.0] * 14,
+            action_code="STAND",
+            task_id="Mjlab-SitStand-Flat-MicroDuck",
+        ),
+    )
+    declaration = _stand_config().actions[0]
+    definition = next(
+        action for action in bundle.actions if action.actionCode == "STAND"
+    )
+
+    with pytest.raises(ValueError, match="raw evidence"):
+        _adapt_stand_battery_and_recompute(
+            bundle,
+            declaration,
+            definition,
+            field=field,
+            value=wrong_value,
+        )
 
 
 def test_qualification_rejects_runtime_evidence_with_wrong_seed_identity(

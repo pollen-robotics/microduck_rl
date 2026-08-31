@@ -320,6 +320,10 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
                 except Exception as exc:  # noqa: BLE001 - shutdown remains fail closed.
                     app.state.watchdog_terminalization_failed = True
                     shutdown_failure = exc
+                finally:
+                    app.state.shutdown_reaped_pid = getattr(
+                        service, "shutdown_reaped_pid", None
+                    )
             app.state.shutdown_failure = shutdown_failure
             if shutdown_failure is not None:
                 raise RuntimeError("simulator shutdown containment failed") from (
@@ -340,6 +344,7 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
     app.state.watchdog_healthy = True
     app.state.watchdog_terminalization_failed = False
     app.state.shutdown_failure = None
+    app.state.shutdown_reaped_pid = None
 
     async def require_bearer(
         request: Request,

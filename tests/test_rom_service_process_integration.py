@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import importlib
 import inspect
+import json
 import os
 import select
 import sqlite3
@@ -196,10 +197,14 @@ def test_lifespan_surfaces_exact_reap_failure_instead_of_reporting_clean_shutdow
 
 
 def test_pid1_server_exits_nonzero_when_lifespan_containment_fails(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    app = SimpleNamespace(state=SimpleNamespace(shutdown_failure=None))
-    configured = SimpleNamespace(host="127.0.0.1", port=8000)
+    app = SimpleNamespace(
+        state=SimpleNamespace(shutdown_failure=None, shutdown_reaped_pid=23)
+    )
+    configured = SimpleNamespace(
+        host="127.0.0.1", port=8000, state_db=tmp_path / "tasks.sqlite3"
+    )
     captured: dict[str, object] = {}
 
     class FakeServer:
@@ -247,6 +252,37 @@ def test_pid1_server_exits_nonzero_when_lifespan_containment_fails(
     }
     assert captured["app_created_before_run"] is False
     assert captured["app_created_during_run"] is True
+    evidence = json.loads(
+        (tmp_path / "tasks.sqlite3.shutdown-v1.json").read_text()
+    )
+    assert evidence["reapedChildPid"] == 23
+    assert evidence["exitCode"] == 70
+
+
+def test_pid1_shutdown_evidence_records_exact_reap_before_exit(
+    tmp_path: Path,
+) -> None:
+    """The durable marker must identify one exact child and an ordered PID1 exit."""
+    state_db = tmp_path / "tasks.sqlite3"
+
+    evidence_path = rom_main._write_shutdown_evidence(
+        state_db,
+        reaped_child_pid=23,
+        exit_code=0,
+    )
+
+    assert evidence_path == tmp_path / "tasks.sqlite3.shutdown-v1.json"
+    assert json.loads(evidence_path.read_text()) == {
+        "events": [
+            {"event": "CHILD_REAPED", "sequence": 0},
+            {"event": "PID1_EXITING", "sequence": 1},
+        ],
+        "exitCode": 0,
+        "exactReapConfirmed": True,
+        "pid1Pid": os.getpid(),
+        "reapedChildPid": 23,
+        "schema": "MICRODUCK_ROM_PID1_SHUTDOWN_V1",
+    }
 
 
 def test_service_requires_a_supervisor_factory_not_a_runtime_handle():
