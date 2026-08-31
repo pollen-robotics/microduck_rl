@@ -1339,7 +1339,9 @@ def test_roll_sprint_reposition_command_points_to_nearest_safe_road_edge(monkeyp
 
     assert torch.allclose(command[0], torch.tensor([0.0, -0.20, -0.05]))
     assert torch.allclose(command[1], torch.tensor([0.0, 0.20, 0.05]))
-    assert torch.allclose(command[2], torch.tensor([0.0, 0.0, -0.05]))
+    # A large heading error must not suppress the simultaneous road-return
+    # command. Side recoveries otherwise remain outside the road indefinitely.
+    assert torch.allclose(command[2], torch.tensor([0.0, -0.20, -0.05]))
 
     env._roll_sprint_self_righting[0] = True
     assert torch.allclose(
