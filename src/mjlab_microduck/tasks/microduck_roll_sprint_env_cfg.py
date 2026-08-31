@@ -8,6 +8,7 @@ distance is released to PPO.
 """
 
 import copy
+import math
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers import (
@@ -543,6 +544,11 @@ def make_microduck_backroll_sprint_env_cfg(
     # a small standing bucket for launch learning, but avoid letting the
     # easier self-right-only basin dominate the first policy updates.
     reset_params["midroll_forward_vel_range"] = (0.15, 0.45)
+    reset_params.update(
+        midroll_pitch_min=math.radians(220.0),
+        midroll_pitch_max=math.radians(340.0),
+        midroll_omega_range=(1.5, 4.0),
+    )
     if not play:
         reset_params.update(
             standing_prob=0.25,
@@ -555,18 +561,22 @@ def make_microduck_backroll_sprint_env_cfg(
             "param_stages"
         ]
         stage_mixes = (
-            (0.15, 0.65, 0.05, 0.05, 0.10),
-            (0.25, 0.55, 0.05, 0.05, 0.10),
-            (0.45, 0.35, 0.10, 0.05, 0.05),
-            (0.65, 0.10, 0.10, 0.05, 0.10),
+            ((0.15, 0.65, 0.05, 0.05, 0.10), (220.0, 340.0, (1.5, 4.0))),
+            ((0.25, 0.55, 0.05, 0.05, 0.10), (160.0, 340.0, (1.0, 3.5))),
+            ((0.45, 0.35, 0.10, 0.05, 0.05), (100.0, 340.0, (0.5, 3.0))),
+            ((0.65, 0.10, 0.10, 0.05, 0.10), (50.0, 340.0, (0.0, 3.0))),
         )
-        for stage, mix in zip(spawn_stages, stage_mixes, strict=True):
+        for stage, (mix, roll_window) in zip(spawn_stages, stage_mixes, strict=True):
+            pitch_min, pitch_max, omega_range = roll_window
             stage["params"].update(
                 standing_prob=mix[0],
                 midroll_prob=mix[1],
                 postroll_prob=mix[2],
                 crouch_prob=mix[3],
                 ground_recovery_prob=mix[4],
+                midroll_pitch_min=math.radians(pitch_min),
+                midroll_pitch_max=math.radians(pitch_max),
+                midroll_omega_range=omega_range,
             )
 
     # Backroll discovery needs more dense supported-rotation signal than a
