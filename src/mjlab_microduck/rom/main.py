@@ -273,6 +273,7 @@ def load_qualified_bundle(bundle_dir: Path) -> PolicyBundle:
             or bundle.sourceCommit != subject.sourceCommit
             or bundle.model != subject.model
             or bundle.policies != subject.policies
+            or bundle.license != subject.license
             or configuration.release != bundle.bundleVersion
             or configuration.createdAt != bundle.createdAt
         ):

@@ -25,7 +25,7 @@ from mjlab_microduck.rom.contracts import (
     canonical_json,
     sha256_prefixed,
 )
-from mjlab_microduck.rom.main import load_qualified_bundle
+from mjlab_microduck.rom.main import load_qualified_bundle, load_verified_bundle
 from mjlab_microduck.rom.process_protocol import TerminalPayload
 from mjlab_microduck.rom.process_supervisor import RuntimeProcessSupervisor
 from mjlab_microduck.rom.qualification import (
@@ -165,6 +165,29 @@ def _extract_promoted_bundle(tmp_path: Path) -> tuple[Path, PolicyBundle]:
     with zipfile.ZipFile(promoted.output_zip) as archive:
         archive.extractall(installed)
     return installed, promoted.manifest
+
+
+@pytest.mark.parametrize("requested_status", ("DEVELOPMENT_ONLY", "DISTRIBUTION_CLEARED"))
+def test_promotion_preserves_typed_model_asset_license_status(
+    tmp_path: Path, requested_status: str
+) -> None:
+    """Changing the promotion copy must not silently grant distribution clearance."""
+    candidate_root = tmp_path / "candidate"
+    candidate = _write_verified_bundle(
+        candidate_root, model_license_status=requested_status
+    )
+
+    promoted = qualify_and_promote(
+        candidate_root,
+        tmp_path / "qualified.zip",
+        _config(mandatory=True),
+        timestamp=lambda: NOW,
+    )
+
+    assert promoted.manifest.license == candidate.license
+    assert (
+        promoted.manifest.license.modelAssets.distributionStatus == requested_status
+    )
 
 
 def _extract_promoted_stand_bundle(tmp_path: Path) -> tuple[Path, PolicyBundle]:
@@ -471,6 +494,87 @@ def _resign_bundle_document(document: dict[str, object]) -> str:
     return digest
 
 
+@pytest.mark.parametrize(
+    "mutate_license",
+    (
+        lambda license_: license_["modelAssets"].update(
+            {"artifactPaths": ["licenses/missing.txt"]}
+        ),
+        lambda license_: license_["modelAssets"].update(
+            {"identifier": "MIT"}
+        ),
+    ),
+    ids=("dangling-reference", "changed-identifier"),
+)
+def test_candidate_and_promotion_reject_resigned_invalid_license_contract(
+    tmp_path: Path, mutate_license
+) -> None:
+    """Removing contract validation would admit re-hashed dangling license evidence."""
+    candidate_root = tmp_path / "candidate"
+    _write_verified_bundle(candidate_root)
+    manifest_path = candidate_root / "microduck-policy-bundle.json"
+    manifest = json.loads(manifest_path.read_text())
+    mutate_license(manifest["license"])
+    _resign_bundle_document(manifest)
+    manifest_path.write_bytes(canonical_json(manifest))
+
+    with pytest.raises(ValueError, match="bundle manifest is invalid"):
+        load_verified_bundle(candidate_root)
+    with pytest.raises(ValueError, match="bundle manifest is invalid"):
+        qualify_and_promote(
+            candidate_root,
+            tmp_path / "qualified.zip",
+            _config(mandatory=True),
+            timestamp=lambda: NOW,
+        )
+
+
+def test_candidate_and_promotion_reject_modified_license_evidence_bytes(
+    tmp_path: Path,
+) -> None:
+    """Skipping evidence digest verification would qualify altered license bytes."""
+    candidate_root = tmp_path / "candidate"
+    _write_verified_bundle(candidate_root)
+    (candidate_root / "licenses/Apache-2.0.txt").write_bytes(b"modified evidence")
+
+    with pytest.raises(ValueError, match="bundle artifact verification failed"):
+        load_verified_bundle(candidate_root)
+    with pytest.raises(ValueError, match="bundle artifact verification failed"):
+        qualify_and_promote(
+            candidate_root,
+            tmp_path / "qualified.zip",
+            _config(mandatory=True),
+            timestamp=lambda: NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutate_license",
+    (
+        lambda license_: license_["modelAssets"].update(
+            {"distributionStatus": "DEVELOPMENT_ONLY"}
+        ),
+        lambda license_: license_["modelAssets"].update(
+            {"identifier": "CC-BY-NC-SA-4.0"}
+        ),
+    ),
+    ids=("changed-status", "changed-identifier"),
+)
+def test_qualified_runtime_rejects_resigned_final_license_disagreement(
+    tmp_path: Path, mutate_license
+) -> None:
+    """Removing the subject/final license binding would permit a re-signed release change."""
+    installed, _ = _extract_promoted_bundle(tmp_path)
+
+    _resign_mutated_promoted_bundle(
+        installed,
+        mutate_manifest=lambda manifest: mutate_license(manifest["license"]),
+    )
+
+    with pytest.raises(ValueError, match="bundle qualification verification failed"):
+        load_qualified_bundle(installed)
+
+
 def test_fully_resigned_subject_and_release_cannot_widen_walk_safety_envelope(
     tmp_path: Path,
 ) -> None:
@@ -670,6 +774,15 @@ def test_production_builder_walk_only_release_promotes_with_complete_catalog(
             source_repository="microduck-rl",
             source_commit="a" * 40,
             created_at=NOW,
+            software_license_id="Apache-2.0",
+            software_license_files=(
+                fixture_root / fixture.license.software.artifactPaths[0],
+            ),
+            model_license_id="Apache-2.0",
+            model_license_status="DISTRIBUTION_CLEARED",
+            model_license_files=(
+                fixture_root / fixture.license.modelAssets.artifactPaths[0],
+            ),
             checkpoint="model_100.pt",
             experiment_ref="entity/project/run-id",
         )

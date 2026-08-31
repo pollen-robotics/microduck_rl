@@ -489,6 +489,7 @@ def _write_verified_bundle(
     exact_foot_topology: bool = True,
     extra_passive_wheel_joint: bool = False,
     weld_trunk: bool | None = None,
+    model_license_status: str = "DISTRIBUTION_CLEARED",
 ) -> PolicyBundle:
     model_path = root / "models" / "robot.xml"
     policy_path = root / "policies" / "walk.onnx"
@@ -636,7 +637,15 @@ def _write_verified_bundle(
             ),
         },
         license={
-            "spdx": "Apache-2.0",
+            "software": {
+                "identifier": "Apache-2.0",
+                "artifactPaths": ["licenses/Apache-2.0.txt"],
+            },
+            "modelAssets": {
+                "identifier": "Apache-2.0",
+                "distributionStatus": model_license_status,
+                "artifactPaths": ["licenses/Apache-2.0.txt"],
+            },
             "artifacts": [
                 {
                     "path": "licenses/Apache-2.0.txt",
@@ -696,7 +705,7 @@ def _rewrite_as_stand_bundle(root: Path, source: PolicyBundle) -> PolicyBundle:
         source.model.path: source.model.digest,
         policy.path: policy.digest,
         **{
-            item["path"]: item["digest"] for item in source.license.get("artifacts", [])
+            item.path: item.digest for item in source.license.artifacts
         },
     }
     rewritten = publish_policy_bundle(unsigned, digests)
@@ -1386,7 +1395,7 @@ def test_runtime_readiness_rejects_available_action_with_wrong_policy_task_ident
         source.model.path: source.model.digest,
         source.policies[0].path: source.policies[0].digest,
         **{
-            item["path"]: item["digest"] for item in source.license.get("artifacts", [])
+            item.path: item.digest for item in source.license.artifacts
         },
     }
     rewritten = publish_policy_bundle(unsigned, artifact_digests)
@@ -1483,7 +1492,7 @@ def test_runtime_readiness_rejects_action_preconditions_outside_qualification(
         source.model.path: source.model.digest,
         source.policies[0].path: source.policies[0].digest,
         **{
-            item["path"]: item["digest"] for item in source.license.get("artifacts", [])
+            item.path: item.digest for item in source.license.artifacts
         },
     }
     rewritten = publish_policy_bundle(unsigned, artifacts)

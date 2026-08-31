@@ -91,15 +91,13 @@ def _declared_artifacts(bundle: PolicyBundle) -> list[ModelArtifact]:
             for item in bundle.policies
         ),
     ]
-    for container, key in (
-        (bundle.qualification, "artifacts"),
-        (bundle.qualification, "modelClosure"),
-        (bundle.license, "artifacts"),
-    ):
+    for key in ("artifacts", "modelClosure"):
+        container = bundle.qualification
         raw = container.get(key, [])
         if not isinstance(raw, list):
             raise TypeError("bundle artifact declarations must be lists")
         artifacts.extend(ModelArtifact.model_validate(item) for item in raw)
+    artifacts.extend(bundle.license.artifacts)
     return artifacts
 
 
