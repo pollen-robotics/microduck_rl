@@ -28,6 +28,8 @@ def test_short_burst_save_interval_is_configurable(monkeypatch) -> None:
             "1",
             "--seed",
             "7",
+            "--learning-rate",
+            "5e-6",
             "--run-name",
             "short_burst",
         ],
@@ -39,6 +41,7 @@ def test_short_burst_save_interval_is_configurable(monkeypatch) -> None:
     assert args.iterations == 10
     assert args.save_interval == 1
     assert args.seed == 7
+    assert args.learning_rate == 5e-6
     assert args.run_name == "short_burst"
 
 
@@ -55,6 +58,18 @@ def test_seed_defaults_to_mjlab_default_and_accepts_zero(monkeypatch) -> None:
 
 def test_negative_seed_is_rejected(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", [str(SCRIPT_PATH), "--seed", "-1"])
+
+    with pytest.raises(SystemExit):
+        MODULE._parse_args()
+
+
+@pytest.mark.parametrize("value", ["0", "-1e-6"])
+def test_nonpositive_learning_rate_is_rejected(monkeypatch, value: str) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(SCRIPT_PATH), "--learning-rate", value],
+    )
 
     with pytest.raises(SystemExit):
         MODULE._parse_args()
@@ -87,6 +102,8 @@ def test_training_command_forwards_seed_exactly_once(monkeypatch, tmp_path: Path
             str(source),
             "--seed",
             "31415",
+            "--learning-rate",
+            "5e-6",
         ],
     )
 
@@ -97,3 +114,9 @@ def test_training_command_forwards_seed_exactly_once(monkeypatch, tmp_path: Path
     assert command.count("--agent.seed") == 1
     seed_index = command.index("--agent.seed")
     assert command[seed_index : seed_index + 2] == ["--agent.seed", "31415"]
+    assert command.count("--agent.algorithm.learning-rate") == 1
+    rate_index = command.index("--agent.algorithm.learning-rate")
+    assert command[rate_index : rate_index + 2] == [
+        "--agent.algorithm.learning-rate",
+        "5e-06",
+    ]

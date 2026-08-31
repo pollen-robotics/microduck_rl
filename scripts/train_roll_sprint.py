@@ -41,6 +41,13 @@ def _nonnegative_int(value: str) -> int:
     return parsed
 
 
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0.0:
+        raise argparse.ArgumentTypeError("must be a positive number")
+    return parsed
+
+
 def stage_checkpoint(source: Path, destination: Path) -> None:
     """Copy a compatible PPO snapshot while resetting run counters only."""
     import torch
@@ -72,6 +79,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--num-envs", type=int, default=1024)
     parser.add_argument("--iterations", type=int, default=4000)
     parser.add_argument("--seed", type=_nonnegative_int, default=DEFAULT_SEED)
+    parser.add_argument(
+        "--learning-rate",
+        type=_positive_float,
+        default=None,
+        help="Optional PPO learning-rate override for conservative champion search.",
+    )
     parser.add_argument(
         "--save-interval",
         type=int,
@@ -123,6 +136,10 @@ def main() -> int:
             "False",
         ]
     )
+    if args.learning_rate is not None:
+        command.extend(
+            ["--agent.algorithm.learning-rate", str(args.learning_rate)]
+        )
     environment = os.environ.copy()
     environment.setdefault("WANDB_MODE", "offline")
     print(f"[roll-sprint] source checkpoint: {source}")
