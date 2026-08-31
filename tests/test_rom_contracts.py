@@ -604,6 +604,11 @@ def test_shared_portability_fixtures_match_python_semantic_validation():
         "date-time",
         "depth",
         "digest",
+        "license-closure",
+        "license-contract",
+        "license-identifier",
+        "license-path",
+        "license-uniqueness",
         "raw-control",
         "scenario",
         "sequence",
@@ -623,6 +628,40 @@ def test_shared_portability_fixtures_match_python_semantic_validation():
         else:
             accepted = True
         assert accepted is case["accepted"], case["name"]
+
+
+def test_license_portability_cases_match_generated_and_tracked_standard_schema():
+    """Dropping portable license keywords would make non-Python validators admit bad bundles."""
+    repository = Path(__file__).parents[1]
+    fixture = json.loads(
+        (repository / "schemas/microduck-v1-portability-fixtures.json").read_text()
+    )
+    tracked = json.loads(
+        (repository / "schemas/microduck-policy-bundle-v1.schema.json").read_text()
+    )
+    schemas = (PolicyBundle.model_json_schema(by_alias=True), tracked)
+
+    for case in fixture["cases"]:
+        if case["model"] != "PolicyBundle" or "schemaAccepted" not in case:
+            continue
+        payload = deepcopy(fixture["basePayloads"][case["base"]])
+        for pointer in case.get("remove", []):
+            _remove_json_pointer(payload, pointer)
+        for pointer, value in case.get("set", {}).items():
+            _set_json_pointer(payload, pointer, value)
+        for schema in schemas:
+            accepted = not list(Draft202012Validator(schema).iter_errors(payload))
+            assert accepted is case["schemaAccepted"], case["name"]
+
+
+def test_generated_license_schema_declares_semantic_reference_invariants():
+    """Cross-reference closure must stay explicit for consumers beyond JSON Schema."""
+    schema = PolicyBundle.model_json_schema(by_alias=True)
+
+    assert schema["$defs"]["BundleLicense"]["x-unergy-invariants"] == {
+        "artifactPathUniqueness": True,
+        "referencedArtifactsExactlyMatchDeclaredArtifacts": True,
+    }
 
 
 def test_openapi_int64_bounds_are_exact_and_standard_schema_rejects_overflow():

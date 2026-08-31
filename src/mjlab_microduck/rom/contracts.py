@@ -114,17 +114,31 @@ BoundedJsonKey = Annotated[
     str, StringConstraints(strict=True, min_length=1, max_length=128)
 ]
 BoundedJsonString = Annotated[str, StringConstraints(strict=True, max_length=1_024)]
-LicenseIdentifier = Annotated[
+_LICENSE_ARTIFACT_PATH_PATTERN = (
+    r"^licenses/(?:[^./\\][^/\\]*|\.+[^./\\][^/\\]*)"
+    r"(?:/(?:[^./\\][^/\\]*|\.+[^./\\][^/\\]*))*$"
+)
+LicenseArtifactPath = Annotated[
     str,
     StringConstraints(
         strict=True,
         min_length=1,
-        max_length=128,
-        pattern=r"^(?:[A-Za-z0-9][A-Za-z0-9.-]*|LicenseRef-[A-Za-z0-9.-]+)$",
+        max_length=_MAX_PATH_LENGTH,
+        pattern=_LICENSE_ARTIFACT_PATH_PATTERN,
     ),
 ]
-
 SPDX_LICENSE_IDENTIFIERS = frozenset({"Apache-2.0", "CC-BY-NC-SA-4.0"})
+SoftwareLicenseIdentifier = Literal["Apache-2.0", "CC-BY-NC-SA-4.0"]
+LicenseRefIdentifier = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        min_length=12,
+        max_length=128,
+        pattern=r"^LicenseRef-[A-Za-z0-9.-]+$",
+    ),
+]
+ModelAssetLicenseIdentifier = SoftwareLicenseIdentifier | LicenseRefIdentifier
 
 
 def _strict_finite_float(value: Any) -> float:
@@ -459,9 +473,17 @@ class ModelArtifact(ContractModel):
     digest: str = Field(pattern=_DIGEST_PATTERN)
 
 
+class LicenseArtifact(ModelArtifact):
+    path: LicenseArtifactPath
+
+
 class LicenseDeclaration(ContractModel):
-    identifier: LicenseIdentifier
-    artifactPaths: list[BoundedPath] = Field(min_length=1, max_length=32)
+    identifier: SoftwareLicenseIdentifier
+    artifactPaths: list[LicenseArtifactPath] = Field(
+        min_length=1,
+        max_length=32,
+        json_schema_extra={"uniqueItems": True},
+    )
 
     @field_validator("artifactPaths")
     @classmethod
@@ -480,25 +502,30 @@ class LicenseDeclaration(ContractModel):
 
 
 class ModelAssetLicenseDeclaration(LicenseDeclaration):
+    identifier: ModelAssetLicenseIdentifier
     distributionStatus: Literal["DEVELOPMENT_ONLY", "DISTRIBUTION_CLEARED"]
 
 
 class BundleLicense(ContractModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "x-unergy-invariants": {
+                "artifactPathUniqueness": True,
+                "referencedArtifactsExactlyMatchDeclaredArtifacts": True,
+            }
+        }
+    )
+
     software: LicenseDeclaration
     modelAssets: ModelAssetLicenseDeclaration
-    artifacts: list[ModelArtifact] = Field(min_length=1, max_length=64)
+    artifacts: list[LicenseArtifact] = Field(
+        min_length=1,
+        max_length=64,
+        json_schema_extra={"uniqueItems": True},
+    )
 
     @model_validator(mode="after")
     def validate_license_contract(self) -> BundleLicense:
-        if self.software.identifier not in SPDX_LICENSE_IDENTIFIERS:
-            raise ValueError("software license identifier must be an allowed SPDX identifier")
-        if (
-            self.modelAssets.identifier not in SPDX_LICENSE_IDENTIFIERS
-            and not re.fullmatch(r"LicenseRef-[A-Za-z0-9.-]+", self.modelAssets.identifier)
-        ):
-            raise ValueError(
-                "model asset license identifier must be an allowed SPDX identifier or LicenseRef"
-            )
         artifact_paths = [artifact.path for artifact in self.artifacts]
         if len(artifact_paths) != len(set(artifact_paths)):
             raise ValueError("license artifact paths must be unique")

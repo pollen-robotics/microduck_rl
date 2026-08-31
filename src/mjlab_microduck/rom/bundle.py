@@ -24,6 +24,7 @@ from .contracts import (
     ActionContract,
     ActionDefinition,
     BundleLicense,
+    LicenseArtifact,
     LicenseDeclaration,
     ModelArtifact,
     ModelAssetLicenseDeclaration,
@@ -185,7 +186,7 @@ def _supporting_artifacts(
 def _license_artifacts(
     software_files: tuple[Path, ...],
     model_files: tuple[Path, ...],
-) -> tuple[list[tuple[str, Path]], list[ModelArtifact], list[str], list[str]]:
+) -> tuple[list[tuple[str, Path]], list[LicenseArtifact], list[str], list[str]]:
     """Return unique staged files, artifacts, software refs, and model refs."""
 
     def resolved_archive_paths(files: tuple[Path, ...]) -> list[tuple[str, Path]]:
@@ -220,7 +221,7 @@ def _license_artifacts(
         for archive_path, (_, source) in sorted(staged_by_archive_path.items())
     ]
     artifacts = [
-        ModelArtifact(path=archive_path, digest=digest)
+        LicenseArtifact(path=archive_path, digest=digest)
         for archive_path, (digest, _) in sorted(staged_by_archive_path.items())
     ]
     return staged, artifacts, references(software_sources), references(model_sources)

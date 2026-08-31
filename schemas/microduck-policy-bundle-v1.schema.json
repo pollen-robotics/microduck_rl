@@ -402,12 +402,13 @@
         },
         "artifacts": {
           "items": {
-            "$ref": "#/$defs/ModelArtifact"
+            "$ref": "#/$defs/LicenseArtifact"
           },
           "maxItems": 64,
           "minItems": 1,
           "title": "Artifacts",
-          "type": "array"
+          "type": "array",
+          "uniqueItems": true
         }
       },
       "required": [
@@ -416,7 +417,11 @@
         "artifacts"
       ],
       "title": "BundleLicense",
-      "type": "object"
+      "type": "object",
+      "x-unergy-invariants": {
+        "artifactPathUniqueness": true,
+        "referencedArtifactsExactlyMatchDeclaredArtifacts": true
+      }
     },
     "CompletionContract": {
       "additionalProperties": false,
@@ -580,13 +585,37 @@
         "commandCadenceMs <= minLeaseMs"
       ]
     },
+    "LicenseArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^licenses/(?:[^./\\\\][^/\\\\]*|\\.+[^./\\\\][^/\\\\]*)(?:/(?:[^./\\\\][^/\\\\]*|\\.+[^./\\\\][^/\\\\]*))*$",
+          "title": "Path",
+          "type": "string"
+        },
+        "digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Digest",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "digest"
+      ],
+      "title": "LicenseArtifact",
+      "type": "object"
+    },
     "LicenseDeclaration": {
       "additionalProperties": false,
       "properties": {
         "identifier": {
-          "maxLength": 128,
-          "minLength": 1,
-          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9.-]*|LicenseRef-[A-Za-z0-9.-]+)$",
+          "enum": [
+            "Apache-2.0",
+            "CC-BY-NC-SA-4.0"
+          ],
           "title": "Identifier",
           "type": "string"
         },
@@ -594,12 +623,14 @@
           "items": {
             "maxLength": 512,
             "minLength": 1,
+            "pattern": "^licenses/(?:[^./\\\\][^/\\\\]*|\\.+[^./\\\\][^/\\\\]*)(?:/(?:[^./\\\\][^/\\\\]*|\\.+[^./\\\\][^/\\\\]*))*$",
             "type": "string"
           },
           "maxItems": 32,
           "minItems": 1,
           "title": "Artifactpaths",
-          "type": "array"
+          "type": "array",
+          "uniqueItems": true
         }
       },
       "required": [
@@ -635,22 +666,35 @@
       "additionalProperties": false,
       "properties": {
         "identifier": {
-          "maxLength": 128,
-          "minLength": 1,
-          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9.-]*|LicenseRef-[A-Za-z0-9.-]+)$",
-          "title": "Identifier",
-          "type": "string"
+          "anyOf": [
+            {
+              "enum": [
+                "Apache-2.0",
+                "CC-BY-NC-SA-4.0"
+              ],
+              "type": "string"
+            },
+            {
+              "maxLength": 128,
+              "minLength": 12,
+              "pattern": "^LicenseRef-[A-Za-z0-9.-]+$",
+              "type": "string"
+            }
+          ],
+          "title": "Identifier"
         },
         "artifactPaths": {
           "items": {
             "maxLength": 512,
             "minLength": 1,
+            "pattern": "^licenses/(?:[^./\\\\][^/\\\\]*|\\.+[^./\\\\][^/\\\\]*)(?:/(?:[^./\\\\][^/\\\\]*|\\.+[^./\\\\][^/\\\\]*))*$",
             "type": "string"
           },
           "maxItems": 32,
           "minItems": 1,
           "title": "Artifactpaths",
-          "type": "array"
+          "type": "array",
+          "uniqueItems": true
         },
         "distributionStatus": {
           "enum": [

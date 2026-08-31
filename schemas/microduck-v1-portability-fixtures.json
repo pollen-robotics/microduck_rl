@@ -341,6 +341,150 @@
       "accepted": true
     },
     {
+      "name": "bundle-license-valid-allowed-spdx-and-license-ref",
+      "model": "PolicyBundle",
+      "base": "policyBundle",
+      "covers": "license-contract",
+      "accepted": true,
+      "schemaAccepted": true
+    },
+    {
+      "name": "bundle-license-rejects-unallowlisted-software-identifier",
+      "model": "PolicyBundle",
+      "base": "policyBundle",
+      "covers": "license-identifier",
+      "set": {
+        "/license/software/identifier": "MIT"
+      },
+      "accepted": false,
+      "schemaAccepted": false
+    },
+    {
+      "name": "bundle-license-rejects-unallowlisted-model-identifier",
+      "model": "PolicyBundle",
+      "base": "policyBundle",
+      "covers": "license-identifier",
+      "set": {
+        "/license/modelAssets/identifier": "MIT"
+      },
+      "accepted": false,
+      "schemaAccepted": false
+    },
+    {
+      "name": "bundle-license-rejects-software-license-ref",
+      "model": "PolicyBundle",
+      "base": "policyBundle",
+      "covers": "license-identifier",
+      "set": {
+        "/license/software/identifier": "LicenseRef-Local"
+      },
+      "accepted": false,
+      "schemaAccepted": false
+    },
+    {
+      "name": "bundle-license-rejects-duplicate-references",
+      "model": "PolicyBundle",
+      "base": "policyBundle",
+      "covers": "license-uniqueness",
+      "set": {
+        "/license/software/artifactPaths": [
+          "licenses/LICENSE",
+          "licenses/LICENSE"
+        ]
+      },
+      "accepted": false,
+      "schemaAccepted": false
+    },
+    {
+      "name": "bundle-license-rejects-traversal-evidence-path",
+      "model": "PolicyBundle",
+      "base": "policyBundle",
+      "covers": "license-path",
+      "set": {
+        "/license/software/artifactPaths": [
+          "licenses/../models/LICENSE"
+        ],
+        "/license/artifacts/0/path": "licenses/../models/LICENSE"
+      },
+      "accepted": false,
+      "schemaAccepted": false
+    },
+    {
+      "name": "bundle-license-rejects-outside-evidence-path",
+      "model": "PolicyBundle",
+      "base": "policyBundle",
+      "covers": "license-path",
+      "set": {
+        "/license/software/artifactPaths": [
+          "models/LICENSE"
+        ],
+        "/license/artifacts/0/path": "models/LICENSE"
+      },
+      "accepted": false,
+      "schemaAccepted": false
+    },
+    {
+      "name": "bundle-license-rejects-dangling-evidence-reference",
+      "model": "PolicyBundle",
+      "base": "policyBundle",
+      "covers": "license-closure",
+      "set": {
+        "/license/software/artifactPaths": [
+          "licenses/MISSING"
+        ]
+      },
+      "accepted": false,
+      "schemaAccepted": true
+    },
+    {
+      "name": "bundle-license-rejects-unreferenced-evidence-artifact",
+      "model": "PolicyBundle",
+      "base": "policyBundle",
+      "covers": "license-closure",
+      "set": {
+        "/license/artifacts": [
+          {
+            "path": "licenses/LICENSE",
+            "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          {
+            "path": "licenses/MODEL-LICENSE",
+            "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+          },
+          {
+            "path": "licenses/UNREFERENCED",
+            "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          }
+        ]
+      },
+      "accepted": false,
+      "schemaAccepted": true
+    },
+    {
+      "name": "bundle-license-rejects-duplicate-evidence-path",
+      "model": "PolicyBundle",
+      "base": "policyBundle",
+      "covers": "license-uniqueness",
+      "set": {
+        "/license/artifacts": [
+          {
+            "path": "licenses/LICENSE",
+            "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          {
+            "path": "licenses/MODEL-LICENSE",
+            "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+          },
+          {
+            "path": "licenses/LICENSE",
+            "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          }
+        ]
+      },
+      "accepted": false,
+      "schemaAccepted": true
+    },
+    {
       "name": "published-bundle-rejects-null-digest",
       "model": "PolicyBundle",
       "base": "policyBundle",
