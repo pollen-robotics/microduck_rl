@@ -299,12 +299,14 @@ def _adapt_walk_battery_and_recompute(
                 metrics[field] = value
         terminal = TerminalPayload(
             outcome="SUCCEEDED",
-            evidence=TaskEvidence.model_construct(
-                bundleDigest=bundle.bundleDigest,
-                policyDigest=metrics["onnxDigest"],
-                modelDigest=bundle.model.digest,
-                metrics=metrics,
-                stopReason="MAX_STEPS_REACHED",
+            evidence=TaskEvidence.model_validate(
+                {
+                    "bundleDigest": bundle.bundleDigest,
+                    "policyDigest": metrics["onnxDigest"],
+                    "modelDigest": bundle.model.digest,
+                    "metrics": metrics,
+                    "stopReason": "MAX_STEPS_REACHED",
+                }
             ),
         )
         rollouts.append(
@@ -386,12 +388,14 @@ def _adapt_stand_battery_and_recompute(
             metrics[field] = value
         terminal = TerminalPayload(
             outcome="SUCCEEDED",
-            evidence=TaskEvidence.model_construct(
-                bundleDigest=bundle.bundleDigest,
-                policyDigest=policy.digest,
-                modelDigest=bundle.model.digest,
-                metrics=metrics,
-                stopReason="STAND_POSE_SETTLED",
+            evidence=TaskEvidence.model_validate(
+                {
+                    "bundleDigest": bundle.bundleDigest,
+                    "policyDigest": policy.digest,
+                    "modelDigest": bundle.model.digest,
+                    "metrics": metrics,
+                    "stopReason": "STAND_POSE_SETTLED",
+                }
             ),
         )
         rollouts.append(
@@ -457,7 +461,7 @@ def _resign_mutated_promoted_bundle(
         *manifest["policies"],
         *manifest["qualification"].get("artifacts", []),
         *manifest["qualification"].get("modelClosure", []),
-        *manifest["license"].get("artifacts", []),
+        *manifest["license"]["artifacts"],
     ]:
         artifact_digests[artifact["path"]] = artifact["digest"]
     manifest["bundleDigest"] = sha256_prefixed(
@@ -481,7 +485,7 @@ def _resign_bundle_document(document: dict[str, object]) -> str:
         *document["policies"],
         *document["qualification"].get("artifacts", []),
         *document["qualification"].get("modelClosure", []),
-        *document["license"].get("artifacts", []),
+        *document["license"]["artifacts"],
     ]:
         artifacts[artifact["path"]] = artifact["digest"]
     digest = sha256_prefixed(
@@ -1074,7 +1078,12 @@ def test_qualification_rejects_wrong_scalar_type_or_nonfinite_raw_evidence(
         action for action in bundle.actions if action.actionCode == "WALK_VELOCITY"
     )
 
-    with pytest.raises(ValueError, match="raw evidence"):
+    expected_error = (
+        "finite"
+        if isinstance(wrong_value, float) and not math.isfinite(wrong_value)
+        else "raw evidence"
+    )
+    with pytest.raises(ValueError, match=expected_error):
         _adapt_walk_battery_and_recompute(
             bundle,
             declaration,

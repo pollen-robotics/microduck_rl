@@ -37,6 +37,7 @@ from mjlab_microduck.rom.service import (
 )
 from mjlab_microduck.rom.store import SqliteTaskStore
 from tests.fakes.fake_microduck_runtime import FakeMicroduckRuntime, robot_status
+from tests.rom_license_fixtures import cleared_apache_license
 
 _REPLACED_THREAD_LIFECYCLE_TESTS = {
     "test_blocked_sample_fails_closed_without_holding_service_ownership",
@@ -1011,11 +1012,6 @@ def test_reused_command_sequence_with_different_content_is_a_command_conflict(
         command(sequence=1, vx=0.401),
         command(sequence=1, lease_ms=99),
         command(sequence=1, lease_ms=5_001),
-        TaskCommandRequest.model_construct(
-            commandSequence=1,
-            parameters={"vxMps": nan, "vyMps": 0.0, "yawRateRadps": 0.0},
-            leaseMs=500,
-        ),
         TaskCommandRequest(
             commandSequence=1, parameters={"vxMps": 0.0, "vyMps": 0.0}, leaseMs=100
         ),
@@ -1031,6 +1027,22 @@ def test_command_rejects_out_of_manifest_parameter_or_lease_bounds(
         service.command(walk_request.taskId, invalid)
 
     assert error.value.code == "PARAMETER_INVALID"
+
+
+def test_command_contract_rejects_nonfinite_parameter_before_service() -> None:
+    """Accepting NaN at the wire boundary would make command validation nonportable."""
+    with pytest.raises(ValueError, match="finite"):
+        TaskCommandRequest.model_validate(
+            {
+                "commandSequence": 1,
+                "parameters": {
+                    "vxMps": nan,
+                    "vyMps": 0.0,
+                    "yawRateRadps": 0.0,
+                },
+                "leaseMs": 500,
+            }
+        )
 
 
 def test_higher_sequence_replaces_the_lease_deadline(service, walk_request, clock):
@@ -1251,5 +1263,5 @@ def bundle() -> PolicyBundle:
             "modelTerrain": "flat",
             "scenarioProfile": "SEEDED_SERVO_RESET_V1",
         },
-        license={},
+        license=cleared_apache_license(),
     )

@@ -36,6 +36,7 @@ from mjlab_microduck.rom.service import (
 )
 from mjlab_microduck.rom.store import SqliteTaskStore
 from tests.fakes.fake_microduck_runtime import FakeMicroduckRuntime, robot_status
+from tests.rom_license_fixtures import cleared_apache_license
 
 
 def test_discrete_task_records_terminal_evidence(service, stand_request, runtime):
@@ -405,7 +406,7 @@ def bundle() -> PolicyBundle:
             for code in CODE_OWNED_ACTION_CODES
         ],
         qualification={},
-        license={},
+        license=cleared_apache_license(),
     )
 
 

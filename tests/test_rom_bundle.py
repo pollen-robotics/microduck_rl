@@ -341,7 +341,7 @@ def test_candidate_loader_rejects_a_resigned_widened_action_envelope(
             *manifest["policies"],
             *manifest["qualification"].get("artifacts", []),
             *manifest["qualification"].get("modelClosure", []),
-            *manifest["license"].get("artifacts", []),
+            *manifest["license"]["artifacts"],
         ]
     }
     manifest["bundleDigest"] = sha256_prefixed(

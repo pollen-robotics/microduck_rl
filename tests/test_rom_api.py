@@ -42,6 +42,7 @@ from mjlab_microduck.rom.main import (
 from mjlab_microduck.rom.service import SimulatorTaskService
 from mjlab_microduck.rom.store import SqliteTaskStore
 from tests.fakes.fake_microduck_runtime import FakeMicroduckRuntime
+from tests.rom_license_fixtures import cleared_apache_license
 
 
 @pytest.fixture
@@ -156,27 +157,7 @@ def service(tmp_path: Path) -> SimulatorTaskService:
         ],
         actions=actions,
         qualification={},
-        license={
-            "software": {
-                "identifier": "Apache-2.0",
-                "artifactPaths": ["licenses/LICENSE"],
-            },
-            "modelAssets": {
-                "identifier": "LicenseRef-MicroDuck-Model",
-                "distributionStatus": "DISTRIBUTION_CLEARED",
-                "artifactPaths": ["licenses/MODEL-LICENSE"],
-            },
-            "artifacts": [
-                {
-                    "path": "licenses/LICENSE",
-                    "digest": "sha256:" + "1" * 64,
-                },
-                {
-                    "path": "licenses/MODEL-LICENSE",
-                    "digest": "sha256:" + "2" * 64,
-                },
-            ],
-        },
+        license=cleared_apache_license(),
     )
     return SimulatorTaskService(
         bundle,
@@ -618,7 +599,11 @@ def _resolve_openapi_parameter(
 
 def _write_verified_bundle(bundle_dir: Path, source: PolicyBundle) -> PolicyBundle:
     """Create a hand-checked installed bundle fixture without using startup verification code."""
-    files = {"models/robot.xml": b"<mujoco/>", "policies/stand.onnx": b"policy"}
+    files = {
+        "models/robot.xml": b"<mujoco/>",
+        "policies/stand.onnx": b"policy",
+        "licenses/LICENSE": b"Apache License 2.0 test evidence\n",
+    }
     for relative_path, content in files.items():
         target = bundle_dir / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -640,6 +625,9 @@ def _write_verified_bundle(bundle_dir: Path, source: PolicyBundle) -> PolicyBund
                     }
                 )
             ],
+            "license": cleared_apache_license(
+                artifact_digest=digests["licenses/LICENSE"]
+            ),
         }
     )
     bundle = publish_policy_bundle(unsigned, digests)
