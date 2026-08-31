@@ -64,6 +64,11 @@ VIDEO_COLLECTIONS = {
         "description": "Repeated flat-ground rolls from the current sprint policy.",
         "default": True,
     },
+    "backroll-sprint": {
+        "label": "Backroll sprint",
+        "description": "Reverse-roll race progress from the dedicated backroll policy.",
+        "default": False,
+    },
     "stairs": {
         "label": "Stair training",
         "description": "The existing staircase-policy rollout samples.",
@@ -707,6 +712,8 @@ def _media_collection(source: str, relative_path: str) -> str:
     """Map a video path to the dashboard's selectable training run."""
 
     normalized = f"{source}/{relative_path}".lower().replace("_", "-")
+    if "backroll-sprint" in normalized or "backrollsprint" in normalized:
+        return "backroll-sprint"
     if "roll-sprint" in normalized or "rollsprint" in normalized:
         return "roll-sprint"
     if "stair" in normalized:
