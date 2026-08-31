@@ -380,7 +380,7 @@ def _launch_container(
     try:
         _prepare_state(image, state_dir)
         secret_file = _prepare_secret(
-            image, state_dir.parent / f"{state_dir.name}-secret"
+            image, state_dir.parent / f"{state_dir.name}-{suffix}-secret"
         )
         _run("docker", "rm", "--force", name, check=False)
         _run(
