@@ -1,0 +1,633 @@
+<mujoco model="world_labyrinth">
+  <!-- LABYRINTH world: full-collision robot + a 15x15-cell maze
+         (recursive-backtracker spanning tree, seed=42 -> deterministic,
+         reproducible with gen_labyrinth() in README.md). ONE entrance
+         (light-green marker) and TWO exits (light-blue "exit 1", light-
+         yellow "exit 2"), both reachable from the entrance by construction
+         (a spanning-tree maze connects every cell to every other cell by
+         exactly one path) and verified by BFS at generation time.
+
+         Both exits were DELIBERATELY chosen as the maze's own farthest
+         boundary cells from the entrance (not fixed corners) -- exit 1 is
+         the single farthest cell in the whole maze (77 hops), exit 2 is
+         the farthest cell that is ALSO in a different region of the grid
+         from exit 1 (55 hops) -- so neither exit is a shortcut and both
+         demand solving most of the maze, not just one of them. Wall height
+         0.5m = 2x the robot's own ~0.25m standing height.
+
+         Corridor width = cell size 0.45m -- sized so the robot has room
+         to physically RECOVER from a fall (a standup maneuver needs the
+         robot's full prone body length plus lateral limb clearance, not
+         just its standing footprint) without its limbs fouling a wall
+         mid-recovery.
+
+         Walls are colored in THREE tiers by BFS distance-from-entrance
+         (terracotta = near the entrance, stone-teal = mid-maze, deep-plum =
+         deep/far cells) -- distinct from the three light entry/exit floor
+         markers, so the two color schemes never get confused: markers say
+         WHERE (entrance/exit1/exit2), wall tiers say HOW FAR (near/mid/far
+         from entrance).
+
+         The robot's spawn is baked into trunk_base's body pose (not just
+         left in a keyframe) so opening this file directly places the robot
+         at the entrance, facing into the maze, by default -- see
+         README.md "Baking the entrance as the default spawn". -->
+  <compiler angle="radian" meshdir="assets/"/>
+
+  <size nkey="1"/>
+
+  <visual>
+    <global azimuth="160" elevation="-20"/>
+    <headlight ambient="0.3 0.3 0.3" diffuse="0.6 0.6 0.6" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+  </visual>
+
+  <default>
+
+    <equality solref="0.002" solimp="0.99 0.999 0.0005"/>
+    <default class="microduck">
+      <joint armature="0.005" frictionloss="0.1"/>
+
+      <equality solref="0.02" solimp="0.9 0.95 0.001"/>
+      <general biastype="affine" gainprm="50" biasprm="0 -50 1"/>
+      <default class="visual">
+        <geom type="mesh" contype="0" conaffinity="0" group="2"/>
+      </default>
+      <default class="collision">
+        <geom group="3"/>
+      </default>
+    </default>
+    <default class="perfect_actuator">
+      <joint armature="0.001" damping="0.15" frictionloss="0.1"/>
+      <geom contype="0" conaffinity="0"/>
+
+      <equality solref="0.02" solimp="0.9 0.95 0.001"/>
+      <general forcerange="-20 20" biastype="affine" gainprm="10" biasprm="0 -10 -0.1"/>
+    </default>
+    <default class="chosen_actuator_old">
+      <joint armature="0.002" damping="0.048" frictionloss="0.006"/>
+      <geom contype="0" conaffinity="0"/>
+
+      <equality solref="0.02" solimp="0.9 0.95 0.001"/>
+      <general ctrlrange="-10 10" forcerange="-0.91 0.91" biastype="affine" gainprm="0.52" biasprm="0 -0.52"/>
+    </default>
+    <default class="chosen_actuator_new">
+      <joint armature="0.002" damping="0.041" frictionloss="0.032"/>
+      <geom contype="0" conaffinity="0"/>
+
+      <equality solref="0.02" solimp="0.9 0.95 0.001"/>
+      <general ctrlrange="-10 10" forcerange="-0.67 0.67" biastype="affine" gainprm="0.386" biasprm="0 -0.386"/>
+    </default>
+    <default class="chosen_actuator_antoine">
+      <joint armature="0.0017" damping="0.044" frictionloss="0.013"/>
+      <geom contype="0" conaffinity="0"/>
+
+      <equality solref="0.02" solimp="0.9 0.95 0.001"/>
+      <general ctrlrange="-10 10" forcerange="-0.75 0.75" biastype="affine" gainprm="0.43" biasprm="0 -0.43"/>
+    </default>
+    <default class="chosen_actuator">
+      <joint armature="0.0018" damping="0.053" frictionloss="0.0048"/>
+      <geom contype="0" conaffinity="0"/>
+
+      <equality solref="0.02" solimp="0.9 0.95 0.001"/>
+      <general ctrlrange="-10 10" forcerange="-0.96 0.96" biastype="affine" gainprm="0.55" biasprm="0 -0.55"/>
+    </default>
+    <default class="passive_wheel">
+      <joint armature="0.0001"/>
+      <geom contype="0" conaffinity="0"/>
+
+      <equality solref="0.02" solimp="0.9 0.95 0.001"/>
+    </default>
+    <default class="passive_joint">
+      <joint armature="0.0001"/>
+      <geom contype="0" conaffinity="0"/>
+
+      <equality solref="0.02" solimp="0.9 0.95 0.001"/>
+    </default>
+    <default class="self_collision_only">
+      <geom contype="2" conaffinity="2" group="3"/>
+    </default>
+  </default>
+
+  <asset>
+    <texture type="skybox" colorspace="auto" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" colorspace="auto" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="seeed_bearing__configuration__22x16x4_material" rgba="0.713725 0.760784 0.8 1"/>
+    <material name="right_shell_material" rgba="0.8 0.8 0.8 1"/>
+    <material name="banana_pcb_locker_material" rgba="0.647059 0.647059 0.647059 1"/>
+    <material name="trunk_base_material" rgba="0.34902 0.376471 0.4 1"/>
+    <material name="xl330_material" rgba="0.286275 0.286275 0.286275 1"/>
+    <material name="power_support_material" rgba="0.901961 0.901961 0.901961 1"/>
+    <material name="np_f970_material" rgba="0.901961 0.901961 0.901961 1"/>
+    <material name="left_shell_material" rgba="0.8 0.8 0.8 1"/>
+    <material name="yaw2roll_material" rgba="0.647059 0.647059 0.647059 1"/>
+    <material name="bearing_roll_material" rgba="0.262745 0.282353 0.301961 1"/>
+    <material name="hip_l_material" rgba="0.901961 0.901961 0.901961 1"/>
+    <material name="upper_leg_left_material" rgba="0.866667 0.866667 0.866667 1"/>
+    <material name="upper_leg_rigidity_plate_material" rgba="0.537255 0.854902 0.827451 1"/>
+    <material name="leg_material" rgba="0.811765 0.858824 0.898039 1"/>
+    <material name="sole_left_material" rgba="0.537255 0.854902 0.827451 1"/>
+    <material name="foot_left_material" rgba="0.980392 0.713725 0.00392157 1"/>
+    <material name="seeed_bearing__configuration_default_material" rgba="0.713725 0.760784 0.8 1"/>
+    <material name="ankle_left_material" rgba="0.980392 0.713725 0.00392157 1"/>
+    <material name="neck_material" rgba="0.8 0.8 0.8 1"/>
+    <material name="neck_pitch_material" rgba="0.34902 0.376471 0.4 1"/>
+    <material name="yaw_roll_motion_material" rgba="0.768627 0.886275 0.952941 1"/>
+    <material name="lens_material" rgba="0.262745 0.282353 0.301961 1"/>
+    <material name="face_part_material" rgba="0.34902 0.376471 0.4 1"/>
+    <material name="jaw_soft_material" rgba="0.85098 0.756863 0.866667 1"/>
+    <material name="motor_support_material" rgba="0.262745 0.282353 0.301961 1"/>
+    <material name="top_head_shell_material" rgba="0.901961 0.901961 0.901961 1"/>
+    <material name="elec_rpi_robot_hat_pcb_material" rgba="0.313725 0.486275 0.411765 1"/>
+    <material name="soft_mouth_top_material" rgba="0.85098 0.756863 0.866667 1"/>
+    <material name="noenoeil_material" rgba="0.262745 0.282353 0.301961 1"/>
+    <material name="jaw_material" rgba="0.980392 0.713725 0.00392157 1"/>
+    <material name="bottom_head_shell_material" rgba="0.980392 0.713725 0.00392157 1"/>
+    <material name="m12_lens_holder_material" rgba="0.262745 0.282353 0.301961 1"/>
+    <material name="pcb__raspberry_pi_zero_2_w_material" rgba="0.498039 0.498039 0.498039 1"/>
+    <material name="speaker_material" rgba="0.294118 0.290196 0.290196 1"/>
+    <material name="upper_leg_right_material" rgba="0.866667 0.866667 0.866667 1"/>
+    <material name="ankle_right_material" rgba="0.980392 0.713725 0.00392157 1"/>
+    <material name="sole_right_material" rgba="0.537255 0.854902 0.827451 1"/>
+    <material name="foot_right_material" rgba="0.980392 0.713725 0.00392157 1"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="10 10" reflectance="0.2"/>
+    <mesh name="seeed_bearing__configuration__22x16x4" file="seeed_bearing__configuration__22x16x4.stl"/>
+    <mesh name="sole_left" file="sole_left.stl"/>
+    <mesh name="yaw2roll" file="yaw2roll.stl"/>
+    <mesh name="sole_right" file="sole_right.stl"/>
+    <mesh name="leg" file="leg.stl"/>
+    <mesh name="xl330" file="xl330.stl"/>
+    <mesh name="noenoeil" file="noenoeil.stl"/>
+    <mesh name="pcb__raspberry_pi_zero_2_w" file="pcb__raspberry_pi_zero_2_w.stl"/>
+    <mesh name="neck_pitch" file="neck_pitch.stl"/>
+    <mesh name="foot_left" file="foot_left.stl"/>
+    <mesh name="ankle_left" file="ankle_left.stl"/>
+    <mesh name="yaw_roll_motion" file="yaw_roll_motion.stl"/>
+    <mesh name="left_shell" file="left_shell.stl"/>
+    <mesh name="m12_lens_holder" file="m12_lens_holder.stl"/>
+    <mesh name="jaw_soft" file="jaw_soft.stl"/>
+    <mesh name="elec_rpi_robot_hat_pcb" file="elec_rpi_robot_hat_pcb.stl"/>
+    <mesh name="top_head_shell" file="top_head_shell.stl"/>
+    <mesh name="lens" file="lens.stl"/>
+    <mesh name="bottom_head_shell" file="bottom_head_shell.stl"/>
+    <mesh name="motor_support" file="motor_support.stl"/>
+    <mesh name="neck" file="neck.stl"/>
+    <mesh name="np_f970" file="np_f970.stl"/>
+    <mesh name="upper_leg_rigidity_plate" file="upper_leg_rigidity_plate.stl"/>
+    <mesh name="seeed_bearing__configuration_default" file="seeed_bearing__configuration_default.stl"/>
+    <mesh name="soft_mouth_top" file="soft_mouth_top.stl"/>
+    <mesh name="trunk_base" file="trunk_base.stl"/>
+    <mesh name="hip_l" file="hip_l.stl"/>
+    <mesh name="bearing_roll" file="bearing_roll.stl"/>
+    <mesh name="banana_pcb_locker" file="banana_pcb_locker.stl"/>
+    <mesh name="speaker" file="speaker.stl"/>
+    <mesh name="ankle_right" file="ankle_right.stl"/>
+    <mesh name="upper_leg_right" file="upper_leg_right.stl"/>
+    <mesh name="right_shell" file="right_shell.stl"/>
+    <mesh name="face_part" file="face_part.stl"/>
+    <mesh name="foot_right" file="foot_right.stl"/>
+    <mesh name="power_support" file="power_support.stl"/>
+    <mesh name="upper_leg_left" file="upper_leg_left.stl"/>
+    <mesh name="jaw" file="jaw.stl"/>
+  </asset>
+
+  <worldbody>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+    <geom name="wall_h_1" size="0.235 0.01 0.25" pos="0.675 6.75 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_2" size="0.235 0.01 0.25" pos="1.125 6.75 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_3" size="0.235 0.01 0.25" pos="1.575 6.75 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_4" size="0.235 0.01 0.25" pos="2.025 6.75 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_5" size="0.235 0.01 0.25" pos="2.475 6.75 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_6" size="0.235 0.01 0.25" pos="2.925 6.75 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_7" size="0.235 0.01 0.25" pos="3.375 6.75 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_8" size="0.235 0.01 0.25" pos="3.825 6.75 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_9" size="0.235 0.01 0.25" pos="4.275 6.75 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_10" size="0.235 0.01 0.25" pos="4.725 6.75 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_11" size="0.235 0.01 0.25" pos="5.175 6.75 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_12" size="0.235 0.01 0.25" pos="5.625 6.75 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_13" size="0.235 0.01 0.25" pos="6.075 6.75 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_14" size="0.235 0.01 0.25" pos="0.225 6.3 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_15" size="0.235 0.01 0.25" pos="0.675 6.3 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_16" size="0.235 0.01 0.25" pos="1.125 6.3 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_17" size="0.235 0.01 0.25" pos="1.575 6.3 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_18" size="0.235 0.01 0.25" pos="3.375 6.3 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_19" size="0.235 0.01 0.25" pos="3.825 6.3 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_20" size="0.235 0.01 0.25" pos="4.275 6.3 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_21" size="0.235 0.01 0.25" pos="5.175 6.3 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_22" size="0.235 0.01 0.25" pos="5.625 6.3 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_23" size="0.235 0.01 0.25" pos="6.075 6.3 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_24" size="0.235 0.01 0.25" pos="6.525 6.3 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_25" size="0.235 0.01 0.25" pos="0.675 5.85 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_26" size="0.235 0.01 0.25" pos="3.825 5.85 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_27" size="0.235 0.01 0.25" pos="4.725 5.85 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_28" size="0.235 0.01 0.25" pos="5.175 5.85 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_29" size="0.235 0.01 0.25" pos="0.225 5.4 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_30" size="0.235 0.01 0.25" pos="2.925 5.4 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_31" size="0.235 0.01 0.25" pos="3.375 5.4 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_32" size="0.235 0.01 0.25" pos="0.225 4.95 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_33" size="0.235 0.01 0.25" pos="0.675 4.95 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_34" size="0.235 0.01 0.25" pos="1.575 4.95 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_35" size="0.235 0.01 0.25" pos="2.475 4.95 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_36" size="0.235 0.01 0.25" pos="3.825 4.95 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_37" size="0.235 0.01 0.25" pos="0.675 4.5 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_38" size="0.235 0.01 0.25" pos="1.125 4.5 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_39" size="0.235 0.01 0.25" pos="2.025 4.5 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_40" size="0.235 0.01 0.25" pos="3.375 4.5 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_41" size="0.235 0.01 0.25" pos="3.825 4.5 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_42" size="0.235 0.01 0.25" pos="4.275 4.5 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_43" size="0.235 0.01 0.25" pos="0.675 4.05 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_44" size="0.235 0.01 0.25" pos="1.125 4.05 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_45" size="0.235 0.01 0.25" pos="1.575 4.05 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_46" size="0.235 0.01 0.25" pos="2.475 4.05 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_47" size="0.235 0.01 0.25" pos="2.925 4.05 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_48" size="0.235 0.01 0.25" pos="3.825 4.05 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_49" size="0.235 0.01 0.25" pos="6.075 4.05 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_50" size="0.235 0.01 0.25" pos="0.225 3.6 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_51" size="0.235 0.01 0.25" pos="0.675 3.6 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_52" size="0.235 0.01 0.25" pos="1.125 3.6 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_53" size="0.235 0.01 0.25" pos="2.025 3.6 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_h_54" size="0.235 0.01 0.25" pos="2.925 3.6 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_55" size="0.235 0.01 0.25" pos="3.375 3.6 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_56" size="0.235 0.01 0.25" pos="4.275 3.6 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_57" size="0.235 0.01 0.25" pos="4.725 3.6 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_58" size="0.235 0.01 0.25" pos="5.625 3.6 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_59" size="0.235 0.01 0.25" pos="6.075 3.6 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_60" size="0.235 0.01 0.25" pos="1.125 3.15 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_61" size="0.235 0.01 0.25" pos="1.575 3.15 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_62" size="0.235 0.01 0.25" pos="3.825 3.15 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_63" size="0.235 0.01 0.25" pos="4.275 3.15 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_64" size="0.235 0.01 0.25" pos="4.725 3.15 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_65" size="0.235 0.01 0.25" pos="5.175 3.15 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_66" size="0.235 0.01 0.25" pos="5.625 3.15 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_67" size="0.235 0.01 0.25" pos="0.675 2.7 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_68" size="0.235 0.01 0.25" pos="1.125 2.7 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_69" size="0.235 0.01 0.25" pos="2.925 2.7 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_70" size="0.235 0.01 0.25" pos="3.375 2.7 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_71" size="0.235 0.01 0.25" pos="3.825 2.7 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_72" size="0.235 0.01 0.25" pos="4.275 2.7 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_73" size="0.235 0.01 0.25" pos="6.075 2.7 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_74" size="0.235 0.01 0.25" pos="0.225 2.25 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_75" size="0.235 0.01 0.25" pos="0.675 2.25 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_76" size="0.235 0.01 0.25" pos="2.025 2.25 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_77" size="0.235 0.01 0.25" pos="2.475 2.25 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_78" size="0.235 0.01 0.25" pos="3.825 2.25 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_79" size="0.235 0.01 0.25" pos="4.275 2.25 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_80" size="0.235 0.01 0.25" pos="4.725 2.25 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_81" size="0.235 0.01 0.25" pos="5.175 2.25 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_82" size="0.235 0.01 0.25" pos="5.625 2.25 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_83" size="0.235 0.01 0.25" pos="6.075 2.25 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_84" size="0.235 0.01 0.25" pos="1.575 1.8 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_85" size="0.235 0.01 0.25" pos="2.025 1.8 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_86" size="0.235 0.01 0.25" pos="2.475 1.8 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_87" size="0.235 0.01 0.25" pos="2.925 1.8 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_88" size="0.235 0.01 0.25" pos="5.175 1.8 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_89" size="0.235 0.01 0.25" pos="5.625 1.8 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_90" size="0.235 0.01 0.25" pos="0.675 1.35 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_91" size="0.235 0.01 0.25" pos="2.475 1.35 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_92" size="0.235 0.01 0.25" pos="3.375 1.35 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_h_93" size="0.235 0.01 0.25" pos="4.725 1.35 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_94" size="0.235 0.01 0.25" pos="5.175 1.35 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_95" size="0.235 0.01 0.25" pos="0.675 0.9 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_96" size="0.235 0.01 0.25" pos="1.125 0.9 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_97" size="0.235 0.01 0.25" pos="2.025 0.9 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_98" size="0.235 0.01 0.25" pos="2.925 0.9 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_99" size="0.235 0.01 0.25" pos="4.275 0.9 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_100" size="0.235 0.01 0.25" pos="4.725 0.9 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_101" size="0.235 0.01 0.25" pos="6.075 0.9 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_102" size="0.235 0.01 0.25" pos="6.525 0.9 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_103" size="0.235 0.01 0.25" pos="0.675 0.45 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_104" size="0.235 0.01 0.25" pos="1.125 0.45 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_105" size="0.235 0.01 0.25" pos="1.575 0.45 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_106" size="0.235 0.01 0.25" pos="2.475 0.45 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_107" size="0.235 0.01 0.25" pos="3.375 0.45 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_108" size="0.235 0.01 0.25" pos="5.175 0.45 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_109" size="0.235 0.01 0.25" pos="0.225 0 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_110" size="0.235 0.01 0.25" pos="0.675 0 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_111" size="0.235 0.01 0.25" pos="1.125 0 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_112" size="0.235 0.01 0.25" pos="1.575 0 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_113" size="0.235 0.01 0.25" pos="2.025 0 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_114" size="0.235 0.01 0.25" pos="2.475 0 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_115" size="0.235 0.01 0.25" pos="2.925 0 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_116" size="0.235 0.01 0.25" pos="3.825 0 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_117" size="0.235 0.01 0.25" pos="4.275 0 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_118" size="0.235 0.01 0.25" pos="4.725 0 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_119" size="0.235 0.01 0.25" pos="5.175 0 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_120" size="0.235 0.01 0.25" pos="5.625 0 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_121" size="0.235 0.01 0.25" pos="6.075 0 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_h_122" size="0.235 0.01 0.25" pos="6.525 0 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_123" size="0.01 0.235 0.25" pos="0 6.525 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_124" size="0.01 0.235 0.25" pos="2.25 6.525 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_125" size="0.01 0.235 0.25" pos="2.7 6.525 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_126" size="0.01 0.235 0.25" pos="6.75 6.525 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_127" size="0.01 0.235 0.25" pos="0 6.075 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_128" size="0.01 0.235 0.25" pos="1.8 6.075 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_129" size="0.01 0.235 0.25" pos="2.25 6.075 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_130" size="0.01 0.235 0.25" pos="2.7 6.075 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_131" size="0.01 0.235 0.25" pos="3.15 6.075 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_132" size="0.01 0.235 0.25" pos="4.5 6.075 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_133" size="0.01 0.235 0.25" pos="5.85 6.075 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_134" size="0.01 0.235 0.25" pos="6.75 6.075 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_135" size="0.01 0.235 0.25" pos="0 5.625 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_136" size="0.01 0.235 0.25" pos="0.9 5.625 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_137" size="0.01 0.235 0.25" pos="1.35 5.625 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_138" size="0.01 0.235 0.25" pos="1.8 5.625 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_139" size="0.01 0.235 0.25" pos="2.25 5.625 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_140" size="0.01 0.235 0.25" pos="3.15 5.625 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_141" size="0.01 0.235 0.25" pos="4.05 5.625 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_142" size="0.01 0.235 0.25" pos="4.5 5.625 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_143" size="0.01 0.235 0.25" pos="5.4 5.625 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_144" size="0.01 0.235 0.25" pos="5.85 5.625 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_145" size="0.01 0.235 0.25" pos="6.3 5.625 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_146" size="0.01 0.235 0.25" pos="6.75 5.625 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_147" size="0.01 0.235 0.25" pos="0 5.175 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_148" size="0.01 0.235 0.25" pos="0.9 5.175 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_149" size="0.01 0.235 0.25" pos="1.35 5.175 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_150" size="0.01 0.235 0.25" pos="1.8 5.175 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_151" size="0.01 0.235 0.25" pos="2.25 5.175 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_152" size="0.01 0.235 0.25" pos="3.15 5.175 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_153" size="0.01 0.235 0.25" pos="4.05 5.175 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_154" size="0.01 0.235 0.25" pos="4.5 5.175 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_155" size="0.01 0.235 0.25" pos="4.95 5.175 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_156" size="0.01 0.235 0.25" pos="5.4 5.175 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_157" size="0.01 0.235 0.25" pos="5.85 5.175 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_158" size="0.01 0.235 0.25" pos="6.3 5.175 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_159" size="0.01 0.235 0.25" pos="6.75 5.175 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_160" size="0.01 0.235 0.25" pos="0 4.725 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_161" size="0.01 0.235 0.25" pos="1.35 4.725 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_162" size="0.01 0.235 0.25" pos="2.25 4.725 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_163" size="0.01 0.235 0.25" pos="2.7 4.725 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_164" size="0.01 0.235 0.25" pos="3.6 4.725 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_165" size="0.01 0.235 0.25" pos="4.5 4.725 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_166" size="0.01 0.235 0.25" pos="4.95 4.725 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_167" size="0.01 0.235 0.25" pos="5.4 4.725 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_168" size="0.01 0.235 0.25" pos="5.85 4.725 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_169" size="0.01 0.235 0.25" pos="6.3 4.725 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_170" size="0.01 0.235 0.25" pos="6.75 4.725 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_171" size="0.01 0.235 0.25" pos="0 4.275 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_172" size="0.01 0.235 0.25" pos="1.8 4.275 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_173" size="0.01 0.235 0.25" pos="3.15 4.275 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_174" size="0.01 0.235 0.25" pos="4.5 4.275 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_175" size="0.01 0.235 0.25" pos="4.95 4.275 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_176" size="0.01 0.235 0.25" pos="5.4 4.275 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_177" size="0.01 0.235 0.25" pos="6.3 4.275 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_178" size="0.01 0.235 0.25" pos="6.75 4.275 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_179" size="0.01 0.235 0.25" pos="0 3.825 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_180" size="0.01 0.235 0.25" pos="1.8 3.825 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_181" size="0.01 0.235 0.25" pos="2.25 3.825 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_182" size="0.01 0.235 0.25" pos="3.6 3.825 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_183" size="0.01 0.235 0.25" pos="4.05 3.825 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_184" size="0.01 0.235 0.25" pos="4.95 3.825 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_185" size="0.01 0.235 0.25" pos="5.4 3.825 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_186" size="0.01 0.235 0.25" pos="6.3 3.825 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_187" size="0.01 0.235 0.25" pos="6.75 3.825 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_188" size="0.01 0.235 0.25" pos="0 3.375 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_189" size="0.01 0.235 0.25" pos="1.35 3.375 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_190" size="0.01 0.235 0.25" pos="2.25 3.375 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_191" size="0.01 0.235 0.25" pos="2.7 3.375 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_192" size="0.01 0.235 0.25" pos="4.95 3.375 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_193" size="0.01 0.235 0.25" pos="6.3 3.375 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_194" size="0.01 0.235 0.25" pos="6.75 3.375 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_195" size="0.01 0.235 0.25" pos="0 2.925 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_196" size="0.01 0.235 0.25" pos="0.45 2.925 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_197" size="0.01 0.235 0.25" pos="1.8 2.925 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_198" size="0.01 0.235 0.25" pos="2.25 2.925 0.25" type="box" rgba="0.5 0.4 0.58 1"/>
+    <geom name="wall_v_199" size="0.01 0.235 0.25" pos="2.7 2.925 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_200" size="0.01 0.235 0.25" pos="3.15 2.925 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_201" size="0.01 0.235 0.25" pos="5.4 2.925 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_202" size="0.01 0.235 0.25" pos="5.85 2.925 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_203" size="0.01 0.235 0.25" pos="6.75 2.925 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_204" size="0.01 0.235 0.25" pos="0 2.475 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_205" size="0.01 0.235 0.25" pos="0.9 2.475 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_206" size="0.01 0.235 0.25" pos="1.8 2.475 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_207" size="0.01 0.235 0.25" pos="2.7 2.475 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_208" size="0.01 0.235 0.25" pos="4.95 2.475 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_209" size="0.01 0.235 0.25" pos="6.3 2.475 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_210" size="0.01 0.235 0.25" pos="6.75 2.475 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_211" size="0.01 0.235 0.25" pos="0 2.025 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_212" size="0.01 0.235 0.25" pos="0.9 2.025 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_213" size="0.01 0.235 0.25" pos="1.35 2.025 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_214" size="0.01 0.235 0.25" pos="3.15 2.025 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_215" size="0.01 0.235 0.25" pos="3.6 2.025 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_216" size="0.01 0.235 0.25" pos="4.5 2.025 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_217" size="0.01 0.235 0.25" pos="6.3 2.025 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_218" size="0.01 0.235 0.25" pos="6.75 2.025 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_219" size="0.01 0.235 0.25" pos="0 1.575 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_220" size="0.01 0.235 0.25" pos="0.45 1.575 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_221" size="0.01 0.235 0.25" pos="1.35 1.575 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_222" size="0.01 0.235 0.25" pos="2.25 1.575 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_223" size="0.01 0.235 0.25" pos="3.6 1.575 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_224" size="0.01 0.235 0.25" pos="4.05 1.575 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_225" size="0.01 0.235 0.25" pos="4.5 1.575 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_226" size="0.01 0.235 0.25" pos="5.85 1.575 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_227" size="0.01 0.235 0.25" pos="6.3 1.575 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_228" size="0.01 0.235 0.25" pos="6.75 1.575 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_229" size="0.01 0.235 0.25" pos="0 1.125 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_230" size="0.01 0.235 0.25" pos="0.45 1.125 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_231" size="0.01 0.235 0.25" pos="1.35 1.125 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_232" size="0.01 0.235 0.25" pos="1.8 1.125 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_233" size="0.01 0.235 0.25" pos="2.7 1.125 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_234" size="0.01 0.235 0.25" pos="3.6 1.125 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_235" size="0.01 0.235 0.25" pos="4.05 1.125 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_236" size="0.01 0.235 0.25" pos="5.4 1.125 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_237" size="0.01 0.235 0.25" pos="5.85 1.125 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_238" size="0.01 0.235 0.25" pos="6.75 1.125 0.25" type="box" rgba="0.42 0.55 0.58 1"/>
+    <geom name="wall_v_239" size="0.01 0.235 0.25" pos="0 0.675 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_240" size="0.01 0.235 0.25" pos="1.8 0.675 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_241" size="0.01 0.235 0.25" pos="2.25 0.675 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_242" size="0.01 0.235 0.25" pos="3.15 0.675 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_243" size="0.01 0.235 0.25" pos="3.6 0.675 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_244" size="0.01 0.235 0.25" pos="4.05 0.675 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_245" size="0.01 0.235 0.25" pos="4.5 0.675 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_246" size="0.01 0.235 0.25" pos="5.4 0.675 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_247" size="0.01 0.235 0.25" pos="5.85 0.675 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_248" size="0.01 0.235 0.25" pos="6.75 0.675 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_249" size="0.01 0.235 0.25" pos="0 0.225 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_250" size="0.01 0.235 0.25" pos="2.7 0.225 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_251" size="0.01 0.235 0.25" pos="4.5 0.225 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_252" size="0.01 0.235 0.25" pos="6.3 0.225 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="wall_v_253" size="0.01 0.235 0.25" pos="6.75 0.225 0.25" type="box" rgba="0.72 0.42 0.32 1"/>
+    <geom name="entrance_marker" size="0.195 0.195 0.002" pos="3.375 0.225 0.003" type="box" contype="0" conaffinity="0" rgba="0.75 1 0.75 1"/>
+    <geom name="exit1_marker" size="0.195 0.195 0.002" pos="0.225 6.525 0.003" type="box" contype="0" conaffinity="0" rgba="0.75 0.9 1 1"/>
+    <geom name="exit2_marker" size="0.195 0.195 0.002" pos="6.525 6.525 0.003" type="box" contype="0" conaffinity="0" rgba="1 1 0.7 1"/>
+    <light pos="3.38 3.38 3.5" dir="0 0 -1" type="directional"/>
+    <body name="trunk_base" childclass="microduck" pos="3.375 0.225 0.12" quat="0.707107 0 0 0.707107">
+      <inertial pos="-0.0226332 -2.70828e-05 0.00280064" quat="0.664866 0.238381 0.235012 0.667756" mass="0.199224" diaginertia="0.000145932 0.000140799 9.85265e-05"/>
+      <joint name="trunk_base_freejoint" type="free" armature="0" frictionloss="0"/>
+      <geom class="visual" pos="0.006 0.0175 -0.005" quat="1 0 0 0" material="seeed_bearing__configuration__22x16x4_material" mesh="seeed_bearing__configuration__22x16x4"/>
+      <geom class="visual" pos="0.004 -0.0005 -0.0175" quat="0.707107 0 0 0.707107" material="right_shell_material" mesh="right_shell"/>
+      <geom class="visual" pos="0.0042 0 -0.0175215" quat="0.707107 0 0 0.707107" material="banana_pcb_locker_material" mesh="banana_pcb_locker"/>
+      <geom class="visual" pos="0.004 0 -0.0175" quat="0.707107 0 0 0.707107" material="trunk_base_material" mesh="trunk_base"/>
+      <geom class="visual" pos="0.006 0.0175 0.0115" quat="0 0.707107 0 0.707107" material="xl330_material" mesh="xl330"/>
+      <geom class="visual" pos="0.004 0 -0.0175215" quat="0.707107 0 0 0.707107" material="power_support_material" mesh="power_support"/>
+      <geom class="self_collision_only" pos="0.004 0 -0.0175215" quat="0.707107 0 0 0.707107" type="mesh" material="power_support_material" mesh="power_support"/>
+      <geom class="visual" pos="-0.0359693 0 -0.00385049" quat="0.00617059 0.70708 -0.70708 -0.00617059" material="np_f970_material" mesh="np_f970"/>
+      <geom class="collision" pos="-0.0359693 0 -0.00385049" quat="0.00617059 0.70708 -0.70708 -0.00617059" type="mesh" material="np_f970_material" mesh="np_f970"/>
+      <geom class="visual" pos="0.006 -0.0175 0.0115" quat="0 0.707107 0 0.707107" material="xl330_material" mesh="xl330"/>
+      <geom class="visual" pos="0.004 0 -0.0175785" quat="0.707107 0 0 0.707107" material="left_shell_material" mesh="left_shell"/>
+      <geom class="visual" pos="0.006 -0.0175 -0.005" quat="1 0 0 0" material="seeed_bearing__configuration__22x16x4_material" mesh="seeed_bearing__configuration__22x16x4"/>
+      <site name="imu" pos="-0.021 6.64098e-05 -0.0146984" group="3"/>
+      <body name="yaw2roll" pos="0.006 0.0175 -0.005" quat="0 -0.707107 -0.707107 0">
+        <inertial pos="-8.8e-11 0.00099414 0.0168917" quat="0.99973 -0.0232487 0 0" mass="0.0230406" diaginertia="4.1964e-06 3.41989e-06 2.32413e-06"/>
+        <joint name="left_hip_yaw" class="chosen_actuator" pos="0 0 0" axis="0 0 1" range="-0.436332 0.523599"/>
+        <geom class="visual" pos="-0.0175 -0.002 0.0125" quat="0 1 0 0" material="yaw2roll_material" mesh="yaw2roll"/>
+        <geom class="visual" pos="0 0 0.0125" quat="0 -0.707107 0.707107 0" material="xl330_material" mesh="xl330"/>
+        <geom class="visual" pos="0 0.0165 0.0125" quat="0.5 0.5 0.5 -0.5" material="seeed_bearing__configuration__22x16x4_material" mesh="seeed_bearing__configuration__22x16x4"/>
+        <geom class="visual" pos="-0.0175 -0.002 0.0125" quat="0 -1 0 0" material="bearing_roll_material" mesh="bearing_roll"/>
+        <body name="hip_l" pos="0 0.0165 0.0125" quat="0.707107 -0.707107 0 0">
+          <inertial pos="0.014815 1.6179e-08 -0.00829992" quat="0.94694 -8.2459e-07 -0.321411 -2.79883e-07" mass="0.00618934" diaginertia="1.15976e-06 1.15753e-06 3.52458e-07"/>
+          <joint name="left_hip_roll" class="chosen_actuator" pos="0 0 0" axis="0 0 1" range="-0.383972 0.383972"/>
+          <geom class="visual" pos="0.021 0 -0.0185" quat="0.5 0.5 0.5 0.5" material="seeed_bearing__configuration__22x16x4_material" mesh="seeed_bearing__configuration__22x16x4"/>
+          <geom class="visual" pos="-0.0175 0 -0.0185" quat="0.707107 -0.707107 0 0" material="hip_l_material" mesh="hip_l"/>
+          <geom class="collision" pos="-0.0175 0 -0.0185" quat="0.707107 -0.707107 0 0" type="mesh" material="hip_l_material" mesh="hip_l"/>
+          <body name="upper_leg_left" pos="0.025 0 -0.0185" quat="0.5 -0.5 0.5 -0.5">
+            <inertial pos="0.006766 0.0228838 0.0134531" quat="0.620818 0.374279 -0.583696 0.365786" mass="0.0482067" diaginertia="1.98453e-05 1.9108e-05 8.11799e-06"/>
+            <joint name="left_hip_pitch" class="chosen_actuator" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708"/>
+            <geom class="visual" pos="0 0 -0.0425" quat="0.5 -0.5 -0.5 -0.5" material="upper_leg_left_material" mesh="upper_leg_left"/>
+            <geom class="visual" pos="0.022 0.0357771 0.0125" quat="0 -0.707107 0 -0.707107" material="xl330_material" mesh="xl330"/>
+            <geom class="visual" pos="0 0 -0.0425" quat="0.5 -0.5 -0.5 -0.5" material="upper_leg_rigidity_plate_material" mesh="upper_leg_rigidity_plate"/>
+            <geom class="visual" pos="0.022 0.0357771 -0.004" quat="0 0 0 1" material="seeed_bearing__configuration__22x16x4_material" mesh="seeed_bearing__configuration__22x16x4"/>
+            <geom class="visual" pos="0 0 0.0125" quat="0.5 0.5 -0.5 0.5" material="xl330_material" mesh="xl330"/>
+            <body name="leg" pos="0.022 0.0357771 -0.004" quat="0 0.707107 0.707107 0">
+              <inertial pos="-1.52e-10 0.0318937 -0.00953505" quat="0.806473 0.591271 0 0" mass="0.0215844" diaginertia="5.25056e-06 4.58054e-06 1.91378e-06"/>
+              <joint name="left_knee" class="chosen_actuator" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708"/>
+              <geom class="visual" pos="-0.022 0.0357771 0.0385" quat="0.5 0.5 0.5 -0.5" material="leg_material" mesh="leg"/>
+              <geom class="collision" pos="-0.022 0.0357771 0.0385" quat="0.5 0.5 0.5 -0.5" type="mesh" material="leg_material" mesh="leg"/>
+              <geom class="visual" pos="0 0.042 -0.0115" quat="0.5 -0.5 -0.5 -0.5" material="xl330_material" mesh="xl330"/>
+              <body name="ankle_left" pos="0 0.042 -0.026" quat="0 1 0 0">
+                <inertial pos="-0.00615738 -0.0137483 -0.0156586" quat="0.474727 0.505178 0.517423 0.501699" mass="0.0300246" diaginertia="1.11623e-05 7.74319e-06 5.90334e-06"/>
+                <joint name="left_ankle" class="chosen_actuator" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708"/>
+                <geom class="visual" pos="-0.022 0.00622291 -0.0647" quat="0.5 -0.5 -0.5 -0.5" material="sole_left_material" mesh="sole_left"/>
+                <geom name="left_foot_collision" class="collision" pos="-0.022 0.00622291 -0.0647" quat="0.5 -0.5 -0.5 -0.5" type="mesh" material="sole_left_material" mesh="sole_left"/>
+                <geom class="visual" pos="-0.022 0.00622291 -0.0647" quat="0.5 -0.5 -0.5 -0.5" material="foot_left_material" mesh="foot_left"/>
+                <geom class="visual" pos="0 0 -0.0322" quat="0 0 0 1" material="seeed_bearing__configuration_default_material" mesh="seeed_bearing__configuration_default"/>
+                <geom class="visual" pos="-0.022 0.00622291 -0.0647" quat="0.5 -0.5 -0.5 -0.5" material="ankle_left_material" mesh="ankle_left"/>
+                <site name="left_foot" pos="0 -0.0238146 -0.0140852" quat="0 0 0.707107 0.707107" group="3"/>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="neck" pos="0.026 0.0145 0.0324215" quat="0 0 0.707107 -0.707107">
+        <inertial pos="0 -0.025 0.0141665" quat="0.707107 0.707107 0 0" mass="0.0368414" diaginertia="1.72925e-05 1.63707e-05 3.12694e-06"/>
+        <joint name="neck_pitch" class="chosen_actuator" pos="0 0 0" axis="0 0 1" range="-1.5708 1.0472"/>
+        <geom class="visual" pos="0.022 0.05 0.028" quat="0.5 0.5 0.5 -0.5" material="neck_material" mesh="neck"/>
+        <geom class="visual" pos="0 0 0.0145" quat="0.5 -0.5 -0.5 -0.5" material="xl330_material" mesh="xl330"/>
+        <geom class="visual" pos="0 -0.05 0.0145" quat="0.5 0.5 -0.5 0.5" material="xl330_material" mesh="xl330"/>
+        <geom class="visual" pos="0.022 0.05 0.003" quat="0.5 0.5 0.5 -0.5" material="neck_material" mesh="neck"/>
+        <body name="neck_pitch" pos="0 -0.05 0" quat="0 1 0 0">
+          <inertial pos="-6.533e-09 0.0116641 -0.0145" mass="0.00572" diaginertia="1.09186e-06 9.66855e-07 5.12111e-07"/>
+          <joint name="head_pitch" class="chosen_actuator" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708"/>
+          <geom class="visual" pos="0 0.0287931 -0.0145" quat="0.5 -0.5 -0.5 -0.5" material="neck_pitch_material" mesh="neck_pitch"/>
+          <geom class="visual" pos="0 0.0207931 -0.0145" quat="0.707107 0.707107 0 0" material="seeed_bearing__configuration__22x16x4_material" mesh="seeed_bearing__configuration__22x16x4"/>
+          <body name="yaw_roll_motion" pos="0 0.0186931 -0.0145" quat="0 0 -0.707107 -0.707107">
+            <inertial pos="-0.000166657 -0.00500964 0.0178065" quat="0.174483 0.690172 -0.0192577 0.702031" mass="0.0486" diaginertia="9.65512e-06 8.11788e-06 6.8878e-06"/>
+            <joint name="head_yaw" class="chosen_actuator" pos="0 0 0" axis="0 0 1" range="-2.96706 2.96706"/>
+            <geom class="visual" pos="0 0 0.01" quat="0.707107 0 0 0.707107" material="yaw_roll_motion_material" mesh="yaw_roll_motion"/>
+            <geom class="visual" pos="0 0 0.0145" quat="0.5 -0.5 -0.5 -0.5" material="xl330_material" mesh="xl330"/>
+            <geom class="visual" pos="-0.016 0 0.0145" quat="0.707107 0 -0.707107 0" material="seeed_bearing__configuration__22x16x4_material" mesh="seeed_bearing__configuration__22x16x4"/>
+            <geom class="visual" pos="0.018 0 0.0145" quat="0.707107 0 -0.707107 0" material="seeed_bearing__configuration__22x16x4_material" mesh="seeed_bearing__configuration__22x16x4"/>
+            <body name="jaw_soft" pos="-0.0179 0 0.0145" quat="0.707107 0 -0.707107 0">
+              <inertial pos="0.00460523 0.00120047 -0.0324761" quat="0.999608 0.0201487 -0.0191643 -0.00313927" mass="0.188766" diaginertia="0.000321068 0.000254266 0.000149461"/>
+              <joint name="head_roll" class="chosen_actuator" pos="0 0 0" axis="0 0 1" range="-0.436332 0.436332"/>
+              <geom class="visual" pos="0.0155 -9.13778e-05 -0.05548" quat="0.5 -0.5 0.5 -0.5" material="lens_material" mesh="lens"/>
+              <geom class="visual" pos="-0.0045 -9.13778e-05 -0.0178" quat="0.5 0.5 0.5 0.5" material="face_part_material" mesh="face_part"/>
+              <geom class="visual" pos="0.003 0.0255 -0.018" quat="0.707107 0 0 -0.707107" material="xl330_material" mesh="xl330"/>
+              <geom class="visual" pos="-0.0046 0 -0.0179996" quat="0.5 0.5 0.5 0.5" material="jaw_soft_material" mesh="jaw_soft"/>
+              <geom class="visual" pos="-0.0045 0 -0.018" quat="0.5 0.5 0.5 0.5" material="motor_support_material" mesh="motor_support"/>
+              <geom class="visual" pos="-0.0045 0 -0.018" quat="0.5 0.5 0.5 0.5" material="top_head_shell_material" mesh="top_head_shell"/>
+              <geom class="collision" pos="-0.0045 0 -0.018" quat="0.5 0.5 0.5 0.5" type="mesh" material="top_head_shell_material" mesh="top_head_shell"/>
+              <geom class="visual" pos="0 0 0.0145" quat="0.5 -0.5 -0.5 -0.5" material="xl330_material" mesh="xl330"/>
+              <geom class="visual" pos="0.0032 -0.04 -0.018" quat="0.5 -0.5 0.5 0.5" material="seeed_bearing__configuration_default_material" mesh="seeed_bearing__configuration_default"/>
+              <geom class="visual" pos="0.02694 0.0289936 -0.0519" quat="0.707107 0 0 -0.707107" material="elec_rpi_robot_hat_pcb_material" mesh="elec_rpi_robot_hat_pcb"/>
+              <geom class="visual" pos="-0.00420071 1.7776e-08 -0.0180814" quat="0.5 0.5 0.5 0.5" material="soft_mouth_top_material" mesh="soft_mouth_top"/>
+              <geom class="visual" pos="-0.0045 -9.13778e-05 -0.0178" quat="0.5 0.5 0.5 0.5" material="noenoeil_material" mesh="noenoeil"/>
+              <geom class="visual" pos="-0.0045 0 -0.018" quat="0.5 0.5 0.5 0.5" material="jaw_material" mesh="jaw"/>
+              <geom class="collision" pos="-0.0045 0 -0.018" quat="0.5 0.5 0.5 0.5" type="mesh" material="jaw_material" mesh="jaw"/>
+              <geom class="visual" pos="-0.0043 0 -0.018" quat="0.5 0.5 0.5 0.5" material="bottom_head_shell_material" mesh="bottom_head_shell"/>
+              <geom class="collision" pos="-0.0043 0 -0.018" quat="0.5 0.5 0.5 0.5" type="mesh" material="bottom_head_shell_material" mesh="bottom_head_shell"/>
+              <geom class="visual" pos="0.0155 -9.13778e-05 -0.05558" quat="0.5 -0.5 0.5 -0.5" material="m12_lens_holder_material" mesh="m12_lens_holder"/>
+              <geom class="visual" pos="0.015435 -1.13778e-05 -0.06001" quat="0.5 -0.5 -0.5 0.5" material="pcb__raspberry_pi_zero_2_w_material" mesh="pcb__raspberry_pi_zero_2_w"/>
+              <geom class="visual" pos="0.01 -0.016786 0.0260226" quat="0.5 0.5 0.5 0.5" material="speaker_material" mesh="speaker"/>
+              <site name="head_camera" pos="0.0155 -9.13778e-05 -0.0733" quat="0.707107 0 0.707107 0" group="3"/>
+              <site name="tof" pos="0.0135 0.0224086 -0.0733" quat="0.707107 0 0.707107 0" group="3"/>
+              <site name="head_imu" pos="0.0152323 0.000111069 -0.05106" group="3"/>
+              <site name="mouth_tip" pos="-0.00809334 0 -0.0777383" quat="0.704015 0 0.710185 0" group="3"/>
+              <camera name="head_camera" pos="0.0155 -9.13778e-05 -0.0733" quat="0 0 -1 0"/>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="bearing_roll" pos="0.006 -0.0175 -0.005" quat="0 0.707107 0.707107 0">
+        <inertial pos="-8.8e-11 0.00099414 0.0168917" quat="0.99973 -0.0232487 0 0" mass="0.0230406" diaginertia="4.1964e-06 3.41989e-06 2.32413e-06"/>
+        <joint name="right_hip_yaw" class="chosen_actuator" pos="0 0 0" axis="0 0 1" range="-0.523599 0.436332"/>
+        <geom class="visual" pos="-0.0175 -0.002 0.0125" quat="0 1 0 0" material="yaw2roll_material" mesh="yaw2roll"/>
+        <geom class="visual" pos="0 0 0.0125" quat="0 -0.707107 0.707107 0" material="xl330_material" mesh="xl330"/>
+        <geom class="visual" pos="-0.0175 -0.002 0.0125" quat="0 -1 0 0" material="bearing_roll_material" mesh="bearing_roll"/>
+        <geom class="visual" pos="0 0.0165 0.0125" quat="0.5 0.5 0.5 -0.5" material="seeed_bearing__configuration__22x16x4_material" mesh="seeed_bearing__configuration__22x16x4"/>
+        <body name="hip_l_2" pos="0 0.0165 0.0125" quat="0 0 0.707107 0.707107">
+          <inertial pos="0.014815 1.6212e-08 -0.00829992" quat="0.94694 -8.2459e-07 -0.321411 -2.79883e-07" mass="0.00618934" diaginertia="1.15976e-06 1.15753e-06 3.52458e-07"/>
+          <joint name="right_hip_roll" class="chosen_actuator" pos="0 0 0" axis="0 0 1" range="-0.383972 0.383972"/>
+          <geom class="visual" pos="-0.0175 0 -0.0185" quat="0.707107 -0.707107 0 0" material="hip_l_material" mesh="hip_l"/>
+          <geom class="collision" pos="-0.0175 0 -0.0185" quat="0.707107 -0.707107 0 0" type="mesh" material="hip_l_material" mesh="hip_l"/>
+          <geom class="visual" pos="0.025 0 -0.0185" quat="0.5 0.5 -0.5 -0.5" material="seeed_bearing__configuration__22x16x4_material" mesh="seeed_bearing__configuration__22x16x4"/>
+          <body name="upper_leg_right" pos="0.025 0 -0.0185" quat="0.5 -0.5 0.5 -0.5">
+            <inertial pos="-0.006766 0.0228838 0.0134531" quat="0.365786 0.583696 -0.374279 0.620818" mass="0.0482067" diaginertia="1.98453e-05 1.9108e-05 8.11799e-06"/>
+            <joint name="right_hip_pitch" class="chosen_actuator" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708"/>
+            <geom class="visual" pos="-0.022 0.0357771 0.0125" quat="0.707107 0 -0.707107 0" material="xl330_material" mesh="xl330"/>
+            <geom class="visual" pos="-0.022 0.0357771 0" quat="0 1 0 0" material="seeed_bearing__configuration__22x16x4_material" mesh="seeed_bearing__configuration__22x16x4"/>
+            <geom class="visual" pos="0 0 0.0435" quat="0.5 -0.5 0.5 0.5" material="upper_leg_rigidity_plate_material" mesh="upper_leg_rigidity_plate"/>
+            <geom class="visual" pos="0 0 -0.0425" quat="0.5 -0.5 0.5 0.5" material="upper_leg_right_material" mesh="upper_leg_right"/>
+            <geom class="visual" pos="0 0 0.0125" quat="0.5 0.5 -0.5 0.5" material="xl330_material" mesh="xl330"/>
+            <body name="leg_2" pos="-0.022 0.0357771 -0.004" quat="0 1 0 0">
+              <inertial pos="-0.0318937 -1.52e-10 -0.00953505" quat="0.570263 0.418091 0.418091 0.570263" mass="0.0215844" diaginertia="5.25056e-06 4.58054e-06 1.91378e-06"/>
+              <joint name="right_knee" class="chosen_actuator" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708"/>
+              <geom class="visual" pos="-0.042 0 -0.0115" quat="0.707107 0 -0.707107 0" material="xl330_material" mesh="xl330"/>
+              <geom class="visual" pos="-0.0357771 -0.022 0.0385" quat="0.707107 0 0.707107 0" material="leg_material" mesh="leg"/>
+              <geom class="collision" pos="-0.0357771 -0.022 0.0385" quat="0.707107 0 0.707107 0" type="mesh" material="leg_material" mesh="leg"/>
+              <body name="ankle_right" pos="-0.042 0 -0.026" quat="0 -0.707107 -0.707107 0">
+                <inertial pos="0.00615539 -0.0137482 -0.0156566" quat="0.517424 0.501653 0.474682 0.505266" mass="0.0300251" diaginertia="1.11622e-05 7.74322e-06 5.90344e-06"/>
+                <joint name="right_ankle" class="chosen_actuator" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708"/>
+                <geom class="visual" pos="0.022 0.00622291 -0.0647" quat="0.5 -0.5 0.5 0.5" material="ankle_right_material" mesh="ankle_right"/>
+                <geom class="visual" pos="0.022 0.00622291 -0.0647" quat="0.5 -0.5 0.5 0.5" material="sole_right_material" mesh="sole_right"/>
+                <geom name="right_foot_collision" class="collision" pos="0.022 0.00622291 -0.0647" quat="0.5 -0.5 0.5 0.5" type="mesh" material="sole_right_material" mesh="sole_right"/>
+                <geom class="visual" pos="0 0 -0.0292" quat="0 1 0 0" material="seeed_bearing__configuration_default_material" mesh="seeed_bearing__configuration_default"/>
+                <geom class="visual" pos="0.022 0.00622291 -0.0647" quat="0.5 -0.5 0.5 0.5" material="foot_right_material" mesh="foot_right"/>
+                <site name="right_foot" pos="0 -0.0238146 -0.0140852" quat="0.707107 -0.707107 0 0" group="3"/>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <general name="left_hip_yaw" class="chosen_actuator" joint="left_hip_yaw"/>
+    <general name="left_hip_roll" class="chosen_actuator" joint="left_hip_roll"/>
+    <general name="left_hip_pitch" class="chosen_actuator" joint="left_hip_pitch"/>
+    <general name="left_knee" class="chosen_actuator" joint="left_knee"/>
+    <general name="left_ankle" class="chosen_actuator" joint="left_ankle"/>
+    <general name="neck_pitch" class="chosen_actuator" joint="neck_pitch"/>
+    <general name="head_pitch" class="chosen_actuator" joint="head_pitch"/>
+    <general name="head_yaw" class="chosen_actuator" joint="head_yaw"/>
+    <general name="head_roll" class="chosen_actuator" joint="head_roll"/>
+    <general name="right_hip_yaw" class="chosen_actuator" joint="right_hip_yaw"/>
+    <general name="right_hip_roll" class="chosen_actuator" joint="right_hip_roll"/>
+    <general name="right_hip_pitch" class="chosen_actuator" joint="right_hip_pitch"/>
+    <general name="right_knee" class="chosen_actuator" joint="right_knee"/>
+    <general name="right_ankle" class="chosen_actuator" joint="right_ankle"/>
+  </actuator>
+
+  <sensor>
+    <framequat objtype="site" objname="imu" name="orientation" noise="0.001"/>
+    <gyro site="imu" name="angular-velocity" noise="0.005"/>
+    <gyro site="imu" name="imu_ang_vel"/>
+    <velocimeter site="imu" name="imu_lin_vel"/>
+    <accelerometer site="imu" name="imu_accel"/>
+    <subtreeangmom body="trunk_base" name="root_angmom"/>
+  </sensor>
+
+  <keyframe>
+    <key name="ENTRANCE" qpos="3.375 0.225 0.12 0.707107 0 0 0.707107 0 0 0 0 0 0 0 0 0 0 0 0 0 0"/>
+  </keyframe>
+</mujoco>
