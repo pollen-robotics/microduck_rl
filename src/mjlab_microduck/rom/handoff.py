@@ -5,7 +5,7 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
-from .contracts import ModelArtifact, PolicyBundle
+from .contracts import ModelArtifact, PolicyBundle, canonical_json
 from .main import load_qualified_bundle
 
 
@@ -46,7 +46,11 @@ def materialize_distribution_bundle(bundle_dir: Path, destination: Path) -> Poli
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "x", compression=zipfile.ZIP_STORED) as archive:
         for relative in sorted(files):
-            content = (root / relative).read_bytes()
+            content = (
+                canonical_json(bundle)
+                if relative == "microduck-policy-bundle.json"
+                else (root / relative).read_bytes()
+            )
             info = zipfile.ZipInfo(relative, date_time=(1980, 1, 1, 0, 0, 0))
             info.create_system = 3
             info.external_attr = 0o100644 << 16

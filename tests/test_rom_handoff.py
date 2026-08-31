@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import zipfile
 from pathlib import Path
 
 import pytest
 
+from mjlab_microduck.rom.contracts import canonical_json
 from mjlab_microduck.rom.handoff import materialize_distribution_bundle
 from mjlab_microduck.rom.main import load_qualified_bundle
 from mjlab_microduck.rom.qualification import qualify_and_promote
@@ -52,6 +54,8 @@ def test_distribution_materialization_writes_deterministic_cleared_bundle(
     installed = _installed_promoted_bundle(
         tmp_path, status="DISTRIBUTION_CLEARED", name="cleared"
     )
+    manifest_path = installed / "microduck-policy-bundle.json"
+    manifest_path.write_text(json.dumps(json.loads(manifest_path.read_text()), indent=2))
     first = tmp_path / "first.zip"
     second = tmp_path / "second.zip"
 
@@ -77,9 +81,7 @@ def test_distribution_materialization_writes_deterministic_cleared_bundle(
 
     with zipfile.ZipFile(first) as archive:
         assert set(archive.namelist()) == expected
-        assert archive.read("microduck-policy-bundle.json") == (
-            installed / "microduck-policy-bundle.json"
-        ).read_bytes()
+        assert archive.read("microduck-policy-bundle.json") == canonical_json(bundle)
         for artifact in declared_artifacts:
             content = archive.read(artifact.path)
             assert content == (installed / artifact.path).read_bytes()
