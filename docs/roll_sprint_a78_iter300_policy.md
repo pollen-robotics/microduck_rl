@@ -6,6 +6,8 @@ A78 iteration 300 is the preserved policy behind the deterministic race preview 
 
 This snapshot is intentionally classified as a **saved visual candidate**, not the formal 10 m champion. It shows stronger roll, self-right, and reroll behavior, but its strict evaluator still reports insufficient distance and excessive road drift.
 
+Checkpoint 1000 later became the A78 race leader with 3 of 4 valid 10 m finishes and zero shared-road exits. It is documented separately in `docs/roll_sprint_a78_iter1000_race_leader.md`; this checkpoint-300 archive remains the user-selected visual baseline.
+
 | Identity | Value |
 |---|---|
 | Policy ID | `a78-iter300-2794ff28ed96` |
