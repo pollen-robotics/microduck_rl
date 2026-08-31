@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record four standing-start roll-sprint rollouts in one tiled video."""
+"""Record deterministic roll-sprint races and recovery rollouts."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from mjlab_microduck.tasks import mdp as microduck_mdp
 TASK_ID = "Mjlab-Roll-Sprint-Flat-MicroDuck"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RACE_LANE_SPACING = 0.28
+FIVE_RACER_LANE_SPACING = 0.21
 ROAD_HALF_WIDTH_M = microduck_mdp._ROLL_SPRINT_ROAD_HALF_WIDTH
 ROAD_SAFE_FULL_REWARD_HALF_WIDTH_M = microduck_mdp._ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH
 ROAD_REPOSITION_TRIGGER_M = microduck_mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M
@@ -44,6 +45,15 @@ RACE_CAMERA_MAX_SPEED_MPS = 3.0
 RACE_CAMERA_MAX_ACCEL_MPS2 = 4.0
 RACE_LINE_HEIGHT = 0.008
 RACE_LINE_RADIUS = 0.018
+FINISH_ARCH_HEIGHT_M = 0.72
+FINISH_CELEBRATION_SECONDS = 4.0
+FINISH_EFFECT_COLORS = (
+    (0.20, 0.72, 1.00, 1.0),
+    (1.00, 0.32, 0.42, 1.0),
+    (1.00, 0.78, 0.18, 1.0),
+    (0.42, 0.95, 0.54, 1.0),
+    (0.78, 0.42, 1.00, 1.0),
+)
 RECOVERY_ORIENTATIONS = ("face_down", "face_up", "left", "right")
 
 
@@ -52,6 +62,23 @@ class CameraFollowState(NamedTuple):
 
     x_m: float
     velocity_mps: float = 0.0
+
+
+class FinishCelebrationState:
+    """Latch valid finish times and expose deterministic animation time."""
+
+    def __init__(self, num_robots: int) -> None:
+        self.current_time_s = 0.0
+        self.finish_times_s: list[float | None] = [None] * num_robots
+
+    def update(self, credited_frontier_m: torch.Tensor, elapsed_s: float) -> None:
+        """Latch each robot once, using only valid roll-linked frontier."""
+        if credited_frontier_m.numel() != len(self.finish_times_s):
+            raise ValueError("one credited frontier is required for every racer")
+        self.current_time_s = float(elapsed_s)
+        for index, frontier_m in enumerate(credited_frontier_m.detach().cpu().tolist()):
+            if self.finish_times_s[index] is None and frontier_m >= TARGET_DISTANCE_M:
+                self.finish_times_s[index] = self.current_time_s
 
 
 def _parse_args() -> argparse.Namespace:
@@ -85,6 +112,14 @@ def _parse_args() -> argparse.Namespace:
         "--recovery-montage",
         action="store_true",
         help="Record deterministic face-down, face-up, left, and right recovery starts.",
+    )
+    parser.add_argument(
+        "--five-robot-showcase",
+        action="store_true",
+        help=(
+            "Record five aligned racers with a finish arch and valid-frontier "
+            "firework celebration."
+        ),
     )
     return parser.parse_args()
 
@@ -209,6 +244,8 @@ def _load_policy_then_arrange_start(
     device: str,
     recovery_montage: bool,
     seed: int,
+    race_lane_spacing: float = RACE_LANE_SPACING,
+    celebration_state: FinishCelebrationState | None = None,
 ):
     """Load inference first, then apply the final deterministic rollout state."""
     env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
@@ -224,22 +261,34 @@ def _load_policy_then_arrange_start(
     if recovery_montage:
         _arrange_recovery_montage(base_env, seed=seed)
     else:
-        _arrange_race_start(base_env)
-        _install_race_corridor_visualizer(base_env)
+        _arrange_race_start(base_env, race_lane_spacing)
+        _install_race_corridor_visualizer(
+            base_env,
+            num_lanes=base_env.num_envs,
+            lane_spacing=race_lane_spacing,
+            celebration_state=celebration_state,
+        )
     _refresh_manual_start_state(base_env)
     return env, policy
 
 
 def _race_corridor_segments(
     *,
+    num_lanes: int = 4,
     lane_spacing: float = RACE_LANE_SPACING,
     target_distance_m: float = TARGET_DISTANCE_M,
 ) -> list[tuple[np.ndarray, np.ndarray, tuple[float, float, float, float], float]]:
     """Return visible lane, start, finish, and distance-marker line segments."""
-    if not np.isclose(2.0 * lane_spacing, ROAD_HALF_WIDTH_M):
-        raise ValueError("four-lane spacing must match the shared-road half-width")
+    if num_lanes < 1 or lane_spacing <= 0.0:
+        raise ValueError("the race needs at least one positive-width lane")
+    lane_centers = (
+        np.arange(num_lanes, dtype=np.float64) - (num_lanes - 1) / 2.0
+    ) * lane_spacing
+    if np.max(np.abs(lane_centers)) > ROAD_SAFE_FULL_REWARD_HALF_WIDTH_M + 1.0e-9:
+        raise ValueError("race starts must remain inside the full-reward road band")
     edge_y = ROAD_HALF_WIDTH_M
-    lane_boundaries = np.linspace(-edge_y, edge_y, 5)
+    internal_boundaries = 0.5 * (lane_centers[:-1] + lane_centers[1:])
+    lane_boundaries = np.concatenate(([-edge_y], internal_boundaries, [edge_y]))
     segments = [
         (
             np.array([0.0, lane_y, RACE_LINE_HEIGHT]),
@@ -270,20 +319,135 @@ def _race_corridor_segments(
     return segments
 
 
-def _draw_race_corridor(visualizer) -> None:
+def _finish_arch_segments() -> list[
+    tuple[np.ndarray, np.ndarray, tuple[float, float, float, float], float]
+]:
+    """Return a clean gold finish arch and a checkered ground strip."""
+    gold = (1.0, 0.72, 0.10, 1.0)
+    segments = [
+        (
+            np.array([TARGET_DISTANCE_M, side * ROAD_HALF_WIDTH_M, 0.02]),
+            np.array([TARGET_DISTANCE_M, side * ROAD_HALF_WIDTH_M, FINISH_ARCH_HEIGHT_M]),
+            gold,
+            0.032,
+        )
+        for side in (-1.0, 1.0)
+    ]
+    segments.append(
+        (
+            np.array([TARGET_DISTANCE_M, -ROAD_HALF_WIDTH_M, FINISH_ARCH_HEIGHT_M]),
+            np.array([TARGET_DISTANCE_M, ROAD_HALF_WIDTH_M, FINISH_ARCH_HEIGHT_M]),
+            gold,
+            0.032,
+        )
+    )
+    checker_width = (2.0 * ROAD_HALF_WIDTH_M) / 10.0
+    for index in range(10):
+        y0 = -ROAD_HALF_WIDTH_M + index * checker_width
+        segments.append(
+            (
+                np.array([TARGET_DISTANCE_M, y0, RACE_LINE_HEIGHT * 1.4]),
+                np.array(
+                    [TARGET_DISTANCE_M, y0 + checker_width, RACE_LINE_HEIGHT * 1.4]
+                ),
+                (1.0, 1.0, 1.0, 1.0) if index % 2 == 0 else (0.08, 0.10, 0.14, 1.0),
+                RACE_LINE_RADIUS * 1.45,
+            )
+        )
+    return segments
+
+
+def _finish_celebration_segments(
+    state: FinishCelebrationState,
+    lane_centers: np.ndarray,
+) -> list[tuple[np.ndarray, np.ndarray, tuple[float, float, float, float], float]]:
+    """Build deterministic firework rays and falling confetti for valid finishers."""
+    segments = []
+    for robot_index, finish_time_s in enumerate(state.finish_times_s):
+        if finish_time_s is None:
+            continue
+        age_s = state.current_time_s - finish_time_s
+        if age_s < 0.0 or age_s > FINISH_CELEBRATION_SECONDS:
+            continue
+        color = FINISH_EFFECT_COLORS[robot_index % len(FINISH_EFFECT_COLORS)]
+        burst_cycle = int(age_s / 0.85)
+        burst_phase = (age_s % 0.85) / 0.85
+        burst_radius = 0.08 + 0.42 * math.sin(min(burst_phase, 1.0) * math.pi / 2.0)
+        burst_center = np.array(
+            [
+                TARGET_DISTANCE_M + 0.10 + 0.12 * (burst_cycle % 2),
+                lane_centers[robot_index] * 0.72 + 0.06 * ((burst_cycle % 3) - 1),
+                0.46 + 0.11 * ((robot_index + burst_cycle) % 3),
+            ]
+        )
+        alpha = max(0.16, 1.0 - burst_phase)
+        ray_color = (color[0], color[1], color[2], alpha)
+        for ray_index in range(14):
+            angle = 2.0 * math.pi * ray_index / 14.0
+            depth = 0.10 * math.sin(angle * 3.0 + robot_index)
+            endpoint = burst_center + np.array(
+                [depth, burst_radius * math.cos(angle), burst_radius * math.sin(angle)]
+            )
+            segments.append((burst_center, endpoint, ray_color, 0.010))
+
+        for piece_index in range(18):
+            fall_phase = (age_s * 0.62 + piece_index * 0.173 + robot_index * 0.071) % 1.0
+            piece_color = FINISH_EFFECT_COLORS[
+                (robot_index + piece_index) % len(FINISH_EFFECT_COLORS)
+            ]
+            start = np.array(
+                [
+                    TARGET_DISTANCE_M - 0.42 + 0.84 * ((piece_index * 0.37) % 1.0),
+                    -ROAD_HALF_WIDTH_M + 2.0 * ROAD_HALF_WIDTH_M * ((piece_index * 0.61) % 1.0),
+                    0.07 + 0.72 * (1.0 - fall_phase),
+                ]
+            )
+            end = start + np.array([0.025, 0.016 * (-1.0 if piece_index % 2 else 1.0), -0.035])
+            segments.append((start, end, piece_color, 0.008))
+    return segments
+
+
+def _draw_race_corridor(
+    visualizer,
+    *,
+    num_lanes: int = 4,
+    lane_spacing: float = RACE_LANE_SPACING,
+    celebration_state: FinishCelebrationState | None = None,
+) -> None:
     """Draw the non-colliding shared-road race corridor into the render scene."""
-    for start, end, color, radius in _race_corridor_segments():
+    segments = _race_corridor_segments(
+        num_lanes=num_lanes,
+        lane_spacing=lane_spacing,
+    )
+    if celebration_state is not None:
+        lane_centers = (
+            np.arange(num_lanes, dtype=np.float64) - (num_lanes - 1) / 2.0
+        ) * lane_spacing
+        segments.extend(_finish_arch_segments())
+        segments.extend(_finish_celebration_segments(celebration_state, lane_centers))
+    for start, end, color, radius in segments:
         visualizer.add_cylinder(start, end, radius=radius, color=color)
 
 
-def _install_race_corridor_visualizer(base_env: ManagerBasedRlEnv) -> None:
+def _install_race_corridor_visualizer(
+    base_env: ManagerBasedRlEnv,
+    *,
+    num_lanes: int = 4,
+    lane_spacing: float = RACE_LANE_SPACING,
+    celebration_state: FinishCelebrationState | None = None,
+) -> None:
     """Add the corridor after normal debug visuals on every rendered frame."""
     original_update_visualizers = getattr(base_env, "update_visualizers", None)
 
     def update_visualizers(visualizer) -> None:
         if original_update_visualizers is not None:
             original_update_visualizers(visualizer)
-        _draw_race_corridor(visualizer)
+        _draw_race_corridor(
+            visualizer,
+            num_lanes=num_lanes,
+            lane_spacing=lane_spacing,
+            celebration_state=celebration_state,
+        )
 
     base_env.update_visualizers = update_visualizers
 
@@ -436,6 +600,8 @@ def main() -> int:
     temporary_output = temporary_dir / f"roll-sprint-recording-{os.getpid()}.mp4"
     if not checkpoint.is_file():
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
+    if args.five_robot_showcase and args.recovery_montage:
+        raise SystemExit("--five-robot-showcase cannot be combined with --recovery-montage")
     if (
         args.steps < 1
         or args.frame_stride < 1
@@ -452,9 +618,16 @@ def main() -> int:
     configure_torch_backends()
     env_cfg = load_env_cfg(args.task_id, play=True)
     agent_cfg = load_rl_cfg(args.task_id)
-    env_cfg.scene.num_envs = 4
-    env_cfg.scene.env_spacing = RACE_LANE_SPACING
-    env_cfg.scene.terrain.env_spacing = RACE_LANE_SPACING
+    race_robots = 5 if args.five_robot_showcase else 4
+    race_lane_spacing = (
+        FIVE_RACER_LANE_SPACING if args.five_robot_showcase else RACE_LANE_SPACING
+    )
+    celebration_state = (
+        FinishCelebrationState(race_robots) if args.five_robot_showcase else None
+    )
+    env_cfg.scene.num_envs = race_robots
+    env_cfg.scene.env_spacing = race_lane_spacing
+    env_cfg.scene.terrain.env_spacing = race_lane_spacing
     env_cfg.seed = args.seed
     env_cfg.auto_reset = False
     policy_dt = env_cfg.sim.mujoco.timestep * env_cfg.decimation
@@ -465,7 +638,7 @@ def main() -> int:
     env_cfg.viewer.fovy = RACE_CAMERA_FOVY
     env_cfg.viewer.azimuth = RACE_CAMERA_AZIMUTH
     env_cfg.viewer.elevation = RACE_CAMERA_ELEVATION
-    env_cfg.viewer.max_extra_envs = 3
+    env_cfg.viewer.max_extra_envs = race_robots - 1
     env_cfg.viewer.width = args.width
     env_cfg.viewer.height = args.height
     reset_cfg = env_cfg.events["set_roll_sprint_state"]
@@ -489,6 +662,8 @@ def main() -> int:
         device=args.device,
         recovery_montage=args.recovery_montage,
         seed=args.seed,
+        race_lane_spacing=race_lane_spacing,
+        celebration_state=celebration_state,
     )
     camera_state = CameraFollowState(RACE_CAMERA_LOOKAT[0])
     leader_index = 0
@@ -500,6 +675,15 @@ def main() -> int:
                 observations = env.get_observations()
                 actions = policy(observations)
                 env.step(actions)
+            if celebration_state is not None:
+                credited_frontier_m = (
+                    base_env._roll_sprint_forward_frontier
+                    - base_env._roll_sprint_forward_origin
+                ).clamp_min(0.0)
+                celebration_state.update(
+                    credited_frontier_m,
+                    elapsed_s=(step + 1) * policy_dt,
+                )
             if not args.recovery_montage:
                 camera_state, _camera_y_m, leader_index = _follow_on_road_leader(
                     base_env,
@@ -540,6 +724,16 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     os.replace(temporary_output, output)
     print(f"[roll-sprint-video] wrote {output}")
+    if celebration_state is not None:
+        finishers = [
+            index + 1
+            for index, finish_time_s in enumerate(celebration_state.finish_times_s)
+            if finish_time_s is not None
+        ]
+        print(
+            "[roll-sprint-video] valid 10 m finishers: "
+            f"{finishers} at {celebration_state.finish_times_s}"
+        )
     return 0
 
 

@@ -122,6 +122,7 @@ def test_policy_load_precedes_final_race_arrangement_and_observation_refresh(
 ) -> None:
     events: list[str] = []
     base_env = SimpleNamespace(
+        num_envs=4,
         forward=torch.full((4,), 9.0),
         lateral=torch.full((4,), 9.0),
         yaw=torch.full((4,), 1.0),
@@ -158,7 +159,8 @@ def test_policy_load_precedes_final_race_arrangement_and_observation_refresh(
 
     expected_lateral = torch.tensor([-0.42, -0.14, 0.14, 0.42])
 
-    def arrange(env) -> None:
+    def arrange(env, lane_spacing) -> None:
+        assert lane_spacing == MODULE.RACE_LANE_SPACING
         events.append("arrange")
         env.forward.zero_()
         env.lateral.copy_(expected_lateral)
@@ -178,7 +180,7 @@ def test_policy_load_precedes_final_race_arrangement_and_observation_refresh(
     monkeypatch.setattr(
         MODULE,
         "_install_race_corridor_visualizer",
-        lambda _env: events.append("corridor"),
+        lambda _env, **_kwargs: events.append("corridor"),
     )
     monkeypatch.setattr(MODULE, "_refresh_manual_start_state", refresh)
 
@@ -564,3 +566,56 @@ def test_corridor_visualizer_installs_when_no_existing_callback() -> None:
     env.update_visualizers(visualizer)
 
     assert len(observed) == len(MODULE._race_corridor_segments())
+
+
+def test_five_robot_showcase_uses_aligned_safe_road_starts() -> None:
+    origins = MODULE._race_lane_origins(
+        5,
+        MODULE.FIVE_RACER_LANE_SPACING,
+        device="cpu",
+        dtype=torch.float32,
+    )
+
+    assert torch.equal(origins[:, 0], torch.zeros(5))
+    assert origins[:, 1].tolist() == pytest.approx([-0.42, -0.21, 0.0, 0.21, 0.42])
+    assert origins[:, 1].abs().max().item() <= MODULE.ROAD_SAFE_FULL_REWARD_HALF_WIDTH_M
+
+
+def test_five_robot_corridor_has_five_visible_lanes() -> None:
+    segments = MODULE._race_corridor_segments(
+        num_lanes=5,
+        lane_spacing=MODULE.FIVE_RACER_LANE_SPACING,
+    )
+    longitudinal = [
+        (start, end) for start, end, _color, _radius in segments if start[1] == end[1]
+    ]
+
+    assert len(longitudinal) == 6
+    assert [start[1] for start, _end in longitudinal] == pytest.approx(
+        [-0.56, -0.315, -0.105, 0.105, 0.315, 0.56]
+    )
+
+
+def test_showcase_fireworks_latch_only_valid_ten_meter_frontier() -> None:
+    state = MODULE.FinishCelebrationState(5)
+    state.update(torch.tensor([19.0, 9.99, 10.0, 2.0, 11.0]), elapsed_s=12.0)
+
+    # Raw position is never passed here. Only the credited frontier can trigger.
+    assert state.finish_times_s == [12.0, None, 12.0, None, 12.0]
+
+    state.update(torch.tensor([20.0, 10.0, 12.0, 10.0, 13.0]), elapsed_s=13.5)
+    assert state.finish_times_s == [12.0, 13.5, 12.0, 13.5, 12.0]
+
+
+def test_showcase_draws_finish_arch_and_animated_celebration() -> None:
+    state = MODULE.FinishCelebrationState(5)
+    state.update(torch.tensor([10.0, 0.0, 0.0, 0.0, 0.0]), elapsed_s=20.0)
+    state.current_time_s = 20.4
+    lane_centers = MODULE.np.array([-0.42, -0.21, 0.0, 0.21, 0.42])
+
+    arch = MODULE._finish_arch_segments()
+    celebration = MODULE._finish_celebration_segments(state, lane_centers)
+
+    assert len(arch) == 13
+    assert len(celebration) == 32
+    assert all(segment[3] > 0.0 for segment in celebration)
