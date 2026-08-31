@@ -128,7 +128,12 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     )
     cfg.rewards["roll_sprint_self_right_success"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_self_right_success_rate,
-        weight=5.0,
+        # A72/A75 continuation audits showed that a weight-5 completion pulse
+        # lets PPO replace the race skill with the easier "become upright"
+        # edge before repositioning or rerolling.  Keep a modest one-shot
+        # completion signal while the distance and recovered-reroll objectives
+        # train the full transition.
+        weight=1.0,
     )
     cfg.rewards["roll_sprint_head_pivot"] = RewardTermCfg(
         func=microduck_mdp.roll_sprint_head_pivot,
@@ -467,7 +472,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
             "roll_sprint_self_right_success_weight",
             "roll_sprint_self_right_success",
             [
-                {"step": 0, "weight": 5.0},
+                {"step": 0, "weight": 1.0},
                 {"step": 1000 * 24, "weight": 10.0},
             ],
         ),

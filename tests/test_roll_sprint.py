@@ -166,7 +166,7 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert cfg.rewards["roll_sprint_self_right_height"].weight == 30.0
     assert cfg.rewards["roll_sprint_self_right_upward"].weight == 1.0
     assert cfg.rewards["roll_sprint_self_right_fallen_tax"].weight == -0.25
-    assert cfg.rewards["roll_sprint_self_right_success"].weight == 5.0
+    assert cfg.rewards["roll_sprint_self_right_success"].weight == 1.0
     assert (
         cfg.rewards["roll_sprint_recovered_reroll"].weight
         < cfg.rewards["roll_sprint_distance"].weight
@@ -322,7 +322,10 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     ][-1] == {"step": 1000 * 24, "weight": -0.5}
     assert cfg.curriculum["roll_sprint_self_right_success_weight"].params[
         "weight_stages"
-    ][-1] == {"step": 1000 * 24, "weight": 10.0}
+    ] == [
+        {"step": 0, "weight": 1.0},
+        {"step": 1000 * 24, "weight": 10.0},
+    ]
     assert cfg.curriculum["roll_sprint_head_pivot_weight"].params[
         "weight_stages"
     ] == [
