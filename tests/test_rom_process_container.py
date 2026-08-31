@@ -1365,9 +1365,11 @@ def test_container_sigterm_reaps_exact_child_and_restart_reconciles_unknown(
                 assert ready["ready"] is False
                 assert select.select([child_pidfd], [], [], 0.0)[0] == []
 
-        assert _stop_and_assert_exact_reap(
-            container, child_pidfd=child_pidfd
-        ) == 0
+            assert _stop_and_assert_exact_reap(
+                container,
+                child_pidfd=child_pidfd,
+                require_ordered_evidence=phase != "QUARANTINED",
+            ) == 0
         child_pidfd = None
         if operation is not None:
             operation.join(timeout=20)
@@ -1386,7 +1388,7 @@ def test_container_sigterm_reaps_exact_child_and_restart_reconciles_unknown(
         try:
             expected_state = (
                 {"FAILED"}
-                if phase in {"START", "STOPPING"}
+                if phase in {"START", "STOPPING", "QUARANTINED"}
                 else {"UNKNOWN"}
             )
             reconciled = _wait_task(restarted, task_id, expected_state)
