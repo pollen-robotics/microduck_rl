@@ -1,4 +1,4 @@
-"""Microduck repeated supported forward-roll sprint task.
+"""Microduck repeated supported forward-roll and backroll sprint tasks.
 
 This is a separate deployable policy from the one-roll-and-stand roulade.  A
 fixed forty-second horizon makes sustained forward distance and speed the
@@ -6,6 +6,8 @@ natural objective while leaving enough time to prove a 10 m race. Each cycle
 must still be a supported sagittal roll with a flat head-top contact before its
 distance is released to PPO.
 """
+
+import copy
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers import (
@@ -523,6 +525,15 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
     return cfg
 
 
+def make_microduck_backroll_sprint_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Create the separate repeated supported backroll sprint configuration."""
+    cfg = make_microduck_roll_sprint_env_cfg(play=play)
+    cfg.events["set_roll_sprint_state"].params["roll_direction"] = -1.0
+    return cfg
+
+
 MicroduckRollSprintRlCfg = RslRlOnPolicyRunnerCfg(
     actor=RslRlModelCfg(
         hidden_dims=(512, 256, 128),
@@ -571,3 +582,8 @@ MicroduckRollSprintRlCfg = RslRlOnPolicyRunnerCfg(
     num_steps_per_env=24,
     max_iterations=4_000,
 )
+
+MicroduckBackrollSprintRlCfg = copy.deepcopy(MicroduckRollSprintRlCfg)
+MicroduckBackrollSprintRlCfg.experiment_name = "microduck_backroll_sprint"
+MicroduckBackrollSprintRlCfg.run_name = "microduck_backroll_sprint"
+MicroduckBackrollSprintRlCfg.save_interval = 50

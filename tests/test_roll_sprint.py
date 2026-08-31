@@ -8,7 +8,9 @@ from mjlab_microduck.tasks import mdp
 from mjlab_microduck.tasks.microduck_roll_sprint_env_cfg import (
     EPISODE_LENGTH_S,
     TARGET_DISTANCE_M,
+    MicroduckBackrollSprintRlCfg,
     MicroduckRollSprintRlCfg,
+    make_microduck_backroll_sprint_env_cfg,
     make_microduck_roll_sprint_env_cfg,
 )
 from mjlab_microduck.tasks.microduck_roulade_env_cfg import (
@@ -369,6 +371,69 @@ def test_roll_sprint_road_return_weight_stays_fixed_at_proven_level():
     ]
 
 
+def test_backroll_sprint_is_separate_directional_61d_policy():
+    forward = make_microduck_roll_sprint_env_cfg()
+    reverse = make_microduck_backroll_sprint_env_cfg()
+
+    assert forward.events["set_roll_sprint_state"].params.get(
+        "roll_direction", 1.0
+    ) == 1.0
+    assert reverse.events["set_roll_sprint_state"].params["roll_direction"] == -1.0
+    assert list(reverse.observations["actor"].terms) == list(
+        forward.observations["actor"].terms
+    )
+    assert list(reverse.actions) == list(forward.actions)
+    assert MicroduckBackrollSprintRlCfg.experiment_name == (
+        "microduck_backroll_sprint"
+    )
+    assert MicroduckBackrollSprintRlCfg.save_interval == 50
+    assert MicroduckBackrollSprintRlCfg.actor is not MicroduckRollSprintRlCfg.actor
+    assert MicroduckBackrollSprintRlCfg.algorithm is not (
+        MicroduckRollSprintRlCfg.algorithm
+    )
+
+
+def test_backroll_requires_reverse_rotation_and_reverse_translation(monkeypatch):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    mdp._reset_roll_sprint_buffers(
+        env,
+        torch.tensor([0]),
+        roll_direction=-1.0,
+    )
+    _prime_roll_heading(env, asset)
+
+    assert env._roll_sprint_body_heading_w[0].tolist() == pytest.approx([1.0, 0.0])
+    assert env._roll_sprint_heading_w[0].tolist() == pytest.approx([-1.0, 0.0])
+
+    asset.data.root_link_pos_w[:, 0] = -0.20
+    asset.data.root_link_ang_vel_b[:, 1] = -1.0
+    env._roll_sprint_accum[:] = 2.0 * torch.pi - 0.01
+    env._roll_sprint_phase_frontier[:] = env._roll_sprint_accum
+    env._roll_sprint_head_latch[:] = True
+    mdp._update_roll_sprint_state(env, asset)
+
+    assert env._roll_sprint_completed_now[0]
+    assert env._roll_sprint_completed_distance[0] == pytest.approx(0.20)
+    assert env._roll_sprint_forward_frontier[0] == pytest.approx(0.20)
+
+    opposite_env, opposite_asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, opposite_env)
+    mdp._reset_roll_sprint_buffers(
+        opposite_env,
+        torch.tensor([0]),
+        roll_direction=-1.0,
+    )
+    _prime_roll_heading(opposite_env, opposite_asset)
+    opposite_asset.data.root_link_pos_w[:, 0] = 0.20
+    opposite_asset.data.root_link_ang_vel_b[:, 1] = 1.0
+    mdp._update_roll_sprint_state(opposite_env, opposite_asset)
+
+    assert opposite_env._roll_sprint_accum[0] == 0.0
+    assert opposite_env._roll_sprint_phase_frontier[0] == 0.0
+    assert opposite_env._roll_sprint_completed_distance[0] == 0.0
+
+
 def test_roll_sprint_and_backlash_tasks_are_registered():
     from mjlab.tasks.registry import list_tasks
 
@@ -376,6 +441,7 @@ def test_roll_sprint_and_backlash_tasks_are_registered():
 
     tasks = list_tasks()
     assert "Mjlab-Roll-Sprint-Flat-MicroDuck" in tasks
+    assert "Mjlab-Backroll-Sprint-Flat-MicroDuck" in tasks
     assert "Mjlab-Roll-Sprint-Flat-Backlash-MicroDuck" in tasks
 
 

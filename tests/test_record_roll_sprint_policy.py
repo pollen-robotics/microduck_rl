@@ -116,6 +116,58 @@ def test_canonical_video_arranges_four_parallel_deterministic_race_lanes() -> No
     assert torch.allclose(projected_advance, torch.full((4,), 0.25), atol=1.0e-7)
 
 
+def test_backroll_video_faces_away_but_credits_the_same_world_race_axis() -> None:
+    robot = _FakeRobot()
+    terrain = SimpleNamespace(env_origins=torch.zeros((4, 3)))
+
+    class _Scene:
+        def __init__(self) -> None:
+            self.terrain = terrain
+
+        def __getitem__(self, name):
+            assert name == "robot"
+            return robot
+
+    sim = SimpleNamespace(forward=lambda: None)
+    env = SimpleNamespace(
+        num_envs=4,
+        device=torch.device("cpu"),
+        scene=_Scene(),
+        sim=sim,
+    )
+
+    MODULE._arrange_race_start(
+        env,
+        task_id="Mjlab-Backroll-Sprint-Flat-MicroDuck",
+    )
+
+    expected_lanes = torch.tensor([-0.42, -0.14, 0.14, 0.42])
+    assert torch.allclose(robot.pose[:, 0], torch.zeros(4), atol=1.0e-7)
+    assert torch.allclose(robot.pose[:, 1], expected_lanes, atol=1.0e-7)
+    assert torch.allclose(
+        robot.pose[:, 3:],
+        torch.tensor([[0.0, 0.0, 0.0, 1.0]] * 4),
+        atol=1.0e-7,
+    )
+    assert torch.allclose(
+        env._roll_sprint_body_heading_w,
+        torch.tensor([[-1.0, 0.0]] * 4),
+        atol=1.0e-7,
+    )
+    assert torch.allclose(
+        env._roll_sprint_heading_w,
+        torch.tensor([[1.0, 0.0]] * 4),
+        atol=1.0e-7,
+    )
+    robot.data.root_link_pos_w[:, 0] += 0.25
+    projected_advance = MODULE.microduck_mdp._roll_sprint_forward_position(
+        env,
+        robot,
+        env._roll_sprint_heading_w,
+    )
+    assert torch.allclose(projected_advance, torch.full((4,), 0.25), atol=1.0e-7)
+
+
 def test_policy_load_precedes_final_race_arrangement_and_observation_refresh(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -226,26 +226,47 @@ def _race_lane_origins(
     return origins
 
 
+def _roll_direction_for_task(task_id: str) -> float:
+    """Return the signed roll/travel direction encoded by the task id."""
+    return -1.0 if "Backroll-Sprint" in task_id else 1.0
+
+
 def _arrange_race_start(
     base_env: ManagerBasedRlEnv,
+    task_id: str = TASK_ID,
     lane_spacing: float = RACE_LANE_SPACING,
 ) -> None:
-    """Place all robots on one deterministic start line facing world +x."""
-    microduck_mdp.arrange_roll_sprint_race_start(base_env, lane_spacing)
+    """Place all robots on one deterministic world +x race course."""
+    roll_direction = _roll_direction_for_task(task_id)
+    if roll_direction > 0.0:
+        microduck_mdp.arrange_roll_sprint_race_start(base_env, lane_spacing)
+    else:
+        microduck_mdp.arrange_roll_sprint_race_start(
+            base_env,
+            lane_spacing,
+            roll_direction=roll_direction,
+        )
 
 
 def _arrange_recovery_montage(
     base_env: ManagerBasedRlEnv,
     *,
     seed: int,
+    task_id: str = TASK_ID,
     lane_spacing: float = RACE_LANE_SPACING,
 ) -> None:
     """Place one deterministic recovery orientation in each visible lane."""
+    kwargs = {
+        "seed": seed,
+        "orientations": RECOVERY_ORIENTATIONS,
+    }
+    roll_direction = _roll_direction_for_task(task_id)
+    if roll_direction < 0.0:
+        kwargs["roll_direction"] = roll_direction
     microduck_mdp.arrange_roll_sprint_recovery_start(
         base_env,
         lane_spacing,
-        seed=seed,
-        orientations=RECOVERY_ORIENTATIONS,
+        **kwargs,
     )
 
 
@@ -283,9 +304,19 @@ def _load_policy_then_arrange_start(
     )
     policy = runner.get_inference_policy(device=device)
     if recovery_montage:
-        _arrange_recovery_montage(base_env, seed=seed)
+        if _roll_direction_for_task(task_id) < 0.0:
+            _arrange_recovery_montage(base_env, seed=seed, task_id=task_id)
+        else:
+            _arrange_recovery_montage(base_env, seed=seed)
     else:
-        _arrange_race_start(base_env, race_lane_spacing)
+        if _roll_direction_for_task(task_id) < 0.0:
+            _arrange_race_start(
+                base_env,
+                task_id=task_id,
+                lane_spacing=race_lane_spacing,
+            )
+        else:
+            _arrange_race_start(base_env, race_lane_spacing)
         _install_race_corridor_visualizer(
             base_env,
             num_lanes=base_env.num_envs,

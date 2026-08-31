@@ -23,6 +23,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENT = "microduck_roll_sprint"
 BOOTSTRAP_DIR_NAME = ".bootstrap-a35-roll-sprint"
+TASK_ID = "Mjlab-Roll-Sprint-Flat-MicroDuck"
 DEFAULT_SEED = 42
 DEFAULT_SOURCE = (
     REPO_ROOT
@@ -92,6 +93,8 @@ def _parse_args() -> argparse.Namespace:
         help="Save a checkpoint every N PPO iterations.",
     )
     parser.add_argument("--run-name", default="from_a35_roll_sprint")
+    parser.add_argument("--task-id", default=TASK_ID)
+    parser.add_argument("--experiment-name", default=EXPERIMENT)
     return parser.parse_args()
 
 
@@ -103,7 +106,7 @@ def main() -> int:
     if args.num_envs < 1 or args.iterations < 1 or args.save_interval < 1:
         raise SystemExit("--num-envs, --iterations, and --save-interval must be positive")
 
-    experiment_root = REPO_ROOT / "logs" / "rsl_rl" / EXPERIMENT
+    experiment_root = REPO_ROOT / "logs" / "rsl_rl" / args.experiment_name
     staged = experiment_root / BOOTSTRAP_DIR_NAME / "model_0.pt"
     stage_checkpoint(source, staged)
 
@@ -113,7 +116,7 @@ def main() -> int:
     command = [str(train_exe)] if train_exe.is_file() else [shutil.which("uv") or "uv", "run", "train"]
     command.extend(
         [
-            "Mjlab-Roll-Sprint-Flat-MicroDuck",
+            args.task_id,
             "--env.scene.num-envs",
             str(args.num_envs),
             "--agent.max-iterations",
@@ -144,6 +147,8 @@ def main() -> int:
     environment.setdefault("WANDB_MODE", "offline")
     print(f"[roll-sprint] source checkpoint: {source}")
     print(f"[roll-sprint] staged checkpoint: {staged}")
+    print(f"[roll-sprint] task: {args.task_id}")
+    print(f"[roll-sprint] experiment: {args.experiment_name}")
     print(f"[roll-sprint] launching {args.num_envs} envs for {args.iterations} iterations")
     return subprocess.call(command, cwd=REPO_ROOT, env=environment)
 

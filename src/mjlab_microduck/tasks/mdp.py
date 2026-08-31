@@ -11081,6 +11081,7 @@ def reset_roulade_state(
     tuck_overrides: Optional[dict] = None,
     tuck_factor_range: tuple = (0.3, 1.0),
     joint_noise_std: float = 0.0,
+    roll_direction: float = 1.0,
 ):
     """Reset to a standing start or a mid-roll state (reverse curriculum).
 
@@ -11100,6 +11101,8 @@ def reset_roulade_state(
     """
     if env_ids is None or len(env_ids) == 0:
         return
+    if roll_direction not in (-1.0, 1.0):
+        raise ValueError("roll_direction must be -1.0 or 1.0")
     env_ids = env_ids.to(env.device, dtype=torch.long)
     num = len(env_ids)
     asset: Entity = env.scene[asset_cfg.name]
@@ -11121,7 +11124,7 @@ def reset_roulade_state(
         torch.rand(num, device=env.device) * (midroll_pitch_max - midroll_pitch_min)
         + midroll_pitch_min
     )
-    pitch = torch.where(is_mid, mid_pitch, pitch)
+    pitch = torch.where(is_mid, roll_direction * mid_pitch, pitch)
     roll = (torch.rand(num, device=env.device) * 2 - 1) * max(standing_tilt_max, math.radians(5.0))
 
     cp = torch.cos(pitch * 0.5); sp = torch.sin(pitch * 0.5)
@@ -11172,7 +11175,9 @@ def reset_roulade_state(
             * (midroll_omega_range[1] - midroll_omega_range[0])
             + midroll_omega_range[0]
         )
-        env.sim.data.qvel[mid_env_ids, 4] = _ROULADE_FWD_SIGN * omega
+        env.sim.data.qvel[mid_env_ids, 4] = (
+            roll_direction * _ROULADE_FWD_SIGN * omega
+        )
 
     # Élan hook: forward base velocity for STANDING spawns, body x → world xy
     # through the spawn yaw. (0, 0) = standstill start, disabled.
@@ -11184,8 +11189,12 @@ def reset_roulade_state(
             + forward_vel_range[0]
         )
         yaw_s = yaw[~is_mid]
-        env.sim.data.qvel[stand_env_ids, 0] = vx * torch.cos(yaw_s)
-        env.sim.data.qvel[stand_env_ids, 1] = vx * torch.sin(yaw_s)
+        env.sim.data.qvel[stand_env_ids, 0] = (
+            roll_direction * vx * torch.cos(yaw_s)
+        )
+        env.sim.data.qvel[stand_env_ids, 1] = (
+            roll_direction * vx * torch.sin(yaw_s)
+        )
 
     # Progress accounting: standing starts at 0, mid-roll at the spawn pitch.
     spawn_angle = torch.where(is_mid, mid_pitch, torch.zeros_like(mid_pitch))
@@ -11531,6 +11540,12 @@ _ROLL_SPRINT_REPOSITION_YAW_COMMAND_RPS = 0.05
 def _roll_sprint_state(env: ManagerBasedRlEnv) -> None:
     """Create the per-environment cyclic roll-sprint buffers lazily."""
     if hasattr(env, "_roll_sprint_accum"):
+        if not hasattr(env, "_roll_sprint_roll_direction"):
+            env._roll_sprint_roll_direction = torch.ones(
+                env.num_envs, device=env.device
+            )
+        if not hasattr(env, "_roll_sprint_body_heading_w"):
+            env._roll_sprint_body_heading_w = env._roll_sprint_heading_w.clone()
         return
     z = torch.zeros(env.num_envs, device=env.device)
     env._roll_sprint_accum = z.clone()
@@ -11621,6 +11636,10 @@ def _roll_sprint_state(env: ManagerBasedRlEnv) -> None:
         (env.num_envs, 2), device=env.device
     )
     env._roll_sprint_course_lateral_position = z.clone()
+    env._roll_sprint_roll_direction = torch.ones(env.num_envs, device=env.device)
+    env._roll_sprint_body_heading_w = torch.zeros(
+        (env.num_envs, 2), device=env.device
+    )
     env._roll_sprint_heading_w = torch.zeros((env.num_envs, 2), device=env.device)
     env._roll_sprint_heading_ready = torch.zeros(
         env.num_envs, dtype=torch.bool, device=env.device
@@ -11766,25 +11785,31 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
     if not bool(active.any()):
         return
 
-    heading = _roll_sprint_heading(asset)
+    body_heading = _roll_sprint_heading(asset)
     not_ready = active & ~env._roll_sprint_heading_ready
     use_reset_heading = not_ready & env._roll_sprint_reset_heading_override_valid
-    reset_heading = torch.where(
+    reset_body_heading = torch.where(
         use_reset_heading.unsqueeze(-1),
         env._roll_sprint_reset_heading_override_w,
-        heading,
+        body_heading,
     )
-    initial_heading = _roll_sprint_rotate_heading(
-        reset_heading,
+    initial_body_heading = _roll_sprint_rotate_heading(
+        reset_body_heading,
         torch.where(
             not_ready,
             env._roll_sprint_spawn_heading_error_rad,
             torch.zeros_like(env._roll_sprint_spawn_heading_error_rad),
         ),
     )
-    reference_heading = torch.where(
-        not_ready.unsqueeze(-1), initial_heading, env._roll_sprint_heading_w
+    reference_body_heading = torch.where(
+        not_ready.unsqueeze(-1),
+        initial_body_heading,
+        env._roll_sprint_body_heading_w,
     )
+    reference_heading = (
+        reference_body_heading * env._roll_sprint_roll_direction.unsqueeze(-1)
+    )
+    env._roll_sprint_body_heading_w = reference_body_heading
     env._roll_sprint_heading_w = reference_heading
     position_xy = torch.nan_to_num(asset.data.root_link_pos_w[:, :2], nan=0.0)
     reference_lateral_w = torch.stack(
@@ -11798,7 +11823,9 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
         initialized_course_center_xy,
         env._roll_sprint_course_center_xy_w,
     )
-    heading_error = _roll_sprint_signed_heading_error(heading, reference_heading)
+    heading_error = _roll_sprint_signed_heading_error(
+        body_heading, reference_body_heading
+    )
     heading_error_abs = heading_error.abs()
     previous_heading_error_abs = torch.where(
         not_ready,
@@ -11882,7 +11909,10 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
         head_contact = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
     omega_fwd = torch.nan_to_num(
-        _ROULADE_FWD_SIGN * asset.data.root_link_ang_vel_b[:, 1], nan=0.0
+        _ROULADE_FWD_SIGN
+        * env._roll_sprint_roll_direction
+        * asset.data.root_link_ang_vel_b[:, 1],
+        nan=0.0,
     )
     positive_rate = torch.clamp(omega_fwd, min=0.0)
 
@@ -12486,10 +12516,13 @@ def reset_roll_sprint_state(
     heading_return_prob: float = 0.0,
     heading_return_min_rad: float = _ROLL_SPRINT_HEADING_RETURN_RESET_MIN_RAD,
     heading_return_max_rad: float = _ROLL_SPRINT_HEADING_RETURN_RESET_MAX_RAD,
+    roll_direction: float = 1.0,
 ) -> None:
     """Reset pose plus every cyclic sprint buffer for the selected envs."""
     if env_ids is None or len(env_ids) == 0:
         return
+    if roll_direction not in (-1.0, 1.0):
+        raise ValueError("roll_direction must be -1.0 or 1.0")
     env_ids = env_ids.to(env.device, dtype=torch.long)
     total = (
         standing_prob
@@ -12542,6 +12575,7 @@ def reset_roll_sprint_state(
             tuck_overrides=tuck_overrides,
             tuck_factor_range=tuck_factor_range,
             joint_noise_std=joint_noise_std,
+            roll_direction=roll_direction,
         )
 
     _reset_bucket(is_standing | is_crouch | is_ground, standing=True)
@@ -12662,6 +12696,7 @@ def reset_roll_sprint_state(
         spawn_recovery_kind=spawn_kind,
         spawn_course_lateral_position=road_lateral_position,
         spawn_heading_error_rad=spawn_heading_error,
+        roll_direction=roll_direction,
     )
     if len(ground_ids) > 0:
         env._roll_sprint_reset_heading_override_w[ground_ids] = ground_heading
@@ -12686,6 +12721,7 @@ def _reset_roll_sprint_buffers(
     spawn_recovery_kind: torch.Tensor | None = None,
     spawn_course_lateral_position: torch.Tensor | None = None,
     spawn_heading_error_rad: torch.Tensor | None = None,
+    roll_direction: float = 1.0,
 ) -> None:
     """Reset only cyclic sprint bookkeeping, preserving other env state."""
     _roll_sprint_state(env)
@@ -12765,6 +12801,8 @@ def _reset_roll_sprint_buffers(
     env._roll_sprint_course_lateral_position[env_ids] = (
         spawn_course_lateral_position
     )
+    env._roll_sprint_roll_direction[env_ids] = roll_direction
+    env._roll_sprint_body_heading_w[env_ids] = 0.0
     env._roll_sprint_heading_w[env_ids] = 0.0
     env._roll_sprint_heading_ready[env_ids] = False
     env._roll_sprint_reset_heading_override_w[env_ids] = 0.0
@@ -12784,9 +12822,16 @@ def _reset_roll_sprint_buffers(
 def arrange_roll_sprint_race_start(
     env: ManagerBasedRlEnv,
     lane_spacing: float,
+    roll_direction: float = 1.0,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Align every canonical race robot on one deterministic world +x line."""
+    """Align every canonical race robot on one deterministic world +x line.
+
+    Backroll robots face world -x while their credited course remains world
+    +x, making the reverse direction visible without changing the race track.
+    """
+    if roll_direction not in (-1.0, 1.0):
+        raise ValueError("roll_direction must be -1.0 or 1.0")
     asset: Entity = env.scene[asset_cfg.name]
     old_origins = env.scene.terrain.env_origins.clone()
     lane_indices = torch.arange(env.num_envs, device=env.device, dtype=old_origins.dtype)
@@ -12802,7 +12847,10 @@ def arrange_roll_sprint_race_start(
     pose[:, :3] = origins
     pose[:, 2] += local_height
     pose[:, 3:] = 0.0
-    pose[:, 3] = 1.0
+    if roll_direction > 0.0:
+        pose[:, 3] = 1.0
+    else:
+        pose[:, 6] = 1.0
     velocity = torch.zeros((env.num_envs, 6), device=env.device, dtype=pose.dtype)
 
     env.scene.terrain.env_origins.copy_(origins)
@@ -12816,11 +12864,14 @@ def arrange_roll_sprint_race_start(
         env,
         env_ids,
         spawn_course_lateral_position=course_lateral_position,
+        roll_direction=roll_direction,
     )
-    heading = _roll_sprint_heading(asset)
+    body_heading = _roll_sprint_heading(asset)
+    heading = body_heading * roll_direction
     env._roll_sprint_course_center_xy_w.zero_()
     forward_position = _roll_sprint_forward_position(env, asset, heading)
     lateral_position = _roll_sprint_lateral_position(env, asset, heading)
+    env._roll_sprint_body_heading_w.copy_(body_heading)
     env._roll_sprint_heading_w.copy_(heading)
     env._roll_sprint_heading_ready[:] = True
     env._roll_sprint_heading_error_rad.zero_()
@@ -12841,10 +12892,13 @@ def arrange_roll_sprint_recovery_start(
     lane_spacing: float,
     seed: int = 0,
     orientations: tuple[str, ...] = ("face_down", "face_up", "left", "right"),
+    roll_direction: float = 1.0,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Arrange deterministic four-orientation self-right and reroll starts."""
     asset: Entity = env.scene[asset_cfg.name]
+    if roll_direction not in (-1.0, 1.0):
+        raise ValueError("roll_direction must be -1.0 or 1.0")
     if len(orientations) != env.num_envs:
         raise ValueError("one recovery orientation is required for every environment")
     orientation_to_code = {"face_down": 1, "face_up": 2, "left": 3, "right": 4}
@@ -12878,6 +12932,10 @@ def arrange_roll_sprint_recovery_start(
             device=env.device,
             dtype=pose.dtype,
         )
+    if roll_direction < 0.0:
+        # Pre-multiply every lying pose by a deterministic world-yaw of pi.
+        w, x, y, z = pose[:, 3:].unbind(dim=-1)
+        pose[:, 3:] = torch.stack((-z, -y, x, w), dim=-1)
     velocity = torch.zeros((env.num_envs, 6), device=env.device, dtype=pose.dtype)
 
     joint_pos = asset.data.default_joint_pos.clone()
@@ -12907,12 +12965,17 @@ def arrange_roll_sprint_recovery_start(
         spawn_self_righting=true,
         spawn_recovery_kind=codes,
         spawn_course_lateral_position=lane_indices * lane_spacing,
+        roll_direction=roll_direction,
     )
-    heading = torch.zeros((env.num_envs, 2), device=env.device, dtype=pose.dtype)
-    heading[:, 0] = 1.0
+    body_heading = torch.zeros(
+        (env.num_envs, 2), device=env.device, dtype=pose.dtype
+    )
+    body_heading[:, 0] = roll_direction
+    heading = body_heading * roll_direction
     env._roll_sprint_course_center_xy_w.zero_()
     forward_position = _roll_sprint_forward_position(env, asset, heading)
     lateral_position = _roll_sprint_lateral_position(env, asset, heading)
+    env._roll_sprint_body_heading_w.copy_(body_heading)
     env._roll_sprint_heading_w.copy_(heading)
     env._roll_sprint_heading_ready[:] = True
     env._roll_sprint_heading_error_rad.zero_()
@@ -13424,7 +13487,10 @@ def roll_sprint_head_pivot(
         env._roll_sprint_accum < _HEAD_LATCH_HI
     )
     omega_fwd = torch.nan_to_num(
-        _ROULADE_FWD_SIGN * asset.data.root_link_ang_vel_b[:, 1], nan=0.0
+        _ROULADE_FWD_SIGN
+        * env._roll_sprint_roll_direction
+        * asset.data.root_link_ang_vel_b[:, 1],
+        nan=0.0,
     )
     rate = torch.clamp(omega_fwd / rate_norm, 0.0, 1.0)
     return (
