@@ -543,11 +543,16 @@ def make_microduck_backroll_sprint_env_cfg(
     # Reverse discovery needs many direction-matched mid-roll examples.  Keep
     # a small standing bucket for launch learning, but avoid letting the
     # easier self-right-only basin dominate the first policy updates.
-    reset_params["midroll_forward_vel_range"] = (0.15, 0.45)
+    # Give both reset buckets a small, direction-matched launch velocity.  A
+    # standing robot otherwise has no observable cue that this dedicated
+    # policy must choose the reverse roll sign, while mid-roll starts should
+    # carry enough course-aligned momentum to keep the late-roll lesson alive.
+    reset_params["forward_vel_range"] = (0.08, 0.20)
+    reset_params["midroll_forward_vel_range"] = (0.20, 0.50)
     reset_params.update(
-        midroll_pitch_min=math.radians(220.0),
-        midroll_pitch_max=math.radians(340.0),
-        midroll_omega_range=(1.5, 4.0),
+        midroll_pitch_min=math.radians(280.0),
+        midroll_pitch_max=math.radians(350.0),
+        midroll_omega_range=(2.5, 5.0),
     )
     if not play:
         reset_params.update(
@@ -561,8 +566,8 @@ def make_microduck_backroll_sprint_env_cfg(
             "param_stages"
         ]
         stage_mixes = (
-            ((0.15, 0.65, 0.05, 0.05, 0.10), (220.0, 340.0, (1.5, 4.0))),
-            ((0.25, 0.55, 0.05, 0.05, 0.10), (160.0, 340.0, (1.0, 3.5))),
+            ((0.25, 0.55, 0.05, 0.05, 0.10), (280.0, 350.0, (2.5, 5.0))),
+            ((0.30, 0.50, 0.05, 0.05, 0.10), (220.0, 350.0, (1.5, 4.5))),
             ((0.45, 0.35, 0.10, 0.05, 0.05), (100.0, 340.0, (0.5, 3.0))),
             ((0.65, 0.10, 0.10, 0.05, 0.10), (50.0, 340.0, (0.0, 3.0))),
         )

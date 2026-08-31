@@ -384,16 +384,19 @@ def test_backroll_sprint_is_separate_directional_61d_policy():
     ] == (0.0, 0.0)
     assert reverse.events["set_roll_sprint_state"].params[
         "midroll_forward_vel_range"
-    ] == (0.15, 0.45)
+    ] == (0.20, 0.50)
+    assert reverse.events["set_roll_sprint_state"].params[
+        "forward_vel_range"
+    ] == (0.08, 0.20)
     assert reverse.events["set_roll_sprint_state"].params[
         "midroll_pitch_min"
-    ] == pytest.approx(math.radians(220.0))
+    ] == pytest.approx(math.radians(280.0))
     assert reverse.events["set_roll_sprint_state"].params[
         "midroll_pitch_max"
-    ] == pytest.approx(math.radians(340.0))
+    ] == pytest.approx(math.radians(350.0))
     assert reverse.events["set_roll_sprint_state"].params[
         "midroll_omega_range"
-    ] == (1.5, 4.0)
+    ] == (2.5, 5.0)
     assert list(reverse.observations["actor"].terms) == list(
         forward.observations["actor"].terms
     )
@@ -422,8 +425,8 @@ def test_backroll_sprint_is_separate_directional_61d_policy():
         "param_stages"
     ]
     assert [stage["params"]["midroll_prob"] for stage in spawn_stages] == [
-        0.65,
         0.55,
+        0.50,
         0.35,
         0.10,
     ]
@@ -431,15 +434,15 @@ def test_backroll_sprint_is_separate_directional_61d_policy():
         stage["params"]["midroll_pitch_min"] for stage in spawn_stages
     ] == pytest.approx(
         [
+            math.radians(280.0),
             math.radians(220.0),
-            math.radians(160.0),
             math.radians(100.0),
             math.radians(50.0),
         ]
     )
     assert [stage["params"]["midroll_omega_range"] for stage in spawn_stages] == [
-        (1.5, 4.0),
-        (1.0, 3.5),
+        (2.5, 5.0),
+        (1.5, 4.5),
         (0.5, 3.0),
         (0.0, 3.0),
     ]
