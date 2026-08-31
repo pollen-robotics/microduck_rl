@@ -2457,6 +2457,6 @@ def test_qualified_stand_api_runs_from_accepted_to_succeeded(
 
     assert "RUNNING" in observed
     assert snapshot["state"] == "SUCCEEDED"
-    assert snapshot["stopReason"] == "TASK_COMPLETE"
+    assert snapshot["stopReason"] == "STAND_POSE_SETTLED"
     assert snapshot["evidence"]["metrics"]["standSettledSteps"] >= 10
     assert candidate.bundleId == promoted.manifest.bundleId

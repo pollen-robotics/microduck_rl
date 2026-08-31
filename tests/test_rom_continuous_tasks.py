@@ -53,6 +53,7 @@ _REPLACED_THREAD_LIFECYCLE_TESTS = {
     "test_start_timeout_retains_service_owner_until_emergency_attempt_finishes",
     "test_safety_operation_failure_persists_requested_terminal_and_releases_slot",
 }
+_PARENT_DEADMAN_GRACE_MS = 500
 
 
 @pytest.fixture(autouse=True)
@@ -725,7 +726,7 @@ def test_expired_lease_zeros_velocity_stops_and_times_out(
     service.create_task(walk_request)
     service.command(walk_request.taskId, command(sequence=1, vx=0.2, lease_ms=500))
 
-    clock.advance_ms(501)
+    clock.advance_ms(501 + _PARENT_DEADMAN_GRACE_MS)
     service.tick()
 
     assert runtime.last_command == {"vxMps": 0.0, "vyMps": 0.0, "yawRateRadps": 0.0}
@@ -856,7 +857,7 @@ def test_app_watchdog_expires_initial_lease_without_http_traffic(
             json=walk_request.model_dump(mode="json"),
         )
         assert response.status_code == 202
-        clock.advance_ms(501)
+        clock.advance_ms(501 + _PARENT_DEADMAN_GRACE_MS)
         assert runtime.safe_stopped.wait(timeout=1.0)
         terminal = _wait_for_terminal(service, walk_request.taskId)
         assert terminal.state == "TIMED_OUT"
@@ -961,7 +962,7 @@ def test_stale_command_does_not_renew_lease(service, walk_request, clock, runtim
         service.command(walk_request.taskId, command(sequence=1, vx=0.1, lease_ms=500))
 
     assert error.value.code == "STALE_COMMAND"
-    clock.advance_ms(2)
+    clock.advance_ms(2 + _PARENT_DEADMAN_GRACE_MS)
     service.tick()
     assert service.get_task(walk_request.taskId).state == "TIMED_OUT"
     assert runtime.operation_log[-2:] == [
@@ -980,7 +981,7 @@ def test_identical_command_sequence_is_idempotent_without_renewing_lease(
     clock.advance_ms(99)
 
     service.command(walk_request.taskId, first)
-    clock.advance_ms(2)
+    clock.advance_ms(2 + _PARENT_DEADMAN_GRACE_MS)
     service.tick()
 
     assert service.get_task(walk_request.taskId).state == "TIMED_OUT"
