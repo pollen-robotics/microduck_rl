@@ -5,6 +5,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[1] / "scripts" / "sample_roll_sprint_videos.py"
 )
@@ -41,7 +43,7 @@ def test_defaults_record_long_race_every_150_seconds() -> None:
     assert args.task_id == "Mjlab-Roll-Sprint-Flat-MicroDuck"
     assert sampler.RECORDING_STEPS == 2000
     assert sampler.RECOVERY_RECORDING_STEPS == 600
-    assert sampler.RECORDING_FRAME_STRIDE == 2
+    assert sampler.RECORDING_FRAME_STRIDE == 3
     assert sampler.PLAYBACK_SPEED == 2.0
     assert sampler.OUTPUT_FPS == 60.0
     assert (sampler.OUTPUT_WIDTH, sampler.OUTPUT_HEIGHT) == (1920, 1080)
@@ -51,14 +53,15 @@ def test_defaults_record_long_race_every_150_seconds() -> None:
         / sampler.RECORDING_FRAME_STRIDE
         * sampler.PLAYBACK_SPEED
     )
-    assert distinct_motion_fps == 50.0
-    assert (
-        sampler.RECORDING_STEPS
-        / sampler.RECORDING_FRAME_STRIDE
-        / distinct_motion_fps
-        == sampler.OUTPUT_VIDEO_SECONDS
-        == 20.0
+    assert distinct_motion_fps > 30.0
+    recorded_frames = len(
+        range(0, sampler.RECORDING_STEPS, sampler.RECORDING_FRAME_STRIDE)
     )
+    assert recorded_frames / distinct_motion_fps == pytest.approx(
+        sampler.OUTPUT_VIDEO_SECONDS,
+        abs=0.02,
+    )
+    assert sampler.OUTPUT_VIDEO_SECONDS == 20.0
     assert sampler.EVALUATION_DURATION == 40.0
     assert sampler.EVALUATION_SCHEMA_VERSION == 8
     assert args.parent_frontier_m is None
@@ -120,7 +123,7 @@ def test_sample_once_records_four_robot_video_and_persists_state(
     assert evaluation_command[evaluation_command.index("--duration") + 1] == "40"
     assert command[2] == str(checkpoint)
     assert command[command.index("--steps") + 1] == "2000"
-    assert command[command.index("--frame-stride") + 1] == "2"
+    assert command[command.index("--frame-stride") + 1] == "3"
     assert command[command.index("--output-fps") + 1] == "60.0"
     assert command[command.index("--playback-speed") + 1] == "2.0"
     assert command[command.index("--width") + 1] == "1920"

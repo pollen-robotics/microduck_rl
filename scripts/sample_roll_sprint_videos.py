@@ -36,10 +36,10 @@ OUTPUT_HEIGHT = 1080
 OUTPUT_FPS = 60.0
 OUTPUT_VIDEO_SECONDS = 20.0
 PLAYBACK_SPEED = 2.0
-# Rendering every second physics step supplies 50 distinct motion updates per
-# playback second. The encoder writes a browser-friendly constant 60 fps by
-# repeating the remaining frames without changing the 20 s clip duration.
-RECORDING_FRAME_STRIDE = 2
+# Rendering every third policy step supplies 33.3 distinct motion updates per
+# playback second. The encoder writes a browser-friendly constant 60 fps while
+# preserving the full race and enough GPU margin for the 150 s capture cadence.
+RECORDING_FRAME_STRIDE = 3
 EVALUATION_ENVS = 4
 EVALUATION_DURATION = 40.0
 EVALUATION_SCHEMA_VERSION = 8
