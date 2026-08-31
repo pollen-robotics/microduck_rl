@@ -391,6 +391,17 @@ def test_backroll_sprint_is_separate_directional_61d_policy():
     assert MicroduckBackrollSprintRlCfg.algorithm is not (
         MicroduckRollSprintRlCfg.algorithm
     )
+    assert reverse.rewards["roll_sprint_progress"].weight == 3.0
+    assert reverse.rewards["roll_sprint_head_pivot"].weight == 0.5
+    spawn_stages = reverse.curriculum["roll_sprint_spawn_mix"].params[
+        "param_stages"
+    ]
+    assert [stage["params"]["midroll_prob"] for stage in spawn_stages] == [
+        0.35,
+        0.25,
+        0.15,
+        0.10,
+    ]
 
 
 def test_backroll_requires_reverse_rotation_and_reverse_translation(monkeypatch):
@@ -432,6 +443,28 @@ def test_backroll_requires_reverse_rotation_and_reverse_translation(monkeypatch)
     assert opposite_env._roll_sprint_accum[0] == 0.0
     assert opposite_env._roll_sprint_phase_frontier[0] == 0.0
     assert opposite_env._roll_sprint_completed_distance[0] == 0.0
+
+
+def test_backroll_midroll_bootstrap_gets_dense_progress_but_no_cycle_credit(
+    monkeypatch,
+):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    mdp._reset_roll_sprint_buffers(
+        env,
+        torch.tensor([0]),
+        spawn_accum=torch.tensor([4.0]),
+        spawn_cycle_eligible=torch.tensor([False]),
+        roll_direction=-1.0,
+    )
+    asset.data.root_link_ang_vel_b[:, 1] = -1.0
+
+    progress = mdp.roll_sprint_progress(env)
+
+    assert progress[0] > 0.0
+    assert mdp.roll_sprint_cycle_rate(env)[0] == 0.0
+    assert mdp.roll_sprint_distance(env)[0] == 0.0
+    assert env._roll_sprint_completed[0] == 0.0
 
 
 def test_roll_sprint_and_backlash_tasks_are_registered():

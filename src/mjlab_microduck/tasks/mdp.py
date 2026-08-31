@@ -13040,9 +13040,16 @@ def roll_sprint_progress(
     # flat head-top contact was actually witnessed. Orientation/road-invalid
     # cycles stop paying immediately, and their completion step cannot leak a
     # final progress payment after the state machine resets its phase frontier.
+    bootstrap_segment = (
+        ~env._roll_sprint_cycle_eligible
+        & ~env._roll_sprint_awaiting_recovery
+        & ~env._roll_sprint_awaiting_reposition
+        & ~env._roll_sprint_self_righting
+    )
     head_phase_valid = (
         (env._roll_sprint_phase_frontier < _HEAD_LATCH_HI)
         | env._roll_sprint_head_latch
+        | bootstrap_segment
     )
     cycle_valid = (
         head_phase_valid

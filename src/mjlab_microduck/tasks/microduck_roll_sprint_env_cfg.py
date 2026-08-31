@@ -530,7 +530,49 @@ def make_microduck_backroll_sprint_env_cfg(
 ) -> ManagerBasedRlEnvCfg:
     """Create the separate repeated supported backroll sprint configuration."""
     cfg = make_microduck_roll_sprint_env_cfg(play=play)
-    cfg.events["set_roll_sprint_state"].params["roll_direction"] = -1.0
+    reset_params = cfg.events["set_roll_sprint_state"].params
+    reset_params["roll_direction"] = -1.0
+    if not play:
+        reset_params.update(
+            standing_prob=0.35,
+            midroll_prob=0.35,
+            postroll_prob=0.10,
+            crouch_prob=0.05,
+            ground_recovery_prob=0.15,
+        )
+        spawn_stages = cfg.curriculum["roll_sprint_spawn_mix"].params[
+            "param_stages"
+        ]
+        stage_mixes = (
+            (0.35, 0.35, 0.10, 0.05, 0.15),
+            (0.45, 0.25, 0.10, 0.05, 0.15),
+            (0.55, 0.15, 0.10, 0.05, 0.15),
+            (0.65, 0.10, 0.10, 0.05, 0.10),
+        )
+        for stage, mix in zip(spawn_stages, stage_mixes, strict=True):
+            stage["params"].update(
+                standing_prob=mix[0],
+                midroll_prob=mix[1],
+                postroll_prob=mix[2],
+                crouch_prob=mix[3],
+                ground_recovery_prob=mix[4],
+            )
+
+    # Backroll discovery needs more dense supported-rotation signal than a
+    # continuation of an already learned forward roll. It remains far below
+    # the valid frontier objective and decays once complete backrolls emerge.
+    cfg.rewards["roll_sprint_progress"].weight = 3.0
+    cfg.curriculum["roll_sprint_progress_weight"].params["weight_stages"] = [
+        {"step": 0, "weight": 3.0},
+        {"step": 1000 * 24, "weight": 2.0},
+        {"step": 2000 * 24, "weight": 1.5},
+    ]
+    cfg.rewards["roll_sprint_head_pivot"].weight = 0.5
+    cfg.curriculum["roll_sprint_head_pivot_weight"].params["weight_stages"] = [
+        {"step": 0, "weight": 0.5},
+        {"step": 1000 * 24, "weight": 0.25},
+        {"step": 3000 * 24, "weight": 0.10},
+    ]
     return cfg
 
 
