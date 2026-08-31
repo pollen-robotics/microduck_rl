@@ -46,7 +46,7 @@ def install_parent_death_signal(expected_parent_pid: int) -> None:
     if (
         not isinstance(expected_parent_pid, int)
         or isinstance(expected_parent_pid, bool)
-        or expected_parent_pid <= 1
+        or expected_parent_pid <= 0
         or os.getppid() != expected_parent_pid
     ):
         os._exit(70)

@@ -1275,6 +1275,19 @@ def test_supervisor_launch_never_uses_unsafe_preexec(monkeypatch) -> None:
     assert "preexec_fn" not in captured
 
 
+def test_parent_death_identity_accepts_container_pid_one(monkeypatch) -> None:
+    """The API is PID 1 in the production container, so one is a valid parent."""
+    from mjlab_microduck.rom import parent_death
+
+    class Libc:
+        def prctl(self, *_args):
+            return 0
+
+    monkeypatch.setattr(parent_death.os, "getppid", lambda: 1)
+    monkeypatch.setattr(parent_death.ctypes, "CDLL", lambda *_a, **_k: Libc())
+    parent_death.install_parent_death_signal(1)
+
+
 def test_parent_killed_before_python_bootstrap_cannot_leave_orphan_with_peer_open() -> None:
     report_parent, report_child = socket.socketpair(
         socket.AF_UNIX, socket.SOCK_SEQPACKET
