@@ -8,25 +8,35 @@ import inspect
 import os
 import select
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
+import mjlab_microduck.rom.main as rom_main
 from mjlab_microduck.rom.api import create_app
 from mjlab_microduck.rom.contracts import TaskCommandRequest, TaskEvidence
-from mjlab_microduck.rom.process_protocol import TerminalPayload
+from mjlab_microduck.rom.process_protocol import AckPayload, TerminalPayload
 from mjlab_microduck.rom.process_service import SimulatorTaskService
-from mjlab_microduck.rom.process_supervisor import CorrelatedTerminalDelivery
+from mjlab_microduck.rom.process_supervisor import (
+    CorrelatedTerminalDelivery,
+    StartAcknowledgement,
+    SupervisorSnapshot,
+    SupervisorUnavailable,
+)
 from mjlab_microduck.rom.service import RuntimeException
 from mjlab_microduck.rom.store import SqliteTaskStore
+from mjlab_microduck.rom.supervisor_state import SupervisorState
 from tests.test_rom_continuous_tasks import bundle as walk_bundle_fixture
 from tests.test_rom_continuous_tasks import walk_request as walk_request_fixture
 from tests.test_rom_discrete_tasks import bundle as stand_bundle_fixture
 from tests.test_rom_discrete_tasks import stand_request as stand_request_fixture
-from tests.test_rom_process_supervisor import _supervisor
+from tests.test_rom_process_supervisor import _gate_next_unsolicited_poll, _supervisor
 
 ROM_ROOT = Path(__file__).parents[1] / "src" / "mjlab_microduck" / "rom"
 
@@ -126,6 +136,7 @@ def test_parent_rom_modules_do_not_import_native_runtime_libraries():
         "api.py",
         "main.py",
         "process_supervisor.py",
+        "qualification.py",
     ):
         path = ROM_ROOT / name
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -139,6 +150,103 @@ def test_parent_rom_modules_do_not_import_native_runtime_libraries():
             if names & {"mujoco", "onnxruntime"}:
                 violations.append(path.name)
     assert violations == []
+
+
+def test_production_parent_import_closure_does_not_load_native_runtime_modules():
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "import mjlab_microduck.rom.main; "
+                "import mjlab_microduck.rom.qualification; "
+                "assert 'mujoco' not in sys.modules; "
+                "assert 'onnxruntime' not in sys.modules"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_lifespan_surfaces_exact_reap_failure_instead_of_reporting_clean_shutdown():
+    class CloseFailureService:
+        def tick(self) -> None:
+            return None
+
+        def watchdog_failed(self) -> None:
+            return None
+
+        def close(self) -> None:
+            raise RuntimeError("sensitive containment detail")
+
+    app = create_app(CloseFailureService(), "shutdown-token")  # type: ignore[arg-type]
+
+    with (
+        pytest.raises(RuntimeError, match="shutdown containment failed"),
+        TestClient(app) as client,
+    ):
+        assert client.get("/v1/health").status_code == 200
+
+    assert isinstance(app.state.shutdown_failure, RuntimeError)
+
+
+def test_pid1_server_exits_nonzero_when_lifespan_containment_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = SimpleNamespace(state=SimpleNamespace(shutdown_failure=None))
+    configured = SimpleNamespace(host="127.0.0.1", port=8000)
+    captured: dict[str, object] = {}
+
+    class FakeServer:
+        def __init__(self, config) -> None:
+            captured["config"] = config
+            self.lifespan = SimpleNamespace(shutdown_failed=True)
+
+        def run(self) -> None:
+            factory, _kwargs = captured["config"]
+            assert callable(factory)
+            captured["app_created_before_run"] = False
+            created_app = factory()
+            assert created_app is app
+            captured["app_created_during_run"] = True
+            app.state.shutdown_failure = RuntimeError("exact reap unproven")
+
+    monkeypatch.setattr(rom_main, "read_configuration", lambda: configured)
+    app_created = False
+
+    def create_after_signal_ownership():
+        nonlocal app_created
+        app_created = True
+        return app
+
+    monkeypatch.setattr(rom_main, "create_configured_app", create_after_signal_ownership)
+    monkeypatch.setattr(
+        rom_main.uvicorn,
+        "Config",
+        lambda application, **kwargs: (application, kwargs),
+    )
+    monkeypatch.setattr(rom_main.uvicorn, "Server", FakeServer)
+
+    with pytest.raises(SystemExit) as failure:
+        assert app_created is False
+        rom_main.main()
+
+    assert failure.value.code == 70
+    factory, options = captured["config"]
+    assert callable(factory)
+    assert options == {
+        "host": "127.0.0.1",
+        "port": 8000,
+        "timeout_graceful_shutdown": 1.0,
+        "factory": True,
+    }
+    assert captured["app_created_before_run"] is False
+    assert captured["app_created_during_run"] is True
 
 
 def test_service_requires_a_supervisor_factory_not_a_runtime_handle():
@@ -216,6 +324,82 @@ def _wait_state(service, task_id, state):
             return snapshot
         time.sleep(0.005)
     raise AssertionError(f"{task_id} did not reach {state}")
+
+
+def test_watchdog_durably_fails_post_ack_child_exit_without_public_operation(
+    tmp_path,
+):
+    """A dead child must not remain cached RUNNING until a caller touches the API."""
+    service, request, supervisor, launch = _process_service(
+        tmp_path, "exit-after-start-ack"
+    )
+    try:
+        service.create_task(request)
+        peer = launch.test_peer
+        assert peer is not None
+        peer.settimeout(2)
+        assert peer.recv(64) == b"STARTED"
+        pid = supervisor.snapshot().pid
+        assert pid is not None
+        pidfd = os.pidfd_open(pid)
+        release_poll = _gate_next_unsolicited_poll(supervisor)
+        peer.sendall(b"EXIT")
+        assert select.select([pidfd], [], [], 2)[0] == [pidfd]
+        release_poll.set()
+
+        deadline = time.monotonic() + 2
+        while supervisor.snapshot().pid is not None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        try:
+            assert select.select([pidfd], [], [], 0)[0] == [pidfd]
+        finally:
+            os.close(pidfd)
+        service.tick()
+        terminal = service._store.get(request.taskId)
+        assert terminal is not None
+        assert terminal.state == "FAILED"
+        assert terminal.stopReason == "RUNTIME_UNRESPONSIVE"
+        assert supervisor.snapshot().state.value == "NO_CHILD"
+    finally:
+        service.close()
+
+
+def test_terminal_then_immediate_child_exit_preserves_durable_success(tmp_path):
+    """A queued truthful terminal must win over the child's subsequent EOF."""
+    service, request, supervisor, launch = _process_service(
+        tmp_path, "terminal-event-exit", discrete=True
+    )
+    try:
+        service.create_task(request)
+        peer = launch.test_peer
+        assert peer is not None
+        peer.settimeout(2)
+        assert peer.recv(64) == b"STARTED"
+        pid = supervisor.snapshot().pid
+        assert pid is not None
+        pidfd = os.pidfd_open(pid)
+        release_poll = _gate_next_unsolicited_poll(supervisor)
+        peer.sendall(b"EMIT")
+        assert select.select([pidfd], [], [], 2)[0] == [pidfd]
+        os.close(pidfd)
+        release_poll.set()
+        deadline = time.monotonic() + 2
+        terminal = None
+        while time.monotonic() < deadline:
+            terminal = service._store.get(request.taskId)
+            if (
+                terminal is not None
+                and terminal.state == "SUCCEEDED"
+                and supervisor.snapshot().pid is None
+            ):
+                break
+            time.sleep(0.005)
+        assert terminal is not None
+        assert terminal.state == "SUCCEEDED"
+        assert terminal.stopReason == "TASK_COMPLETE"
+        assert supervisor.snapshot().state.value == "NO_CHILD"
+    finally:
+        service.close()
 
 
 def test_process_discrete_stand_success_and_event_paging(tmp_path):
@@ -817,11 +1001,115 @@ def test_walk_start_renew_and_child_acknowledged_lease_timeout(tmp_path):
         assert accepted.state == "RUNNING"
         now[0] += 0.501
         service.tick()
+        assert service.get_task(request.taskId).state == "RUNNING"
+        now[0] += 1.501
+        service.tick()
         terminal = service.get_task(request.taskId)
         assert terminal.state == "TIMED_OUT"
         assert terminal.stopReason == "LEASE_EXPIRED"
     finally:
         supervisor.close()
+
+
+def test_watchdog_stop_defers_to_exact_queued_child_lease_terminal(tmp_path):
+    """A queued child deadman result must beat the parent's concurrent stop claim."""
+    now = [100.0]
+    bundle = walk_bundle_fixture.__wrapped__()
+    request = walk_request_fixture.__wrapped__()
+    policy = bundle.policies[0]
+    delivery = CorrelatedTerminalDelivery(
+        generation=1,
+        task_id=request.taskId,
+        event_sequence=1,
+        terminal=TerminalPayload(
+            outcome="TIMED_OUT",
+            evidence=TaskEvidence(
+                bundleDigest=bundle.bundleDigest,
+                policyDigest=policy.digest,
+                modelDigest=bundle.model.digest,
+                metrics={},
+                stopReason="LEASE_EXPIRED",
+            ),
+        ),
+    )
+
+    class QueuedTerminalSupervisor:
+        def __init__(self, callback) -> None:
+            self.callback = callback
+            self.running = False
+            self.terminal_queued = False
+
+        def snapshot(self):
+            if self.terminal_queued:
+                return SupervisorSnapshot(
+                    SupervisorState.IDLE,
+                    1,
+                    True,
+                    None,
+                    None,
+                    False,
+                    True,
+                    delivery,
+                )
+            return SupervisorSnapshot(
+                SupervisorState.RUNNING if self.running else SupervisorState.IDLE,
+                1,
+                True,
+                None,
+                None,
+                not self.running,
+            )
+
+        def ensure_ready(self):
+            return self.snapshot()
+
+        def readiness(self):
+            return not self.running
+
+        def start(
+            self, candidate, register_acknowledgement=None, register_dispatch=None
+        ):
+            if register_dispatch is not None:
+                register_dispatch()
+            result = StartAcknowledgement(
+                1, candidate.taskId, AckPayload(acknowledgedKind="START")
+            )
+            if register_acknowledgement is not None:
+                register_acknowledgement(result)
+            self.running = True
+            return result
+
+        def stop(self, _task_id, _reason, register_dispatch=None):
+            if register_dispatch is not None:
+                register_dispatch()
+            self.terminal_queued = True
+            raise SupervisorUnavailable("terminal delivery already queued")
+
+        def close(self):
+            return None
+
+    holder = {}
+
+    def factory(callback):
+        supervisor = QueuedTerminalSupervisor(callback)
+        holder["supervisor"] = supervisor
+        return supervisor
+
+    service = SimulatorTaskService(
+        bundle,
+        SqliteTaskStore(tmp_path / "queued-terminal.sqlite3"),
+        factory,
+        monotonic_clock=lambda: now[0],
+    )
+    service.create_task(request)
+    now[0] += request.leaseMs / 1000 + 0.001
+    service.tick()
+    assert service.get_task(request.taskId).state == "RUNNING"
+
+    holder["supervisor"].callback(delivery)
+    terminal = service.get_task(request.taskId)
+    assert terminal.state == "TIMED_OUT"
+    assert terminal.stopReason == "LEASE_EXPIRED"
 
 
 def test_cancel_queued_during_blocked_start_stops_once_after_start_ack(tmp_path):

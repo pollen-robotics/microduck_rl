@@ -49,6 +49,8 @@ MODES = (
     "malformed-event",
     "lease-null-cleanup-failure",
     "exit-after-ready",
+    "exit-after-start-ack",
+    "terminal-event-exit",
 )
 
 PROOF_MODES = (
@@ -285,8 +287,16 @@ def main() -> int:
             if not test_control.recv(1):
                 return 0
             return 17
+        if (
+            args.mode == "exit-after-start-ack"
+            and request.kind is RuntimeMessageKind.START
+        ):
+            test_control.sendall(b"STARTED")
+            if test_control.recv(4) == b"EXIT":
+                return 17
         if request.kind is RuntimeMessageKind.START and args.mode in {
             "terminal-event",
+            "terminal-event-exit",
             "terminal-fallen",
             "terminal-overrun",
             "terminal-nonfinite",
@@ -304,6 +314,7 @@ def main() -> int:
                 if test_control.recv(4) == b"EMIT":
                     reason = {
                         "terminal-event": "TASK_COMPLETE",
+                        "terminal-event-exit": "TASK_COMPLETE",
                         "terminal-fallen": "FALLEN",
                         "terminal-overrun": "CONTROL_LOOP_OVERRUN",
                         "terminal-nonfinite": "NON_FINITE_STATE",
@@ -315,13 +326,16 @@ def main() -> int:
                                 request,
                                 outcome=(
                                     "SUCCEEDED"
-                                    if args.mode == "terminal-event"
+                                    if args.mode
+                                    in {"terminal-event", "terminal-event-exit"}
                                     else "FAILED"
                                 ),
                                 reason=reason,
                             )
                         )
                     )
+                    if args.mode == "terminal-event-exit":
+                        return 0
             elif args.mode == "malformed-event":
                 control.sendall(b'{"kind":"TERMINAL_EVENT"}')
             else:

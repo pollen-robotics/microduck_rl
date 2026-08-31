@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import os
+import signal
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -413,9 +414,43 @@ def create_configured_app(
 def main() -> None:
     """Launch the configured HTTP server without logging authorization material."""
     configuration = read_configuration()
-    uvicorn.run(
-        create_configured_app(), host=configuration.host, port=configuration.port
+    applications: list[Any] = []
+
+    def application_factory():
+        app = create_configured_app()
+        applications.append(app)
+        return app
+
+    server = uvicorn.Server(
+        uvicorn.Config(
+            application_factory,
+            host=configuration.host,
+            port=configuration.port,
+            # Keep HTTP draining shorter than the durable store's bounded write
+            # wait so lifespan containment failures cannot expire invisibly
+            # before ``service.close()`` observes the blocked callback worker.
+            timeout_graceful_shutdown=1.0,
+            factory=True,
+        )
     )
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def request_server_shutdown(_signum: int, _frame: object) -> None:
+        # Uvicorn restores and replays the prior handler after its signal
+        # capture context.  Preserve that replay without letting the bootstrap
+        # handler's pre-server SystemExit(0) hide a lifespan close failure.
+        server.should_exit = True
+
+    signal.signal(signal.SIGTERM, request_server_shutdown)
+    try:
+        server.run()
+        app = applications[0] if applications else None
+        if (
+            app is not None and app.state.shutdown_failure is not None
+        ) or getattr(server.lifespan, "shutdown_failed", False):
+            raise SystemExit(70)
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":

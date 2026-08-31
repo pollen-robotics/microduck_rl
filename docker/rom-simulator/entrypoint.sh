@@ -18,4 +18,4 @@ if [ ! -d "$state_dir" ] || [ ! -w "$state_dir" ]; then
     exit 64
 fi
 
-exec python -m mjlab_microduck.rom.main "$@"
+exec python -P /usr/local/libexec/microduck-rom-pid1.py "$@"

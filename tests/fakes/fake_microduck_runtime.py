@@ -58,6 +58,7 @@ class FakeMicroduckRuntime:
         self.safe_stop_metrics: dict[str, Any] = {"safeStop": True}
         self.status_value = robot_status()
         self.status_call_count = 0
+        self.sample_call_count = 0
         self.active_handle: RuntimeHandle | None = None
 
     def __call__(self, terminal_callback):
@@ -101,6 +102,7 @@ class FakeMicroduckRuntime:
         self.sample_started.set()
         self.sample_release.wait()
         with self._lock:
+            self.sample_call_count += 1
             if self._samples:
                 next_sample = self._samples.popleft()
                 if isinstance(next_sample, BaseException):
@@ -225,10 +227,17 @@ class FakeRuntimeProcessSupervisor:
         self.runtime.status()
         return self.snapshot()
 
-    def start(self, request, register_acknowledgement=None):
+    def start(
+        self,
+        request,
+        register_acknowledgement=None,
+        register_dispatch=None,
+    ):
         from mjlab_microduck.rom.process_supervisor import StartAcknowledgement
 
         with self._operation_lock:
+            if register_dispatch is not None:
+                register_dispatch()
             self.runtime.validate(request, request)
             try:
                 self.handle = self.runtime.start(request, request)
@@ -290,8 +299,10 @@ class FakeRuntimeProcessSupervisor:
     def status(self, task_id):
         return self.runtime.status()
 
-    def stop(self, task_id, reason):
+    def stop(self, task_id, reason, register_dispatch=None):
         with self._operation_lock:
+            if register_dispatch is not None:
+                register_dispatch()
             return self._finish(
                 (
                     "CANCELLED"

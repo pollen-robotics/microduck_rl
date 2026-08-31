@@ -8,7 +8,10 @@ objects.
 
 from __future__ import annotations
 
+import array
 import json
+import os
+import socket
 from enum import Enum
 from typing import Annotated, Any, Literal
 
@@ -34,6 +37,7 @@ from .contracts import (
 
 PROTOCOL = "MICRODUCK_RUNTIME_IPC_V1"
 PACKET_MAX_BYTES = 65_536
+_ANCILLARY_BUFFER_BYTES = socket.CMSG_SPACE(16 * array.array("i").itemsize)
 _TASK_ID_PATTERN = r"^[0-9a-f]{32}$"
 _DIGEST_PATTERN = r"^sha256:[0-9a-f]{64}$"
 _UINT64_MAX = 2**64 - 1
@@ -47,6 +51,36 @@ ErrorCode = Annotated[
 
 class ProtocolViolation(ValueError):
     """A peer supplied a packet outside the private runtime IPC contract."""
+
+
+def _close_received_descriptors(
+    ancillary: list[tuple[int, int, bytes]],
+) -> None:
+    """Close every descriptor delivered with a packet that will be rejected."""
+    item_size = array.array("i").itemsize
+    for level, kind, data in ancillary:
+        if level != socket.SOL_SOCKET or kind != socket.SCM_RIGHTS:
+            continue
+        descriptors = array.array("i")
+        descriptors.frombytes(data[: len(data) - (len(data) % item_size)])
+        for descriptor in descriptors:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def receive_packet(control: socket.socket) -> bytes:
+    """Receive one strict data-only packet and reject all control metadata."""
+    packet, ancillary, flags, _address = control.recvmsg(
+        PACKET_MAX_BYTES + 1, _ANCILLARY_BUFFER_BYTES
+    )
+    _close_received_descriptors(ancillary)
+    if ancillary or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):
+        raise ProtocolViolation("runtime packet contains truncation or control data")
+    if len(packet) > PACKET_MAX_BYTES:
+        raise ProtocolViolation("runtime packet exceeds size limit")
+    return packet
 
 
 class RuntimeMessageKind(str, Enum):

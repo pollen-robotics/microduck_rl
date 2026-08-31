@@ -94,10 +94,16 @@ class ProcessSupervisor(Protocol):
         self,
         request: TaskCreateRequest,
         register_acknowledgement: Callable[[StartAcknowledgement], None] | None = None,
+        register_dispatch: Callable[[], None] | None = None,
     ) -> StartAcknowledgement: ...
     def command(self, task_id: str, command: TaskCommandRequest) -> AckPayload: ...
     def status(self, task_id: str) -> RobotStatus: ...
-    def stop(self, task_id: str, reason: str) -> TerminalPayload: ...
+    def stop(
+        self,
+        task_id: str,
+        reason: str,
+        register_dispatch: Callable[[], None] | None = None,
+    ) -> TerminalPayload: ...
     def close(self) -> None: ...
 
 
@@ -284,9 +290,6 @@ class SimulatorTaskService:
             ):
                 return snapshot
             active.stop_claimed = True
-            self._store.append_event(
-                task_id, "TASK_CANCEL_REQUESTED", {"code": "CANCELLED"}
-            )
         return self._request_stop(active, "CANCELLED")
 
     def command(self, task_id: str, command: TaskCommandRequest):
@@ -497,7 +500,12 @@ class SimulatorTaskService:
                 active is not None
                 and active.continuous
                 and active.deadline is not None
-                and self._monotonic_clock() >= active.deadline
+                # The child owns the exact lease deadline and publishes its
+                # truthful local-deadman terminal.  The parent containment
+                # timer starts only after two bounded acknowledgement windows,
+                # avoiding a duplicate ZERO_AND_STOP race at the same instant.
+                and self._monotonic_clock()
+                >= active.deadline + 2 * self._runtime_call_timeout_s
                 and not active.stop_claimed
             )
             if expired:
@@ -534,8 +542,22 @@ class SimulatorTaskService:
         self._supervisor.close()
 
     def _request_stop(self, active: _ActiveTask, reason: str):
+        dispatch_callback: Callable[[], None] | None = None
+        if reason == "CANCELLED":
+
+            def record_cancel_dispatch() -> None:
+                with self._lock:
+                    self._store.append_event(
+                        active.request.taskId,
+                        "TASK_CANCEL_REQUESTED",
+                        {"code": "CANCELLED"},
+                    )
+
+            dispatch_callback = record_cancel_dispatch
         try:
-            terminal = self._supervisor.stop(active.request.taskId, reason)
+            terminal = self._supervisor.stop(
+                active.request.taskId, reason, dispatch_callback
+            )
             self._terminal_callback(
                 CorrelatedTerminalDelivery(
                     generation=self._supervisor.snapshot().generation,
@@ -546,7 +568,17 @@ class SimulatorTaskService:
             )
         except SupervisorTaskTerminalized:
             pass
-        except (SupervisorUnavailable, SupervisorOperationError):
+        except SupervisorUnavailable:
+            snap = self._supervisor.snapshot()
+            queued = snap.cached_terminal
+            if not (
+                snap.terminal_delivery_outstanding
+                and queued is not None
+                and queued.generation == active.supervisor_generation
+                and queued.task_id == active.request.taskId
+            ):
+                self._persist_failure(active, "RUNTIME_UNRESPONSIVE")
+        except SupervisorOperationError:
             self._persist_failure(active, "RUNTIME_UNRESPONSIVE")
         return self._store.get(active.request.taskId)
 

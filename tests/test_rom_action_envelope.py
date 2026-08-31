@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import mjlab_microduck.rom.runtime_identity as runtime_identity_module
@@ -123,27 +125,30 @@ def test_v1_envelope_rejects_manifest_owned_safety_mutations(mutation) -> None:
 
 
 EXPECTED_GOVERNED_RUNTIME_MODULES = (
-    "action_catalog.py",
-    "action_specs.py",
-    "api.py",
-    "bundle.py",
-    "contracts.py",
-    "main.py",
-    "mirroring.py",
-    "model_semantics.py",
-    "mujoco_runtime.py",
-    "observation.py",
-    "onnx_policy.py",
-    "qualification.py",
-    "process_protocol.py",
-    "process_supervisor.py",
-    "runtime_child.py",
-    "parent_death.py",
-    "runtime.py",
-    "runtime_identity.py",
-    "service.py",
-    "store.py",
-    "supervisor_state.py",
+    "__init__.py",
+    "rom/__init__.py",
+    "rom/action_catalog.py",
+    "rom/action_specs.py",
+    "rom/api.py",
+    "rom/bundle.py",
+    "rom/contracts.py",
+    "rom/main.py",
+    "rom/mirroring.py",
+    "rom/model_semantics.py",
+    "rom/mujoco_runtime.py",
+    "rom/observation.py",
+    "rom/onnx_policy.py",
+    "rom/qualification.py",
+    "rom/process_protocol.py",
+    "rom/process_service.py",
+    "rom/process_supervisor.py",
+    "rom/runtime_child.py",
+    "rom/parent_death.py",
+    "rom/runtime.py",
+    "rom/runtime_identity.py",
+    "rom/service.py",
+    "rom/store.py",
+    "rom/supervisor_state.py",
 )
 
 
@@ -158,9 +163,10 @@ def test_runtime_revision_audits_and_changes_with_every_governed_module(
 
     def changed_bytes(path):
         content = original(path)
+        relative_suffix = ("mjlab_microduck", *Path(module_name).parts)
         return (
             content + b"\n# governed mutation\n"
-            if path.name == module_name
+            if path.parts[-len(relative_suffix) :] == relative_suffix
             else content
         )
 

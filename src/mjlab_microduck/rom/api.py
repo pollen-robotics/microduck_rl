@@ -303,18 +303,28 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
         try:
             yield
         finally:
+            shutdown_failure: BaseException | None = None
             watchdog_stop.set()
             watchdog_thread.join(timeout=2.0)
             if watchdog_thread.is_alive():
                 app.state.watchdog_healthy = False
                 app.state.watchdog_thread = watchdog_thread
+                shutdown_failure = RuntimeError(
+                    "watchdog shutdown containment failed"
+                )
             else:
                 app.state.watchdog_thread = None
             if service is not None:
                 try:
                     service.close()
-                except Exception:  # noqa: BLE001 - shutdown remains fail closed.
+                except Exception as exc:  # noqa: BLE001 - shutdown remains fail closed.
                     app.state.watchdog_terminalization_failed = True
+                    shutdown_failure = exc
+            app.state.shutdown_failure = shutdown_failure
+            if shutdown_failure is not None:
+                raise RuntimeError("simulator shutdown containment failed") from (
+                    shutdown_failure
+                )
 
     app = FastAPI(
         title="MicroDuck ROM Simulator API",
@@ -329,6 +339,7 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
     )
     app.state.watchdog_healthy = True
     app.state.watchdog_terminalization_failed = False
+    app.state.shutdown_failure = None
 
     async def require_bearer(
         request: Request,

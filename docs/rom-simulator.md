@@ -1,8 +1,9 @@
 # MicroDuck ROM simulator release and operations
 
 The ROM simulator runs only verified, qualified policy bundles. Qualification and
-serving use the same code-owned action specifications and
-`MicroduckMujocoRuntime`; there is no manifest-selected Python evaluator.
+serving use the same code-owned action specifications and child-owned
+`MicroduckMujocoRuntime`; the CLI/API parent never owns MuJoCo or ONNX objects,
+and there is no manifest-selected Python evaluator.
 
 ## 1. Export and build a candidate
 
@@ -108,11 +109,19 @@ governed runtime modules. Batteries require 3–16 unique seeds and 100–2,000
 steps, and action commands, terrain, reset, action metric, and metric direction
 must match the code-owned action specification.
 
-The auditable runtime-revision source set is `action_catalog.py`,
-`action_specs.py`, `api.py`, `bundle.py`, `contracts.py`, `main.py`,
-`mirroring.py`, `model_semantics.py`, `mujoco_runtime.py`, `observation.py`,
-`onnx_policy.py`, `qualification.py`, `runtime.py`, `runtime_identity.py`,
-`service.py`, and `store.py`. Tests require that changing any one of these files
+Each seed executes through the production supervisor and runtime child over
+canonical `SOCK_SEQPACKET` messages. The child loads the verified candidate and
+runs the native runtime with real-time pacing disabled for up to `maxSteps`:
+continuous success reaches exactly that horizon, while discrete success or
+failure may terminate earlier. Every exact child PID is reaped before promotion
+continues, and the qualification parent does not import the native runtime.
+
+The auditable runtime-revision source set includes both executed package
+initializers and every governed module under `mjlab_microduck.rom`: action
+catalog/specs, API, bundle/contracts, composition, model semantics, native
+runtime/policy/observation, qualification, process protocol/service/supervisor,
+runtime child and parent-death handling, runtime identity, service/store, and
+the supervisor state machine. Tests require that changing any one of these files
 changes the revision.
 
 The qualification report contains bounded per-seed success, fall, stepwise
@@ -163,44 +172,68 @@ remains bounded to 32 scalar fields and 1 KiB.
 docker build -f docker/rom-simulator/Dockerfile \
   -t microduck-rom-sim:1.0.0 .
 
-mkdir -p ../release/qualified-bundle ../release/state
+mkdir -p ../release/qualified-bundle
 python -m zipfile -e ../release/microduck-qualified-1.0.0.zip \
   ../release/qualified-bundle
+
+# The image runs as numeric UID/GID 10001. Create the only durable writable
+# host directory explicitly; do not rely on Docker creating it as root.
+sudo install -d -o 10001 -g 10001 -m 0750 ../release/state
+sudo chown -R 10001:10001 ../release/state
+sudo chmod 0750 ../release/state
 
 umask 077
 printf 'MICRODUCK_ROM_BEARER_TOKEN=%s\n' 'replace-with-a-random-token' \
   > ../release/rom-token.env
 
 docker run --name microduck-rom-sim --rm \
+  --user 10001:10001 \
   --read-only \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   --mount type=bind,src="$(realpath ../release/qualified-bundle)",dst=/bundle,readonly \
   --mount type=bind,src="$(realpath ../release/state)",dst=/state \
   --env-file ../release/rom-token.env \
   --publish 127.0.0.1:8000:8000 \
+  --stop-timeout 60 \
   microduck-rom-sim:1.0.0
 ```
 
-The image runs as UID/GID 10001, listens only on its configured internal port
-8000, and uses an exec entrypoint. `/bundle` is read-only; `/state` is the only
-persistent writable mount; `/tmp` is ephemeral workspace for verified MJCF
-snapshots. A valid qualified mount activates the Task 7 runtime during startup.
-Invalid bundle, token, state, model, or policy inputs fail closed.
+Linux is the supported production target. The image and launch both select
+UID/GID 10001, the root filesystem is read-only, all capabilities are dropped,
+and privilege escalation is disabled. `/bundle` is an explicit read-only
+mount; `/state` is the only persistent writable mount and must remain owned by
+10001:10001 with mode 0700 or 0750; `/tmp` is a bounded, `noexec`, `nosuid`
+ephemeral workspace for verified MJCF snapshots. A valid qualified mount
+activates the process-isolated runtime during startup. Invalid bundle, token,
+state, model, or policy inputs fail closed.
+
+The image declares `STOPSIGNAL SIGTERM`, and the shell entrypoint uses `exec`,
+so the Python API parent is PID 1. A stop reaches its lifespan shutdown, which
+stops or contains the active task, forwards only to its exact owned child,
+waits for exact reap, and exits nonzero if that containment barrier fails. The
+60-second Docker stop timeout is deliberately above the bounded runtime
+operation, termination, kill, and reap envelope; Docker's final `SIGKILL` is a
+last resort rather than the normal child cleanup path.
 
 The build syncs only the exact-pinned `rom` dependency group from the frozen
 lockfile. The ROM runtime does not import BAM, Torch, CUDA, or `mjlab`; it
-executes the verified deployment bundle with Task 7's position-actuator
+executes the verified deployment bundle with the governed position-actuator
 semantics. This keeps Git and training-only integration code out of the runtime
 image without floating any installed dependency version.
 
 The Dockerfile-specific ignore file and root-context `.dockerignore` are
-deny-by-default allowlists. They admit only lock/package/readme/license metadata,
-the direct ROM Python package, and the entrypoint; robot, training, tests,
-checkpoints, outputs, env files, STL, and `.part` paths remain excluded. The
-final image carries `/app/LICENSE` and the package metadata used for runtime
-revision binding. It contains no production or distribution-restricted model
-bytes; runtime model resolution is exclusively from the verified `/bundle`
-mount.
+deny-by-default literal allowlists. They admit only the lock/package/license
+metadata, each named ROM Python module, the three authoritative schema/OpenAPI
+fixture files, and the entrypoint. There is no Python wildcard or directory
+copy, so a newly added debug or secret module remains outside the context and
+image until explicitly reviewed. Robot, training, tests, checkpoints, outputs,
+env files, logs, caches, handoff work, STL, and `.part` paths remain excluded.
+The final image carries `/app/LICENSE`, `/app/pyproject.toml`, and the exact
+schemas under `/app/schemas`; it contains no production or
+distribution-restricted model bytes. Runtime model resolution is exclusively
+from the verified `/bundle` mount.
 
 ## 4. Authenticated API checks
 
@@ -284,36 +317,31 @@ status, and event reads remain available. Catalog and robot status also
 document HTTP 503 `NOT_READY` for startup states in which their required
 installed bundle or runtime is absent.
 
-Every runtime call is supervised outside the service ownership mutex by one
-long-lived daemon worker, a bounded admission queue, and a monotonic deadline.
-If sampling, validation, start, command, status, or safe stop stalls, the
-dispatcher rejects all further work, readiness fails closed as
-`RUNTIME_UNRESPONSIVE`, active ownership is durably terminalized as `FAILED`,
-and an immediate lock-independent emergency zero/disable attempt is made.
-Emergency stop
-publishes fatal/zero intent before attempting the native-data guard and never
-waits for that guard. Start and command holders recheck the emergency state
-after their final publication and again across guard release; a raced emergency
-revokes motion authority, zeros motion, and disables actuator gain/bias. A real
-published handle, task identity, and policy-thread reference remain
-cleanup-only ownership until `safe_stop(handle)` joins and clears them; repeated
-safe stop uses the cached evidence and cannot restart motion. Late runtime
-returns have no task authority and cannot republish command or ownership. If
-cancellation or watchdog failure races a pending start, its returned handle
-remains cleanup-only ownership and the FIFO stop resolves that handle after
-start finishes. The service keeps the generation quarantined from start
-submission through handle registration and dispatcher completion observation;
-durable ownership is not released before emergency completion and
-handle-specific cleanup have been attempted. If a runtime deadline expires
-while start is still pending, the task becomes durably
-`FAILED / RUNTIME_UNRESPONSIVE` but its motion slot stays quarantined. A late
-handle is registered, emergency intent is republished, and `safe_stop(handle)`
-is attempted before the slot is released. If start or cleanup never returns,
-that slot remains quarantined until the process/container is restarted.
-Diagnostic reads and cancellation remain available from durable/cached state.
-At most one native runtime call can remain hung; if it cannot return/join or the
-direct zero/disable guard is unavailable, do not reuse that process: restart
-the process/container before accepting any further motion.
+The API parent owns durable task state and SQLite; it owns no runtime handle,
+policy thread, MuJoCo model, or ONNX session. One supervisor owner thread
+controls one exact `Popen` child and a bounded canonical `SOCK_SEQPACKET` queue.
+The child alone loads the verified bundle, owns native runtime state, arms the
+local lease deadman before acknowledging `START`, and performs zero-and-stop on
+lease expiry, parent EOF, or shutdown. Diagnostic reads use cached bounded
+status, so GET/status/events and cancellation remain responsive during a native
+stall.
+
+An operation timeout, malformed packet, fatal runtime result, or child exit
+quarantines that exact generation and fails readiness closed. The task is
+durably terminalized truthfully, but the motion slot is not released until the
+child acknowledges completed cleanup or the supervisor sends `SIGTERM`,
+escalates to `SIGKILL` if necessary, and reaps the exact stored process. No
+process-name lookup or pattern kill is used. A child that exits after a
+`START` acknowledgement without a terminal event is detected autonomously,
+reaped, and durably failed; a queued valid terminal event is consumed before
+that exit is classified.
+
+After exact reap, the supervisor may spawn and verify a fresh child for a new
+generation; `RUNTIME_UNRESPONSIVE` does not by itself require restarting the
+whole API/container. Catalog motion stays masked and creates fail closed until
+the replacement handshake is ready. A full parent/container restart is the
+recovery boundary only when the API parent itself terminates or cannot complete
+its bounded shutdown; persisted nonterminal tasks then reconcile to `UNKNOWN`.
 
 To smoke the deadman, create a distinct continuous task with `"leaseMs":200`,
 send no renewal, wait more than 200 ms, and query it:
@@ -377,7 +405,7 @@ Stable operator signals:
 | `QUALIFICATION_UNAVAILABLE` | Candidate, missing, forged, duplicate, mismatched, or partial qualification data was rejected; mount the exact promoted output. |
 | `STATE_DB_UNAVAILABLE` | Make `/state` writable by UID/GID 10001 and verify free space. |
 | `RUNTIME_UNAVAILABLE` | Bundle verification passed but model/policy/runtime preflight failed; rebuild from exact governed artifacts. |
-| `RUNTIME_UNRESPONSIVE` | A runtime call exceeded its monotonic deadline; inspect resource/runtime failure and restart the process/container before motion. |
+| `RUNTIME_UNRESPONSIVE` | A runtime call exceeded its monotonic deadline; the supervisor quarantines, terminates, and exactly reaps that child before a fresh generation can become ready. Investigate repeated failures; do not bypass readiness. |
 | `WATCHDOG_UNHEALTHY` | Restart and investigate host scheduling/resource pressure before accepting motion. |
 | `ACTION_UNAVAILABLE` | Inspect the catalog reason; do not bypass qualification or runtime support. |
 | `BUNDLE_MISMATCH` | Refresh catalog identities and recreate the request against the installed release. |

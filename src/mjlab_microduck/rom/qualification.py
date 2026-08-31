@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import math
+import threading
+import time
 import zipfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -11,7 +14,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-import mujoco
 from pydantic import Field, model_validator
 
 from .action_specs import ACTION_RUNTIME_SPECS, STAND_SETTLEMENT_LIMITS
@@ -20,6 +22,7 @@ from .contracts import (
     ContractModel,
     ModelArtifact,
     PolicyBundle,
+    RobotStatus,
     TaskCreateRequest,
     canonical_json,
     publish_policy_bundle,
@@ -27,7 +30,13 @@ from .contracts import (
     unsigned_policy_bundle_manifest,
 )
 from .main import load_verified_bundle
-from .mujoco_runtime import MicroduckMujocoRuntime
+from .process_protocol import TerminalPayload
+from .process_supervisor import (
+    CorrelatedTerminalDelivery,
+    RuntimeProcessSupervisor,
+    SupervisorTaskTerminalized,
+    SupervisorUnavailable,
+)
 from .runtime import canonical_tracking_mean
 from .runtime_identity import runtime_revision
 
@@ -36,6 +45,11 @@ RELEASE_CONFIGURATION_PATH = "qualification/release-v1.json"
 SUBJECT_MANIFEST_PATH = "qualification/subject-manifest-v1.json"
 _REPORT_BINDING = "VERIFIED_INPUT_BUNDLE_DIGEST_V1"
 _RUNTIME_IDENTIFIER = "mjlab_microduck.rom.mujoco_runtime.MicroduckMujocoRuntime"
+
+
+def _simulator_version() -> str:
+    """Read package metadata without importing the native MuJoCo module."""
+    return importlib.metadata.version("mujoco")
 
 
 class QualificationFailed(RuntimeError):
@@ -440,7 +454,7 @@ def _unavailable_result(
         runtimeClass="MicroduckMujocoRuntime",
         runtimeIdentifier=_RUNTIME_IDENTIFIER,
         runtimeRevision=installed_runtime_revision,
-        simulatorVersion=mujoco.__version__,
+        simulatorVersion=_simulator_version(),
         policyDigest=None,
         modelDigest=bundle.model.digest,
         sourceCommit=bundle.sourceCommit,
@@ -503,7 +517,7 @@ def _validate_rollout_semantics(
         "runIdentity": policy.experimentRef,
         "runtimeIdentifier": _RUNTIME_IDENTIFIER,
         "runtimeRevision": installed_runtime_revision,
-        "simulatorVersion": mujoco.__version__,
+        "simulatorVersion": _simulator_version(),
         "terrain": declaration.terrain,
         "resetProfile": declaration.resetProfile,
         "scenarioProfile": spec.scenario_profile,
@@ -819,13 +833,263 @@ def recompute_action_qualification(
         runtimeClass="MicroduckMujocoRuntime",
         runtimeIdentifier=_RUNTIME_IDENTIFIER,
         runtimeRevision=installed_runtime_revision,
-        simulatorVersion=mujoco.__version__,
+        simulatorVersion=_simulator_version(),
         policyDigest=policy.digest,
         modelDigest=bundle.model.digest,
         sourceCommit=bundle.sourceCommit,
         checkpoint=policy.checkpoint,
         runIdentity=policy.experimentRef,
         rollouts=rollouts,
+    )
+
+
+def _qualification_rollout_timeout(declaration: ActionQualificationConfig) -> float:
+    """Return a finite per-seed release bound scaled by the governed horizon."""
+    return max(30.0, min(300.0, declaration.maxSteps * 0.05))
+
+
+def _qualification_rollout_from_terminal(
+    bundle: PolicyBundle,
+    declaration: ActionQualificationConfig,
+    definition: ActionDefinition,
+    seed: int,
+    status: RobotStatus,
+    terminal: TerminalPayload,
+    installed_runtime_revision: str,
+    started_at: datetime,
+) -> QualificationRollout:
+    """Adapt supervisor-correlated terminal evidence into the release record."""
+    spec = ACTION_RUNTIME_SPECS[declaration.actionCode]
+    policy = next(
+        item for item in bundle.policies if item.policyRef == definition.policyRef
+    )
+    metrics = terminal.evidence.metrics
+    stop_reason = terminal.evidence.stopReason
+    expected_metrics: dict[str, object] = {
+        "actionCode": declaration.actionCode,
+        "bundleDigest": bundle.bundleDigest,
+        "onnxDigest": policy.digest,
+        "mjcfDigest": bundle.model.digest,
+        "sourceCommit": bundle.sourceCommit,
+        "checkpoint": policy.checkpoint,
+        "runIdentity": policy.experimentRef,
+        "terrainIdentity": declaration.terrain,
+        "rngSeed": seed,
+        "scenarioProfile": spec.scenario_profile,
+        "resetProfile": declaration.resetProfile,
+    }
+    evidence_identity = (
+        terminal.evidence.bundleDigest,
+        terminal.evidence.policyDigest,
+        terminal.evidence.modelDigest,
+    )
+    if evidence_identity != (
+        bundle.bundleDigest,
+        policy.digest,
+        bundle.model.digest,
+    ) or any(
+        key not in metrics
+        or type(metrics[key]) is not type(value)
+        or metrics[key] != value
+        for key, value in expected_metrics.items()
+    ):
+        raise ValueError("qualification runtime evidence identity is invalid")
+    if stop_reason == "MAX_STEPS_REACHED":
+        expected_horizon_outcome = (
+            "SUCCEEDED"
+            if spec.execution_mode == "CONTINUOUS_LEASE"
+            else "TIMED_OUT"
+        )
+        if terminal.outcome != expected_horizon_outcome:
+            raise ValueError("qualification horizon outcome is invalid")
+    terminal_state: Literal["RUNNING", "SUCCEEDED", "FAILED"]
+    if stop_reason == "MAX_STEPS_REACHED":
+        terminal_state = "RUNNING"
+    elif terminal.outcome == "SUCCEEDED":
+        terminal_state = "SUCCEEDED"
+    else:
+        terminal_state = "FAILED"
+    fallen = metrics.get("fallen") is True
+    success = (
+        terminal_state == "SUCCEEDED"
+        if spec.execution_mode == "DISCRETE"
+        else (
+            terminal_state == "RUNNING"
+            and _integer(metrics, "steps") == declaration.maxSteps
+            and not fallen
+        )
+    )
+    return QualificationRollout(
+        actionCode=declaration.actionCode,
+        bundleDigest=bundle.bundleDigest,
+        policyDigest=policy.digest,
+        modelDigest=bundle.model.digest,
+        sourceCommit=bundle.sourceCommit,
+        checkpoint=policy.checkpoint,
+        runIdentity=policy.experimentRef,
+        runtimeIdentifier=_RUNTIME_IDENTIFIER,
+        runtimeRevision=installed_runtime_revision,
+        simulatorVersion=_simulator_version(),
+        terrain=declaration.terrain,
+        resetProfile=declaration.resetProfile,
+        scenarioProfile=spec.scenario_profile,
+        seed=seed,
+        requestedParameters=declaration.parameters,
+        requestedMotion=dict(status.requestedMotion),
+        appliedMotion=dict(status.appliedMotion),
+        startedAt=started_at,
+        finishedAt=datetime.now(UTC),
+        steps=_integer(metrics, "steps"),
+        terminalState=terminal_state,
+        success=success,
+        fallen=fallen,
+        trackingError=_number(metrics, "trackingError"),
+        trackingErrorSum=_number(metrics, "trackingErrorSum"),
+        trackingErrorMax=_number(metrics, "trackingErrorMax"),
+        trackingSampleCount=_integer(metrics, "trackingErrorSamples"),
+        distanceM=_number(metrics, "baseTravelM") or 0.0,
+        energyProxy=_number(metrics, "energyProxy") or 0.0,
+        actuatorClampSteps=_integer(metrics, "actuatorClampSteps"),
+        physicalJointLimitViolations=_integer(
+            metrics, "physicalJointLimitViolations"
+        ),
+        settledSteps=_integer(metrics, "standSettledSteps"),
+        uprightSteps=_integer(metrics, "uprightSteps"),
+        maxAbsAction=_number(metrics, "maxAbsAction") or 0.0,
+        actionMetric=declaration.thresholds.actionMetric,
+        actionMetricValue=_number(metrics, declaration.thresholds.actionMetric),
+        yawRotationRad=_number(metrics, "yawRotationRad"),
+        standPoseError=_number(metrics, "standPoseError"),
+        settledPoseErrorMax=_number(metrics, "settledPoseErrorMax"),
+        settledTrunkHeightMinM=_number(metrics, "settledHeightMinM"),
+        settledTrunkHeightMaxM=_number(metrics, "settledHeightMaxM"),
+        settledTrunkTiltMaxRad=_number(metrics, "settledTiltMaxRad"),
+        settledJointSpeedMaxRadps=_number(metrics, "settledJointSpeedMaxRadps"),
+        stopReason=stop_reason,
+    )
+
+
+def _run_qualification_seed(
+    root: Path,
+    bundle: PolicyBundle,
+    declaration: ActionQualificationConfig,
+    definition: ActionDefinition,
+    seed: int,
+    installed_runtime_revision: str,
+    started_at: datetime,
+) -> QualificationRollout:
+    """Run one seed through the production supervisor and runtime-child protocol."""
+    terminal_ready = threading.Event()
+    deliveries: list[CorrelatedTerminalDelivery] = []
+
+    def capture_terminal(delivery: CorrelatedTerminalDelivery) -> None:
+        deliveries.append(delivery)
+        terminal_ready.set()
+
+    timeout = _qualification_rollout_timeout(declaration)
+    supervisor = RuntimeProcessSupervisor(
+        bundle_root=root,
+        bundle_digest=bundle.bundleDigest,
+        terminal_callback=capture_terminal,
+        operation_timeout_s=min(30.0, timeout),
+        terminate_timeout_s=0.5,
+        owner_thread_name="microduck-runtime-supervisor-qualification",
+        qualification_max_steps=declaration.maxSteps,
+    )
+    failure: BaseException | None = None
+    rollout: QualificationRollout | None = None
+    try:
+        supervisor.ensure_ready()
+        lease_ms = (
+            definition.lease.defaultLeaseMs if definition.lease is not None else None
+        )
+        task_id = _task_id(bundle.bundleDigest, declaration.actionCode, seed)
+        request = TaskCreateRequest(
+            schema="MICRODUCK_SIM_TASK_V1",
+            taskId=task_id,
+            actionCode=declaration.actionCode,
+            bundleVersion=bundle.bundleVersion,
+            bundleDigest=bundle.bundleDigest,
+            parameters=declaration.parameters,
+            scenario={"terrain": declaration.terrain, "seed": seed},
+            leaseMs=lease_ms,
+            requestedBy="rom-qualification",
+        )
+        acknowledgement = supervisor.start(request)
+        if acknowledgement.task_id != task_id:
+            raise ValueError("qualification START identity is invalid")
+        status = supervisor.status(task_id)
+        if lease_ms is not None:
+            supervisor.command(task_id, declaration.parameters, lease_ms)
+        deadline = time.monotonic() + timeout
+        cadence = (
+            definition.lease.commandCadenceMs / 1000
+            if definition.lease is not None
+            else timeout
+        )
+        while not terminal_ready.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("qualification child deadline")
+            if terminal_ready.wait(min(cadence, remaining)):
+                break
+            if lease_ms is not None:
+                try:
+                    supervisor.command(task_id, declaration.parameters, lease_ms)
+                except (SupervisorTaskTerminalized, SupervisorUnavailable):
+                    if not terminal_ready.wait(min(1.0, max(0.0, remaining))):
+                        raise
+        if len(deliveries) != 1:
+            raise ValueError("qualification terminal delivery is ambiguous")
+        delivery = deliveries[0]
+        if (
+            delivery.task_id != task_id
+            or delivery.generation != acknowledgement.generation
+            or delivery.event_sequence != 1
+        ):
+            raise ValueError("qualification terminal identity is invalid")
+        rollout = _qualification_rollout_from_terminal(
+            bundle,
+            declaration,
+            definition,
+            seed,
+            status,
+            delivery.terminal,
+            installed_runtime_revision,
+            started_at,
+        )
+    except BaseException as exc:  # noqa: BLE001 - exact close still runs below
+        failure = exc
+    try:
+        supervisor.close()
+    except BaseException as exc:  # noqa: BLE001 - containment failure wins release
+        failure = exc
+    if failure is not None:
+        raise QualificationFailed("qualification child failed closed") from failure
+    assert rollout is not None
+    return rollout
+
+
+def _run_qualification_battery(
+    root: Path,
+    bundle: PolicyBundle,
+    declaration: ActionQualificationConfig,
+    definition: ActionDefinition,
+    installed_runtime_revision: str,
+    started_at: datetime,
+) -> tuple[QualificationRollout, ...]:
+    """Execute every seed in a fresh, exactly reaped production runtime child."""
+    return tuple(
+        _run_qualification_seed(
+            root,
+            bundle,
+            declaration,
+            definition,
+            seed,
+            installed_runtime_revision,
+            started_at,
+        )
+        for seed in declaration.seeds
     )
 
 
@@ -837,130 +1101,32 @@ def _qualify_action(
     installed_runtime_revision: str,
     timestamp: Callable[[], datetime],
 ) -> ActionQualificationResult:
-    spec = ACTION_RUNTIME_SPECS[declaration.actionCode]
-    policy = next(
-        item for item in bundle.policies if item.policyRef == definition.policyRef
-    )
-    rollouts: list[QualificationRollout] = []
-    for seed in declaration.seeds:
-        started_at = timestamp()
-        runtime = MicroduckMujocoRuntime(root, bundle, realtime=False)
-        request = TaskCreateRequest(
-            schema="MICRODUCK_SIM_TASK_V1",
-            taskId=_task_id(bundle.bundleDigest or "", declaration.actionCode, seed),
-            actionCode=declaration.actionCode,
-            bundleVersion=bundle.bundleVersion,
-            bundleDigest=bundle.bundleDigest,
-            parameters=declaration.parameters,
-            scenario={"terrain": declaration.terrain, "seed": seed},
-            leaseMs=(definition.lease.defaultLeaseMs if definition.lease else None),
-            requestedBy="rom-qualification",
-        )
-        runtime.validate(definition, request)
-        handle = runtime.start(definition, request)
-        sample = None
-        try:
-            for _ in range(declaration.maxSteps):
-                sample = runtime.sample(handle)
-                if not sample.running:
-                    break
-            status = runtime.status()
-            evidence = runtime.safe_stop(handle, "QUALIFICATION_BATTERY_COMPLETE")
-        except Exception:
-            runtime.safe_stop(handle, "QUALIFICATION_RUNTIME_ERROR")
-            raise
-        metrics = dict(evidence.metrics)
-        expected_identities = {
-            "actionCode": declaration.actionCode,
-            "bundleDigest": bundle.bundleDigest,
-            "onnxDigest": policy.digest,
-            "mjcfDigest": bundle.model.digest,
-            "sourceCommit": bundle.sourceCommit,
-            "checkpoint": policy.checkpoint,
-            "runIdentity": policy.experimentRef,
-            "terrainIdentity": declaration.terrain,
-            "rngSeed": seed,
-            "scenarioProfile": spec.scenario_profile,
-            "resetProfile": declaration.resetProfile,
-        }
-        if any(metrics.get(key) != value for key, value in expected_identities.items()):
-            raise QualificationFailed(
-                f"runtime evidence identity mismatch for {declaration.actionCode}"
-            )
-        steps = _integer(metrics, "steps")
-        fallen = bool(metrics.get("fallen", False))
-        terminal_failed = sample is not None and sample.terminalState == "FAILED"
-        terminal_succeeded = sample is not None and sample.terminalState == "SUCCEEDED"
-        succeeded = (
-            terminal_succeeded
-            if spec.execution_mode == "DISCRETE"
-            else steps == declaration.maxSteps and not terminal_failed
-        )
-        action_metric_value = _number(metrics, declaration.thresholds.actionMetric)
-        rollouts.append(
-            QualificationRollout(
-                actionCode=declaration.actionCode,
-                bundleDigest=bundle.bundleDigest,
-                policyDigest=policy.digest,
-                modelDigest=bundle.model.digest,
-                sourceCommit=bundle.sourceCommit,
-                checkpoint=policy.checkpoint,
-                runIdentity=policy.experimentRef,
-                runtimeIdentifier=_RUNTIME_IDENTIFIER,
-                runtimeRevision=installed_runtime_revision,
-                simulatorVersion=mujoco.__version__,
-                terrain=declaration.terrain,
-                resetProfile=declaration.resetProfile,
-                scenarioProfile=spec.scenario_profile,
-                seed=seed,
-                requestedParameters=declaration.parameters,
-                requestedMotion=status.requestedMotion,
-                appliedMotion=status.appliedMotion,
-                startedAt=started_at,
-                finishedAt=timestamp(),
-                steps=steps,
-                terminalState=(
-                    sample.terminalState
-                    if sample is not None and sample.terminalState is not None
-                    else "RUNNING"
-                ),
-                success=succeeded and not fallen,
-                fallen=fallen,
-                trackingError=_number(metrics, "trackingError"),
-                trackingErrorSum=_number(metrics, "trackingErrorSum"),
-                trackingErrorMax=_number(metrics, "trackingErrorMax"),
-                trackingSampleCount=_integer(metrics, "trackingErrorSamples"),
-                distanceM=_number(metrics, "baseTravelM") or 0.0,
-                energyProxy=_number(metrics, "energyProxy") or 0.0,
-                actuatorClampSteps=_integer(metrics, "actuatorClampSteps"),
-                physicalJointLimitViolations=_integer(
-                    metrics, "physicalJointLimitViolations"
-                ),
-                settledSteps=_integer(metrics, "standSettledSteps"),
-                uprightSteps=_integer(metrics, "uprightSteps"),
-                maxAbsAction=_number(metrics, "maxAbsAction") or 0.0,
-                actionMetric=declaration.thresholds.actionMetric,
-                actionMetricValue=action_metric_value,
-                yawRotationRad=_number(metrics, "yawRotationRad"),
-                standPoseError=_number(metrics, "standPoseError"),
-                settledPoseErrorMax=_number(metrics, "settledPoseErrorMax"),
-                settledTrunkHeightMinM=_number(metrics, "settledHeightMinM"),
-                settledTrunkHeightMaxM=_number(metrics, "settledHeightMaxM"),
-                settledTrunkTiltMaxRad=_number(metrics, "settledTiltMaxRad"),
-                settledJointSpeedMaxRadps=_number(metrics, "settledJointSpeedMaxRadps"),
-                stopReason=sample.stopReason
-                if sample is not None and sample.stopReason
-                else "MAX_STEPS_REACHED",
-            )
-        )
-
-    return recompute_action_qualification(
+    started_at = timestamp()
+    rollouts = _run_qualification_battery(
+        root,
         bundle,
         declaration,
         definition,
-        tuple(rollouts),
         installed_runtime_revision,
+        started_at,
     )
+    finished_at = timestamp()
+    rollouts = tuple(
+        rollout.model_copy(
+            update={"startedAt": started_at, "finishedAt": finished_at}
+        )
+        for rollout in rollouts
+    )
+    try:
+        return recompute_action_qualification(
+            bundle,
+            declaration,
+            definition,
+            rollouts,
+            installed_runtime_revision,
+        )
+    except ValueError as exc:
+        raise QualificationFailed("qualification child evidence is invalid") from exc
 
 
 def qualify_bundle(

@@ -171,6 +171,8 @@ def test_fake_child_exposes_every_required_environment_free_mode() -> None:
         "malformed-event",
         "lease-null-cleanup-failure",
         "exit-after-ready",
+        "exit-after-start-ack",
+        "terminal-event-exit",
     )
 
 
@@ -288,6 +290,76 @@ def test_continuous_normal_sample_is_bounded_evidence_on_operator_stop() -> None
     host._put_message(None)
     thread.join(timeout=1)
     parent.close()
+
+
+def test_qualification_horizon_uses_exact_samples_and_terminal_event() -> None:
+    host, runtime, parent, thread = _active_host()
+    host._qualification_max_steps = 3
+
+    host._start_runtime_monitor()
+
+    terminal = decode_packet(parent.recv(65_537))
+    assert terminal.kind is RuntimeMessageKind.TERMINAL_EVENT
+    assert terminal.payload.terminal.outcome == "SUCCEEDED"
+    assert terminal.payload.terminal.evidence.stopReason == "MAX_STEPS_REACHED"
+    assert runtime.sample_call_count == 3
+    assert runtime.safe_stop_calls == [
+        (RuntimeHandle(taskId="1" * 32), "MAX_STEPS_REACHED")
+    ]
+    host._stop.set()
+    host._put_message(None)
+    thread.join(timeout=1)
+    parent.close()
+
+
+def test_continuous_qualification_waits_for_status_and_command_barrier() -> None:
+    host, runtime, parent, thread = _active_host()
+    host._qualification_max_steps = 3
+    host._handle = None
+    runtime.active_handle = None
+
+    start = RuntimeMessage(
+        kind="START",
+        generation=8,
+        operationSequence=1,
+        taskId="2" * 32,
+        payload=StartPayload(
+            actionCode="WALK_VELOCITY",
+            bundleDigest=host._bundle.bundleDigest,
+            parameters={"vxMps": 0.1, "vyMps": 0.0, "yawRateRadps": 0.0},
+            scenario={"terrain": "flat", "seed": 8},
+            leaseMs=1000,
+        ),
+    )
+    assert _exchange(parent, start).kind is RuntimeMessageKind.ACK
+    assert not runtime.sample_started.wait(timeout=0.03)
+
+    status = RuntimeMessage(
+        kind="STATUS",
+        generation=8,
+        operationSequence=2,
+        taskId="2" * 32,
+        payload={},
+    )
+    assert _exchange(parent, status).kind is RuntimeMessageKind.STATUS
+    assert not runtime.sample_started.wait(timeout=0.03)
+
+    command = RuntimeMessage(
+        kind="COMMAND",
+        generation=8,
+        operationSequence=3,
+        taskId="2" * 32,
+        payload=CommandPayload(
+            parameters={"vxMps": 0.1, "vyMps": 0.0, "yawRateRadps": 0.0},
+            leaseMs=1000,
+        ),
+    )
+    assert _exchange(parent, command).kind is RuntimeMessageKind.ACK
+    terminal = decode_packet(parent.recv(65_537))
+    assert terminal.kind is RuntimeMessageKind.TERMINAL_EVENT
+    assert runtime.sample_call_count == 3
+    parent.close()
+    thread.join(timeout=1)
 
 
 def test_blocked_continuous_sample_retires_transport_on_normal_stop() -> None:
@@ -505,6 +577,9 @@ def _active_host() -> tuple[
 
 def test_lease_expiry_initiates_zero_stop_without_parent_watchdog() -> None:
     host, runtime, parent, thread = _active_host()
+    # The real runtime rejects public commands after emergency_stop has already
+    # zeroed and disabled actuators; safe_stop remains the cleanup proof.
+    runtime.zero_command_error = RuntimeError("runtime is emergency-stopped")
     host._start_runtime_monitor()
     host._last_request = RuntimeMessage(
         kind="COMMAND",

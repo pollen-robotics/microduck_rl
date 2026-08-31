@@ -9,27 +9,30 @@ from pathlib import Path
 
 _DISTRIBUTION = "mjlab-microduck"
 GOVERNED_RUNTIME_MODULES = (
-    "action_catalog.py",
-    "action_specs.py",
-    "api.py",
-    "bundle.py",
-    "contracts.py",
-    "main.py",
-    "mirroring.py",
-    "model_semantics.py",
-    "mujoco_runtime.py",
-    "observation.py",
-    "onnx_policy.py",
-    "qualification.py",
-    "process_protocol.py",
-    "process_supervisor.py",
-    "runtime_child.py",
-    "parent_death.py",
-    "runtime.py",
-    "runtime_identity.py",
-    "service.py",
-    "store.py",
-    "supervisor_state.py",
+    "__init__.py",
+    "rom/__init__.py",
+    "rom/action_catalog.py",
+    "rom/action_specs.py",
+    "rom/api.py",
+    "rom/bundle.py",
+    "rom/contracts.py",
+    "rom/main.py",
+    "rom/mirroring.py",
+    "rom/model_semantics.py",
+    "rom/mujoco_runtime.py",
+    "rom/observation.py",
+    "rom/onnx_policy.py",
+    "rom/qualification.py",
+    "rom/process_protocol.py",
+    "rom/process_service.py",
+    "rom/process_supervisor.py",
+    "rom/runtime_child.py",
+    "rom/parent_death.py",
+    "rom/runtime.py",
+    "rom/runtime_identity.py",
+    "rom/service.py",
+    "rom/store.py",
+    "rom/supervisor_state.py",
 )
 
 
@@ -52,7 +55,7 @@ def _package_version() -> str:
 
 def runtime_revision() -> str:
     """Return package version plus a digest of the exact governed source bytes."""
-    package_dir = Path(__file__).resolve().parent
+    package_dir = Path(__file__).resolve().parents[1]
     hasher = hashlib.sha256()
     for name in GOVERNED_RUNTIME_MODULES:
         content = (package_dir / name).read_bytes()

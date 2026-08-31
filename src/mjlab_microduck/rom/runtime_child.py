@@ -20,7 +20,7 @@ from .action_catalog import (
     validate_code_owned_parameters,
 )
 from .contracts import PolicyBundle, TaskCreateRequest, TaskEvidence
-from .main import load_qualified_bundle
+from .main import load_qualified_bundle, load_verified_bundle
 from .mujoco_runtime import MicroduckMujocoRuntime
 from .parent_death import (
     close_unrelated_fds,
@@ -28,7 +28,6 @@ from .parent_death import (
     verify_seqpacket_socket,
 )
 from .process_protocol import (
-    PACKET_MAX_BYTES,
     AckPayload,
     CommandPayload,
     ErrorDetail,
@@ -48,6 +47,7 @@ from .process_protocol import (
     ZeroAndStopPayload,
     decode_packet,
     encode_packet,
+    receive_packet,
 )
 from .runtime import RuntimeEvidence, RuntimeHandle, RuntimeSample, SimulationRuntime
 from .runtime_identity import runtime_revision
@@ -130,6 +130,8 @@ class RuntimeChildHost:
         runtime_factory: Callable[
             [Path, PolicyBundle], SimulationRuntime
         ] = MicroduckMujocoRuntime,
+        bundle_loader: Callable[[Path], PolicyBundle] | None = None,
+        qualification_max_steps: int | None = None,
         clock: Callable[[], float] = time.monotonic,
         fatal_cleanup_timeout_s: float = _FATAL_CLEANUP_TIMEOUT_S,
     ) -> None:
@@ -141,6 +143,15 @@ class RuntimeChildHost:
         self._socket = control
         self._bundle_root = bundle_root
         self._runtime_factory = runtime_factory
+        self._bundle_loader = bundle_loader
+        if qualification_max_steps is not None and (
+            isinstance(qualification_max_steps, bool)
+            or qualification_max_steps <= 0
+            or qualification_max_steps > 2_000
+        ):
+            raise ValueError("qualification step bound is invalid")
+        self._qualification_max_steps = qualification_max_steps
+        self._qualification_monitor_started = False
         self._clock = clock
         if fatal_cleanup_timeout_s <= 0:
             raise ValueError("fatal cleanup timeout must be positive")
@@ -234,18 +245,15 @@ class RuntimeChildHost:
     def _receive(self) -> None:
         while not self._stop.is_set():
             try:
-                packet, _ancillary, flags, _address = self._socket.recvmsg(
-                    PACKET_MAX_BYTES + 1
-                )
-            except OSError:
-                packet = b""
-                flags = 0
-            if not packet:
-                self._request_safety("PARENT_EOF")
+                packet = receive_packet(self._socket)
+            except ProtocolViolation:
+                self._request_safety("PROTOCOL_ERROR")
                 self._put_message(None)
                 return
-            if flags & socket.MSG_TRUNC or len(packet) > PACKET_MAX_BYTES:
-                self._request_safety("PROTOCOL_ERROR")
+            except OSError:
+                packet = b""
+            if not packet:
+                self._request_safety("PARENT_EOF")
                 self._put_message(None)
                 return
             try:
@@ -322,11 +330,13 @@ class RuntimeChildHost:
         try:
             runtime.emergency_stop(reason)
         except Exception:  # noqa: BLE001 - native safety failures are contained
+            emergency_succeeded = False
             evidence = RuntimeEvidence(
                 metrics={"safetyFailure": "EMERGENCY_STOP_FAILED"},
                 stopReason=reason,
             )
         else:
+            emergency_succeeded = True
             evidence = RuntimeEvidence(stopReason=reason)
         if (
             handle is None
@@ -353,10 +363,15 @@ class RuntimeChildHost:
                 )
                 runtime.command(handle, zero)
             except Exception:  # noqa: BLE001 - safe-stop still must be attempted
-                cleanup_evidence = RuntimeEvidence(
-                    metrics={"safetyFailure": "ZERO_COMMAND_FAILED"},
-                    stopReason=reason,
-                )
+                # A successful emergency_stop already published the code-owned
+                # zero intent and disabled actuation.  The concrete runtime
+                # intentionally rejects later public commands once that safety
+                # barrier is set; safe_stop below remains the cleanup proof.
+                if not emergency_succeeded:
+                    cleanup_evidence = RuntimeEvidence(
+                        metrics={"safetyFailure": "ZERO_COMMAND_FAILED"},
+                        stopReason=reason,
+                    )
             try:
                 raw_stopped = runtime.safe_stop(handle, reason)
                 stopped = RuntimeEvidence(
@@ -480,10 +495,14 @@ class RuntimeChildHost:
         template = action_template(self._active_action_code)
         deadline = (
             self._clock() + template.completion.maxDurationMs / 1000
-            if template.completion is not None
+            if (
+                template.completion is not None
+                and self._qualification_max_steps is None
+            )
             else None
         )
         self._sample_stop.clear()
+        self._qualification_monitor_started = True
 
         def monitor() -> None:
             assert self._runtime is not None and self._handle is not None
@@ -493,6 +512,7 @@ class RuntimeChildHost:
             sample = RuntimeSample(running=True)
             reason = "MAX_DURATION_EXCEEDED"
             outcome = "TIMED_OUT"
+            samples = 0
             try:
                 while (
                     (deadline is None or self._clock() < deadline)
@@ -500,12 +520,19 @@ class RuntimeChildHost:
                     and not self._sample_stop.is_set()
                 ):
                     sample = runtime.sample(handle)
+                    samples += 1
                     if sample.metrics:
                         with self._state_lock:
                             self._latest_sample_metrics = dict(sample.metrics)
                     if sample.terminalState is not None:
-                        if sample.terminalState == "SUCCEEDED":
-                            reason = "TASK_COMPLETE"
+                        if self._qualification_max_steps is not None:
+                            reason = sample.stopReason or (
+                                "TASK_COMPLETE"
+                                if sample.terminalState == "SUCCEEDED"
+                                else "RUNTIME_FAILED"
+                            )
+                        elif sample.terminalState == "SUCCEEDED":
+                            reason = sample.stopReason or "TASK_COMPLETE"
                         elif template.execution_mode == "DISCRETE":
                             reason = (
                                 "FALLEN"
@@ -516,7 +543,21 @@ class RuntimeChildHost:
                             reason = sample.stopReason or "RUNTIME_FAILED"
                         outcome = sample.terminalState
                         break
-                    self._sample_stop.wait(0.02)
+                    if (
+                        self._qualification_max_steps is not None
+                        and samples >= self._qualification_max_steps
+                    ):
+                        reason = "MAX_STEPS_REACHED"
+                        outcome = (
+                            "SUCCEEDED"
+                            if template.execution_mode == "CONTINUOUS_LEASE"
+                            else "TIMED_OUT"
+                        )
+                        break
+                    if self._qualification_max_steps is None:
+                        self._sample_stop.wait(0.02)
+                    else:
+                        time.sleep(0)
                 else:
                     if self._safety_requested.is_set() or self._sample_stop.is_set():
                         return
@@ -700,7 +741,8 @@ class RuntimeChildHost:
                 )
                 if root is None:
                     raise ValueError
-                bundle = load_qualified_bundle(root)
+                loader = self._bundle_loader or load_qualified_bundle
+                bundle = loader(root)
                 if bundle.bundleDigest != message.payload.bundleDigest:
                     raise ValueError
                 runtime = self._runtime_factory(root, bundle)
@@ -723,13 +765,21 @@ class RuntimeChildHost:
                 if not self._matches_active(message):
                     raise ValueError
                 assert self._runtime is not None
-                self._send(
+                published = self._send(
                     self._response(
                         message,
                         RuntimeMessageKind.STATUS,
                         StatusPayload(status=self._runtime.status()),
                     )
                 )
+                if (
+                    published
+                    and self._qualification_max_steps is not None
+                    and action_template(self._active_action_code).execution_mode
+                    == "DISCRETE"
+                    and not self._qualification_monitor_started
+                ):
+                    self._start_runtime_monitor()
             elif message.kind is RuntimeMessageKind.ZERO_AND_STOP:
                 assert isinstance(message.payload, ZeroAndStopPayload)
                 if not self._matches_active(message):
@@ -831,6 +881,7 @@ class RuntimeChildHost:
                 else None
             )
             self._latest_sample_metrics = {}
+            self._qualification_monitor_started = False
             self._completed_identity = None
             self._truthfully_stopped_completion = None
         self._runtime.validate(action, request)
@@ -846,7 +897,8 @@ class RuntimeChildHost:
             )
         )
         self._event_sequence = 0
-        self._start_runtime_monitor()
+        if self._qualification_max_steps is None:
+            self._start_runtime_monitor()
 
     def _command(self, message: RuntimeMessage) -> None:
         assert isinstance(message.payload, CommandPayload)
@@ -862,11 +914,17 @@ class RuntimeChildHost:
         self._runtime.command(self._handle, message.payload.parameters)
         if self._safety_requested.is_set():
             return
-        self._send(
+        published = self._send(
             self._response(
                 message, RuntimeMessageKind.ACK, AckPayload(acknowledgedKind="COMMAND")
             )
         )
+        if (
+            published
+            and self._qualification_max_steps is not None
+            and not self._qualification_monitor_started
+        ):
+            self._start_runtime_monitor()
 
     def run(self) -> int:
         receiver = threading.Thread(
@@ -921,6 +979,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket-fd", type=int, required=True)
     parser.add_argument("--bundle-root", type=Path)
+    parser.add_argument("--qualification-max-steps", type=int)
     return parser
 
 
@@ -932,7 +991,22 @@ def main() -> int:
     signal.signal(signal.SIGTERM, lambda _signum, _frame: termination.set())
     install_parent_death_signal()
     clear_runtime_environment()
-    host = RuntimeChildHost(control, bundle_root=args.bundle_root)
+    if args.qualification_max_steps is not None and not (
+        100 <= args.qualification_max_steps <= 2_000
+    ):
+        raise SystemExit(2)
+    if args.qualification_max_steps is None:
+        host = RuntimeChildHost(control, bundle_root=args.bundle_root)
+    else:
+        host = RuntimeChildHost(
+            control,
+            bundle_root=args.bundle_root,
+            runtime_factory=lambda root, bundle: MicroduckMujocoRuntime(
+                root, bundle, realtime=False
+            ),
+            bundle_loader=load_verified_bundle,
+            qualification_max_steps=args.qualification_max_steps,
+        )
     watcher = threading.Thread(
         target=lambda: (termination.wait(), host._request_safety("PARENT_DEATH")),
         daemon=True,

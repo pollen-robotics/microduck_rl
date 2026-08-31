@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+from collections import Counter
 import hashlib
 import json
 import math
@@ -18,12 +20,14 @@ from mjlab_microduck.rom.action_catalog import ACTION_TEMPLATES
 from mjlab_microduck.rom.bundle import BundleBuildRequest, build_bundle
 from mjlab_microduck.rom.contracts import (
     PolicyBundle,
+    TaskEvidence,
     UnsignedPolicyBundleManifest,
     canonical_json,
     sha256_prefixed,
 )
 from mjlab_microduck.rom.main import load_qualified_bundle
-from mjlab_microduck.rom.mujoco_runtime import MicroduckMujocoRuntime
+from mjlab_microduck.rom.process_protocol import TerminalPayload
+from mjlab_microduck.rom.process_supervisor import RuntimeProcessSupervisor
 from mjlab_microduck.rom.qualification import (
     ActionQualificationConfig,
     QualificationFailed,
@@ -35,6 +39,7 @@ from mjlab_microduck.rom.qualification import (
     recompute_action_qualification,
 )
 from mjlab_microduck.rom.runtime_identity import runtime_revision
+from tests.fakes.fake_microduck_runtime import robot_status
 from tests.test_rom_mujoco_runtime import (
     _rewrite_as_stand_bundle,
     _write_verified_bundle,
@@ -568,7 +573,11 @@ def test_battery_uses_governed_runtime_and_records_bounded_exact_identity(
     assert result.resetProfile == "DEFAULT_STANDING"
     assert result.scenarioProfile == "SEEDED_SERVO_RESET_V1"
     assert [rollout.seed for rollout in result.rollouts] == [7, 11, 29]
-    assert all(rollout.steps <= 100 for rollout in result.rollouts)
+    assert all(rollout.steps == 100 for rollout in result.rollouts)
+    assert all(rollout.terminalState == "RUNNING" for rollout in result.rollouts)
+    assert all(
+        rollout.stopReason == "MAX_STEPS_REACHED" for rollout in result.rollouts
+    )
     assert all(
         rollout.startedAt == NOW == rollout.finishedAt for rollout in result.rollouts
     )
@@ -576,6 +585,76 @@ def test_battery_uses_governed_runtime_and_records_bounded_exact_identity(
     assert all(rollout.actuatorClampSteps >= 0 for rollout in result.rollouts)
     assert all(rollout.physicalJointLimitViolations == 0 for rollout in result.rollouts)
     assert all(rollout.maxAbsAction >= 0.0 for rollout in result.rollouts)
+
+
+def test_qualification_executes_native_runtime_only_in_reaped_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Calling MuJoCo in the CLI parent would defeat process-owned qualification."""
+    source = tmp_path / "candidate"
+    _write_verified_bundle(source)
+    original_popen = subprocess.Popen
+    runtime_child_pids: list[int] = []
+    status_calls: list[str] = []
+    command_calls: list[str] = []
+    original_status = RuntimeProcessSupervisor.status
+    original_command = RuntimeProcessSupervisor.command
+
+    def recording_popen(*args, **kwargs):
+        process = original_popen(*args, **kwargs)
+        argv = args[0] if args else kwargs.get("args", ())
+        if (
+            "mjlab_microduck.rom.runtime_child" in argv
+            and "--qualification-max-steps" in argv
+        ):
+            runtime_child_pids.append(process.pid)
+        return process
+
+    def recording_status(self, task_id):
+        status_calls.append(task_id)
+        return original_status(self, task_id)
+
+    def recording_command(self, task_id, command, lease_ms=None):
+        command_calls.append(task_id)
+        return original_command(self, task_id, command, lease_ms)
+
+    monkeypatch.setattr(subprocess, "Popen", recording_popen)
+    monkeypatch.setattr(RuntimeProcessSupervisor, "status", recording_status)
+    monkeypatch.setattr(RuntimeProcessSupervisor, "command", recording_command)
+    promoted = qualify_and_promote(
+        source,
+        tmp_path / "qualified.zip",
+        _config(mandatory=True),
+        timestamp=lambda: NOW,
+    )
+
+    assert promoted.report.actions[0].status == "PASSED"
+    assert len(runtime_child_pids) == 3
+    assert len(status_calls) == 3
+    assert len(command_calls) >= 3
+    assert set(status_calls) == set(command_calls)
+    assert all(count >= 2 for count in Counter(command_calls).values())
+    assert all(pid != os.getpid() for pid in runtime_child_pids)
+    for pid in runtime_child_pids:
+        with pytest.raises(ChildProcessError):
+            os.waitpid(pid, os.WNOHANG)
+
+
+def test_qualification_parent_has_no_native_runtime_import() -> None:
+    """The production runtime child, never the parent, owns MuJoCo/ONNX objects."""
+    repository = Path(__file__).parents[1]
+    parent_path = repository / "src/mjlab_microduck/rom/qualification.py"
+    child_path = repository / "src/mjlab_microduck/rom/runtime_child.py"
+    assert child_path.is_file()
+    imports: set[str] = set()
+    for node in ast.walk(ast.parse(parent_path.read_text())):
+        if isinstance(node, ast.Import):
+            imports.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imports.add(node.module or "")
+    assert "mujoco" not in imports
+    assert "mujoco_runtime" not in imports
+    assert "mjlab_microduck.rom.mujoco_runtime" not in imports
 
 
 def test_stand_qualification_promotes_exact_discrete_runtime_success(
@@ -622,17 +701,20 @@ def test_qualification_rejects_runtime_evidence_with_wrong_seed_identity(
     """A runtime result from another seed must never be attributed to this battery."""
     source = tmp_path / "candidate"
     _write_verified_bundle(source)
-    original = MicroduckMujocoRuntime._evidence_metrics_locked
+    original = qualification_module._run_qualification_battery
 
-    def mismatched_seed(runtime: MicroduckMujocoRuntime):
-        metrics = original(runtime)
-        return metrics | {"rngSeed": int(metrics["rngSeed"]) + 1}
+    def mismatched_seed(*args, **kwargs):
+        rollouts = original(*args, **kwargs)
+        return (
+            rollouts[0].model_copy(update={"seed": rollouts[0].seed + 1}),
+            *rollouts[1:],
+        )
 
     monkeypatch.setattr(
-        MicroduckMujocoRuntime, "_evidence_metrics_locked", mismatched_seed
+        qualification_module, "_run_qualification_battery", mismatched_seed
     )
 
-    with pytest.raises(QualificationFailed, match="identity"):
+    with pytest.raises(QualificationFailed, match="evidence"):
         qualify_and_promote(
             source,
             tmp_path / "qualified.zip",
@@ -640,6 +722,104 @@ def test_qualification_rejects_runtime_evidence_with_wrong_seed_identity(
             timestamp=lambda: NOW,
         )
 
+
+def test_qualification_adapter_rejects_raw_child_identity_before_normalizing(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "candidate"
+    bundle = _write_verified_bundle(source)
+    declaration = _config(mandatory=True).actions[0]
+    definition = next(
+        action for action in bundle.actions if action.actionCode == "WALK_VELOCITY"
+    )
+    policy = next(
+        item for item in bundle.policies if item.policyRef == definition.policyRef
+    )
+    terminal = TerminalPayload(
+        outcome="SUCCEEDED",
+        evidence=TaskEvidence(
+            bundleDigest=bundle.bundleDigest,
+            policyDigest=policy.digest,
+            modelDigest=bundle.model.digest,
+            metrics={
+                "actionCode": declaration.actionCode,
+                "bundleDigest": bundle.bundleDigest,
+                "onnxDigest": policy.digest,
+                "mjcfDigest": bundle.model.digest,
+                "sourceCommit": bundle.sourceCommit,
+                "checkpoint": policy.checkpoint,
+                "runIdentity": policy.experimentRef,
+                "terrainIdentity": declaration.terrain,
+                "rngSeed": 999,
+                "scenarioProfile": "SEEDED_SERVO_RESET_V1",
+                "resetProfile": declaration.resetProfile,
+                "steps": declaration.maxSteps,
+            },
+            stopReason="MAX_STEPS_REACHED",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="runtime evidence identity"):
+        qualification_module._qualification_rollout_from_terminal(
+            bundle,
+            declaration,
+            definition,
+            declaration.seeds[0],
+            robot_status(),
+            terminal,
+            runtime_revision(),
+            NOW,
+        )
+
+
+def test_qualification_adapter_rejects_failed_exact_horizon_claim(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "candidate"
+    bundle = _write_verified_bundle(source)
+    declaration = _config(mandatory=True).actions[0]
+    definition = next(
+        action for action in bundle.actions if action.actionCode == "WALK_VELOCITY"
+    )
+    policy = next(
+        item for item in bundle.policies if item.policyRef == definition.policyRef
+    )
+    metrics = {
+        "actionCode": declaration.actionCode,
+        "bundleDigest": bundle.bundleDigest,
+        "onnxDigest": policy.digest,
+        "mjcfDigest": bundle.model.digest,
+        "sourceCommit": bundle.sourceCommit,
+        "checkpoint": policy.checkpoint,
+        "runIdentity": policy.experimentRef,
+        "terrainIdentity": declaration.terrain,
+        "rngSeed": declaration.seeds[0],
+        "scenarioProfile": "SEEDED_SERVO_RESET_V1",
+        "resetProfile": declaration.resetProfile,
+        "steps": declaration.maxSteps,
+    }
+    terminal = TerminalPayload(
+        outcome="FAILED",
+        evidence=TaskEvidence(
+            bundleDigest=bundle.bundleDigest,
+            policyDigest=policy.digest,
+            modelDigest=bundle.model.digest,
+            metrics=metrics,
+            stopReason="MAX_STEPS_REACHED",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="horizon outcome"):
+        qualification_module._qualification_rollout_from_terminal(
+            bundle,
+            declaration,
+            definition,
+            declaration.seeds[0],
+            robot_status(),
+            terminal,
+            runtime_revision(),
+            NOW,
+        )
 
 def test_promotion_is_reproducible_refuses_overwrite_and_binds_report_artifact(
     tmp_path: Path,
@@ -1582,19 +1762,39 @@ def test_docker_context_policies_allow_only_exact_rom_copy_inputs() -> None:
         text=True,
     ).stdout.splitlines()
     expected = {
+        "LICENSE",
         "pyproject.toml",
         "uv.lock",
-        "README.md",
-        "LICENSE",
-        "src/mjlab_microduck/__init__.py",
-        *(
-            path
-            for path in tracked
-            if path.startswith("src/mjlab_microduck/rom/")
-            and PurePosixPath(path).parent == PurePosixPath("src/mjlab_microduck/rom")
-            and path.endswith(".py")
-        ),
         "docker/rom-simulator/entrypoint.sh",
+        "docker/rom-simulator/mjlab_microduck_rom.pth",
+        "docker/rom-simulator/pid1_bootstrap.py",
+        "schemas/microduck-policy-bundle-v1.schema.json",
+        "schemas/microduck-simulator-api-v1.openapi.yaml",
+        "schemas/microduck-v1-portability-fixtures.json",
+        "src/mjlab_microduck/__init__.py",
+        "src/mjlab_microduck/rom/__init__.py",
+        "src/mjlab_microduck/rom/action_catalog.py",
+        "src/mjlab_microduck/rom/action_specs.py",
+        "src/mjlab_microduck/rom/api.py",
+        "src/mjlab_microduck/rom/bundle.py",
+        "src/mjlab_microduck/rom/contracts.py",
+        "src/mjlab_microduck/rom/main.py",
+        "src/mjlab_microduck/rom/mirroring.py",
+        "src/mjlab_microduck/rom/model_semantics.py",
+        "src/mjlab_microduck/rom/mujoco_runtime.py",
+        "src/mjlab_microduck/rom/observation.py",
+        "src/mjlab_microduck/rom/onnx_policy.py",
+        "src/mjlab_microduck/rom/parent_death.py",
+        "src/mjlab_microduck/rom/process_protocol.py",
+        "src/mjlab_microduck/rom/process_service.py",
+        "src/mjlab_microduck/rom/process_supervisor.py",
+        "src/mjlab_microduck/rom/qualification.py",
+        "src/mjlab_microduck/rom/runtime.py",
+        "src/mjlab_microduck/rom/runtime_child.py",
+        "src/mjlab_microduck/rom/runtime_identity.py",
+        "src/mjlab_microduck/rom/service.py",
+        "src/mjlab_microduck/rom/store.py",
+        "src/mjlab_microduck/rom/supervisor_state.py",
     }
     policies = [
         (repository / ".dockerignore").read_text(),
@@ -1602,12 +1802,16 @@ def test_docker_context_policies_allow_only_exact_rom_copy_inputs() -> None:
     ]
     representatives = [
         *tracked,
+        "docker/rom-simulator/mjlab_microduck_rom.pth",
+        "docker/rom-simulator/pid1_bootstrap.py",
         ".env",
         "output/checkpoint.pt",
         "src/mjlab_microduck/robot/microduck/assets/body.stl",
         "src/mjlab_microduck/robot/microduck/assets/source.part",
         "src/mjlab_microduck/tasks/new_training.py",
         "tests/secret_fixture.bin",
+        "src/mjlab_microduck/rom/debug_secret.py",
+        "src/mjlab_microduck/rom/untracked_secret.py",
     ]
     for policy in policies:
         included = {

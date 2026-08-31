@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,68 @@ from mjlab_microduck.rom.supervisor_state import SupervisorState
 
 def test_supervisor_module_exposes_process_owner() -> None:
     assert RuntimeProcessSupervisor is not None
+
+
+def test_production_child_launch_uses_safe_module_path_and_null_stdio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Writable service state and inherited streams must not reach the native child."""
+    monkeypatch.setenv("PYTHONPATH", "/state/attacker-controlled")
+    supervisor = RuntimeProcessSupervisor(bundle_root="/bundle", bundle_digest=DIGEST)
+    try:
+        launch = supervisor._default_launch(17)
+        assert launch.argv[:3] == (sys.executable, "-P", "-m")
+        assert launch.env is not None and "PYTHONPATH" not in launch.env
+        assert launch.stdin == subprocess.DEVNULL
+        assert launch.stdout == subprocess.DEVNULL
+        assert launch.stderr == subprocess.DEVNULL
+    finally:
+        supervisor.close()
+
+
+def test_qualification_launch_uses_the_same_runtime_child_with_bounded_mode() -> None:
+    supervisor = RuntimeProcessSupervisor(
+        bundle_root="/candidate",
+        bundle_digest=DIGEST,
+        qualification_max_steps=100,
+    )
+    try:
+        launch = supervisor._default_launch(17)
+        assert launch.argv[-2:] == ("--qualification-max-steps", "100")
+        assert "mjlab_microduck.rom.runtime_child" in launch.argv
+        assert "qualification_worker" not in " ".join(launch.argv)
+    finally:
+        supervisor.close()
+
+
+@pytest.mark.parametrize(("mode", "operation"), [("block-start", "start"), ("block-stop", "stop")])
+def test_dispatch_callback_proves_request_was_sent_before_blocked_reply(
+    mode: str, operation: str
+) -> None:
+    supervisor, _launch = _supervisor(mode, operation_timeout_s=2.0)
+    supervisor.ensure_ready()
+    if operation == "stop":
+        supervisor.start(_request())
+    dispatched = threading.Event()
+    result: list[BaseException] = []
+
+    def invoke() -> None:
+        try:
+            if operation == "start":
+                supervisor.start(_request(), register_dispatch=dispatched.set)
+            else:
+                supervisor.stop(TASK_ID, "CANCELLED", dispatched.set)
+        except BaseException as exc:  # noqa: BLE001 - close deliberately severs IPC
+            result.append(exc)
+
+    worker = threading.Thread(target=invoke, daemon=True)
+    worker.start()
+    assert dispatched.wait(timeout=1)
+    assert worker.is_alive()
+    supervisor.close()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert result
 
 
 DIGEST = "sha256:" + "a" * 64
@@ -131,6 +194,35 @@ def _assert_containment_trace(
     assert supervisor.snapshot().slot_releasable is True
 
 
+def _gate_next_unsolicited_poll(
+    supervisor: RuntimeProcessSupervisor, *, drain: bool = True
+) -> threading.Event:
+    """Hold the owner before poll so the exact child can become a confirmed zombie."""
+    entered = threading.Event()
+    release = threading.Event()
+    original = supervisor._poll_unsolicited
+
+    def gated_poll() -> None:
+        entered.set()
+        assert release.wait(timeout=2)
+        supervisor._poll_unsolicited = original  # type: ignore[method-assign]
+        if drain:
+            original()
+
+    supervisor._poll_unsolicited = gated_poll  # type: ignore[method-assign]
+    assert entered.wait(timeout=2)
+    return release
+
+
+def _capture_exception(
+    outcome: dict[str, BaseException], key: str, operation: Callable[[], object]
+) -> None:
+    try:
+        operation()
+    except BaseException as exc:  # noqa: BLE001 - test records exact caller outcome.
+        outcome[key] = exc
+
+
 def test_start_command_stop_reuses_exact_healthy_child_pid() -> None:
     supervisor, _launch = _supervisor()
     try:
@@ -215,6 +307,110 @@ def test_idle_owner_consumes_unsolicited_terminal_and_releases_slot() -> None:
         assert snapshot.cached_terminal.outcome == "SUCCEEDED"
         assert snapshot.state is SupervisorState.IDLE
         assert snapshot.slot_releasable is True
+    finally:
+        supervisor.close()
+
+
+def test_owner_autonomously_reaps_child_exit_after_start_ack_without_terminal() -> None:
+    """Removing idle exit polling would leave the exact acknowledged task RUNNING."""
+    supervisor, launch = _supervisor("exit-after-start-ack")
+    try:
+        supervisor.ensure_ready()
+        supervisor.start(_request())
+        peer = _receive_gate(launch, b"STARTED")
+        pid = supervisor.snapshot().pid
+        assert pid is not None
+        pidfd = os.pidfd_open(pid)
+        release_poll = _gate_next_unsolicited_poll(supervisor)
+        peer.sendall(b"EXIT")
+        assert select.select([pidfd], [], [], 2)[0] == [pidfd]
+        release_poll.set()
+
+        deadline = time.monotonic() + 2
+        while supervisor.snapshot().pid is not None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        _assert_pidfd_dead(pidfd)
+        assert supervisor.snapshot().state is SupervisorState.NO_CHILD
+        assert supervisor.snapshot().slot_releasable is True
+        assert "CHILD_REAPED" in supervisor.trace
+    finally:
+        supervisor.close()
+
+
+def test_terminal_packet_is_consumed_before_immediately_exited_child_is_reaped() -> None:
+    """Checking poll first would discard a truthful queued terminal packet."""
+    delivered: list[TerminalPayload] = []
+    supervisor, launch = _supervisor(
+        "terminal-event-exit",
+        terminal_callback=lambda delivery: delivered.append(delivery.terminal),
+    )
+    try:
+        supervisor.ensure_ready()
+        supervisor.start(_request())
+        peer = _receive_gate(launch, b"STARTED")
+        pid = supervisor.snapshot().pid
+        assert pid is not None
+        pidfd = os.pidfd_open(pid)
+        release_poll = _gate_next_unsolicited_poll(supervisor)
+        peer.sendall(b"EMIT")
+        assert select.select([pidfd], [], [], 2)[0] == [pidfd]
+        os.close(pidfd)
+        release_poll.set()
+
+        deadline = time.monotonic() + 2
+        while (
+            (not delivered or supervisor.snapshot().pid is not None)
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.005)
+        assert [item.outcome for item in delivered] == ["SUCCEEDED"]
+        assert supervisor.snapshot().cached_terminal is not None
+        assert supervisor.snapshot().cached_terminal.outcome == "SUCCEEDED"
+        assert supervisor.snapshot().state is SupervisorState.NO_CHILD
+        assert supervisor.snapshot().slot_releasable is True
+    finally:
+        supervisor.close()
+
+
+def test_prequeued_terminal_from_exited_child_wins_over_next_public_operation() -> None:
+    """A send to EOF must not discard the terminal already queued by the kernel."""
+    delivered: list[TerminalPayload] = []
+    supervisor, launch = _supervisor(
+        "terminal-event-exit",
+        terminal_callback=lambda delivery: delivered.append(delivery.terminal),
+    )
+    outcome: dict[str, BaseException] = {}
+    try:
+        supervisor.ensure_ready()
+        supervisor.start(_request())
+        peer = _receive_gate(launch, b"STARTED")
+        release_poll = _gate_next_unsolicited_poll(supervisor, drain=False)
+        pid = supervisor.snapshot().pid
+        assert pid is not None
+        pidfd = os.pidfd_open(pid)
+        peer.sendall(b"EMIT")
+        assert select.select([pidfd], [], [], 2)[0] == [pidfd]
+        os.close(pidfd)
+
+        caller = threading.Thread(
+            target=lambda: _capture_exception(
+                outcome, "status", lambda: supervisor.status(TASK_ID)
+            ),
+            daemon=True,
+        )
+        caller.start()
+        release_poll.set()
+        caller.join(timeout=2)
+        assert not caller.is_alive()
+        assert isinstance(outcome.get("status"), SupervisorTaskTerminalized)
+        deadline = time.monotonic() + 2
+        while (
+            (not delivered or supervisor.snapshot().pid is not None)
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.005)
+        assert [terminal.outcome for terminal in delivered] == ["SUCCEEDED"]
+        assert supervisor.snapshot().state is SupervisorState.NO_CHILD
     finally:
         supervisor.close()
 
@@ -619,6 +815,8 @@ def test_each_block_mode_has_ordered_reap_barrier(
     assert len(errors) == 1 and isinstance(errors[0], SupervisorOperationError)
     _assert_pidfd_dead(pidfd)
     _assert_containment_trace(supervisor)
+    if operation != "ready":
+        assert supervisor.snapshot().quarantine_reason == "OPERATION_TIMEOUT"
     supervisor.close()
     for peer in launch.test_peers:
         peer.close()

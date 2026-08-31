@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import array
+import os
+import socket
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -13,6 +18,7 @@ from mjlab_microduck.rom.process_protocol import (
     StartPayload,
     decode_packet,
     encode_packet,
+    receive_packet,
 )
 
 
@@ -91,6 +97,40 @@ def test_packet_is_canonical_bounded_and_round_trips() -> None:
     assert len(packet) <= PACKET_MAX_BYTES
     assert packet == canonical_json(message)
     assert decode_packet(packet) == message
+
+
+def test_receive_packet_accepts_only_canonical_packet_bytes() -> None:
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    try:
+        packet = encode_packet(_start_message())
+        parent.sendall(packet)
+        assert receive_packet(child) == packet
+    finally:
+        parent.close()
+        child.close()
+
+
+@pytest.mark.parametrize("descriptor_count", [1, 32])
+def test_receive_packet_rejects_control_data_without_leaking_received_fds(
+    descriptor_count: int,
+) -> None:
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    source_fd = os.open("/dev/null", os.O_RDONLY)
+    before = {item.name for item in Path("/proc/self/fd").iterdir()}
+    try:
+        rights = array.array("i", [source_fd] * descriptor_count)
+        parent.sendmsg(
+            [encode_packet(_start_message())],
+            [(socket.SOL_SOCKET, socket.SCM_RIGHTS, rights)],
+        )
+        with pytest.raises(ProtocolViolation, match="control data"):
+            receive_packet(child)
+        after = {item.name for item in Path("/proc/self/fd").iterdir()}
+        assert after == before
+    finally:
+        os.close(source_fd)
+        parent.close()
+        child.close()
 
 
 @pytest.mark.parametrize(
