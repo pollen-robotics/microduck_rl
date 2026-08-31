@@ -223,6 +223,9 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
         reset_params["road_return_prob"],
     ) == (0.70, 0.20, 0.10)
     assert reset_params["recovery_road_return_prob"] == 0.35
+    assert reset_params["heading_return_prob"] == 0.30
+    assert reset_params["heading_return_min_rad"] == pytest.approx(math.radians(20.0))
+    assert reset_params["heading_return_max_rad"] == pytest.approx(math.radians(40.0))
     assert tuple(
         reset_params[name]
         for name in (
@@ -272,6 +275,9 @@ def test_roll_sprint_is_separate_long_distance_61d_policy():
     assert [
         stage["params"]["recovery_road_return_prob"] for stage in spawn_stages
     ] == [0.35, 0.30, 0.20, 0.10]
+    assert [
+        stage["params"]["heading_return_prob"] for stage in spawn_stages
+    ] == [0.30, 0.25, 0.20, 0.15]
     assert [
         tuple(
             stage["params"][name]
@@ -433,6 +439,37 @@ def test_first_post_reset_update_freezes_actual_course_frame(monkeypatch):
     )
     assert env._roll_sprint_course_lateral_position[0] == pytest.approx(0.31)
     assert env._roll_sprint_forward_origin[0] == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_heading_return_reset_exposes_signed_error_and_requires_reposition(monkeypatch):
+    env, asset = _fake_env(1)
+    _enable_flat_valid_roll(monkeypatch, env)
+    angle = math.radians(30.0)
+    mdp._reset_roll_sprint_buffers(
+        env,
+        torch.tensor([0]),
+        spawn_cycle_eligible=torch.tensor([False]),
+        spawn_awaiting_reposition=torch.tensor([True]),
+        spawn_heading_error_rad=torch.tensor([angle]),
+    )
+    env.command_manager = SimpleNamespace(
+        get_command=lambda command_name: torch.zeros((1, 3))
+    )
+
+    _set_yaw(asset, torch.tensor([0.0]))
+    mdp._update_roll_sprint_state(env, asset)
+    command = mdp.roll_sprint_reposition_command(env)
+
+    assert env._roll_sprint_heading_w[0].tolist() == pytest.approx(
+        [math.cos(angle), math.sin(angle)], abs=1.0e-6
+    )
+    assert env._roll_sprint_heading_error_rad[0] == pytest.approx(angle)
+    assert env._roll_sprint_awaiting_reposition[0]
+    assert not env._roll_sprint_cycle_eligible[0]
+    assert command[0, 2] == pytest.approx(
+        mdp._ROLL_SPRINT_REPOSITION_YAW_COMMAND_RPS
+    )
+    assert env._roll_sprint_spawn_heading_error_rad[0] == 0.0
 
 
 @pytest.mark.parametrize("left_prob,right_prob", [(1.0, 0.0), (0.0, 1.0)])

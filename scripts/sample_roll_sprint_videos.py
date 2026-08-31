@@ -20,23 +20,24 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RECORDER = REPO_ROOT / "scripts" / "record_roll_sprint_policy.py"
 EVALUATOR = REPO_ROOT / "scripts" / "evaluate_roll_sprint_checkpoint.py"
+SELECTOR = REPO_ROOT / "scripts" / "select_best_roll_sprint_checkpoint.py"
 DEFAULT_CHECKPOINT_ROOT = REPO_ROOT / "logs" / "rsl_rl" / "microduck_roll_sprint"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "artifacts" / "training" / "roll-sprint-samples"
 DEFAULT_TASK_ID = "Mjlab-Roll-Sprint-Flat-MicroDuck"
 DEFAULT_INTERVAL_SECONDS = 150.0
-RECORDING_STEPS = 1000
+RECORDING_STEPS = 2000
 RECOVERY_RECORDING_STEPS = 600
 SIMULATION_HZ = 50
-# Ten rendered frames per simulated second keeps the full 20 s race readable
-# while leaving enough wall-clock margin to start a fresh clip every 150 s.
+# Compress the full 40 s race horizon into a readable 20 s clip while leaving
+# enough wall-clock margin to start a fresh clip every 150 s.
 OUTPUT_FPS = 10.0
 OUTPUT_VIDEO_SECONDS = 20.0
 RECORDING_FRAME_STRIDE = round(
     RECORDING_STEPS / (OUTPUT_FPS * OUTPUT_VIDEO_SECONDS)
 )
 EVALUATION_ENVS = 4
-EVALUATION_DURATION = 20.0
-EVALUATION_SCHEMA_VERSION = 7
+EVALUATION_DURATION = 40.0
+EVALUATION_SCHEMA_VERSION = 8
 STATE_FILENAME = ".sample-roll-sprint-videos.json"
 CHECKPOINT_PATTERN = re.compile(r"model_(\d+)\.pt$")
 
@@ -205,6 +206,25 @@ def _recorder_command(
     return command
 
 
+def _select_champion(*, output_dir: Path, champion_dir: Path) -> bool:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SELECTOR),
+            "--evaluation-dir",
+            str(output_dir / "evaluations"),
+            "--champion-dir",
+            str(champion_dir),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+    )
+    if result.returncode != 0:
+        _log(f"champion selection failed with exit code {result.returncode}")
+        return False
+    return True
+
+
 def sample_once(args: argparse.Namespace) -> bool:
     checkpoint = find_newest_checkpoint(args.checkpoint_root)
     if checkpoint is None:
@@ -249,7 +269,28 @@ def sample_once(args: argparse.Namespace) -> bool:
     elif not skip_evaluation:
         _log(f"reusing completed audit: {evaluation}")
 
+    if (
+        not skip_evaluation
+        and args.champion_dir is not None
+        and not _select_champion(
+            output_dir=args.output_dir,
+            champion_dir=args.champion_dir,
+        )
+    ):
+        return False
+
     if args.audit_only:
+        _write_state(
+            args.state_file,
+            {
+                "version": 4,
+                "last_checkpoint": asdict(identity),
+                "last_evaluation": str(evaluation.resolve()),
+                "last_video": None,
+                "last_recovery_montage": None,
+                "sampled_at_utc": datetime.now(UTC).isoformat(),
+            },
+        )
         return True
 
     recovery_montage = _recovery_montage_path(args.output_dir, identity)
@@ -369,6 +410,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--state-file", type=Path)
     parser.add_argument(
+        "--champion-dir",
+        type=Path,
+        help="Keep exactly one best eligible audited checkpoint in this directory.",
+    )
+    parser.add_argument(
         "--interval-seconds", type=float, default=DEFAULT_INTERVAL_SECONDS
     )
     parser.add_argument("--task-id", default=DEFAULT_TASK_ID)
@@ -404,6 +450,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         if args.state_file is not None
         else args.output_dir / STATE_FILENAME
     )
+    args.champion_dir = (
+        args.champion_dir.expanduser().resolve()
+        if args.champion_dir is not None
+        else None
+    )
     if args.interval_seconds <= 0:
         parser.error("--interval-seconds must be greater than zero")
     return args
@@ -415,6 +466,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit(f"Recorder not found: {RECORDER}")
     if not args.video_only and not args.montage_only and not EVALUATOR.is_file():
         raise SystemExit(f"Evaluator not found: {EVALUATOR}")
+    if args.champion_dir is not None and not SELECTOR.is_file():
+        raise SystemExit(f"Champion selector not found: {SELECTOR}")
     if not args.checkpoint_root.is_dir():
         raise SystemExit(f"Checkpoint root not found: {args.checkpoint_root}")
     _log(

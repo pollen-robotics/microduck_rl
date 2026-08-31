@@ -214,6 +214,13 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
             "road_edge_prob": 0.0 if play else 0.20,
             "road_return_prob": 0.0 if play else 0.10,
             "recovery_road_return_prob": 0.0 if play else 0.35,
+            "heading_return_prob": 0.0 if play else 0.30,
+            "heading_return_min_rad": (
+                microduck_mdp._ROLL_SPRINT_HEADING_RETURN_RESET_MIN_RAD
+            ),
+            "heading_return_max_rad": (
+                microduck_mdp._ROLL_SPRINT_HEADING_RETURN_RESET_MAX_RAD
+            ),
             "standing_z_min": old_reset.params["standing_z_min"],
             "standing_z_max": old_reset.params["standing_z_max"],
             "standing_tilt_max": old_reset.params["standing_tilt_max"],
@@ -316,6 +323,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                         "ground_left_prob": 0.25,
                         "ground_right_prob": 0.25,
                         "recovery_road_return_prob": 0.35,
+                        "heading_return_prob": 0.30,
                     },
                 },
                 {
@@ -331,6 +339,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                         "ground_left_prob": 0.25,
                         "ground_right_prob": 0.25,
                         "recovery_road_return_prob": 0.30,
+                        "heading_return_prob": 0.25,
                     },
                 },
                 {
@@ -346,6 +355,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                         "ground_left_prob": 0.25,
                         "ground_right_prob": 0.25,
                         "recovery_road_return_prob": 0.20,
+                        "heading_return_prob": 0.20,
                     },
                 },
                 {
@@ -361,6 +371,7 @@ def make_microduck_roll_sprint_env_cfg(play: bool = False) -> ManagerBasedRlEnvC
                         "ground_left_prob": 0.25,
                         "ground_right_prob": 0.25,
                         "recovery_road_return_prob": 0.10,
+                        "heading_return_prob": 0.15,
                     },
                 },
             ],

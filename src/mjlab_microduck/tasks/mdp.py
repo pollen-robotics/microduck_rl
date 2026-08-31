@@ -11519,6 +11519,8 @@ _ROLL_SPRINT_REPOSITION_LATERAL_KP = 2.0
 _ROLL_SPRINT_REPOSITION_HEADING_TRIGGER_RAD = math.radians(20.0)
 _ROLL_SPRINT_REPOSITION_HEADING_REARM_RAD = math.radians(10.0)
 _ROLL_SPRINT_REPOSITION_HEADING_COMMAND_KP = 1.0
+_ROLL_SPRINT_HEADING_RETURN_RESET_MIN_RAD = math.radians(20.0)
+_ROLL_SPRINT_HEADING_RETURN_RESET_MAX_RAD = math.radians(40.0)
 # The inherited actor's yaw-command normalizer has std about 0.024. Keeping
 # this at 0.05 exposes direction and error without a 15-sigma distribution
 # shift that would destabilize the compatible A60 warm start.
@@ -11628,6 +11630,7 @@ def _roll_sprint_state(env: ManagerBasedRlEnv) -> None:
     env._roll_sprint_reset_heading_override_valid = torch.zeros(
         env.num_envs, dtype=torch.bool, device=env.device
     )
+    env._roll_sprint_spawn_heading_error_rad = z.clone()
     env._roll_sprint_heading_error_rad = z.clone()
     env._roll_sprint_heading_alignment_delta = z.clone()
     env._roll_sprint_progress_delta = z.clone()
@@ -11677,6 +11680,22 @@ def _roll_sprint_signed_heading_error(
         - current_heading_w[:, 1] * target_heading_w[:, 0]
     )
     return torch.atan2(cross, dot)
+
+
+def _roll_sprint_rotate_heading(
+    heading_w: torch.Tensor,
+    angle_rad: torch.Tensor,
+) -> torch.Tensor:
+    """Rotate planar headings by signed angles without changing their norm."""
+    cosine = torch.cos(angle_rad)
+    sine = torch.sin(angle_rad)
+    return torch.stack(
+        (
+            heading_w[:, 0] * cosine - heading_w[:, 1] * sine,
+            heading_w[:, 0] * sine + heading_w[:, 1] * cosine,
+        ),
+        dim=-1,
+    )
 
 
 def _roll_sprint_forward_position(
@@ -11749,10 +11768,18 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
     heading = _roll_sprint_heading(asset)
     not_ready = active & ~env._roll_sprint_heading_ready
     use_reset_heading = not_ready & env._roll_sprint_reset_heading_override_valid
-    initial_heading = torch.where(
+    reset_heading = torch.where(
         use_reset_heading.unsqueeze(-1),
         env._roll_sprint_reset_heading_override_w,
         heading,
+    )
+    initial_heading = _roll_sprint_rotate_heading(
+        reset_heading,
+        torch.where(
+            not_ready,
+            env._roll_sprint_spawn_heading_error_rad,
+            torch.zeros_like(env._roll_sprint_spawn_heading_error_rad),
+        ),
     )
     reference_heading = torch.where(
         not_ready.unsqueeze(-1), initial_heading, env._roll_sprint_heading_w
@@ -11805,6 +11832,11 @@ def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
     )
     env._roll_sprint_heading_ready |= not_ready
     env._roll_sprint_reset_heading_override_valid &= ~not_ready
+    env._roll_sprint_spawn_heading_error_rad = torch.where(
+        active & not_ready,
+        torch.zeros_like(env._roll_sprint_spawn_heading_error_rad),
+        env._roll_sprint_spawn_heading_error_rad,
+    )
     env._roll_sprint_forward_position = torch.where(
         active, position, env._roll_sprint_forward_position
     )
@@ -12450,6 +12482,9 @@ def reset_roll_sprint_state(
     road_edge_prob: float = 0.20,
     road_return_prob: float = 0.10,
     recovery_road_return_prob: float = 0.0,
+    heading_return_prob: float = 0.0,
+    heading_return_min_rad: float = _ROLL_SPRINT_HEADING_RETURN_RESET_MIN_RAD,
+    heading_return_max_rad: float = _ROLL_SPRINT_HEADING_RETURN_RESET_MAX_RAD,
 ) -> None:
     """Reset pose plus every cyclic sprint buffer for the selected envs."""
     if env_ids is None or len(env_ids) == 0:
@@ -12544,6 +12579,10 @@ def reset_roll_sprint_state(
         raise ValueError("roll-sprint road start probabilities need positive mass")
     if not 0.0 <= recovery_road_return_prob <= 1.0:
         raise ValueError("recovery road-return probability must be in [0, 1]")
+    if not 0.0 <= heading_return_prob <= 1.0:
+        raise ValueError("heading-return probability must be in [0, 1]")
+    if not 0.0 <= heading_return_min_rad <= heading_return_max_rad:
+        raise ValueError("heading-return range must be non-negative and ordered")
     road_sample = torch.rand(len(env_ids), device=env.device) * road_total
     is_road_interior = road_sample < road_interior_prob
     is_road_edge = (road_sample >= road_interior_prob) & (
@@ -12556,6 +12595,13 @@ def reset_roll_sprint_state(
     force_recovery_road_return = spawn_self_righting & (
         torch.rand(len(env_ids), device=env.device) < recovery_road_return_prob
     )
+    force_heading_return = torch.zeros(
+        len(env_ids), dtype=torch.bool, device=env.device
+    )
+    if heading_return_prob > 0.0:
+        force_heading_return = (
+            torch.rand(len(env_ids), device=env.device) < heading_return_prob
+        )
     is_road_interior &= ~force_recovery_road_return
     is_road_edge &= ~force_recovery_road_return
     road_sign = torch.where(
@@ -12586,6 +12632,21 @@ def reset_roll_sprint_state(
     )
     spawn_awaiting_reposition = (
         road_lateral_position.abs() > _ROLL_SPRINT_REPOSITION_TRIGGER_M
+    ) | force_heading_return
+    heading_return_sign = torch.where(
+        torch.rand(len(env_ids), device=env.device) < 0.5,
+        -torch.ones(len(env_ids), device=env.device),
+        torch.ones(len(env_ids), device=env.device),
+    )
+    spawn_heading_error = torch.where(
+        force_heading_return,
+        heading_return_sign
+        * (
+            heading_return_min_rad
+            + torch.rand(len(env_ids), device=env.device)
+            * (heading_return_max_rad - heading_return_min_rad)
+        ),
+        torch.zeros(len(env_ids), device=env.device),
     )
     spawn_cycle_eligible &= ~spawn_awaiting_reposition
     _reset_roll_sprint_buffers(
@@ -12599,6 +12660,7 @@ def reset_roll_sprint_state(
         spawn_self_righting=spawn_self_righting,
         spawn_recovery_kind=spawn_kind,
         spawn_course_lateral_position=road_lateral_position,
+        spawn_heading_error_rad=spawn_heading_error,
     )
     if len(ground_ids) > 0:
         env._roll_sprint_reset_heading_override_w[ground_ids] = ground_heading
@@ -12622,6 +12684,7 @@ def _reset_roll_sprint_buffers(
     spawn_self_righting: torch.Tensor | None = None,
     spawn_recovery_kind: torch.Tensor | None = None,
     spawn_course_lateral_position: torch.Tensor | None = None,
+    spawn_heading_error_rad: torch.Tensor | None = None,
 ) -> None:
     """Reset only cyclic sprint bookkeeping, preserving other env state."""
     _roll_sprint_state(env)
@@ -12652,6 +12715,8 @@ def _reset_roll_sprint_buffers(
         )
     if spawn_course_lateral_position is None:
         spawn_course_lateral_position = torch.zeros(len(env_ids), device=env.device)
+    if spawn_heading_error_rad is None:
+        spawn_heading_error_rad = torch.zeros(len(env_ids), device=env.device)
     env._roll_sprint_accum[env_ids] = spawn_accum
     env._roll_sprint_phase_frontier[env_ids] = spawn_accum
     env._roll_sprint_head_latch[env_ids] = spawn_head_latch
@@ -12703,6 +12768,7 @@ def _reset_roll_sprint_buffers(
     env._roll_sprint_heading_ready[env_ids] = False
     env._roll_sprint_reset_heading_override_w[env_ids] = 0.0
     env._roll_sprint_reset_heading_override_valid[env_ids] = False
+    env._roll_sprint_spawn_heading_error_rad[env_ids] = spawn_heading_error_rad
     env._roll_sprint_heading_error_rad[env_ids] = 0.0
     env._roll_sprint_heading_alignment_delta[env_ids] = 0.0
     env._roll_sprint_progress_delta[env_ids] = 0.0

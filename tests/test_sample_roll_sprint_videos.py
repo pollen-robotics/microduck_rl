@@ -21,6 +21,7 @@ def _args(tmp_path: Path, checkpoint_root: Path) -> argparse.Namespace:
         checkpoint_root=checkpoint_root,
         output_dir=output_dir,
         state_file=output_dir / "state.json",
+        champion_dir=None,
         interval_seconds=150.0,
         task_id="Mjlab-Roll-Sprint-Flat-MicroDuck",
         device="cpu",
@@ -38,9 +39,9 @@ def test_defaults_record_long_race_every_150_seconds() -> None:
 
     assert args.interval_seconds == 150.0
     assert args.task_id == "Mjlab-Roll-Sprint-Flat-MicroDuck"
-    assert sampler.RECORDING_STEPS == 1000
+    assert sampler.RECORDING_STEPS == 2000
     assert sampler.RECOVERY_RECORDING_STEPS == 600
-    assert sampler.RECORDING_FRAME_STRIDE == 5
+    assert sampler.RECORDING_FRAME_STRIDE == 10
     assert (
         sampler.RECORDING_STEPS
         / sampler.RECORDING_FRAME_STRIDE
@@ -48,8 +49,8 @@ def test_defaults_record_long_race_every_150_seconds() -> None:
         == sampler.OUTPUT_VIDEO_SECONDS
         == 20.0
     )
-    assert sampler.EVALUATION_DURATION == 20.0
-    assert sampler.EVALUATION_SCHEMA_VERSION == 7
+    assert sampler.EVALUATION_DURATION == 40.0
+    assert sampler.EVALUATION_SCHEMA_VERSION == 8
     assert args.parent_frontier_m is None
 
 
@@ -106,10 +107,10 @@ def test_sample_once_records_four_robot_video_and_persists_state(
     evaluation_command, command, recovery_command = observed["commands"]
     assert evaluation_command[2] == str(checkpoint)
     assert evaluation_command[evaluation_command.index("--num-envs") + 1] == "4"
-    assert evaluation_command[evaluation_command.index("--duration") + 1] == "20"
+    assert evaluation_command[evaluation_command.index("--duration") + 1] == "40"
     assert command[2] == str(checkpoint)
-    assert command[command.index("--steps") + 1] == "1000"
-    assert command[command.index("--frame-stride") + 1] == "5"
+    assert command[command.index("--steps") + 1] == "2000"
+    assert command[command.index("--frame-stride") + 1] == "10"
     assert command[command.index("--task-id") + 1] == args.task_id
     assert "--recovery-montage" not in command
     assert "--recovery-montage" in recovery_command
@@ -123,7 +124,7 @@ def test_sample_once_records_four_robot_video_and_persists_state(
     state = json.loads(args.state_file.read_text(encoding="utf-8"))
     assert state["last_checkpoint"]["iteration"] == 25
     assert Path(state["last_evaluation"]).is_file()
-    assert "race-20s-v7" in Path(state["last_evaluation"]).name
+    assert "race-40s-v8" in Path(state["last_evaluation"]).name
     assert state["last_video"] == str(output.resolve())
     assert Path(state["last_recovery_montage"]).is_file()
 
@@ -264,4 +265,7 @@ def test_audit_only_skips_video_recording(tmp_path: Path, monkeypatch) -> None:
     assert sampler.sample_once(args) is True
     assert len(calls) == 1
     assert calls[0][1] == str(sampler.EVALUATOR)
-    assert not args.state_file.exists()
+    state = json.loads(args.state_file.read_text(encoding="utf-8"))
+    assert state["version"] == 4
+    assert state["last_checkpoint"]["iteration"] == 100
+    assert Path(state["last_evaluation"]).is_file()

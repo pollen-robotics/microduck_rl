@@ -22,7 +22,7 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-def test_canonical_evaluation_defaults_to_twenty_seconds(
+def test_canonical_evaluation_defaults_to_full_forty_second_horizon(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     checkpoint = tmp_path / "model_0.pt"
@@ -31,11 +31,11 @@ def test_canonical_evaluation_defaults_to_twenty_seconds(
 
     args = MODULE._parse_args()
 
-    assert MODULE.CANONICAL_RACE_DURATION_S == pytest.approx(20.0)
-    assert args.duration == pytest.approx(20.0)
+    assert MODULE.CANONICAL_RACE_DURATION_S == pytest.approx(40.0)
+    assert args.duration == pytest.approx(40.0)
 
 
-def test_canonical_evaluation_rejects_forty_second_race(
+def test_canonical_evaluation_rejects_old_twenty_second_deadline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     checkpoint = tmp_path / "model_0.pt"
@@ -43,10 +43,10 @@ def test_canonical_evaluation_rejects_forty_second_race(
     monkeypatch.setattr(
         sys,
         "argv",
-        [str(SCRIPT_PATH), str(checkpoint), "--duration", "40"],
+        [str(SCRIPT_PATH), str(checkpoint), "--duration", "20"],
     )
 
-    with pytest.raises(SystemExit, match="--duration 20"):
+    with pytest.raises(SystemExit, match="--duration 40"):
         MODULE.main()
 
 
@@ -620,7 +620,7 @@ def test_evaluator_ranks_standing_on_road_robot_by_credited_frontier() -> None:
     assert not report["per_robot"][1]["standing_on_road_finish_pass"]
 
 
-def test_ten_meter_finish_boundary_is_scored_at_twenty_seconds() -> None:
+def test_ten_meter_finish_boundary_is_scored_over_full_horizon() -> None:
     lane_centers = torch.tensor([-0.42, -0.14, 0.14, 0.42])
     auditor = MODULE.RollCycleAuditor(
         initial_position_xy=torch.stack((torch.zeros(4), lane_centers), dim=-1),
@@ -646,7 +646,29 @@ def test_ten_meter_finish_boundary_is_scored_at_twenty_seconds() -> None:
         True,
         False,
     ]
-    assert report["mean_roll_linked_speed_mps"] == pytest.approx(39.99 / 4 / 20)
+    assert report["mean_roll_linked_speed_mps"] == pytest.approx(39.99 / 4 / 40)
+
+
+def test_first_valid_ten_meter_finish_time_is_latched() -> None:
+    auditor = _auditor()
+    auditor.linked_distance[:] = 9.80
+    auditor.forward_frontier[:] = 9.80
+    auditor.cycle_start_forward[:] = 9.80
+    auditor.accum[:] = MODULE.TARGET_ANGLE - 0.01
+    auditor.phase_frontier[:] = auditor.accum
+    auditor.head_latch[:] = True
+
+    _observe(auditor, omega=1.0, forward_position=10.10)
+    first_time = auditor.target_reach_time_s.item()
+    _observe(auditor, omega=0.0, forward_position=10.10)
+
+    report = auditor.summary(MODULE.CANONICAL_RACE_DURATION_S)
+    assert first_time == pytest.approx(0.02)
+    assert auditor.target_reach_time_s.item() == pytest.approx(first_time)
+    assert report["target_distance_reach_count"] == 1
+    assert report["mean_time_to_valid_10m_s"] == pytest.approx(first_time)
+    assert report["slowest_time_to_valid_10m_s"] == pytest.approx(first_time)
+    assert report["per_robot"][0]["time_to_valid_10m_s"] == pytest.approx(first_time)
 
 
 def test_heading_uses_lateral_axis_at_vertical_pitch() -> None:
