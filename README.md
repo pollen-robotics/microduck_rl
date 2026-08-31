@@ -21,7 +21,9 @@ reward-design lessons that made it work
 
 ## Quickstart
 
-Requires a CUDA GPU (training runs through MuJoCo Warp) and [uv](https://docs.astral.sh/uv/).
+Requires a CUDA GPU for real training runs (through MuJoCo Warp) and
+[uv](https://docs.astral.sh/uv/); CPU-only machines can still develop and
+smoke-test — see [Running without an NVIDIA GPU](#running-without-an-nvidia-gpu).
 
 > **On ARM boxes (DGX Spark / GB10, Jetson):** `uv sync` pulls ~2 GB of CUDA
 > wheels on first run and uv's default 30 s HTTP timeout can abort mid-download.
@@ -53,6 +55,26 @@ uv run train Mjlab-Velocity-Flat-MicroDuck --env.scene.num-envs 4096 \
 
 No GPU? Add `--hf-jobs` to any train command to run it on Hugging Face Jobs
 instead of locally (see [scripts/hf/README.md](scripts/hf/README.md)).
+
+### Running without an NVIDIA GPU
+
+The whole stack also runs on CPU (macOS Apple Silicon, Linux without CUDA) —
+MuJoCo Warp executes on its `cpu` device and torch on `cpu`. This is a
+development/debugging path, not a training path: expect it to be orders of
+magnitude slower than a GPU, and keep `--env.scene.num-envs` in the 32–128
+range. Real training runs belong on a GPU or `--hf-jobs`.
+
+```bash
+# smoke-test a config on a laptop (a few minutes)
+uv run train Mjlab-Velocity-Flat-MicroDuck --env.scene.num-envs 64 --agent.max_iterations 5
+```
+
+When no CUDA GPU is detected, `train` falls back to CPU automatically (with a
+one-line warning); `--device cpu` / `--device cuda` forces it. `play`,
+`scripts/export.py`, and `scripts/infer_policy.py` already auto-detect and
+fall back to CPU on their own. `--device mps` is not supported: mjlab passes
+a single device string to both Warp and torch, and Warp has no Metal backend
+(the policy networks are tiny, so CPU is fine on macOS anyway).
 
 ## Tasks
 

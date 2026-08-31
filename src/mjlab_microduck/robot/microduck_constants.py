@@ -259,5 +259,7 @@ if __name__ == "__main__":
         entities={"robot": MICRODUCK_WALK_ROBOT_CFG},
     )
 
-    scene = Scene(SCENE_CFG, device="cuda:0")
+    import torch
+
+    scene = Scene(SCENE_CFG, device="cuda:0" if torch.cuda.is_available() else "cpu")
     viewer.launch(scene.compile())
