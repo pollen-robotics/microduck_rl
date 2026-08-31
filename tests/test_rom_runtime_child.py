@@ -608,6 +608,36 @@ def test_failed_completion_terminal_send_retires_transport(monkeypatch) -> None:
     parent.close()
 
 
+@pytest.mark.parametrize(
+    "mode", ["blocked-sample", "blocked-completion-cleanup"]
+)
+def test_real_child_retires_blocked_fake_native_work_without_injected_lease(
+    mode: str,
+) -> None:
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            str(Path(__file__).parent / "fakes" / "runtime_host_harness.py"),
+            "--control-fd",
+            str(child.fileno()),
+            "--mode",
+            mode,
+        ],
+        pass_fds=(child.fileno(),),
+    )
+    child.close()
+    try:
+        parent.settimeout(2)
+        assert parent.recv(65_537) == b""
+        assert process.wait(timeout=2) == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=2)
+        parent.close()
+
+
 def _active_host(**host_kwargs) -> tuple[
     RuntimeChildHost, FakeMicroduckRuntime, socket.socket, threading.Thread
 ]:
