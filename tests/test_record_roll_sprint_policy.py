@@ -348,10 +348,14 @@ def test_backroll_camera_can_follow_wrong_way_motion_before_policy_improves() ->
             robot_x_m=-5.0,
             dt_s=0.02,
             minimum_x_m=None,
+            lead_m=MODULE.BACKROLL_CAMERA_LEAD_M,
+            max_speed_mps=MODULE.BACKROLL_CAMERA_MAX_SPEED_MPS,
+            max_accel_mps2=MODULE.BACKROLL_CAMERA_MAX_ACCEL_MPS2,
         )
 
-    assert state.x_m < -0.60
-    assert state.x_m > -5.0 + MODULE.RACE_CAMERA_LEAD_M
+    assert state.x_m < -4.9
+    assert state.x_m > -5.1
+    assert abs(state.velocity_mps) < 0.5
 
 
 def test_follow_camera_continues_beyond_finish_line() -> None:

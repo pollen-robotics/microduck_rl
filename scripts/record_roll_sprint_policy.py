@@ -43,6 +43,9 @@ RACE_CAMERA_SPRING_GAIN_S2 = 9.0
 RACE_CAMERA_DAMPING_S_INV = 6.0
 RACE_CAMERA_MAX_SPEED_MPS = 3.0
 RACE_CAMERA_MAX_ACCEL_MPS2 = 4.0
+BACKROLL_CAMERA_LEAD_M = 0.0
+BACKROLL_CAMERA_MAX_SPEED_MPS = 8.0
+BACKROLL_CAMERA_MAX_ACCEL_MPS2 = 12.0
 RACE_LINE_HEIGHT = 0.008
 RACE_LINE_RADIUS = 0.018
 FINISH_ARCH_HEIGHT_M = 0.72
@@ -512,6 +515,9 @@ def _camera_follow_x(
     robot_x_m: float,
     dt_s: float,
     minimum_x_m: float | None = -RACE_CAMERA_LEAD_M,
+    lead_m: float = RACE_CAMERA_LEAD_M,
+    max_speed_mps: float = RACE_CAMERA_MAX_SPEED_MPS,
+    max_accel_mps2: float = RACE_CAMERA_MAX_ACCEL_MPS2,
 ) -> CameraFollowState:
     """Advance a critically damped camera without position or velocity snaps."""
     if not np.isfinite(robot_x_m) or not np.isfinite(dt_s) or dt_s <= 0.0:
@@ -519,22 +525,22 @@ def _camera_follow_x(
     # Do not stop the camera at the 10 m line. Valid frontier can lag physical
     # position while a roll is still being verified, so a hard 10 m camera cap
     # leaves every contender off-screen during the decisive final seconds.
-    target_x_m = robot_x_m + RACE_CAMERA_LEAD_M
+    target_x_m = robot_x_m + lead_m
     if minimum_x_m is not None:
         target_x_m = max(target_x_m, minimum_x_m)
     acceleration_mps2 = float(
         np.clip(
             RACE_CAMERA_SPRING_GAIN_S2 * (target_x_m - state.x_m)
             - RACE_CAMERA_DAMPING_S_INV * state.velocity_mps,
-            -RACE_CAMERA_MAX_ACCEL_MPS2,
-            RACE_CAMERA_MAX_ACCEL_MPS2,
+            -max_accel_mps2,
+            max_accel_mps2,
         )
     )
     velocity_mps = float(
         np.clip(
             state.velocity_mps + acceleration_mps2 * dt_s,
-            -RACE_CAMERA_MAX_SPEED_MPS,
-            RACE_CAMERA_MAX_SPEED_MPS,
+            -max_speed_mps,
+            max_speed_mps,
         )
     )
     return CameraFollowState(
@@ -631,6 +637,9 @@ def _follow_on_road_leader(
     previous_leader_index: int | None,
     dt_s: float,
     minimum_camera_x_m: float | None = -RACE_CAMERA_LEAD_M,
+    camera_lead_m: float = RACE_CAMERA_LEAD_M,
+    camera_max_speed_mps: float = RACE_CAMERA_MAX_SPEED_MPS,
+    camera_max_accel_mps2: float = RACE_CAMERA_MAX_ACCEL_MPS2,
 ) -> tuple[CameraFollowState, float, int]:
     """Travel longitudinally with the on-road leader while showing the full road."""
     renderer = base_env._offline_renderer
@@ -645,6 +654,9 @@ def _follow_on_road_leader(
         leader_x_m,
         dt_s,
         minimum_x_m=minimum_camera_x_m,
+        lead_m=camera_lead_m,
+        max_speed_mps=camera_max_speed_mps,
+        max_accel_mps2=camera_max_accel_mps2,
     )
     camera_y_m = 0.0
     renderer._cam.lookat[:] = (
@@ -731,10 +743,16 @@ def main() -> int:
     )
     camera_state = CameraFollowState(RACE_CAMERA_LOOKAT[0])
     leader_index = 0
-    minimum_camera_x_m = (
-        None
-        if _roll_direction_for_task(args.task_id) < 0.0
-        else -RACE_CAMERA_LEAD_M
+    is_backroll = _roll_direction_for_task(args.task_id) < 0.0
+    minimum_camera_x_m = None if is_backroll else -RACE_CAMERA_LEAD_M
+    camera_lead_m = BACKROLL_CAMERA_LEAD_M if is_backroll else RACE_CAMERA_LEAD_M
+    camera_max_speed_mps = (
+        BACKROLL_CAMERA_MAX_SPEED_MPS if is_backroll else RACE_CAMERA_MAX_SPEED_MPS
+    )
+    camera_max_accel_mps2 = (
+        BACKROLL_CAMERA_MAX_ACCEL_MPS2
+        if is_backroll
+        else RACE_CAMERA_MAX_ACCEL_MPS2
     )
 
     writer: subprocess.Popen[bytes] | None = None
@@ -764,6 +782,9 @@ def main() -> int:
                     leader_index,
                     policy_dt,
                     minimum_camera_x_m=minimum_camera_x_m,
+                    camera_lead_m=camera_lead_m,
+                    camera_max_speed_mps=camera_max_speed_mps,
+                    camera_max_accel_mps2=camera_max_accel_mps2,
                 )
             if (step + 1) % args.frame_stride != 0:
                 continue

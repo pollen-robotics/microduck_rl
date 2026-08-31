@@ -49,8 +49,15 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
-def stage_checkpoint(source: Path, destination: Path) -> None:
-    """Copy a compatible PPO snapshot while resetting run counters only."""
+def stage_checkpoint(
+    source: Path,
+    destination: Path,
+    *,
+    exploration_std: float | None = None,
+    reset_optimizer: bool = False,
+    optimizer_learning_rate: float | None = None,
+) -> None:
+    """Copy a PPO snapshot and optionally reopen exploration for a new skill."""
     import torch
 
     payload = torch.load(source, map_location="cpu", weights_only=False)
@@ -65,6 +72,22 @@ def stage_checkpoint(source: Path, destination: Path) -> None:
         env_state = infos.setdefault("env_state", {})
         if isinstance(env_state, dict):
             env_state["common_step_counter"] = 0
+    if exploration_std is not None:
+        std_keys = [
+            key
+            for key in payload["actor_state_dict"]
+            if key.endswith("distribution.std_param")
+        ]
+        if not std_keys:
+            raise SystemExit("Checkpoint actor has no distribution.std_param")
+        for key in std_keys:
+            payload["actor_state_dict"][key].fill_(exploration_std)
+    optimizer = payload["optimizer_state_dict"]
+    if reset_optimizer:
+        optimizer["state"] = {}
+    if optimizer_learning_rate is not None:
+        for param_group in optimizer["param_groups"]:
+            param_group["lr"] = optimizer_learning_rate
     destination.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, destination)
 
@@ -85,6 +108,20 @@ def _parse_args() -> argparse.Namespace:
         type=_positive_float,
         default=None,
         help="Optional PPO learning-rate override for conservative champion search.",
+    )
+    parser.add_argument(
+        "--exploration-std",
+        type=_positive_float,
+        default=None,
+        help=(
+            "Reset the loaded Gaussian action standard deviation while retaining "
+            "the champion mean policy. Useful when learning a genuinely new skill."
+        ),
+    )
+    parser.add_argument(
+        "--reset-optimizer",
+        action="store_true",
+        help="Discard inherited Adam moments while retaining policy and critic weights.",
     )
     parser.add_argument(
         "--save-interval",
@@ -108,7 +145,13 @@ def main() -> int:
 
     experiment_root = REPO_ROOT / "logs" / "rsl_rl" / args.experiment_name
     staged = experiment_root / BOOTSTRAP_DIR_NAME / "model_0.pt"
-    stage_checkpoint(source, staged)
+    stage_checkpoint(
+        source,
+        staged,
+        exploration_std=args.exploration_std,
+        reset_optimizer=args.reset_optimizer,
+        optimizer_learning_rate=args.learning_rate,
+    )
 
     train_exe = REPO_ROOT / ".venv" / (
         "Scripts/train.exe" if os.name == "nt" else "bin/train"
