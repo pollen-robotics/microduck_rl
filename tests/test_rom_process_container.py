@@ -230,6 +230,29 @@ def _secret_mount(secret_file: Path, *, readonly: bool = True) -> str:
     return f"{mount},readonly" if readonly else mount
 
 
+def _cleanup_failed_container_launch(
+    *, image: str, state_dir: Path, name: str, failure: BaseException
+) -> None:
+    """Best-effort cleanup that preserves the original, non-echoing failure."""
+    cleanup_incomplete = False
+    try:
+        removed = _run("docker", "rm", "--force", name, check=False)
+        if removed.returncode != 0:
+            inspected = _run("docker", "inspect", name, check=False)
+            cleanup_incomplete = inspected.returncode == 0
+    except BaseException:  # noqa: BLE001 - the original security failure must win
+        cleanup_incomplete = True
+
+    try:
+        if state_dir.exists():
+            _restore_state_ownership(image, state_dir)
+    except BaseException:  # noqa: BLE001 - do not expose cleanup command output
+        cleanup_incomplete = True
+
+    if cleanup_incomplete:
+        failure.add_note("container startup cleanup did not complete")
+
+
 def _container_pids(name: str) -> tuple[int, tuple[int, ...]]:
     parent_pid = int(
         _run("docker", "inspect", "--format", "{{.State.Pid}}", name).stdout
@@ -353,65 +376,79 @@ def _cross_idle_child_protocol_barrier(container: _Container) -> None:
 def _launch_container(
     *, image: str, bundle: Path, state_dir: Path, suffix: str
 ) -> _Container:
-    _prepare_state(image, state_dir)
-    secret_file = _prepare_secret(image, state_dir.parent / f"{state_dir.name}-secret")
     name = f"microduck-rom-task5-{os.getpid()}-{suffix}"
-    _run("docker", "rm", "--force", name, check=False)
-    _run(
-        "docker",
-        "run",
-        "--detach",
-        "--name",
-        name,
-        "--user",
-        "10001:10001",
-        "--read-only",
-        "--cap-drop=ALL",
-        "--security-opt=no-new-privileges",
-        "--tmpfs",
-        "/tmp:rw,noexec,nosuid,size=64m",
-        "--mount",
-        f"type=bind,src={bundle},dst=/bundle,readonly",
-        "--mount",
-        f"type=bind,src={state_dir},dst=/state",
-        "--mount",
-        _secret_mount(secret_file),
-        "--publish",
-        "127.0.0.1::8000",
-        "--stop-timeout",
-        "60",
-        image,
-    )
-    deadline = time.monotonic() + 30
-    base_url = ""
-    failure_label = "container did not publish a port"
-    while time.monotonic() < deadline:
-        port = _run("docker", "port", name, "8000/tcp", check=False).stdout.strip()
-        if port:
-            base_url = f"http://127.0.0.1:{port.rsplit(':', 1)[1]}"
-            try:
-                status, body = _request(base_url, "GET", "/v1/ready")
-                if status == 200 and body.get("ready") is True:
-                    break
-                _assert_token_absent(
-                    "container readiness response",
-                    json.dumps(body, separators=(",", ":")),
-                )
-                failure_label = f"container readiness returned HTTP {status}"
-            except (OSError, ValueError) as exc:
-                failure_label = (
-                    f"container readiness request failed with {type(exc).__name__}"
-                )
-        time.sleep(0.05)
-    else:
-        logs = _run("docker", "logs", name, check=False)
-        _assert_token_absent("container startup logs", logs.stdout + logs.stderr)
+    try:
+        _prepare_state(image, state_dir)
+        secret_file = _prepare_secret(
+            image, state_dir.parent / f"{state_dir.name}-secret"
+        )
         _run("docker", "rm", "--force", name, check=False)
-        _restore_state_ownership(image, state_dir)
-        raise AssertionError(f"{failure_label}; container did not become ready")
-    parent_pid, descendants = _container_pids(name)
-    assert len(descendants) == 1
-    return _Container(name, image, base_url, state_dir, parent_pid, descendants[0])
+        _run(
+            "docker",
+            "run",
+            "--detach",
+            "--name",
+            name,
+            "--user",
+            "10001:10001",
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
+            "--mount",
+            f"type=bind,src={bundle},dst=/bundle,readonly",
+            "--mount",
+            f"type=bind,src={state_dir},dst=/state",
+            "--mount",
+            _secret_mount(secret_file),
+            "--publish",
+            "127.0.0.1::8000",
+            "--stop-timeout",
+            "60",
+            image,
+        )
+        deadline = time.monotonic() + 30
+        base_url = ""
+        failure_label = "container did not publish a port"
+        while time.monotonic() < deadline:
+            port = _run(
+                "docker", "port", name, "8000/tcp", check=False
+            ).stdout.strip()
+            if port:
+                base_url = f"http://127.0.0.1:{port.rsplit(':', 1)[1]}"
+                try:
+                    status, body = _request(base_url, "GET", "/v1/ready")
+                    if status == 200 and body.get("ready") is True:
+                        break
+                    _assert_token_absent(
+                        "container readiness response",
+                        json.dumps(body, separators=(",", ":")),
+                    )
+                    failure_label = f"container readiness returned HTTP {status}"
+                except (OSError, ValueError) as exc:
+                    failure_label = (
+                        "container readiness request failed with "
+                        f"{type(exc).__name__}"
+                    )
+            time.sleep(0.05)
+        else:
+            logs = _run("docker", "logs", name, check=False)
+            _assert_token_absent("container startup logs", logs.stdout + logs.stderr)
+            raise AssertionError(f"{failure_label}; container did not become ready")
+        parent_pid, descendants = _container_pids(name)
+        assert len(descendants) == 1
+        return _Container(
+            name, image, base_url, state_dir, parent_pid, descendants[0]
+        )
+    except BaseException as failure:
+        _cleanup_failed_container_launch(
+            image=image,
+            state_dir=state_dir,
+            name=name,
+            failure=failure,
+        )
+        raise
 
 
 def _launch_without_readiness_wait(
@@ -1086,6 +1123,107 @@ def test_persisted_evidence_leak_failure_names_only_stable_channel(
 
     assert str(caught.value) == "bearer literal leaked through persisted test evidence"
     assert _TOKEN not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("channel", "expected_error"),
+    (
+        (
+            "readiness",
+            "bearer literal leaked through container readiness response",
+        ),
+        ("startup-logs", "bearer literal leaked through container startup logs"),
+    ),
+)
+def test_launch_leak_failure_removes_container_and_restores_state_ownership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    channel: str,
+    expected_error: str,
+) -> None:
+    """A pre-return security failure must not strand mounted secret material."""
+    image, bundle = _release_inputs(tmp_path)
+    suffix = f"cleanup-{channel}"
+    name = f"microduck-rom-task5-{os.getpid()}-{suffix}"
+    state_dir = tmp_path / f"state-{channel}"
+    real_run = _run
+
+    if channel == "readiness":
+        monkeypatch.setattr(
+            "tests.test_rom_process_container._request",
+            lambda *_args, **_kwargs: (503, {"detail": _TOKEN}),
+        )
+    else:
+        monotonic_values = iter((0.0, 31.0))
+        monkeypatch.setattr(
+            "tests.test_rom_process_container.time.monotonic",
+            lambda: next(monotonic_values),
+        )
+
+        def run_with_planted_logs(
+            *args: str, check: bool = True
+        ) -> subprocess.CompletedProcess[str]:
+            if args[:2] == ("docker", "logs"):
+                return subprocess.CompletedProcess(args, 0, "", _TOKEN)
+            return real_run(*args, check=check)
+
+        monkeypatch.setattr(
+            "tests.test_rom_process_container._run", run_with_planted_logs
+        )
+
+    try:
+        with pytest.raises(AssertionError) as caught:
+            _launch_container(
+                image=image,
+                bundle=bundle,
+                state_dir=state_dir,
+                suffix=suffix,
+            )
+
+        assert str(caught.value) == expected_error
+        assert _TOKEN not in str(caught.value)
+        container_absent = (
+            real_run("docker", "inspect", name, check=False).returncode != 0
+        )
+        ownership_restored = (
+            state_dir.stat().st_uid,
+            state_dir.stat().st_gid,
+        ) == (os.getuid(), os.getgid())
+        assert (container_absent, ownership_restored) == (True, True)
+    finally:
+        real_run("docker", "rm", "--force", name, check=False)
+        if state_dir.exists():
+            _restore_state_ownership(image, state_dir)
+
+
+def test_failed_launch_cleanup_error_does_not_echo_captured_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cleanup diagnostics must not replace or disclose a security failure."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    def fail_with_captured_output(*_args: str, **_kwargs: object) -> None:
+        raise RuntimeError(_TOKEN)
+
+    monkeypatch.setattr(
+        "tests.test_rom_process_container._run", fail_with_captured_output
+    )
+    failure = AssertionError("bearer literal leaked through stable channel")
+
+    _cleanup_failed_container_launch(
+        image="unused-image",
+        state_dir=state_dir,
+        name="unused-container",
+        failure=failure,
+    )
+
+    diagnostic = "\n".join((str(failure), *getattr(failure, "__notes__", ())))
+    assert diagnostic == (
+        "bearer literal leaked through stable channel\n"
+        "container startup cleanup did not complete"
+    )
+    assert _TOKEN not in diagnostic
 
 
 @pytest.mark.parametrize(
