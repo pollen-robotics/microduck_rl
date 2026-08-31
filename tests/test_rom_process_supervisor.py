@@ -21,6 +21,7 @@ from mjlab_microduck.rom.contracts import (
 from mjlab_microduck.rom.process_protocol import TerminalPayload
 from mjlab_microduck.rom.process_supervisor import (
     ChildLaunch,
+    ReapReceipt,
     RuntimeProcessSupervisor,
     SupervisorOperationError,
     SupervisorSnapshot,
@@ -1152,10 +1153,13 @@ def test_close_is_bounded_and_exactly_reaps_from_owned_lifecycle_state(
         assert supervisor.snapshot().state.value == state
 
     close_errors: list[BaseException] = []
+    close_receipts: list[ReapReceipt | None] = []
+    owned = supervisor.snapshot()
+    assert owned.ownership_identity is not None
 
     def close() -> None:
         try:
-            supervisor.close()
+            close_receipts.append(supervisor.close())
         except BaseException as exc:  # noqa: BLE001 - asserted below
             close_errors.append(exc)
 
@@ -1169,7 +1173,13 @@ def test_close_is_bounded_and_exactly_reaps_from_owned_lifecycle_state(
         assert not operation_thread.is_alive()
         assert len(operation_errors) == 1
     _assert_pidfd_dead(pidfd)
-    assert supervisor.last_reaped_pid == pid
+    assert close_receipts == [
+        ReapReceipt(
+            generation=owned.generation,
+            pid=pid,
+            ownership_identity=owned.ownership_identity,
+        )
+    ]
     assert supervisor.snapshot().pid is None
     assert supervisor.snapshot().slot_releasable
     assert supervisor.snapshot().state is SupervisorState.NO_CHILD

@@ -26,6 +26,7 @@ from mjlab_microduck.rom.process_protocol import AckPayload, TerminalPayload
 from mjlab_microduck.rom.process_service import SimulatorTaskService
 from mjlab_microduck.rom.process_supervisor import (
     CorrelatedTerminalDelivery,
+    ReapReceipt,
     StartAcknowledgement,
     SupervisorSnapshot,
     SupervisorUnavailable,
@@ -176,6 +177,10 @@ def test_production_parent_import_closure_does_not_load_native_runtime_modules()
 
 def test_lifespan_surfaces_exact_reap_failure_instead_of_reporting_clean_shutdown():
     class CloseFailureService:
+        shutdown_reap_receipt = ReapReceipt(
+            generation=1, pid=23, ownership_identity=41
+        )
+
         def tick(self) -> None:
             return None
 
@@ -194,13 +199,139 @@ def test_lifespan_surfaces_exact_reap_failure_instead_of_reporting_clean_shutdow
         assert client.get("/v1/health").status_code == 200
 
     assert isinstance(app.state.shutdown_failure, RuntimeError)
+    assert app.state.shutdown_reap_receipt is None
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        ReapReceipt(generation=1, pid=23, ownership_identity=200),
+        ReapReceipt(generation=2, pid=23, ownership_identity=199),
+        ReapReceipt(generation=2, pid=24, ownership_identity=200),
+    ],
+    ids=("same-pid-old-generation", "same-pid-old-owner", "different-pid"),
+)
+def test_service_rejects_reap_receipt_not_bound_to_preclose_owner(
+    tmp_path: Path, receipt: ReapReceipt
+) -> None:
+    bundle = stand_bundle_fixture.__wrapped__()
+
+    class ReceiptSupervisor:
+        def snapshot(self) -> SupervisorSnapshot:
+            return SupervisorSnapshot(
+                SupervisorState.IDLE,
+                2,
+                True,
+                None,
+                None,
+                True,
+                pid=23,
+                ownership_identity=200,
+            )
+
+        def ensure_ready(self) -> SupervisorSnapshot:
+            return self.snapshot()
+
+        def close(self) -> ReapReceipt:
+            return receipt
+
+    supervisor = ReceiptSupervisor()
+    service = SimulatorTaskService(
+        bundle,
+        SqliteTaskStore(tmp_path / "receipt.sqlite3"),
+        lambda _callback: supervisor,  # type: ignore[arg-type,return-value]
+    )
+
+    service.close()
+
+    assert service.shutdown_reap_receipt is None
+
+
+def test_service_does_not_publish_receipt_when_close_raises(tmp_path: Path) -> None:
+    bundle = stand_bundle_fixture.__wrapped__()
+    exact = ReapReceipt(generation=2, pid=23, ownership_identity=200)
+
+    class RaisingSupervisor:
+        # A stale attribute must not rescue a failed close.
+        reap_receipt = exact
+
+        def snapshot(self) -> SupervisorSnapshot:
+            return SupervisorSnapshot(
+                SupervisorState.IDLE,
+                2,
+                True,
+                None,
+                None,
+                True,
+                pid=23,
+                ownership_identity=200,
+            )
+
+        def ensure_ready(self) -> SupervisorSnapshot:
+            return self.snapshot()
+
+        def close(self) -> ReapReceipt:
+            raise RuntimeError("exact reap unproven")
+
+    supervisor = RaisingSupervisor()
+    service = SimulatorTaskService(
+        bundle,
+        SqliteTaskStore(tmp_path / "raising.sqlite3"),
+        lambda _callback: supervisor,  # type: ignore[arg-type,return-value]
+    )
+
+    with pytest.raises(RuntimeError, match="exact reap unproven"):
+        service.close()
+
+    assert service.shutdown_reap_receipt is None
+
+
+def test_service_and_api_publish_only_exact_successful_close_receipt(
+    tmp_path: Path,
+) -> None:
+    bundle = stand_bundle_fixture.__wrapped__()
+    exact = ReapReceipt(generation=2, pid=23, ownership_identity=200)
+
+    class ReceiptSupervisor:
+        def snapshot(self) -> SupervisorSnapshot:
+            return SupervisorSnapshot(
+                SupervisorState.IDLE,
+                2,
+                True,
+                None,
+                None,
+                True,
+                pid=23,
+                ownership_identity=200,
+            )
+
+        def ensure_ready(self) -> SupervisorSnapshot:
+            return self.snapshot()
+
+        def close(self) -> ReapReceipt:
+            return exact
+
+    supervisor = ReceiptSupervisor()
+    service = SimulatorTaskService(
+        bundle,
+        SqliteTaskStore(tmp_path / "success.sqlite3"),
+        lambda _callback: supervisor,  # type: ignore[arg-type,return-value]
+    )
+    app = create_app(service, "shutdown-token")
+
+    with TestClient(app) as client:
+        assert client.get("/v1/health").status_code == 200
+
+    assert app.state.shutdown_failure is None
+    assert service.shutdown_reap_receipt == exact
+    assert app.state.shutdown_reap_receipt == exact
 
 
 def test_pid1_server_exits_nonzero_when_lifespan_containment_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     app = SimpleNamespace(
-        state=SimpleNamespace(shutdown_failure=None, shutdown_reaped_pid=23)
+        state=SimpleNamespace(shutdown_failure=None, shutdown_reap_receipt=None)
     )
     configured = SimpleNamespace(
         host="127.0.0.1", port=8000, state_db=tmp_path / "tasks.sqlite3"
@@ -252,11 +383,7 @@ def test_pid1_server_exits_nonzero_when_lifespan_containment_fails(
     }
     assert captured["app_created_before_run"] is False
     assert captured["app_created_during_run"] is True
-    evidence = json.loads(
-        (tmp_path / "tasks.sqlite3.shutdown-v1.json").read_text()
-    )
-    assert evidence["reapedChildPid"] == 23
-    assert evidence["exitCode"] == 70
+    assert not (tmp_path / "tasks.sqlite3.shutdown-v1.json").exists()
 
 
 def test_pid1_shutdown_evidence_records_exact_reap_before_exit(
@@ -267,7 +394,9 @@ def test_pid1_shutdown_evidence_records_exact_reap_before_exit(
 
     evidence_path = rom_main._write_shutdown_evidence(
         state_db,
-        reaped_child_pid=23,
+        reap_receipt=ReapReceipt(
+            generation=7, pid=23, ownership_identity=101
+        ),
         exit_code=0,
     )
 
@@ -279,10 +408,56 @@ def test_pid1_shutdown_evidence_records_exact_reap_before_exit(
         ],
         "exitCode": 0,
         "exactReapConfirmed": True,
+        "childGeneration": 7,
+        "ownershipIdentity": 101,
         "pid1Pid": os.getpid(),
         "reapedChildPid": 23,
         "schema": "MICRODUCK_ROM_PID1_SHUTDOWN_V1",
     }
+
+
+def test_pid1_main_writes_only_generation_bound_success_receipt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    receipt = ReapReceipt(generation=4, pid=29, ownership_identity=303)
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            shutdown_failure=None,
+            shutdown_reap_receipt=receipt,
+        )
+    )
+    configured = SimpleNamespace(
+        host="127.0.0.1", port=8000, state_db=tmp_path / "tasks.sqlite3"
+    )
+    captured: dict[str, object] = {}
+
+    class FakeServer:
+        def __init__(self, config) -> None:
+            captured["config"] = config
+            self.lifespan = SimpleNamespace(shutdown_failed=False)
+
+        def run(self) -> None:
+            factory, _kwargs = captured["config"]
+            assert factory() is app
+
+    monkeypatch.setattr(rom_main, "read_configuration", lambda: configured)
+    monkeypatch.setattr(rom_main, "create_configured_app", lambda: app)
+    monkeypatch.setattr(
+        rom_main.uvicorn,
+        "Config",
+        lambda application, **kwargs: (application, kwargs),
+    )
+    monkeypatch.setattr(rom_main.uvicorn, "Server", FakeServer)
+
+    rom_main.main()
+
+    evidence = json.loads(
+        (tmp_path / "tasks.sqlite3.shutdown-v1.json").read_text()
+    )
+    assert evidence["reapedChildPid"] == receipt.pid
+    assert evidence["childGeneration"] == receipt.generation
+    assert evidence["ownershipIdentity"] == receipt.ownership_identity
+    assert evidence["exitCode"] == 0
 
 
 def test_service_requires_a_supervisor_factory_not_a_runtime_handle():

@@ -27,6 +27,7 @@ from .contracts import (
 from .process_protocol import AckPayload, TerminalPayload
 from .process_supervisor import (
     CorrelatedTerminalDelivery,
+    ReapReceipt,
     StartAcknowledgement,
     SupervisorOperationError,
     SupervisorSnapshot,
@@ -104,7 +105,7 @@ class ProcessSupervisor(Protocol):
         reason: str,
         register_dispatch: Callable[[], None] | None = None,
     ) -> TerminalPayload: ...
-    def close(self) -> None: ...
+    def close(self) -> ReapReceipt | None: ...
 
 
 type SupervisorFactory = Callable[
@@ -167,7 +168,7 @@ class SimulatorTaskService:
         # one supervisor-owned COMMAND acknowledgement.
         self._runtime_call_timeout_s = runtimeCallTimeoutS
         self._supervisor = supervisor_factory(self._terminal_callback)
-        self._shutdown_reaped_pid: int | None = None
+        self._shutdown_reap_receipt: ReapReceipt | None = None
         try:
             self._supervisor.ensure_ready()
         except Exception:  # noqa: BLE001 - startup diagnostics fail closed.
@@ -540,20 +541,23 @@ class SimulatorTaskService:
             self._request_stop(active, "WATCHDOG_FAILURE")
 
     def close(self) -> None:
-        owned_pid = self._supervisor.snapshot().pid
-        try:
-            self._supervisor.close()
-        finally:
-            if (
-                owned_pid is not None
-                and getattr(self._supervisor, "last_reaped_pid", None) == owned_pid
-            ):
-                self._shutdown_reaped_pid = owned_pid
+        owned = self._supervisor.snapshot()
+        self._shutdown_reap_receipt = None
+        receipt = self._supervisor.close()
+        if (
+            isinstance(receipt, ReapReceipt)
+            and owned.pid is not None
+            and owned.ownership_identity is not None
+            and receipt.generation == owned.generation
+            and receipt.pid == owned.pid
+            and receipt.ownership_identity == owned.ownership_identity
+        ):
+            self._shutdown_reap_receipt = receipt
 
     @property
-    def shutdown_reaped_pid(self) -> int | None:
-        """Expose only a PID whose exact owned process crossed the reap barrier."""
-        return self._shutdown_reaped_pid
+    def shutdown_reap_receipt(self) -> ReapReceipt | None:
+        """Expose evidence only for the exact successful pre-close owner."""
+        return self._shutdown_reap_receipt
 
     def _request_stop(self, active: _ActiveTask, reason: str):
         dispatch_callback: Callable[[], None] | None = None

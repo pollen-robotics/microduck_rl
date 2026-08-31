@@ -24,7 +24,7 @@ from .contracts import (
     sha256_prefixed,
     unsigned_policy_bundle_manifest,
 )
-from .process_supervisor import RuntimeProcessSupervisor
+from .process_supervisor import ReapReceipt, RuntimeProcessSupervisor
 from .service import SimulatorTaskService
 from .store import SqliteTaskStore
 
@@ -335,10 +335,15 @@ def _shutdown_evidence_path(state_db: Path) -> Path:
 
 
 def _write_shutdown_evidence(
-    state_db: Path, *, reaped_child_pid: int, exit_code: int
+    state_db: Path, *, reap_receipt: ReapReceipt, exit_code: int
 ) -> Path:
     """Durably publish exact-reap ordering while this API parent is still PID 1."""
-    if reaped_child_pid <= 1 or exit_code not in {0, 70}:
+    if (
+        reap_receipt.pid <= 1
+        or reap_receipt.generation <= 0
+        or reap_receipt.ownership_identity <= 0
+        or exit_code not in {0, 70}
+    ):
         raise ValueError("shutdown evidence values are invalid")
     destination = _shutdown_evidence_path(state_db)
     temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
@@ -346,7 +351,9 @@ def _write_shutdown_evidence(
         {
             "schema": "MICRODUCK_ROM_PID1_SHUTDOWN_V1",
             "pid1Pid": os.getpid(),
-            "reapedChildPid": reaped_child_pid,
+            "reapedChildPid": reap_receipt.pid,
+            "childGeneration": reap_receipt.generation,
+            "ownershipIdentity": reap_receipt.ownership_identity,
             "exactReapConfirmed": True,
             "exitCode": exit_code,
             "events": [
@@ -501,16 +508,16 @@ def main() -> None:
         shutdown_failed = (
             app is not None and app.state.shutdown_failure is not None
         ) or getattr(server.lifespan, "shutdown_failed", False)
-        reaped_child_pid = (
-            getattr(app.state, "shutdown_reaped_pid", None)
+        reap_receipt = (
+            getattr(app.state, "shutdown_reap_receipt", None)
             if app is not None
             else None
         )
-        if isinstance(state_db, Path) and isinstance(reaped_child_pid, int):
+        if isinstance(state_db, Path) and isinstance(reap_receipt, ReapReceipt):
             try:
                 _write_shutdown_evidence(
                     state_db,
-                    reaped_child_pid=reaped_child_pid,
+                    reap_receipt=reap_receipt,
                     exit_code=70 if shutdown_failed else 0,
                 )
             except Exception:  # noqa: BLE001 - missing reap evidence fails closed.

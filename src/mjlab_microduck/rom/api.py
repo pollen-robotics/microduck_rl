@@ -315,14 +315,15 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
             else:
                 app.state.watchdog_thread = None
             if service is not None:
+                app.state.shutdown_reap_receipt = None
                 try:
                     service.close()
                 except Exception as exc:  # noqa: BLE001 - shutdown remains fail closed.
                     app.state.watchdog_terminalization_failed = True
                     shutdown_failure = exc
-                finally:
-                    app.state.shutdown_reaped_pid = getattr(
-                        service, "shutdown_reaped_pid", None
+                else:
+                    app.state.shutdown_reap_receipt = getattr(
+                        service, "shutdown_reap_receipt", None
                     )
             app.state.shutdown_failure = shutdown_failure
             if shutdown_failure is not None:
@@ -344,7 +345,7 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
     app.state.watchdog_healthy = True
     app.state.watchdog_terminalization_failed = False
     app.state.shutdown_failure = None
-    app.state.shutdown_reaped_pid = None
+    app.state.shutdown_reap_receipt = None
 
     async def require_bearer(
         request: Request,

@@ -13,6 +13,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from itertools import count
 from pathlib import Path
 from typing import Any, Literal
 
@@ -79,6 +80,15 @@ class StartAcknowledgement:
 
 
 @dataclass(frozen=True, slots=True)
+class ReapReceipt:
+    """Immutable proof that one exact owned child crossed ``Popen.wait()``."""
+
+    generation: int
+    pid: int
+    ownership_identity: int
+
+
+@dataclass(frozen=True, slots=True)
 class SupervisorSnapshot:
     state: SupervisorState
     generation: int
@@ -89,6 +99,7 @@ class SupervisorSnapshot:
     terminal_delivery_outstanding: bool = False
     cached_terminal: CorrelatedTerminalDelivery | None = None
     pid: int | None = None
+    ownership_identity: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +132,12 @@ class _Intent:
 class _TerminalDelivery:
     sequence: int
     payload: CorrelatedTerminalDelivery
+
+
+# A PID can be reused and a supervisor generation restarts at one for a new
+# service.  This process-wide sequence gives every successfully spawned Popen a
+# distinct ownership identity for the lifetime of PID 1.
+_PROCESS_OWNERSHIP_IDENTITIES = count(1)
 
 
 class RuntimeProcessSupervisor:
@@ -188,7 +205,8 @@ class RuntimeProcessSupervisor:
         self._sequence = 0
         self._active_task: str | None = None
         self._last_event_sequence = 0
-        self._last_reaped_pid: int | None = None
+        self._ownership_identity: int | None = None
+        self._reap_receipt: ReapReceipt | None = None
         self._terminal_delivery_sequence = 0
         self._terminal_delivery_outstanding: int | None = None
         self._pending_terminal_delivery: _TerminalDelivery | None = None
@@ -262,11 +280,6 @@ class RuntimeProcessSupervisor:
         with self._trace_lock:
             return tuple(self._trace)
 
-    @property
-    def last_reaped_pid(self) -> int | None:
-        """Return the exact most-recent owned PID only after `Popen.wait()` reaped it."""
-        return self._last_reaped_pid
-
     def _record(self, value: str) -> None:
         with self._trace_lock:
             self._trace.append(value)
@@ -324,23 +337,25 @@ class RuntimeProcessSupervisor:
     ) -> TerminalPayload:
         return self._submit("stop", task_id, reason, register_dispatch)
 
-    def close(self) -> None:
+    def close(self) -> ReapReceipt | None:
         if (
             self._closed
             and not self._thread.is_alive()
             and not self.terminal_delivery_alive
         ):
-            return
+            return None
+        receipt: ReapReceipt | None = None
         if self._thread.is_alive():
-            self._claim_close()
+            receipt = self._claim_close()
             self._thread.join(self._operation_timeout + self._terminate_timeout + 1)
             if self._thread.is_alive() or self.snapshot().pid is not None:
                 raise SupervisorUnavailable(
                     "close did not prove owner termination and exact reap"
                 )
         self._shutdown_terminal_delivery()
+        return receipt
 
-    def _claim_close(self) -> None:
+    def _claim_close(self) -> ReapReceipt | None:
         with self._submission_lock, self._close_lock:
             intent = self._close_intent
             if intent is None:
@@ -354,6 +369,9 @@ class RuntimeProcessSupervisor:
             raise SupervisorUnavailable(
                 "close process containment failed"
             ) from intent.error
+        if intent.result is not None and not isinstance(intent.result, ReapReceipt):
+            raise SupervisorUnavailable("close returned invalid exact-reap evidence")
+        return intent.result
 
     def _shutdown_terminal_delivery(self) -> None:
         thread = self._terminal_thread
@@ -419,6 +437,9 @@ class RuntimeProcessSupervisor:
             ),
             cached_terminal=old.cached_terminal if terminal is ... else terminal,  # type: ignore[arg-type]
             pid=self._process.pid if self._process is not None else None,
+            ownership_identity=(
+                self._ownership_identity if self._process is not None else None
+            ),
         )
         with self._snapshot_lock:
             self._snapshot_value = new
@@ -488,7 +509,7 @@ class RuntimeProcessSupervisor:
         if intent.kind == "close":
             self._closed = True
             self._close_owned_child()
-            return None
+            return self._reap_receipt
         if intent.kind == "delivery":
             self._complete_terminal_delivery(*intent.args)
             return None
@@ -511,6 +532,10 @@ class RuntimeProcessSupervisor:
     def _spawn(self) -> None:
         self._generation += 1
         self._sequence = 0
+        # No reap evidence may cross a spawn boundary, even if the kernel later
+        # assigns the new process the same numeric PID.
+        self._reap_receipt = None
+        self._ownership_identity = None
         self._advance(
             SupervisorEvent.SPAWN_REQUESTED, healthy=False, reason=None, slot=False
         )
@@ -530,6 +555,7 @@ class RuntimeProcessSupervisor:
                 stdout=launch.stdout,
                 stderr=launch.stderr,
             )
+            self._ownership_identity = next(_PROCESS_OWNERSHIP_IDENTITIES)
         except BaseException:
             if parent is not None:
                 parent.close()
@@ -969,6 +995,7 @@ class RuntimeProcessSupervisor:
     def _terminate_and_reap(self) -> None:
         process = self._process
         owned_socket = self._socket
+        ownership_identity = self._ownership_identity
         if process is None:
             self._publish(SupervisorState.NO_CHILD, healthy=False, slot=True)
             return
@@ -989,12 +1016,19 @@ class RuntimeProcessSupervisor:
         process.wait(timeout=max(self._operation_timeout, 0.1))
         if process.poll() is None:
             raise RuntimeError("exact child reap was not confirmed")
-        self._last_reaped_pid = process.pid
+        if ownership_identity is None:
+            raise RuntimeError("owned process identity was lost before exact reap")
+        self._reap_receipt = ReapReceipt(
+            generation=self._generation,
+            pid=process.pid,
+            ownership_identity=ownership_identity,
+        )
         self._record("CHILD_REAPED")
         if owned_socket is not None:
             owned_socket.close()
         self._process = None
         self._socket = None
+        self._ownership_identity = None
         self._active_task = None
         self._advance(
             SupervisorEvent.CHILD_REAPED,

@@ -273,33 +273,50 @@ def _wait_parent_wchan_count(
     raise AssertionError(f"parent thread did not enter {expected}: {latest}")
 
 
-def _wait_child_protocol_receive(container: _Container, timeout: float = 5.0) -> None:
-    """Observe the production child blocked on its inherited seqpacket receiver."""
-    namespace_pid = _namespace_pid(container.child_pid)
-    deadline = time.monotonic() + timeout
-    latest = ""
-    while time.monotonic() < deadline:
-        completed = _run(
-            "docker",
-            "exec",
-            "--user",
-            "10001:10001",
-            container.name,
-            "/app/.venv/bin/python",
-            "-P",
-            "-c",
-            (
-                "from pathlib import Path;"
-                f"print('\\n'.join(p.read_text().strip() for p in "
-                f"Path('/proc/{namespace_pid}/task').glob('*/wchan')))"
-            ),
-            check=False,
-        )
-        latest = completed.stdout.strip()
-        if "skb_wait_for_more_packets" in latest:
-            return
-        time.sleep(0.01)
-    raise AssertionError(f"child did not enter inherited protocol receive: {latest}")
+def _cross_running_child_protocol_barrier(
+    container: _Container, task_id: str, *, sequence: int
+) -> None:
+    """Prove the production child received and acknowledged an exact command."""
+    before_pid = container.child_pid
+    status, task = _request(
+        container.base_url,
+        "POST",
+        f"/v1/tasks/{task_id}/command",
+        {
+            "commandSequence": sequence,
+            "parameters": {
+                "vxMps": 0.0,
+                "vyMps": 0.0,
+                "yawRateRadps": 0.0,
+            },
+            "leaseMs": 5_000,
+        },
+    )
+    assert status == 200
+    assert task["state"] == "RUNNING"
+    _parent_pid, descendants = _container_pids(container.name)
+    assert descendants == (before_pid,)
+
+
+def _cross_idle_child_protocol_barrier(container: _Container) -> None:
+    """Round-trip START/COMMAND/STOP and leave the same child idle for the gate."""
+    probe_id = "e" * 32
+    status, _task = _request(
+        container.base_url,
+        "POST",
+        "/v1/tasks",
+        _walk_request(container, probe_id, 5_000),
+    )
+    assert status == 202
+    _wait_task(container, probe_id, {"RUNNING"})
+    _cross_running_child_protocol_barrier(container, probe_id, sequence=1)
+    status, terminal = _request(
+        container.base_url, "POST", f"/v1/tasks/{probe_id}/cancel"
+    )
+    assert status == 200
+    assert terminal["state"] == "CANCELLED"
+    _wait_task(container, probe_id, {"CANCELLED"})
+    _wait_ready(container, True)
 
 
 def _launch_container(
@@ -612,17 +629,19 @@ def _stop_and_assert_exact_reap(
     exit_code = int(inspected["State"]["ExitCode"])
     if require_ordered_evidence:
         evidence = _read_shutdown_evidence(container)
-        assert evidence == {
-            "events": [
-                {"event": "CHILD_REAPED", "sequence": 0},
-                {"event": "PID1_EXITING", "sequence": 1},
-            ],
-            "exitCode": exit_code,
-            "exactReapConfirmed": True,
-            "pid1Pid": 1,
-            "reapedChildPid": child_namespace_pid,
-            "schema": "MICRODUCK_ROM_PID1_SHUTDOWN_V1",
-        }
+        assert evidence["events"] == [
+            {"event": "CHILD_REAPED", "sequence": 0},
+            {"event": "PID1_EXITING", "sequence": 1},
+        ]
+        assert evidence["exitCode"] == exit_code
+        assert evidence["exactReapConfirmed"] is True
+        assert evidence["pid1Pid"] == 1
+        assert evidence["reapedChildPid"] == child_namespace_pid
+        assert evidence["schema"] == "MICRODUCK_ROM_PID1_SHUTDOWN_V1"
+        assert isinstance(evidence["childGeneration"], int)
+        assert evidence["childGeneration"] >= 1
+        assert isinstance(evidence["ownershipIdentity"], int)
+        assert evidence["ownershipIdentity"] >= 1
     return exit_code
 
 
@@ -1082,7 +1101,7 @@ def test_real_container_cancel_queued_while_exact_child_start_is_blocked(
     create_result: dict[str, object] = {}
     cancel_result: dict[str, object] = {}
     try:
-        _wait_child_protocol_receive(container)
+        _cross_idle_child_protocol_barrier(container)
         _signal_container_pid(container, old_pid, signal.SIGSTOP)
         task_id = "c" * 32
         creator = threading.Thread(
@@ -1323,7 +1342,9 @@ def test_container_sigterm_reaps_exact_child_and_restart_reconciles_unknown(
                 _wait_event(container, task_id, "TASK_CANCEL_REQUESTED")
             elif phase == "QUARANTINED":
                 child_pidfd = os.pidfd_open(container.child_pid)
-                _wait_child_protocol_receive(container)
+                _cross_running_child_protocol_barrier(
+                    container, task_id, sequence=1
+                )
                 _signal_container_pid(
                     container, container.child_pid, signal.SIGSTOP
                 )
@@ -1336,7 +1357,7 @@ def test_container_sigterm_reaps_exact_child_and_restart_reconciles_unknown(
                         "POST",
                         f"/v1/tasks/{task_id}/command",
                         {
-                            "commandSequence": 1,
+                            "commandSequence": 2,
                             "parameters": {
                                 "vxMps": 0.0,
                                 "vyMps": 0.0,
