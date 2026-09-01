@@ -24,6 +24,7 @@ MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene.xml"
 # MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene_robot_walk.xml"
 MICRODUCK_ROLLERS_XML = "src/mjlab_microduck/robot/microduck/scene_rollers.xml"
 MICRODUCK_BALL_XML = "src/mjlab_microduck/robot/microduck/scene_ball.xml"
+MICRODUCK_BIG_BALL_XML = "src/mjlab_microduck/robot/microduck/scene_big_ball.xml"
 
 # Body pose command constants (must match training constants)
 BODY_CMD_MAX_Z = 0.03              # ±30 mm
@@ -35,6 +36,15 @@ BODY_CMD_MAX_ANGLE = math.radians(30)  # ±30°
 BALL_OFFSET_X = 0.09
 BALL_OFFSET_ABS_Y = 0.042
 BALL_RADIUS = 0.035
+
+# Ball-walk mode constants (must match microduck_ball_walk_env_cfg): 60cm ball,
+# robot spawned on the apex just above the measured riding height (0.713).
+BALLWALK_BALL_RADIUS = 0.30
+BALLWALK_SPAWN_Z = 0.725
+BALLWALK_PUSH_MAX = 0.1        # final push-curriculum range in training
+# Final command-curriculum ranges in training.
+BALLWALK_VEL_MAX_XY = 0.15
+BALLWALK_VEL_MAX_ANG = 0.5
 
 # Default pose used by the policy (legs flexed, standing position)
 # This is the reference pose that:
@@ -138,7 +148,8 @@ class PolicyInference:
                  sitstand_onnx_path=None,
                  kick_left_onnx_path=None, kick_right_onnx_path=None,
                  roulade_onnx_path=None,
-                 kick_duration=3.0, roulade_duration=2.0):
+                 kick_duration=3.0, roulade_duration=2.0,
+                 ball_walk=False):
         self.model = model
         self.data = data
         self.action_scale = action_scale
@@ -146,6 +157,11 @@ class PolicyInference:
         self.delay_min_lag = delay_min_lag
         self.delay_max_lag = delay_max_lag
         self.switch_threshold = switch_threshold
+        # Ball-walk mode: the walking session is the ball-walk policy (61D obs,
+        # zero command = balance in place ON the ball). Head/body command slots
+        # were ZERO-PADDED in training, so they are forced to 0 here — feeding
+        # keyboard head/body commands would be out-of-distribution.
+        self.ball_walk = ball_walk
         # When True: emit the unified 13D command vector and treat head_offset /
         # body_cmd as policy COMMANDS (no add to ctrl, no joint_pos correction).
         # When False: legacy behaviour (3D command, head_offset added to ctrl[5:9]).
@@ -408,8 +424,9 @@ class PolicyInference:
                 cmd[0] = 1.0 if self.sit_mode else 0.0
             # else standing/old-sit/ground_pick: leave twist 0 (ground_pick
             # writes its phase encoding later)
-            cmd[3:7]  = self.head_offset
-            cmd[7:13] = self.body_cmd  # [x, y, z, roll, pitch, yaw]
+            if not self.ball_walk:  # ball-walk: head/body stay zero-padded
+                cmd[3:7]  = self.head_offset
+                cmd[7:13] = self.body_cmd  # [x, y, z, roll, pitch, yaw]
             self.command = cmd
             return
 
@@ -461,6 +478,9 @@ class PolicyInference:
 
     def toggle_body_pose_mode(self):
         """Toggle body pose control mode on/off."""
+        if self.ball_walk:
+            print("Body pose mode unavailable in ball-walk mode (slot zero-padded in training)")
+            return
         self.body_pose_mode = not self.body_pose_mode
         if self.body_pose_mode:
             print("Body pose mode: ON")
@@ -766,6 +786,9 @@ class PolicyInference:
 
     def toggle_head_mode(self):
         """Toggle head control mode on/off."""
+        if self.ball_walk:
+            print("Head mode unavailable in ball-walk mode (slot zero-padded in training)")
+            return
         self.head_mode = not self.head_mode
         if self.head_mode:
             print("Head mode: ON")
@@ -813,6 +836,7 @@ def main():
     parser.add_argument("--kick-left", type=str, default=None, help="Path to LEFT-foot ball kick policy ONNX (press K to trigger). Requires --new-cmd-obs. Loads a scene with a ball.")
     parser.add_argument("--kick-right", type=str, default=None, help="Path to RIGHT-foot ball kick policy ONNX (press L to trigger). Requires --new-cmd-obs. Loads a scene with a ball.")
     parser.add_argument("--roulade", type=str, default=None, help="Path to roulade (forward roll) policy ONNX (press R to trigger). Requires --new-cmd-obs.")
+    parser.add_argument("--ball-walk", type=str, default=None, help="Path to ball-walk policy ONNX (circus-style walking on a 60cm ball). Requires --new-cmd-obs. Exclusive mode: loads the big-ball scene, spawns the robot on top; zero command = balance in place; press O to re-seat the robot on the ball.")
     parser.add_argument("--kick-duration", type=float, default=3.0, help="Seconds a kick policy stays active before handing back to standing/walking (default: 3.0)")
     parser.add_argument("--roulade-duration", type=float, default=2.0, help="Seconds the roulade policy stays active before handing back to standing/walking (default: 2.0, ~the roll itself; the standing/walking policy takes over for the settle)")
     parser.add_argument("--lin-vel-x", type=float, default=0.0, help="Initial linear velocity X command (m/s)")
@@ -844,14 +868,22 @@ def main():
                              "compliant PU sole. e.g. --foot-solref 0.04")
     args = parser.parse_args()
 
-    if not args.walking and not args.standing and not args.sitstand:
-        parser.error("At least one of --walking, --standing or --sitstand must be provided")
+    if not args.walking and not args.standing and not args.sitstand and not args.ball_walk:
+        parser.error("At least one of --walking, --standing, --sitstand or --ball-walk must be provided")
     if args.sitstand and not args.new_cmd_obs:
         parser.error("--sitstand policies use the unified 13D command obs (61D); add --new-cmd-obs")
     if (args.kick_left or args.kick_right or args.roulade) and not args.new_cmd_obs:
         parser.error("--kick-left/--kick-right/--roulade policies use the unified 13D command obs (61D); add --new-cmd-obs")
     if (args.kick_left or args.kick_right or args.roulade) and args.roller:
         parser.error("kick/roulade policies are trained on the walking robot, not the roller model")
+    if args.ball_walk:
+        if not args.new_cmd_obs:
+            parser.error("--ball-walk policies use the unified 13D command obs (61D); add --new-cmd-obs")
+        _others = (args.walking, args.standing, args.sit, args.sitstand, args.slope,
+                   args.ground_pick, args.kick_left, args.kick_right, args.roulade)
+        if any(_others) or args.roller:
+            parser.error("--ball-walk is an exclusive mode (its own scene and on-ball spawn); "
+                         "run it without other policies / --roller")
 
     # Parse delay arguments
     delay_min_lag = 0
@@ -870,11 +902,14 @@ def main():
             print("Error: --delay accepts 0, 1, or 2 arguments")
             return
 
-    # Load MuJoCo model. Kick policies get a scene with a ball to kick.
+    # Load MuJoCo model. Kick policies get a scene with a ball to kick;
+    # ball-walk gets the big-ball scene (robot spawned on top below).
     if args.roller:
         xml_path = MICRODUCK_ROLLERS_XML
     elif args.kick_left or args.kick_right:
         xml_path = MICRODUCK_BALL_XML
+    elif args.ball_walk:
+        xml_path = MICRODUCK_BIG_BALL_XML
     else:
         xml_path = MICRODUCK_XML
     print(f"Loading MuJoCo model from: {xml_path}")
@@ -917,10 +952,11 @@ def main():
               f"mu={args.foot_friction if args.foot_friction is not None else 'default'}, "
               f"solref={args.foot_solref if args.foot_solref is not None else 'default'}")
 
-    # Initialize policy
+    # Initialize policy. The ball-walk policy IS the walking session (same
+    # twist-driven interface; zero command = balance in place on the ball).
     policy = PolicyInference(
         model, data,
-        walking_onnx_path=args.walking,
+        walking_onnx_path=args.ball_walk or args.walking,
         action_scale=args.action_scale,
         delay_min_lag=delay_min_lag,
         delay_max_lag=delay_max_lag,
@@ -938,6 +974,7 @@ def main():
         roulade_onnx_path=args.roulade,
         kick_duration=args.kick_duration,
         roulade_duration=args.roulade_duration,
+        ball_walk=bool(args.ball_walk),
     )
     policy.set_vel_cmd(args.lin_vel_x, args.lin_vel_y, args.ang_vel_z)
 
@@ -961,6 +998,13 @@ def main():
         policy.vel_max_y = 0.0
         policy.vel_min_y = 0.0
         policy.vel_max_ang = 1.0      # ±1.0 rad heading error
+    elif args.ball_walk:
+        # Final command-curriculum ranges of the ball-walk training.
+        policy.vel_max_x = BALLWALK_VEL_MAX_XY
+        policy.vel_min_x = -BALLWALK_VEL_MAX_XY
+        policy.vel_max_y = BALLWALK_VEL_MAX_XY
+        policy.vel_min_y = -BALLWALK_VEL_MAX_XY
+        policy.vel_max_ang = BALLWALK_VEL_MAX_ANG
     else:
         policy.vel_max_x = 0.3
         policy.vel_min_x = -0.3
@@ -973,7 +1017,11 @@ def main():
     qpos_adr = model.jnt_qposadr[freejoint_id]
     data.qpos[qpos_adr + 0] = 0.0
     data.qpos[qpos_adr + 1] = 0.0
-    data.qpos[qpos_adr + 2] = 0.1385 if args.roller else 0.125  # rollers add 13.5mm height
+    if args.ball_walk:
+        # On the ball apex (the ball sits at the origin from big_ball.xml).
+        data.qpos[qpos_adr + 2] = BALLWALK_SPAWN_Z
+    else:
+        data.qpos[qpos_adr + 2] = 0.1385 if args.roller else 0.125  # rollers add 13.5mm height
     data.qpos[qpos_adr + 3:qpos_adr + 7] = [1, 0, 0, 0]
     for i, qpos_idx in enumerate(policy.joint_qpos_indices):
         data.qpos[qpos_idx] = policy.default_pose[i]
@@ -1002,7 +1050,10 @@ def main():
     print(f"Control frequency: 50 Hz (decimation: 4)")
     print(f"Simulation timestep: {model.opt.timestep}s")
     print(f"Observation size: {test_obs.size} (expected: {expected_obs_size})")
-    if policy.walking_session:
+    if args.ball_walk:
+        print(f"Ball-walk policy: loaded (60cm ball scene; zero command = balance in place; "
+              f"cmd limits ±{BALLWALK_VEL_MAX_XY} m/s, ±{BALLWALK_VEL_MAX_ANG} rad/s; press O to re-seat)")
+    elif policy.walking_session:
         print(f"Walking policy: loaded")
     if policy.standing_session:
         print(f"Standing policy: loaded  (body pose: z=±{BODY_CMD_MAX_Z*1000:.0f}mm, pitch/roll=±{math.degrees(BODY_CMD_MAX_ANGLE):.0f}°)")
@@ -1045,7 +1096,10 @@ def main():
     # the trunk's world-frame linear velocity directly (qvel[0..3]).
     _freejoint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "trunk_base_freejoint")
     _trunk_qvel_adr = int(model.jnt_dofadr[_freejoint_id])
-    PUSH_MAX = 1.0   # matches the final velstand push_magnitude curriculum cap
+    # Push magnitude: velstand's final curriculum cap on the ground; the
+    # ball-walk policy was only trained against ±0.1 (a shove on a ball is
+    # worth ~3x one on the ground).
+    PUSH_MAX = BALLWALK_PUSH_MAX if args.ball_walk else 1.0
 
     def random_push():
         """Set the trunk's world-frame xy velocity to a random vector of
@@ -1058,6 +1112,26 @@ def main():
         data.qvel[_trunk_qvel_adr + 0] = vx
         data.qvel[_trunk_qvel_adr + 1] = vy
         print(f"PUSH applied: v=[{vx:.2f}, {vy:.2f}, 0] m/s (angle={np.degrees(angle):.0f}°)")
+
+    def reset_on_ball():
+        """Ball-walk mode: re-seat the ball at the origin and the robot at HOME
+        on its apex (matching the training reset), zero all velocities."""
+        data.qpos[qpos_adr:qpos_adr + 3] = [0.0, 0.0, BALLWALK_SPAWN_Z]
+        data.qpos[qpos_adr + 3:qpos_adr + 7] = [1, 0, 0, 0]
+        for i, qpos_idx in enumerate(policy.joint_qpos_indices):
+            data.qpos[qpos_idx] = policy.default_pose[i]
+        if policy.ball_qpos_adr is not None:
+            data.qpos[policy.ball_qpos_adr:policy.ball_qpos_adr + 7] = \
+                [0.0, 0.0, BALLWALK_BALL_RADIUS, 1, 0, 0, 0]
+        data.qvel[:] = 0.0
+        data.ctrl[:] = policy.default_pose
+        policy.last_action[:] = 0.0
+        if policy.use_delay:
+            for buf in policy.action_buffer:
+                buf[:] = 0.0
+        policy.set_vel_cmd(0.0, 0.0, 0.0)
+        mujoco.mj_forward(model, data)
+        print("Reset: robot re-seated on the ball")
 
     # Keys come from the TERMINAL (raw stdin, see TerminalInput) — not from the
     # MuJoCo viewer window, whose keypresses also fire built-in visualization
@@ -1150,6 +1224,11 @@ def main():
                 policy.toggle_body_pose_mode()
             elif key == "p":
                 random_push()
+            elif key == "o":
+                if args.ball_walk:
+                    reset_on_ball()
+                else:
+                    print("O (reset on ball) only available in --ball-walk mode")
             elif key == "a":
                 if policy.head_mode:
                     policy.head_offset[3] = np.clip(policy.head_offset[3] + policy.head_step, -policy.head_max, policy.head_max)
@@ -1203,6 +1282,8 @@ def main():
     print("  L:                kick with RIGHT foot (requires --kick-right)")
     print("  R:                roulade / forward roll (requires --roulade)")
     print(f"  P:                random push (trunk vel = {PUSH_MAX:.1f} m/s in random direction)")
+    if args.ball_walk:
+        print("  O:                reset — re-seat the robot on the ball (ball-walk mode)")
     print("  Q:                quit")
     print("  [ Body pose mode — press B to toggle ]")
     print(f"  UP/DOWN arrow:    Δz ±10mm  (max ±{BODY_CMD_MAX_Z*1000:.0f}mm)")
