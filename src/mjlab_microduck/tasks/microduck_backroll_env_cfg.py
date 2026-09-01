@@ -363,6 +363,11 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
         weight=2.0,
         params={"trunk_value": 1.0, "head_value": 2.0},
     )
+    cfg.rewards["backroll_non_top_head_dwell"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_non_top_head_dwell_penalty,
+        weight=0.5,
+        params={"grace_steps": 9},
+    )
     cfg.rewards["backroll_completion_progress"].weight = 18.0
     cfg.rewards["backroll_upright_progress"].weight = 5.0
     cfg.rewards["backroll_height_progress"].weight = 4.0
@@ -401,6 +406,9 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
     )
     cfg.metrics["backroll_max_offaxis_deg"] = MetricsTermCfg(
         func=microduck_mdp.grounded_backroll_episode_max_offaxis_deg,
+    )
+    cfg.metrics["backroll_max_non_top_head_dwell_s"] = MetricsTermCfg(
+        func=microduck_mdp.grounded_backroll_max_non_top_head_dwell_s,
     )
     return cfg
 

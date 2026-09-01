@@ -11523,6 +11523,8 @@ _BACKROLL_TRUNK_LATCH_LO = math.radians(30.0)
 _BACKROLL_TRUNK_LATCH_HI = math.radians(260.0)
 _BACKROLL_HEAD_LATCH_LO = math.radians(100.0)
 _BACKROLL_HEAD_LATCH_HI = math.radians(300.0)
+_BACKROLL_NON_TOP_HEAD_LO = math.radians(150.0)
+_BACKROLL_NON_TOP_HEAD_HI = math.radians(240.0)
 _BACKROLL_LANDING_ANGLE = math.radians(350.0)
 _BACKROLL_POTENTIAL_ANGLE = math.radians(300.0)
 _BACKROLL_UPRIGHT_COS = math.cos(math.radians(20.0))
@@ -11564,6 +11566,8 @@ def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
     env._backroll_landing_hold_steps = i.clone()
     env._backroll_invalid_stall_steps = i.clone()
     env._backroll_landing_timeout_steps = i.clone()
+    env._backroll_non_top_head_steps = i.clone()
+    env._backroll_episode_max_non_top_head_steps = i.clone()
     env._backroll_previous_frontier = env._roulade_max.clone()
     env._backroll_completion_paid = env._roulade_max.clone()
     env._backroll_upright_previous = z.clone()
@@ -11673,13 +11677,33 @@ def _update_grounded_backroll_state(
         frontier <= _BACKROLL_HEAD_LATCH_HI
     )
     previous_head_latch = env._backroll_head_latch.clone()
+    head_top_down = _head_top_down(env, asset)
     env._backroll_head_latch |= (
         env._backroll_trunk_latch
         & head
         & head_phase
-        & _head_top_down(env, asset)
+        & head_top_down
     )
     env._backroll_head_latch_now = env._backroll_head_latch & ~previous_head_latch
+    non_top_head_phase = (
+        (frontier >= _BACKROLL_NON_TOP_HEAD_LO)
+        & (frontier <= _BACKROLL_NON_TOP_HEAD_HI)
+    )
+    non_top_head_contact = (
+        env._backroll_repeat_mode
+        & head
+        & non_top_head_phase
+        & ~head_top_down
+    )
+    env._backroll_non_top_head_steps = torch.where(
+        non_top_head_contact,
+        env._backroll_non_top_head_steps + 1,
+        torch.zeros_like(env._backroll_non_top_head_steps),
+    )
+    env._backroll_episode_max_non_top_head_steps = torch.maximum(
+        env._backroll_episode_max_non_top_head_steps,
+        env._backroll_non_top_head_steps,
+    )
 
     quat = asset.data.root_link_quat_w
     upright = torch.nan_to_num(
@@ -11875,6 +11899,7 @@ def _update_grounded_backroll_state(
         env._backroll_landing_hold_steps[rearm] = 0
         env._backroll_invalid_stall_steps[rearm] = 0
         env._backroll_landing_timeout_steps[rearm] = 0
+        env._backroll_non_top_head_steps[rearm] = 0
         env._backroll_previous_frontier[rearm] = 0.0
         env._backroll_completion_paid[rearm] = 0.0
         env._backroll_upright_previous[rearm] = 0.0
@@ -11980,6 +12005,8 @@ def reset_grounded_backroll_state(
     env._backroll_landing_hold_steps[env_ids] = 0
     env._backroll_invalid_stall_steps[env_ids] = 0
     env._backroll_landing_timeout_steps[env_ids] = 0
+    env._backroll_non_top_head_steps[env_ids] = 0
+    env._backroll_episode_max_non_top_head_steps[env_ids] = 0
     env._backroll_previous_frontier[env_ids] = spawn_angle
     env._backroll_completion_paid[env_ids] = spawn_angle
     env._backroll_upright_previous[env_ids] = 0.0
@@ -12130,6 +12157,19 @@ def grounded_backroll_contact_sequence(
         * _grounded_backroll_positive_reward_valid(env).float()
         / env.step_dt
     )
+
+
+def grounded_backroll_non_top_head_dwell_penalty(
+    env: ManagerBasedRlEnv,
+    grace_steps: int = 9,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Tax persistent face/side head contact after a measured tuck grace."""
+    if grace_steps < 0:
+        raise ValueError("grace_steps must be nonnegative")
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return -(env._backroll_non_top_head_steps > grace_steps).float()
 
 
 def grounded_backroll_completion_progress(
@@ -12344,6 +12384,15 @@ def grounded_backroll_head_contact_latched(
     asset: Entity = env.scene[asset_cfg.name]
     _update_grounded_backroll_state(env, asset)
     return env._backroll_head_latch.float()
+
+
+def grounded_backroll_max_non_top_head_dwell_s(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_episode_max_non_top_head_steps.float() * env.step_dt
 
 
 def grounded_backroll_max_air_gap_s(

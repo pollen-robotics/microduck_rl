@@ -136,6 +136,12 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
         cfg.rewards["backroll_contact_sequence"].func
         is mdp.grounded_backroll_contact_sequence
     )
+    assert (
+        cfg.rewards["backroll_non_top_head_dwell"].func
+        is mdp.grounded_backroll_non_top_head_dwell_penalty
+    )
+    assert cfg.rewards["backroll_non_top_head_dwell"].weight == pytest.approx(0.5)
+    assert cfg.rewards["backroll_non_top_head_dwell"].params == {"grace_steps": 9}
     assert cfg.rewards["backroll_success"].func is mdp.grounded_backroll_repeat_success_rate
     assert cfg.metrics["backroll_cycle_count"].func is mdp.grounded_backroll_cycle_count
     forbidden = ("sprint", "distance", "lane", "road", "recovery", "reposition")
@@ -463,7 +469,6 @@ def test_repeated_progress_bridges_contact_windows_then_requires_latches(monkeyp
     env._backroll_previous_frontier[:] = math.radians(35.0)
     assert mdp.grounded_backroll_progress(env).item() > 0.0
     assert mdp.grounded_backroll_speed_progress(env).item() > 0.0
-
     # Passing the trunk window without a latch closes all further progress.
     env._roulade_accum[:] = math.radians(265.0)
     env._roulade_max[:] = math.radians(265.0)
@@ -500,6 +505,45 @@ def test_repeated_progress_bridges_contact_windows_then_requires_latches(monkeyp
     env.common_step_counter += 1
     assert mdp.grounded_backroll_progress(env).item() > 0.0
     assert mdp.grounded_backroll_speed_progress(env).item() > 0.0
+
+
+def test_repeated_non_top_head_dwell_allows_tuck_grace_then_penalizes(monkeypatch):
+    env, _asset = _fake_env()
+    env._backroll_repeat_mode[:] = True
+    env._roulade_accum[:] = math.radians(177.0)
+    env._roulade_max[:] = math.radians(177.0)
+    env.scene.sensors["left_foot_ground_contact"].data.found[:] = 0.0
+    env.scene.sensors["right_foot_ground_contact"].data.found[:] = 0.0
+    env.scene.sensors["head_ground_contact"].data.found[:] = 1.0
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.zeros(1, dtype=torch.bool),
+    )
+
+    values = []
+    for step in range(10):
+        env.common_step_counter = step
+        values.append(
+            mdp.grounded_backroll_non_top_head_dwell_penalty(env).item()
+        )
+
+    assert values[:9] == [0.0] * 9
+    assert values[9] == -1.0
+    assert mdp.grounded_backroll_max_non_top_head_dwell_s(env).item() == pytest.approx(
+        0.20
+    )
+
+    # Breaking the bad contact resets the consecutive timer, so separate
+    # touches cannot accumulate into a penalty.
+    env.scene.sensors["head_ground_contact"].data.found[:] = 0.0
+    env.common_step_counter = 10
+    assert mdp.grounded_backroll_non_top_head_dwell_penalty(env).item() == 0.0
+    assert env._backroll_non_top_head_steps.item() == 0
+
+    env.scene.sensors["head_ground_contact"].data.found[:] = 1.0
+    env.common_step_counter = 11
+    assert mdp.grounded_backroll_non_top_head_dwell_penalty(env).item() == 0.0
 
 
 def test_repeated_positive_rewards_stop_after_cumulative_offaxis_escape(monkeypatch):
