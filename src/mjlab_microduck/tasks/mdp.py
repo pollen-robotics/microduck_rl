@@ -11614,14 +11614,14 @@ def _grounded_backroll_sagittal_purity(asset: Entity) -> torch.Tensor:
     # Body-frame axis purity alone is insufficient: after tipping onto a
     # shoulder, body-y approaches world vertical and a geometrically wrong
     # side-spin can still look like pure body-y rotation. Preserve ordinary
-    # reset noise through 5 degrees, then smoothly remove positive shaping
-    # before the 20-degree lateral tilt where the maneuver is visibly leaving
-    # the sagittal plane.
+    # ordinary corrective launch motion through 10 degrees, then smoothly
+    # remove positive shaping before the 30-degree lateral tilt where the
+    # maneuver is visibly leaving the sagittal plane.
     lateral_axis_z = torch.nan_to_num(
         _lateral_axis_z(asset.data.root_link_quat_w), nan=1.0
     ).abs()
-    full = math.sin(math.radians(5.0))
-    zero = math.sin(math.radians(20.0))
+    full = math.sin(math.radians(10.0))
+    zero = math.sin(math.radians(30.0))
     t = torch.clamp((zero - lateral_axis_z) / (zero - full), 0.0, 1.0)
     world_flatness = t * t * (3.0 - 2.0 * t)
     return angular_purity * world_flatness

@@ -157,6 +157,9 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "midroll_pitch_min"
     ] == pytest.approx(math.radians(260.0))
+    assert cfg.curriculum["backroll_phase"].params["success_threshold"] == pytest.approx(
+        0.55
+    )
     assert cfg.rewards["backroll_completion_progress"].weight > cfg.rewards[
         "backroll_progress"
     ].weight
@@ -505,11 +508,11 @@ def test_backward_purity_fades_before_the_robot_can_side_roll():
         half = math.radians(degrees) * 0.5
         return torch.tensor([[math.cos(half), math.sin(half), 0.0, 0.0]])
 
-    asset.data.root_link_quat_w[:] = roll_quaternion(5.0)
+    asset.data.root_link_quat_w[:] = roll_quaternion(10.0)
     clean = mdp._grounded_backroll_sagittal_purity(asset)
-    asset.data.root_link_quat_w[:] = roll_quaternion(12.5)
-    fading = mdp._grounded_backroll_sagittal_purity(asset)
     asset.data.root_link_quat_w[:] = roll_quaternion(20.0)
+    fading = mdp._grounded_backroll_sagittal_purity(asset)
+    asset.data.root_link_quat_w[:] = roll_quaternion(30.0)
     escaped = mdp._grounded_backroll_sagittal_purity(asset)
 
     assert clean.item() == pytest.approx(1.0)
