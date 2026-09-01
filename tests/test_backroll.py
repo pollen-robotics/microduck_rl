@@ -143,7 +143,9 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
 
     assert cfg.episode_length_s == REPEATED_EPISODE_LENGTH_S == 12.0
     assert "backroll_success" not in cfg.terminations
-    assert cfg.events["set_grounded_backroll_state"].params["repeat_mode"] is True
+    # Training starts with the audited one-shot champion bridge; repeated
+    # rearm/recovery is enabled only after standing mastery advances stage 0.
+    assert cfg.events["set_grounded_backroll_state"].params["repeat_mode"] is False
     assert cfg.rewards["backroll_speed_progress"].func is mdp.grounded_backroll_speed_progress
     assert cfg.rewards["backroll_rise_velocity"].func is mdp.grounded_backroll_rise_velocity
     assert (
@@ -193,6 +195,10 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
         stage["params"]["standing_prob"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
     ] == [0.50, 0.50, 0.70, 0.80, 0.90, 1.0]
+    assert [
+        stage["params"]["repeat_mode"]
+        for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
+    ] == [False, True, True, True, True, True]
     assert [
         stage["params"]["mastery_cycles"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
