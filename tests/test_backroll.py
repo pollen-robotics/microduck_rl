@@ -141,15 +141,15 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     forbidden = ("sprint", "distance", "lane", "road", "recovery", "reposition")
     assert not any(token in name for name in cfg.rewards for token in forbidden)
     assert MicroduckRepeatedBackrollRlCfg.experiment_name == "microduck_repeated_backroll"
-    assert MicroduckRepeatedBackrollRlCfg.algorithm.learning_rate == pytest.approx(1.0e-4)
-    assert MicroduckRepeatedBackrollRlCfg.algorithm.entropy_coef == pytest.approx(2.0e-3)
+    assert MicroduckRepeatedBackrollRlCfg.algorithm.learning_rate == pytest.approx(5.0e-5)
+    assert MicroduckRepeatedBackrollRlCfg.algorithm.entropy_coef == pytest.approx(1.0e-3)
     assert MicroduckRepeatedBackrollRlCfg.actor.distribution_cfg[
         "init_std"
-    ] == pytest.approx(0.35)
+    ] == pytest.approx(0.25)
     assert [
         stage["params"]["standing_prob"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
-    ] == [0.40, 0.45, 0.55, 0.70, 0.85, 1.0]
+    ] == [0.65, 0.70, 0.75, 0.85, 0.95, 1.0]
     assert [
         stage["params"]["mastery_cycles"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
@@ -163,12 +163,16 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert cfg.rewards["backroll_success"].params["later_cycle_bonus"] == pytest.approx(
         1.0
     )
-    assert cfg.rewards["backroll_speed_progress"].weight == 0.0
+    assert cfg.rewards["backroll_speed_progress"].weight == pytest.approx(1.0)
+    assert cfg.rewards["backroll_speed_progress"].params == {
+        "minimum_rate": 2.0,
+        "target_rate": 6.0,
+    }
     assert cfg.rewards["backroll_invalid"].weight == pytest.approx(-2.0)
     assert cfg.curriculum["backroll_phase"].params["speed_reward_weights"] == [
-        0.0,
-        0.0,
         1.0,
+        1.0,
+        1.5,
         2.0,
         3.0,
         3.0,
@@ -384,7 +388,7 @@ def test_speed_progress_requires_fast_new_backward_frontier(monkeypatch):
     assert revisit.item() == 0.0
 
 
-def test_repeated_progress_requires_ordered_trunk_then_head_contacts(monkeypatch):
+def test_repeated_progress_bridges_contact_windows_then_requires_latches(monkeypatch):
     env, asset = _fake_env()
     env._backroll_repeat_mode[:] = True
     monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
@@ -395,27 +399,48 @@ def test_repeated_progress_requires_ordered_trunk_then_head_contacts(monkeypatch
     )
 
     asset.data.root_link_ang_vel_b[:, 1] = -4.0
+    # The policy still receives a local gradient while trunk contact remains
+    # physically attainable inside its valid phase window.
     env._roulade_accum[:] = math.radians(40.0)
     env._roulade_max[:] = math.radians(40.0)
     env._roulade_paid[:] = math.radians(35.0)
     env._backroll_previous_frontier[:] = math.radians(35.0)
+    assert mdp.grounded_backroll_progress(env).item() > 0.0
+    assert mdp.grounded_backroll_speed_progress(env).item() > 0.0
+
+    # Passing the trunk window without a latch closes all further progress.
+    env._roulade_accum[:] = math.radians(265.0)
+    env._roulade_max[:] = math.radians(265.0)
+    env._roulade_paid[:] = math.radians(260.0)
+    env._backroll_previous_frontier[:] = math.radians(260.0)
+    env.common_step_counter += 1
     assert mdp.grounded_backroll_progress(env).item() == 0.0
     assert mdp.grounded_backroll_speed_progress(env).item() == 0.0
 
+    # A trunk latch reopens the bridge through the head-contact window.
     env._backroll_trunk_latch[:] = True
-    env._roulade_accum[:] = math.radians(120.0)
-    env._roulade_max[:] = math.radians(120.0)
-    env._roulade_paid[:] = math.radians(115.0)
-    env._backroll_previous_frontier[:] = math.radians(115.0)
+    env._roulade_accum[:] = math.radians(275.0)
+    env._roulade_max[:] = math.radians(275.0)
+    env._roulade_paid[:] = math.radians(270.0)
+    env._backroll_previous_frontier[:] = math.radians(270.0)
+    env.common_step_counter += 1
+    assert mdp.grounded_backroll_progress(env).item() > 0.0
+    assert mdp.grounded_backroll_speed_progress(env).item() > 0.0
+
+    # Passing the head window without the ordered flat-top latch closes it.
+    env._roulade_accum[:] = math.radians(305.0)
+    env._roulade_max[:] = math.radians(305.0)
+    env._roulade_paid[:] = math.radians(300.0)
+    env._backroll_previous_frontier[:] = math.radians(300.0)
     env.common_step_counter += 1
     assert mdp.grounded_backroll_progress(env).item() == 0.0
     assert mdp.grounded_backroll_speed_progress(env).item() == 0.0
 
     env._backroll_head_latch[:] = True
-    env._roulade_accum[:] = math.radians(125.0)
-    env._roulade_max[:] = math.radians(125.0)
-    env._roulade_paid[:] = math.radians(120.0)
-    env._backroll_previous_frontier[:] = math.radians(120.0)
+    env._roulade_accum[:] = math.radians(310.0)
+    env._roulade_max[:] = math.radians(310.0)
+    env._roulade_paid[:] = math.radians(305.0)
+    env._backroll_previous_frontier[:] = math.radians(305.0)
     env.common_step_counter += 1
     assert mdp.grounded_backroll_progress(env).item() > 0.0
     assert mdp.grounded_backroll_speed_progress(env).item() > 0.0

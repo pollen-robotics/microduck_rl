@@ -83,13 +83,12 @@ BACKROLL_CURRICULUM_STAGES = [
 REPEATED_BACKROLL_CURRICULUM_STAGES = [
     {
         "params": {
-            # The warm-start already owns the tuck and backward launch.  Most
-            # early experience must therefore begin beyond the observed
-            # inverted parking basin and teach the missing exit/feet landing.
-            # A phase-started episode counts as mastered only after it lands
-            # and then earns a second, full cycle from standing.
-            "standing_prob": 0.40,
-            "midroll_prob": 0.60,
+            # Keep enough late-phase starts to teach the missing exit, but make
+            # standing the majority.  With a 0.55 advancement threshold the
+            # scaffolded 35% cannot advance this stage by itself while pure
+            # standing behavior is still failing.
+            "standing_prob": 0.65,
+            "midroll_prob": 0.35,
             "midroll_pitch_min": math.radians(260.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (0.5, 2.5),
@@ -98,8 +97,8 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.45,
-            "midroll_prob": 0.55,
+            "standing_prob": 0.70,
+            "midroll_prob": 0.30,
             "midroll_pitch_min": math.radians(180.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (1.0, 4.0),
@@ -108,8 +107,8 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.55,
-            "midroll_prob": 0.45,
+            "standing_prob": 0.75,
+            "midroll_prob": 0.25,
             "midroll_pitch_min": math.radians(90.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (2.0, 5.0),
@@ -118,8 +117,8 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.70,
-            "midroll_prob": 0.30,
+            "standing_prob": 0.85,
+            "midroll_prob": 0.15,
             "midroll_pitch_min": math.radians(20.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (0.0, 4.0),
@@ -128,8 +127,8 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.85,
-            "midroll_prob": 0.15,
+            "standing_prob": 0.95,
+            "midroll_prob": 0.05,
             "midroll_pitch_min": math.radians(20.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (0.0, 3.0),
@@ -341,7 +340,7 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
             stages=REPEATED_BACKROLL_CURRICULUM_STAGES,
             success_threshold=0.55,
             speed_reward_name="backroll_speed_progress",
-            speed_reward_weights=[0.0, 0.0, 1.0, 2.0, 3.0, 3.0],
+            speed_reward_weights=[1.0, 1.0, 1.5, 2.0, 3.0, 3.0],
             invalid_reward_name="backroll_invalid",
             invalid_reward_weights=[-2.0, -3.0, -4.0, -6.0, -8.0, -10.0],
         )
@@ -378,15 +377,15 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
     )
     cfg.rewards["backroll_speed_progress"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_speed_progress,
-        weight=0.0,
-        params={"minimum_rate": 1.5, "target_rate": 4.0},
+        weight=1.0,
+        params={"minimum_rate": 2.0, "target_rate": 6.0},
     )
     cfg.rewards["backroll_invalid"].weight = -2.0
     cfg.rewards["backroll_overspeed"].weight = -0.02
     cfg.rewards["backroll_overspeed"].params = {"omega_max": 7.5}
-    cfg.rewards["backroll_sagittal"].weight = -0.30
+    cfg.rewards["backroll_sagittal"].weight = -0.50
     cfg.rewards["backroll_lateral_velocity"].weight = -1.0
-    cfg.rewards["backroll_flatness"].weight = -1.5
+    cfg.rewards["backroll_flatness"].weight = -2.0
     cfg.rewards["action_rate_l2"].weight = -0.05
 
     cfg.metrics["backroll_cycle_count"] = MetricsTermCfg(
@@ -414,6 +413,6 @@ MicroduckRepeatedBackrollRlCfg.experiment_name = "microduck_repeated_backroll"
 MicroduckRepeatedBackrollRlCfg.run_name = "microduck_repeated_backroll"
 MicroduckRepeatedBackrollRlCfg.max_iterations = 4000
 MicroduckRepeatedBackrollRlCfg.save_interval = 50
-MicroduckRepeatedBackrollRlCfg.algorithm.learning_rate = 1.0e-4
-MicroduckRepeatedBackrollRlCfg.algorithm.entropy_coef = 2.0e-3
-MicroduckRepeatedBackrollRlCfg.actor.distribution_cfg["init_std"] = 0.35
+MicroduckRepeatedBackrollRlCfg.algorithm.learning_rate = 5.0e-5
+MicroduckRepeatedBackrollRlCfg.algorithm.entropy_coef = 1.0e-3
+MicroduckRepeatedBackrollRlCfg.actor.distribution_cfg["init_std"] = 0.25

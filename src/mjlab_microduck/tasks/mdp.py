@@ -12012,14 +12012,14 @@ def grounded_backroll_progress(
     delta = torch.clamp(delta, max=max_paid_rate * env.step_dt)
     env._roulade_paid = torch.maximum(paid, new_paid)
     # In repeated mode, generic ground support is not enough to earn the
-    # maneuver.  A120 rotated to ~170 degrees while missing both the trunk and
-    # flat head-top contacts, then parked inverted.  Stop paying that shortcut
-    # as soon as each ordered contact becomes physically due.  Phase resets
-    # synthesize the already-passed latches, so the reverse curriculum retains
-    # its dense late-roll gradient.
+    # maneuver.  Keep the shaping gradient through each contact's physically
+    # valid acquisition window, then stop paying if the policy exits that
+    # window without the ordered latch.  Gating at the *start* of the window
+    # made the 30--contact and 100--contact bridges unrewarded and A126 learned
+    # to crouch instead of attempting the warm-started roll.
     ordered_contacts = (
-        ((frontier < _BACKROLL_TRUNK_LATCH_LO) | env._backroll_trunk_latch)
-        & ((frontier < _BACKROLL_HEAD_LATCH_LO) | env._backroll_head_latch)
+        ((frontier <= _BACKROLL_TRUNK_LATCH_HI) | env._backroll_trunk_latch)
+        & ((frontier <= _BACKROLL_HEAD_LATCH_HI) | env._backroll_head_latch)
     )
     valid = ~env._backroll_repeat_mode | ordered_contacts
     return torch.where(valid, delta / (env.step_dt * target_angle), 0.0)
@@ -12175,8 +12175,8 @@ def grounded_backroll_speed_progress(
         <= _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX
     )
     ordered_contacts = (
-        ((env._roulade_max < _BACKROLL_TRUNK_LATCH_LO) | env._backroll_trunk_latch)
-        & ((env._roulade_max < _BACKROLL_HEAD_LATCH_LO) | env._backroll_head_latch)
+        ((env._roulade_max <= _BACKROLL_TRUNK_LATCH_HI) | env._backroll_trunk_latch)
+        & ((env._roulade_max <= _BACKROLL_HEAD_LATCH_HI) | env._backroll_head_latch)
     )
     return (
         env._backroll_frontier_delta
