@@ -12099,6 +12099,86 @@ def _update_grounded_backroll_state(
     env._backroll_last_update_step = step
 
 
+def _grounded_backroll_reference_bank(
+    env: ManagerBasedRlEnv,
+    reference_state_path: str,
+) -> dict[str, torch.Tensor]:
+    """Load and validate the small champion-derived physical state bank once."""
+    cached_path = getattr(env, "_backroll_reference_bank_path", None)
+    if cached_path == reference_state_path:
+        return env._backroll_reference_bank
+    payload = torch.load(reference_state_path, map_location="cpu", weights_only=True)
+    rows = payload.get("rows") if isinstance(payload, dict) else None
+    if not rows:
+        raise ValueError("backroll reference state bank has no rows")
+    bank = {
+        "qpos": torch.stack([row["qpos"] for row in rows]).to(env.device),
+        "qvel": torch.stack([row["qvel"] for row in rows]).to(env.device),
+        "accum": torch.stack([row["accum"] for row in rows]).to(env.device),
+        "frontier": torch.stack([row["frontier"] for row in rows]).to(env.device),
+        "trunk_latch": torch.stack([row["trunk_latch"] for row in rows])
+        .to(env.device)
+        .bool(),
+        "head_latch": torch.stack([row["head_latch"] for row in rows])
+        .to(env.device)
+        .bool(),
+    }
+    if bank["qpos"].shape[1] != env.sim.data.qpos.shape[1]:
+        raise ValueError("backroll reference qpos width does not match the active model")
+    if bank["qvel"].shape[1] != env.sim.data.qvel.shape[1]:
+        raise ValueError("backroll reference qvel width does not match the active model")
+    env._backroll_reference_bank_path = reference_state_path
+    env._backroll_reference_bank = bank
+    return bank
+
+
+def _reset_grounded_backroll_reference_states(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    *,
+    reference_state_path: str,
+    yaw_range: tuple,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Place environments in real, champion-generated sagittal pivot states."""
+    bank = _grounded_backroll_reference_bank(env, reference_state_path)
+    row_ids = torch.randint(len(bank["qpos"]), (len(env_ids),), device=env.device)
+    qpos = bank["qpos"][row_ids].clone()
+    qvel = bank["qvel"][row_ids].clone()
+    yaw = (
+        torch.rand(len(env_ids), device=env.device) * (yaw_range[1] - yaw_range[0])
+        + yaw_range[0]
+    )
+    cy = torch.cos(yaw)
+    sy = torch.sin(yaw)
+
+    local_x = qpos[:, 0].clone()
+    local_y = qpos[:, 1].clone()
+    qpos[:, 0] = cy * local_x - sy * local_y
+    qpos[:, 1] = sy * local_x + cy * local_y
+    velocity_x = qvel[:, 0].clone()
+    velocity_y = qvel[:, 1].clone()
+    qvel[:, 0] = cy * velocity_x - sy * velocity_y
+    qvel[:, 1] = sy * velocity_x + cy * velocity_y
+
+    half_yaw = 0.5 * yaw
+    yaw_w = torch.cos(half_yaw)
+    yaw_z = torch.sin(half_yaw)
+    qw, qx, qy, qz = qpos[:, 3:7].clone().unbind(dim=1)
+    qpos[:, 3] = yaw_w * qw - yaw_z * qz
+    qpos[:, 4] = yaw_w * qx - yaw_z * qy
+    qpos[:, 5] = yaw_w * qy + yaw_z * qx
+    qpos[:, 6] = yaw_w * qz + yaw_z * qw
+    qpos[:, :2] += env.scene.terrain.env_origins[env_ids, :2]
+
+    env.sim.data.qpos[env_ids] = qpos
+    env.sim.data.qvel[env_ids] = qvel
+    env._roulade_accum[env_ids] = bank["accum"][row_ids]
+    env._roulade_max[env_ids] = bank["frontier"][row_ids]
+    env._roulade_paid[env_ids] = bank["frontier"][row_ids]
+    env._roulade_roll_direction[env_ids] = -1.0
+    return bank["trunk_latch"][row_ids], bank["head_latch"][row_ids]
+
+
 def reset_grounded_backroll_state(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
@@ -12117,6 +12197,8 @@ def reset_grounded_backroll_state(
     tuck_overrides: Optional[dict] = None,
     tuck_factor_range: tuple = (0.5, 1.0),
     joint_noise_std: float = 0.04,
+    reference_state_prob: float = 0.0,
+    reference_state_path: Optional[str] = None,
     repeat_mode: bool = False,
     recovery_enabled: bool = True,
     mastery_cycles: int = 1,
@@ -12158,6 +12240,10 @@ def reset_grounded_backroll_state(
 
     if not 0.0 <= ground_recovery_prob <= 1.0:
         raise ValueError("ground_recovery_prob must be in [0, 1]")
+    if not 0.0 <= reference_state_prob <= 1.0:
+        raise ValueError("reference_state_prob must be in [0, 1]")
+    if reference_state_prob > 0.0 and not reference_state_path:
+        raise ValueError("reference_state_path is required when reference states are enabled")
     if (
         len(ground_z_range) != 2
         or ground_z_range[0] <= 0.0
@@ -12196,6 +12282,25 @@ def reset_grounded_backroll_state(
     spawn_angle = torch.zeros(len(env_ids), device=env.device)
     spawn_angle[~ground_mask] = env._roulade_accum[regular_ids]
     is_midroll = spawn_angle > 0.0
+    reference_mask = (
+        is_midroll
+        & (torch.rand(len(env_ids), device=env.device) < reference_state_prob)
+    )
+    reference_trunk_latch = torch.zeros(
+        len(env_ids), dtype=torch.bool, device=env.device
+    )
+    reference_head_latch = torch.zeros_like(reference_trunk_latch)
+    reference_ids = env_ids[reference_mask]
+    if len(reference_ids) > 0:
+        reference_trunk, reference_head = _reset_grounded_backroll_reference_states(
+            env,
+            reference_ids,
+            reference_state_path=reference_state_path,
+            yaw_range=yaw_range,
+        )
+        spawn_angle[reference_mask] = env._roulade_max[reference_ids]
+        reference_trunk_latch[reference_mask] = reference_trunk
+        reference_head_latch[reference_mask] = reference_head
     env._backroll_start_is_standing[env_ids] = ~ground_mask & ~is_midroll
     if synthesize_contact_latches:
         env._backroll_trunk_latch[env_ids] = is_midroll & (
@@ -12207,6 +12312,12 @@ def reset_grounded_backroll_state(
     else:
         env._backroll_trunk_latch[env_ids] = False
         env._backroll_head_latch[env_ids] = False
+    env._backroll_trunk_latch[env_ids[reference_mask]] = reference_trunk_latch[
+        reference_mask
+    ]
+    env._backroll_head_latch[env_ids[reference_mask]] = reference_head_latch[
+        reference_mask
+    ]
     env._roulade_head_latch[env_ids] = env._backroll_head_latch[env_ids]
     env._backroll_trunk_latch_now[env_ids] = False
     env._backroll_head_latch_now[env_ids] = False

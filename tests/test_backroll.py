@@ -205,10 +205,14 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
         stage["params"]["recovery_enabled"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
     ] == [False, False, False, True, True, True]
+    assert [
+        stage["params"]["reference_state_prob"]
+        for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
+    ] == [0.50, 0.40, 0.25, 0.10, 0.05, 0.0]
     first_stage = REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"]
-    assert first_stage["midroll_pitch_min"] == pytest.approx(math.radians(180.0))
+    assert first_stage["midroll_pitch_min"] == pytest.approx(math.radians(260.0))
     assert first_stage["midroll_pitch_max"] == pytest.approx(math.radians(340.0))
-    assert first_stage["midroll_omega_range"] == (1.0, 3.0)
+    assert first_stage["midroll_omega_range"] == (0.0, 2.0)
     assert cfg.curriculum["backroll_phase"].params["success_threshold"] == pytest.approx(
         0.70
     )
@@ -380,6 +384,61 @@ def test_repeated_ground_reset_starts_grounded_at_home_in_blocked_recovery(
     assert env.sim.data.qpos[0, 5].abs().item() > 0.5
     assert torch.allclose(env.sim.data.qpos[0, 7:], asset.data.default_joint_pos[0])
     assert torch.all(env.sim.data.qvel[0, 6:] == 0.0)
+
+
+def test_repeated_reference_reset_uses_physical_state_and_actual_latches(
+    monkeypatch,
+    tmp_path,
+):
+    env, _asset = _fake_env()
+    env.sim = SimpleNamespace(
+        data=SimpleNamespace(qpos=torch.zeros(1, 21), qvel=torch.zeros(1, 20))
+    )
+    env.sim.data.qpos[:, 3] = 1.0
+    monkeypatch.setattr(mdp, "_servo_joint_ids", lambda _env, _asset: list(range(14)))
+    qpos = torch.linspace(-0.2, 0.2, 21)
+    qpos[:7] = torch.tensor([0.2, -0.1, 0.07, 1.0, 0.0, 0.0, 0.0])
+    qvel = torch.linspace(-1.0, 1.0, 20)
+    reference_path = tmp_path / "reference.pt"
+    torch.save(
+        {
+            "rows": [
+                {
+                    "qpos": qpos,
+                    "qvel": qvel,
+                    "accum": torch.tensor(math.radians(180.0)),
+                    "frontier": torch.tensor(math.radians(190.0)),
+                    "paid": torch.tensor(math.radians(175.0)),
+                    "trunk_latch": torch.tensor(True),
+                    "head_latch": torch.tensor(False),
+                }
+            ]
+        },
+        reference_path,
+    )
+
+    mdp.reset_grounded_backroll_state(
+        env,
+        torch.tensor([0]),
+        standing_prob=0.0,
+        midroll_prob=1.0,
+        midroll_pitch_min=math.radians(260.0),
+        midroll_pitch_max=math.radians(260.0),
+        repeat_mode=True,
+        reference_state_prob=1.0,
+        reference_state_path=str(reference_path),
+        yaw_range=(0.0, 0.0),
+        joint_noise_std=0.0,
+    )
+
+    assert torch.allclose(env.sim.data.qpos[0], qpos)
+    assert torch.allclose(env.sim.data.qvel[0], qvel)
+    assert env._roulade_accum.item() == pytest.approx(math.radians(180.0))
+    assert env._roulade_max.item() == pytest.approx(math.radians(190.0))
+    assert env._roulade_paid.item() == pytest.approx(math.radians(190.0))
+    assert env._backroll_trunk_latch.item()
+    assert not env._backroll_head_latch.item()
+    assert not env._backroll_start_is_standing.item()
 
 
 def test_repeated_curriculum_counts_the_stage_mastery_cycle_target(monkeypatch):

@@ -11,6 +11,7 @@ instead of ending immediately after the first recoverable failed attempt.
 
 import math
 from copy import deepcopy
+from pathlib import Path
 
 from mjlab.managers import (
     CurriculumTermCfg,
@@ -31,6 +32,9 @@ from mjlab_microduck.tasks.microduck_roulade_env_cfg import (
 
 EPISODE_LENGTH_S = 5.0
 REPEATED_EPISODE_LENGTH_S = 12.0
+BACKROLL_REFERENCE_STATE_PATH = str(
+    Path(__file__).with_name("data") / "backroll_champion_reference_states.pt"
+)
 
 BACKROLL_CURRICULUM_STAGES = [
     {
@@ -88,11 +92,12 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             # bucket must still acquire every latch physically.
             "standing_prob": 0.50,
             "midroll_prob": 0.50,
-            "midroll_pitch_min": math.radians(180.0),
+            "midroll_pitch_min": math.radians(260.0),
             "midroll_pitch_max": math.radians(340.0),
-            "midroll_omega_range": (1.0, 3.0),
+            "midroll_omega_range": (0.0, 2.0),
             "joint_noise_std": 0.0,
             "synthesize_contact_latches": True,
+            "reference_state_prob": 0.50,
             "recovery_enabled": False,
             "ground_recovery_prob": 0.0,
             "mastery_cycles": 1,
@@ -107,6 +112,7 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "midroll_omega_range": (1.0, 4.0),
             "joint_noise_std": 0.01,
             "synthesize_contact_latches": True,
+            "reference_state_prob": 0.40,
             "recovery_enabled": False,
             "ground_recovery_prob": 0.0,
             "mastery_cycles": 1,
@@ -121,6 +127,7 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "midroll_omega_range": (2.0, 5.0),
             "joint_noise_std": 0.02,
             "synthesize_contact_latches": True,
+            "reference_state_prob": 0.25,
             "recovery_enabled": False,
             "ground_recovery_prob": 0.0,
             "mastery_cycles": 1,
@@ -135,6 +142,7 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "midroll_omega_range": (0.0, 4.0),
             "joint_noise_std": 0.03,
             "synthesize_contact_latches": True,
+            "reference_state_prob": 0.10,
             "recovery_enabled": True,
             "ground_recovery_prob": 0.05,
             "mastery_cycles": 1,
@@ -149,6 +157,7 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "midroll_omega_range": (0.0, 3.0),
             "joint_noise_std": 0.03,
             "synthesize_contact_latches": True,
+            "reference_state_prob": 0.05,
             "recovery_enabled": True,
             "ground_recovery_prob": 0.10,
             "mastery_cycles": 2,
@@ -163,6 +172,7 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "midroll_omega_range": (0.0, 3.0),
             "joint_noise_std": 0.03,
             "synthesize_contact_latches": True,
+            "reference_state_prob": 0.0,
             "recovery_enabled": True,
             "ground_recovery_prob": 0.20,
             "mastery_cycles": 3,
@@ -358,6 +368,7 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
         joint_noise_std=0.0 if play else 0.03,
         ground_recovery_prob=0.0,
         ground_z_range=(0.04, 0.05),
+        reference_state_path=BACKROLL_REFERENCE_STATE_PATH,
     )
     reset_cfg.params.update(**first_stage)
     if play:
