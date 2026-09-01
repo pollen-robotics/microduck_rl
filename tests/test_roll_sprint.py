@@ -439,16 +439,16 @@ def test_backroll_sprint_is_separate_directional_61d_policy():
         "param_stages"
     ]
     assert [stage["params"]["standing_prob"] for stage in spawn_stages] == [
-        0.15,
-        0.25,
-        0.40,
+        0.45,
+        0.45,
+        0.55,
         0.65,
     ]
     assert [stage["params"]["midroll_prob"] for stage in spawn_stages] == [
-        0.75,
-        0.65,
-        0.45,
         0.10,
+        0.05,
+        0.05,
+        0.00,
     ]
     assert [
         stage["params"]["midroll_pitch_min"] for stage in spawn_stages

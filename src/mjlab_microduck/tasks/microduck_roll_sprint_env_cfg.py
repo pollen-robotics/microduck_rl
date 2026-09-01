@@ -549,20 +549,18 @@ def make_microduck_backroll_sprint_env_cfg(
             microduck_mdp.roll_sprint_backroll_direction_flag
         )
         cfg.observations[group].terms["body_command"].params = {"dim": 6}
-    # Reverse discovery needs late, direction-matched mid-roll examples so the
-    # first updates witness a complete backroll rather than only a fall and
-    # recovery.  Keep a small standing bucket for launch learning, then move
-    # toward standing starts after the completion transition is learned.
+    # Keep the shared recovery curriculum balanced for the reverse policy. A
+    # reverse-heavy mid-roll bucket teaches rotation and falling, but starves
+    # the phase-zero launch that must precede every valid backroll. The staged
+    # mix below keeps standing, post-roll, crouch, and ground-recovery starts
+    # available while the reverse phase windows provide targeted completion
+    # examples.
     # Give both reset buckets a small, direction-matched launch velocity.  A
     # standing robot otherwise has no observable cue that this dedicated
     # policy must choose the reverse roll sign, while mid-roll starts should
     # carry enough course-aligned momentum to keep the late-roll lesson alive.
     reset_params["forward_vel_range"] = (0.08, 0.20)
     reset_params["midroll_forward_vel_range"] = (0.25, 0.65)
-    # A91 learned repeated recovery and directional partial progress but did
-    # not complete a reverse cycle by iteration 290.  Start the next run near
-    # the head-over endpoint to expose the completion and recovery transition,
-    # while retaining a small standing bucket for learning the launch.
     reset_params["recovery_road_return_prob"] = 0.15
     reset_params["heading_return_prob"] = 0.05
     reset_params.update(
@@ -572,20 +570,20 @@ def make_microduck_backroll_sprint_env_cfg(
     )
     if not play:
         reset_params.update(
-            standing_prob=0.15,
-            midroll_prob=0.75,
-            postroll_prob=0.04,
-            crouch_prob=0.03,
-            ground_recovery_prob=0.03,
+            standing_prob=0.45,
+            midroll_prob=0.10,
+            postroll_prob=0.15,
+            crouch_prob=0.10,
+            ground_recovery_prob=0.20,
         )
         spawn_stages = cfg.curriculum["roll_sprint_spawn_mix"].params[
             "param_stages"
         ]
         stage_mixes = (
-            ((0.15, 0.75, 0.04, 0.03, 0.03), (320.0, 355.0, (3.0, 5.5))),
-            ((0.25, 0.65, 0.05, 0.03, 0.02), (260.0, 350.0, (2.0, 5.0))),
-            ((0.40, 0.45, 0.08, 0.04, 0.03), (140.0, 340.0, (0.75, 3.5))),
-            ((0.65, 0.10, 0.10, 0.05, 0.10), (50.0, 340.0, (0.0, 3.0))),
+            ((0.45, 0.10, 0.15, 0.10, 0.20), (320.0, 355.0, (3.0, 5.5))),
+            ((0.45, 0.05, 0.15, 0.15, 0.20), (260.0, 350.0, (2.0, 5.0))),
+            ((0.55, 0.05, 0.10, 0.10, 0.20), (140.0, 340.0, (0.75, 3.5))),
+            ((0.65, 0.00, 0.10, 0.05, 0.20), (50.0, 340.0, (0.0, 3.0))),
         )
         for stage, (mix, roll_window) in zip(spawn_stages, stage_mixes, strict=True):
             pitch_min, pitch_max, omega_range = roll_window
