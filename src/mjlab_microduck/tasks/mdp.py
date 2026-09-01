@@ -11547,12 +11547,14 @@ def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
     env._backroll_success = b.clone()
     env._backroll_success_now = b.clone()
     env._backroll_invalid = b.clone()
+    env._backroll_invalid_now = b.clone()
     env._backroll_started = b.clone()
     env._backroll_air_steps = i.clone()
     env._backroll_max_air_steps = i.clone()
     env._backroll_landing_hold_steps = i.clone()
     env._backroll_invalid_stall_steps = i.clone()
     env._backroll_previous_frontier = env._roulade_max.clone()
+    env._backroll_completion_paid = env._roulade_max.clone()
     env._backroll_upright_previous = z.clone()
     env._backroll_height_previous = z.clone()
     env._backroll_upright_delta = z.clone()
@@ -11665,11 +11667,13 @@ def _update_grounded_backroll_state(
     max_air_steps = math.ceil(_BACKROLL_MAX_AIR_SECONDS / env.step_dt)
     stall_steps = math.ceil(_BACKROLL_INVALID_STALL_SECONDS / env.step_dt)
     wrong_way = accum < -math.radians(90.0)
-    env._backroll_invalid |= (
+    invalid_now = (
         (env._backroll_max_air_steps > max_air_steps)
         | (env._backroll_invalid_stall_steps >= stall_steps)
         | wrong_way
     )
+    env._backroll_invalid_now = invalid_now & ~env._backroll_invalid
+    env._backroll_invalid |= invalid_now
 
     potential_gate = frontier >= _BACKROLL_POTENTIAL_ANGLE
     upright_potential = torch.clamp(upright, min=0.0, max=1.0)
@@ -11761,12 +11765,14 @@ def reset_grounded_backroll_state(
     env._backroll_success[env_ids] = False
     env._backroll_success_now[env_ids] = False
     env._backroll_invalid[env_ids] = False
+    env._backroll_invalid_now[env_ids] = False
     env._backroll_started[env_ids] = True
     env._backroll_air_steps[env_ids] = 0
     env._backroll_max_air_steps[env_ids] = 0
     env._backroll_landing_hold_steps[env_ids] = 0
     env._backroll_invalid_stall_steps[env_ids] = 0
     env._backroll_previous_frontier[env_ids] = spawn_angle
+    env._backroll_completion_paid[env_ids] = spawn_angle
     env._backroll_upright_previous[env_ids] = 0.0
     env._backroll_height_previous[env_ids] = 0.0
     env._backroll_upright_delta[env_ids] = 0.0
@@ -11853,6 +11859,40 @@ def grounded_backroll_head_pivot(
     )
 
 
+def grounded_backroll_completion_progress(
+    env: ManagerBasedRlEnv,
+    start_angle: float = math.radians(150.0),
+    target_angle: float = math.radians(350.0),
+    max_paid_rate: float = 6.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay only new supported backward rotation after flat head contact.
+
+    This is the small second-half push missing from the original objective.
+    Its own max-so-far payment frontier prevents backward/forward rocking from
+    re-earning reward, while the shared roulade frontier already rejects
+    airborne, unsupported, forward, and non-sagittal rotation.
+    """
+    if target_angle <= start_angle:
+        raise ValueError("target_angle must be greater than start_angle")
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    _, frontier, _ = _roulade_state(env)
+    paid = env._backroll_completion_paid
+    clipped_frontier = torch.clamp(frontier, min=start_angle, max=target_angle)
+    clipped_paid = torch.clamp(paid, min=start_angle, max=target_angle)
+    delta = torch.clamp(clipped_frontier - clipped_paid, min=0.0)
+    delta = torch.clamp(delta, max=max_paid_rate * env.step_dt)
+    valid = (
+        env._backroll_head_latch
+        & ~env._backroll_invalid
+        & (env._backroll_max_air_steps * env.step_dt <= _BACKROLL_MAX_AIR_SECONDS)
+    )
+    env._backroll_completion_paid = torch.maximum(paid, frontier)
+    span = target_angle - start_angle
+    return torch.where(valid, delta / (env.step_dt * span), 0.0)
+
+
 def grounded_backroll_upright_progress(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -11896,6 +11936,16 @@ def grounded_backroll_invalid_termination(
     asset: Entity = env.scene[asset_cfg.name]
     _update_grounded_backroll_state(env, asset)
     return env._backroll_invalid
+
+
+def grounded_backroll_invalid_rate(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """One-shot terminal cost so deliberately flopping cannot shorten taxes."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_invalid_now.float() / env.step_dt
 
 
 def grounded_backroll_rotation_deg(

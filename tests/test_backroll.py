@@ -85,9 +85,11 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert set(cfg.rewards) == {
         "backroll_progress",
         "backroll_head_pivot",
+        "backroll_completion_progress",
         "backroll_upright_progress",
         "backroll_height_progress",
         "backroll_success",
+        "backroll_invalid",
         "backroll_overspeed",
         "backroll_sagittal",
         "backroll_lateral_velocity",
@@ -133,6 +135,13 @@ def test_backroll_curriculum_matches_mastery_stages():
         0.40,
         0.15,
     ]
+    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_pitch_min"] == pytest.approx(
+        math.radians(180.0)
+    )
+    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_omega_range"] == (
+        1.0,
+        3.0,
+    )
     cfg = make_microduck_backroll_env_cfg()
     params = cfg.curriculum["backroll_phase"].params
     assert params["window_episodes"] == 4096
@@ -193,6 +202,61 @@ def test_negative_body_y_advances_but_forward_rocking_cannot_farm(monkeypatch):
     assert revisit.item() == 0.0
     assert torch.equal(env._roulade_max - frontier, torch.tensor([0.02]))
     assert extension.item() > 0.0
+
+
+def test_completion_push_requires_head_latch_and_only_pays_new_frontier(monkeypatch):
+    env, asset = _fake_env()
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+    env._roulade_accum[:] = math.radians(180.0)
+    env._roulade_max[:] = math.radians(180.0)
+    env._backroll_completion_paid[:] = math.radians(180.0)
+
+    asset.data.root_link_ang_vel_b[:, 1] = -2.0
+    assert mdp.grounded_backroll_completion_progress(env).item() == 0.0
+    env.common_step_counter += 1
+
+    env._backroll_trunk_latch[:] = True
+    env._backroll_head_latch[:] = True
+    asset.data.root_link_ang_vel_b[:, 1] = -2.0
+    first_extension = mdp.grounded_backroll_completion_progress(env)
+    env.common_step_counter += 1
+    asset.data.root_link_ang_vel_b[:, 1] = 2.0
+    forward_rock = mdp.grounded_backroll_completion_progress(env)
+    env.common_step_counter += 1
+    asset.data.root_link_ang_vel_b[:, 1] = -2.0
+    revisit = mdp.grounded_backroll_completion_progress(env)
+    env.common_step_counter += 1
+    asset.data.root_link_ang_vel_b[:, 1] = -2.0
+    second_extension = mdp.grounded_backroll_completion_progress(env)
+
+    assert first_extension.item() > 0.0
+    assert forward_rock.item() == 0.0
+    assert revisit.item() == 0.0
+    assert second_extension.item() > 0.0
+
+
+def test_completion_push_rejects_airborne_rotation(monkeypatch):
+    env, asset = _fake_env()
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+    env._backroll_trunk_latch[:] = True
+    env._backroll_head_latch[:] = True
+    env._roulade_accum[:] = math.radians(180.0)
+    env._roulade_max[:] = math.radians(180.0)
+    env._backroll_completion_paid[:] = math.radians(180.0)
+    env.scene.sensors["robot_ground_contact"].data.found[:] = 0.0
+    asset.data.root_link_ang_vel_b[:, 1] = -3.0
+
+    assert mdp.grounded_backroll_completion_progress(env).item() == 0.0
 
 
 def test_airborne_and_sideways_rotation_receive_no_progress(monkeypatch):
@@ -258,6 +322,25 @@ def test_airborne_gap_and_wrong_way_completion_are_invalid(monkeypatch):
     for _ in range(46):
         _next_step(env, asset, 2.0)
     assert mdp.grounded_backroll_invalid_termination(env).item()
+
+
+def test_invalid_terminal_cost_is_one_shot(monkeypatch):
+    env, _asset = _fake_env()
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+    env._roulade_accum[:] = -math.radians(91.0)
+    env._roulade_max[:] = 0.0
+
+    first = mdp.grounded_backroll_invalid_rate(env)
+    env.common_step_counter += 1
+    second = mdp.grounded_backroll_invalid_rate(env)
+
+    assert first.item() == pytest.approx(1.0 / env.step_dt)
+    assert second.item() == 0.0
 
 
 def test_success_requires_ordered_contacts_and_is_one_shot(monkeypatch):

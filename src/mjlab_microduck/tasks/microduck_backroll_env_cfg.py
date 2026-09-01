@@ -32,9 +32,9 @@ BACKROLL_CURRICULUM_STAGES = [
         "params": {
             "standing_prob": 0.20,
             "midroll_prob": 0.80,
-            "midroll_pitch_min": math.radians(260.0),
+            "midroll_pitch_min": math.radians(180.0),
             "midroll_pitch_max": math.radians(340.0),
-            "midroll_omega_range": (0.0, 2.0),
+            "midroll_omega_range": (1.0, 3.0),
         }
     },
     {
@@ -122,6 +122,15 @@ def make_microduck_backroll_env_cfg(play: bool = False):
         weight=0.5,
         params={"rate_norm": 2.0},
     )
+    cfg.rewards["backroll_completion_progress"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_completion_progress,
+        weight=4.0,
+        params={
+            "start_angle": math.radians(150.0),
+            "target_angle": math.radians(350.0),
+            "max_paid_rate": 6.0,
+        },
+    )
     cfg.rewards["backroll_upright_progress"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_upright_progress,
         weight=1.5,
@@ -133,6 +142,10 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     cfg.rewards["backroll_success"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_success_rate,
         weight=10.0,
+    )
+    cfg.rewards["backroll_invalid"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_invalid_rate,
+        weight=-2.0,
     )
     cfg.rewards["backroll_overspeed"] = RewardTermCfg(
         func=microduck_mdp.roulade_overspeed_penalty,
