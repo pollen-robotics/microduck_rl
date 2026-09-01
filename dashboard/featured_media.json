@@ -5,6 +5,7 @@
     "artifacts/training/roll-sprint-champion/",
     "artifacts/training/roll-sprint-samples/",
     "artifacts/training/backroll-skill/",
+    "artifacts/training/repeated-backroll-skill/",
     "artifacts/training/backroll-sprint-samples/",
     "artifacts/training/stair-policy-samples/",
     "artifacts/verified/stair-policy-promotions/"
