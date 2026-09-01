@@ -35,6 +35,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--duration", type=float, default=5.0)
     parser.add_argument("--width", type=int, default=OUTPUT_WIDTH)
     parser.add_argument("--height", type=int, default=OUTPUT_HEIGHT)
+    parser.add_argument(
+        "--allow-incomplete-diagnostic",
+        action="store_true",
+        help=(
+            "Publish a clearly named diagnostic even if the physical success "
+            "gate is not reached. Proof recordings still require success by default."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -124,6 +132,8 @@ def main() -> int:
     env_cfg.seed = args.seed
     env_cfg.auto_reset = False
     env_cfg.episode_length_s = args.duration
+    if args.allow_incomplete_diagnostic:
+        env_cfg.terminations.clear()
     env_cfg.viewer.origin_type = type(env_cfg.viewer).OriginType.WORLD
     env_cfg.viewer.lookat = (0.0, 0.0, 0.10)
     env_cfg.viewer.distance = 0.80
@@ -177,7 +187,10 @@ def main() -> int:
             if bool(base_env._backroll_success[0].item()):
                 success = True
                 break
-            if bool(base_env._backroll_invalid[0].item()):
+            if (
+                not args.allow_incomplete_diagnostic
+                and bool(base_env._backroll_invalid[0].item())
+            ):
                 break
 
         if success and writer is not None and writer.stdin is not None:
@@ -192,7 +205,7 @@ def main() -> int:
     if writer is None:
         raise RuntimeError("No frames were recorded")
     return_code = writer.wait()
-    if not success:
+    if not success and not args.allow_incomplete_diagnostic:
         temporary_output.unlink(missing_ok=True)
         raise SystemExit(
             "No proof video was published because this standing trial did not "
@@ -202,7 +215,8 @@ def main() -> int:
         raise RuntimeError(f"ffmpeg failed with exit code {return_code}")
     output.parent.mkdir(parents=True, exist_ok=True)
     os.replace(temporary_output, output)
-    print(f"[grounded-backroll-video] wrote {output}")
+    kind = "proof" if success else "incomplete diagnostic"
+    print(f"[grounded-backroll-video] wrote {kind}: {output}")
     return 0
 
 
