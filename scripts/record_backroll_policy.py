@@ -31,6 +31,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("checkpoint", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Number of deterministic variants to simulate in parallel.",
+    )
+    parser.add_argument(
+        "--env-index",
+        type=int,
+        default=0,
+        help="Variant index to follow, render, and validate within the batch.",
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--duration", type=float, default=5.0)
     parser.add_argument("--width", type=int, default=OUTPUT_WIDTH)
@@ -121,6 +133,10 @@ def main() -> int:
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
     if args.duration <= 0.0 or args.width < 2 or args.height < 2:
         raise SystemExit("--duration, --width, and --height must be positive")
+    if args.batch_size < 1:
+        raise SystemExit("--batch-size must be at least 1")
+    if args.env_index < 0 or args.env_index >= args.batch_size:
+        raise SystemExit("--env-index must be within [0, --batch-size)")
 
     temporary_dir = REPO_ROOT / ".tmp" / "codex"
     temporary_dir.mkdir(parents=True, exist_ok=True)
@@ -128,7 +144,7 @@ def main() -> int:
 
     configure_torch_backends()
     env_cfg = load_env_cfg(TASK_ID, play=True)
-    env_cfg.scene.num_envs = 1
+    env_cfg.scene.num_envs = args.batch_size
     env_cfg.seed = args.seed
     env_cfg.auto_reset = False
     env_cfg.episode_length_s = args.duration
@@ -140,6 +156,7 @@ def main() -> int:
     env_cfg.viewer.origin_type = type(env_cfg.viewer).OriginType.ASSET_BODY
     env_cfg.viewer.entity_name = "robot"
     env_cfg.viewer.body_name = "trunk_base"
+    env_cfg.viewer.env_idx = args.env_index
     env_cfg.viewer.lookat = (0.0, 0.0, 0.10)
     env_cfg.viewer.distance = 0.80
     env_cfg.viewer.fovy = 35.0
@@ -189,12 +206,12 @@ def main() -> int:
                 )
             assert writer.stdin is not None
             writer.stdin.write(last_frame.tobytes())
-            if bool(base_env._backroll_success[0].item()):
+            if bool(base_env._backroll_success[args.env_index].item()):
                 success = True
                 break
             if (
                 not args.allow_incomplete_diagnostic
-                and bool(base_env._backroll_invalid[0].item())
+                and bool(base_env._backroll_invalid[args.env_index].item())
             ):
                 break
 

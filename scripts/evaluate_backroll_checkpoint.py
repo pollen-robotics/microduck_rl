@@ -97,6 +97,7 @@ def _load_policy(
 def _case_rows(
     *,
     seeds: list[int],
+    batch_seed: int,
     start_xy: torch.Tensor,
     start_heading: torch.Tensor,
     robot,
@@ -117,6 +118,9 @@ def _case_rows(
         rows.append(
             {
                 "seed": seed,
+                "variant_batch_seed": batch_seed,
+                "variant_batch_size": len(seeds),
+                "variant_batch_index": index,
                 "signed_backward_rotation_deg": float(
                     torch.rad2deg(base_env._roulade_max[index]).item()
                 ),
@@ -166,8 +170,9 @@ def evaluate_checkpoint(
 
     configure_torch_backends()
     env_cfg = load_env_cfg(TASK_ID, play=True)
+    batch_seed = min(seeds)
     env_cfg.scene.num_envs = len(seeds)
-    env_cfg.seed = min(seeds)
+    env_cfg.seed = batch_seed
     env_cfg.auto_reset = False
     env_cfg.episode_length_s = duration_s
     # The audit owns the fixed horizon and physical validity checks. Disabling
@@ -224,6 +229,7 @@ def evaluate_checkpoint(
     finally:
         rows = _case_rows(
             seeds=seeds,
+            batch_seed=batch_seed,
             start_xy=start_xy,
             start_heading=start_heading,
             robot=robot,
@@ -237,13 +243,15 @@ def evaluate_checkpoint(
     successes = sum(bool(row["grounded_backroll_success"]) for row in rows)
     eligible = [row for row in rows if row["grounded_backroll_success"]]
     report: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "task": TASK_ID,
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": _sha256(checkpoint),
         "checkpoint_iteration": _checkpoint_iteration(checkpoint),
         "duration_s": duration_s,
         "num_standing_trials": len(rows),
+        "variant_batch_seed": batch_seed,
+        "variant_batch_size": len(seeds),
         "grounded_backroll_success_count": successes,
         "grounded_backroll_success_rate": successes / len(rows),
         "acceptance_12_of_16": len(rows) == 16 and successes >= 12,
