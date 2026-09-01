@@ -97,8 +97,9 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             # Bridge from the audited one-shot champion before enabling the
             # stricter repeated-cycle state machine.  The champion can earn
             # one physically valid roll here; standing mastery then unlocks
-            # recovery/rearm and repeated-cycle credit in stage 1.
+            # recovery/rearm and repeated-cycle credit in a later stage.
             "repeat_mode": False,
+            "relaxed_first_cycle": False,
             "midroll_pitch_min": math.radians(260.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (0.0, 2.0),
@@ -128,6 +129,7 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             # destroyed the standing basin immediately (A189, iteration 71).
             # The next stage is the first intentional repeated-cycle handoff.
             "repeat_mode": False,
+            "relaxed_first_cycle": False,
             "midroll_pitch_min": math.radians(180.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (1.0, 4.0),
@@ -146,7 +148,7 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            # First strict repeat stage: keep the same aligned, measured
+            # First repeat stage: keep the same aligned, measured
             # 180-degree basin while the policy learns the post-landing
             # rearm.  Broad 90-degree starts and stronger angular momentum
             # wait for the following stage; introducing them here caused the
@@ -154,6 +156,9 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "standing_prob": 0.50,
             "midroll_prob": 0.50,
             "repeat_mode": True,
+            # Let the proven one-shot envelope earn the first cycle, then
+            # enforce the strict sagittal gate after the first rearm.
+            "relaxed_first_cycle": True,
             "midroll_pitch_min": math.radians(180.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (1.0, 4.0),
@@ -176,6 +181,7 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "standing_prob": 0.80,
             "midroll_prob": 0.20,
             "repeat_mode": True,
+            "relaxed_first_cycle": False,
             "midroll_pitch_min": math.radians(20.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (0.0, 4.0),
@@ -195,6 +201,7 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "standing_prob": 0.90,
             "midroll_prob": 0.10,
             "repeat_mode": True,
+            "relaxed_first_cycle": False,
             "midroll_pitch_min": math.radians(20.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (0.0, 3.0),
@@ -214,6 +221,7 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "standing_prob": 1.0,
             "midroll_prob": 0.0,
             "repeat_mode": True,
+            "relaxed_first_cycle": False,
             "midroll_pitch_min": math.radians(20.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (0.0, 3.0),
@@ -425,6 +433,8 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
         reset_cfg.params.update(
             standing_prob=1.0,
             midroll_prob=0.0,
+            repeat_mode=True,
+            relaxed_first_cycle=False,
             reference_state_prob=0.0,
             yaw_range=(0.0, 0.0),
             recovery_enabled=True,

@@ -11622,6 +11622,7 @@ def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
     env._backroll_start_is_standing = b.clone()
     env._backroll_cycle_max_lateral_axis_z = z.clone()
     env._backroll_cycle_offaxis_rotation = z.clone()
+    env._backroll_relaxed_first_cycle = b.clone()
     env._backroll_episode_max_lateral_axis_z = z.clone()
     env._backroll_episode_max_offaxis_rotation = z.clone()
     env._backroll_recovery_active = b.clone()
@@ -11665,12 +11666,22 @@ def _grounded_backroll_cycle_is_sagittal(env: ManagerBasedRlEnv) -> torch.Tensor
     )
 
 
+def _grounded_backroll_first_cycle_relaxed(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Allow the proven one-shot envelope only for the first repeat cycle."""
+    return (
+        env._backroll_repeat_mode
+        & env._backroll_relaxed_first_cycle
+        & (env._backroll_cycle_count == 0)
+    )
+
+
 def _grounded_backroll_positive_reward_valid(env: ManagerBasedRlEnv) -> torch.Tensor:
     """Reject every positive repeated-skill reward after an off-axis escape."""
+    first_cycle_relaxed = _grounded_backroll_first_cycle_relaxed(env)
     return (
         ~env._backroll_repeat_mode
         | (
-            _grounded_backroll_cycle_is_sagittal(env)
+            (first_cycle_relaxed | _grounded_backroll_cycle_is_sagittal(env))
             & ~env._backroll_invalid
             & ~env._backroll_recovery_active
         )
@@ -11864,8 +11875,11 @@ def _update_grounded_backroll_state(
         env._backroll_episode_max_offaxis_rotation,
         env._backroll_cycle_offaxis_rotation,
     )
+    first_cycle_relaxed = _grounded_backroll_first_cycle_relaxed(env)
     repeated_sagittal = _grounded_backroll_cycle_is_sagittal(env)
-    sagittal_landing = ~env._backroll_repeat_mode | repeated_sagittal
+    sagittal_landing = (
+        ~env._backroll_repeat_mode | first_cycle_relaxed | repeated_sagittal
+    )
     landing_ang_vel_ok = torch.where(
         env._backroll_repeat_mode,
         ang_speed <= _BACKROLL_REPEAT_MAX_LANDING_ANG_VEL,
@@ -11978,13 +11992,14 @@ def _update_grounded_backroll_state(
         & (env._backroll_landing_timeout_steps >= landing_timeout_steps)
     )
     wrong_way = accum < -math.radians(90.0)
+    strict_repeat = env._backroll_repeat_mode & ~first_cycle_relaxed
     repeated_side_flop = (
-        env._backroll_repeat_mode
+        strict_repeat
         & (frontier >= math.radians(30.0))
         & (lateral_axis_z > _BACKROLL_REPEAT_SIDE_INVALID_Z)
     )
     repeated_offaxis_escape = (
-        env._backroll_repeat_mode
+        strict_repeat
         & cycle_active
         & (env._backroll_cycle_offaxis_rotation
            > _BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION)
@@ -12285,6 +12300,7 @@ def reset_grounded_backroll_state(
     reference_phase_range_deg: tuple = (0.0, 360.0),
     reference_source_seed: Optional[int] = None,
     repeat_mode: bool = False,
+    relaxed_first_cycle: bool = False,
     recovery_enabled: bool = True,
     mastery_cycles: int = 1,
     synthesize_contact_latches: bool = True,
@@ -12419,6 +12435,9 @@ def reset_grounded_backroll_state(
     env._backroll_invalid_now[env_ids] = False
     env._backroll_started[env_ids] = True
     env._backroll_repeat_mode[env_ids] = repeat_mode
+    env._backroll_relaxed_first_cycle[env_ids] = bool(
+        repeat_mode and relaxed_first_cycle
+    )
     env._backroll_recovery_enabled[env_ids] = repeat_mode and recovery_enabled
     env._backroll_air_steps[env_ids] = 0
     env._backroll_max_air_steps[env_ids] = 0
@@ -12604,11 +12623,10 @@ def grounded_backroll_progress(
         | (ordered_contacts & _grounded_backroll_positive_reward_valid(env))
     )
     reward = delta / (env.step_dt * target_angle)
-    reward = torch.where(
-        env._backroll_repeat_mode,
-        reward * _grounded_backroll_sagittal_purity(asset),
-        reward,
-    )
+    first_cycle_relaxed = _grounded_backroll_first_cycle_relaxed(env)
+    purity = _grounded_backroll_sagittal_purity(asset)
+    purity = torch.where(first_cycle_relaxed, torch.ones_like(purity), purity)
+    reward = torch.where(env._backroll_repeat_mode, reward * purity, reward)
     return torch.where(valid, reward, 0.0)
 
 
@@ -12727,11 +12745,10 @@ def grounded_backroll_completion_progress(
     env._backroll_completion_paid = torch.maximum(paid, frontier)
     span = target_angle - start_angle
     reward = delta / (env.step_dt * span)
-    reward = torch.where(
-        env._backroll_repeat_mode,
-        reward * _grounded_backroll_sagittal_purity(asset),
-        reward,
-    )
+    first_cycle_relaxed = _grounded_backroll_first_cycle_relaxed(env)
+    purity = _grounded_backroll_sagittal_purity(asset)
+    purity = torch.where(first_cycle_relaxed, torch.ones_like(purity), purity)
+    reward = torch.where(env._backroll_repeat_mode, reward * purity, reward)
     return torch.where(valid, reward, 0.0)
 
 
@@ -12811,7 +12828,10 @@ def grounded_backroll_speed_progress(
         min=0.0,
         max=1.0,
     )
-    strict_sagittal = _grounded_backroll_cycle_is_sagittal(env)
+    strict_sagittal = (
+        _grounded_backroll_first_cycle_relaxed(env)
+        | _grounded_backroll_cycle_is_sagittal(env)
+    )
     ordered_contacts = (
         ((env._roulade_max <= _BACKROLL_TRUNK_LATCH_HI) | env._backroll_trunk_latch)
         & ((env._roulade_max <= _BACKROLL_HEAD_LATCH_HI) | env._backroll_head_latch)

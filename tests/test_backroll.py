@@ -200,6 +200,10 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
     ] == [False, False, True, True, True, True]
     assert [
+        stage["params"]["relaxed_first_cycle"]
+        for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
+    ] == [False, False, True, False, False, False]
+    assert [
         stage["params"]["yaw_range"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES[:3]
     ] == [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)]
@@ -233,6 +237,8 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert first_stage["midroll_pitch_max"] == pytest.approx(math.radians(340.0))
     assert first_stage["midroll_omega_range"] == (0.0, 2.0)
     play_reset = play_cfg.events["set_grounded_backroll_state"].params
+    assert play_reset["repeat_mode"] is True
+    assert play_reset["relaxed_first_cycle"] is False
     assert play_reset["reference_state_prob"] == pytest.approx(0.0)
     assert play_reset["yaw_range"] == (0.0, 0.0)
     assert cfg.curriculum["backroll_phase"].params["success_threshold"] == pytest.approx(
@@ -270,6 +276,21 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
         -8.0,
         -10.0,
     ]
+
+
+def test_repeated_first_cycle_relaxation_expires_after_first_cycle():
+    env, _asset = _fake_env()
+    env._backroll_repeat_mode[:] = True
+    env._backroll_relaxed_first_cycle[:] = True
+    env._backroll_cycle_max_lateral_axis_z[:] = 1.0
+    env._backroll_cycle_offaxis_rotation[:] = 10.0
+
+    assert mdp._grounded_backroll_first_cycle_relaxed(env).item() is True
+    assert mdp._grounded_backroll_positive_reward_valid(env).item() is True
+
+    env._backroll_cycle_count[:] = 1
+    assert mdp._grounded_backroll_first_cycle_relaxed(env).item() is False
+    assert mdp._grounded_backroll_positive_reward_valid(env).item() is False
 
 
 def test_backroll_curriculum_matches_mastery_stages():
