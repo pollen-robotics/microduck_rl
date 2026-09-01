@@ -11551,6 +11551,8 @@ def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
     i = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
     env._backroll_trunk_latch = b.clone()
     env._backroll_head_latch = b.clone()
+    env._backroll_trunk_latch_now = b.clone()
+    env._backroll_head_latch_now = b.clone()
     env._backroll_success = b.clone()
     env._backroll_success_now = b.clone()
     env._backroll_invalid = b.clone()
@@ -11620,16 +11622,22 @@ def _update_grounded_backroll_state(
     trunk_phase = (frontier >= _BACKROLL_TRUNK_LATCH_LO) & (
         frontier <= _BACKROLL_TRUNK_LATCH_HI
     )
+    previous_trunk_latch = env._backroll_trunk_latch.clone()
     env._backroll_trunk_latch |= trunk & trunk_phase
+    env._backroll_trunk_latch_now = (
+        env._backroll_trunk_latch & ~previous_trunk_latch
+    )
     head_phase = (frontier >= _BACKROLL_HEAD_LATCH_LO) & (
         frontier <= _BACKROLL_HEAD_LATCH_HI
     )
+    previous_head_latch = env._backroll_head_latch.clone()
     env._backroll_head_latch |= (
         env._backroll_trunk_latch
         & head
         & head_phase
         & _head_top_down(env, asset)
     )
+    env._backroll_head_latch_now = env._backroll_head_latch & ~previous_head_latch
 
     quat = asset.data.root_link_quat_w
     upright = torch.nan_to_num(
@@ -11815,6 +11823,8 @@ def _update_grounded_backroll_state(
         env._roulade_head_latch[rearm] = False
         env._backroll_trunk_latch[rearm] = False
         env._backroll_head_latch[rearm] = False
+        env._backroll_trunk_latch_now[rearm] = False
+        env._backroll_head_latch_now[rearm] = False
         env._backroll_success[rearm] = False
         env._backroll_air_steps[rearm] = 0
         env._backroll_max_air_steps[rearm] = 0
@@ -11908,6 +11918,8 @@ def reset_grounded_backroll_state(
         spawn_angle >= _BACKROLL_HEAD_LATCH_LO
     )
     env._roulade_head_latch[env_ids] = env._backroll_head_latch[env_ids]
+    env._backroll_trunk_latch_now[env_ids] = False
+    env._backroll_head_latch_now[env_ids] = False
     env._backroll_success[env_ids] = False
     env._backroll_success_now[env_ids] = False
     env._backroll_invalid[env_ids] = False
@@ -11945,6 +11957,8 @@ def grounded_backroll_curriculum(
     success_threshold: float = 0.70,
     speed_reward_name: Optional[str] = None,
     speed_reward_weights: Optional[list[float]] = None,
+    invalid_reward_name: Optional[str] = None,
+    invalid_reward_weights: Optional[list[float]] = None,
 ) -> torch.Tensor:
     """Advance phase initialization only after a clean mastery window."""
     del env_ids
@@ -11973,6 +11987,12 @@ def grounded_backroll_curriculum(
             raise ValueError("speed_reward_weights must match the curriculum stages")
         env.reward_manager.get_term_cfg(speed_reward_name).weight = (
             speed_reward_weights[stage]
+        )
+    if invalid_reward_name is not None:
+        if invalid_reward_weights is None or len(invalid_reward_weights) != len(stages):
+            raise ValueError("invalid_reward_weights must match the curriculum stages")
+        env.reward_manager.get_term_cfg(invalid_reward_name).weight = (
+            invalid_reward_weights[stage]
         )
     return torch.tensor(float(stage), device=env.device)
 
@@ -12031,6 +12051,21 @@ def grounded_backroll_head_pivot(
         * _head_top_down(env, asset).float()
         * rate
     )
+
+
+def grounded_backroll_contact_sequence(
+    env: ManagerBasedRlEnv,
+    trunk_value: float = 1.0,
+    head_value: float = 2.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Bounded one-shot credit for the ordered trunk then flat-head contacts."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return (
+        trunk_value * env._backroll_trunk_latch_now.float()
+        + head_value * env._backroll_head_latch_now.float()
+    ) / env.step_dt
 
 
 def grounded_backroll_completion_progress(
