@@ -407,7 +407,11 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
             stages=REPEATED_BACKROLL_CURRICULUM_STAGES,
             success_threshold=0.45,
             required_consecutive_windows=2,
-            standing_only_mastery=False,
+            # Mixed reference starts can look successful while standing
+            # starts still fail (A180 model 2600-2750).  Do not advance into
+            # the broad phase distribution until the standing launch itself
+            # has mastered this bridge.
+            standing_only_mastery=True,
             speed_reward_name="backroll_speed_progress",
             speed_reward_weights=[1.0, 1.0, 1.5, 2.0, 3.0, 3.0],
             invalid_reward_name="backroll_invalid",

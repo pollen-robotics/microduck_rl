@@ -233,7 +233,7 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert cfg.curriculum["backroll_phase"].params[
         "required_consecutive_windows"
     ] == 2
-    assert cfg.curriculum["backroll_phase"].params["standing_only_mastery"] is False
+    assert cfg.curriculum["backroll_phase"].params["standing_only_mastery"] is True
     assert cfg.rewards["backroll_completion_progress"].weight > cfg.rewards[
         "backroll_progress"
     ].weight
