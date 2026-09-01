@@ -138,8 +138,12 @@ def _case_rows(
                 "peak_vertical_impact_mps2": float(peak_impact[index].item()),
                 "nan": bool(nan_seen[index].item()),
                 "out_of_bounds": bool(out_of_bounds[index].item()),
+                "invalid_physical_solution": bool(
+                    base_env._backroll_invalid[index].item()
+                ),
                 "grounded_backroll_success": bool(
                     base_env._backroll_success[index].item()
+                    and not base_env._backroll_invalid[index].item()
                     and not nan_seen[index].item()
                     and not out_of_bounds[index].item()
                 ),
@@ -166,6 +170,10 @@ def evaluate_checkpoint(
     env_cfg.seed = min(seeds)
     env_cfg.auto_reset = False
     env_cfg.episode_length_s = duration_s
+    # The audit owns the fixed horizon and physical validity checks. Disabling
+    # manager terminations lets all 16 trials finish without auto-resetting an
+    # early invalid case and losing its one-shot state latches.
+    env_cfg.terminations.clear()
     reset_cfg = env_cfg.events["set_grounded_backroll_state"]
     reset_cfg.params.update(
         standing_prob=1.0,
@@ -183,7 +191,6 @@ def evaluate_checkpoint(
     peak_impact = torch.zeros(len(seeds), device=base_env.device)
     nan_seen = torch.zeros(len(seeds), dtype=torch.bool, device=base_env.device)
     out_of_bounds = torch.zeros_like(nan_seen)
-    alive = torch.ones_like(nan_seen)
     steps = math.ceil(duration_s / base_env.step_dt)
 
     try:
@@ -191,7 +198,7 @@ def evaluate_checkpoint(
             with torch.inference_mode():
                 observations = env.get_observations()
                 actions = policy(observations)
-                _, _, dones, _ = env.step(actions)
+                env.step(actions)
             current_vz = robot.data.root_link_lin_vel_w[:, 2]
             peak_impact = torch.maximum(
                 peak_impact,
@@ -214,9 +221,6 @@ def evaluate_checkpoint(
                 | (local_position[:, 2] < -0.25)
                 | (local_position[:, 2] > 1.0)
             )
-            alive &= ~dones.bool()
-            if not bool(alive.any()):
-                break
     finally:
         rows = _case_rows(
             seeds=seeds,
