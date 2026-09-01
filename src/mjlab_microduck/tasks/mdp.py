@@ -13394,10 +13394,13 @@ def roll_sprint_backroll_direction_flag(
     """Expose the dedicated reverse-roll mode in existing body padding.
 
     A standing forward start and a standing backroll start have identical
-    proprioception.  One binary flag in the pre-existing six-dimensional
+    proprioception.  One signed flag in the pre-existing six-dimensional
     body-command padding gives the separately trained backroll policy an
     unambiguous task cue without changing the 61D actor contract or any of
-    the three twist-slot semantics.
+    the three twist-slot semantics.  The reverse value is -1 rather than +1
+    so a warm-started forward champion receives the cue polarity that already
+    produces toward-goal reverse motion; zero remains the forward/default
+    padding value.
     """
     if dim < 1:
         raise ValueError("backroll direction flag needs at least one slot")
@@ -13407,7 +13410,11 @@ def roll_sprint_backroll_direction_flag(
         dtype=torch.float32,
         device=env.device,
     )
-    command[:, 0] = (env._roll_sprint_roll_direction < 0.0).to(command.dtype)
+    command[:, 0] = torch.where(
+        env._roll_sprint_roll_direction < 0.0,
+        -torch.ones(env.num_envs, device=env.device, dtype=command.dtype),
+        torch.zeros(env.num_envs, device=env.device, dtype=command.dtype),
+    )
     return command
 
 
