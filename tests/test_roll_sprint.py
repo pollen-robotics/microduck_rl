@@ -424,9 +424,15 @@ def test_backroll_sprint_is_separate_directional_61d_policy():
     spawn_stages = reverse.curriculum["roll_sprint_spawn_mix"].params[
         "param_stages"
     ]
-    assert [stage["params"]["midroll_prob"] for stage in spawn_stages] == [
-        0.55,
+    assert [stage["params"]["standing_prob"] for stage in spawn_stages] == [
+        0.45,
         0.50,
+        0.45,
+        0.65,
+    ]
+    assert [stage["params"]["midroll_prob"] for stage in spawn_stages] == [
+        0.35,
+        0.30,
         0.35,
         0.10,
     ]

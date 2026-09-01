@@ -556,9 +556,9 @@ def make_microduck_backroll_sprint_env_cfg(
     )
     if not play:
         reset_params.update(
-            standing_prob=0.25,
-            midroll_prob=0.50,
-            postroll_prob=0.10,
+            standing_prob=0.45,
+            midroll_prob=0.35,
+            postroll_prob=0.05,
             crouch_prob=0.05,
             ground_recovery_prob=0.10,
         )
@@ -566,8 +566,8 @@ def make_microduck_backroll_sprint_env_cfg(
             "param_stages"
         ]
         stage_mixes = (
-            ((0.25, 0.55, 0.05, 0.05, 0.10), (280.0, 350.0, (2.5, 5.0))),
-            ((0.30, 0.50, 0.05, 0.05, 0.10), (220.0, 350.0, (1.5, 4.5))),
+            ((0.45, 0.35, 0.05, 0.05, 0.10), (280.0, 350.0, (2.5, 5.0))),
+            ((0.50, 0.30, 0.05, 0.05, 0.10), (220.0, 350.0, (1.5, 4.5))),
             ((0.45, 0.35, 0.10, 0.05, 0.05), (100.0, 340.0, (0.5, 3.0))),
             ((0.65, 0.10, 0.10, 0.05, 0.10), (50.0, 340.0, (0.0, 3.0))),
         )
