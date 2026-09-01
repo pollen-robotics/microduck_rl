@@ -201,7 +201,7 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     )
     cfg.rewards["backroll_completion_progress"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_completion_progress,
-        weight=4.0,
+        weight=8.0,
         params={
             "start_angle": math.radians(150.0),
             "target_angle": math.radians(350.0),
