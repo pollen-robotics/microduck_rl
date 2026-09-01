@@ -11603,6 +11603,13 @@ def _grounded_backroll_positive_reward_valid(env: ManagerBasedRlEnv) -> torch.Te
     )
 
 
+def _grounded_backroll_sagittal_purity(asset: Entity) -> torch.Tensor:
+    """Fraction of angular energy rotating backward about the desired body-y axis."""
+    omega = torch.nan_to_num(asset.data.root_link_ang_vel_b, nan=0.0)
+    omega_back = torch.clamp(-omega[:, 1], min=0.0)
+    return omega_back.pow(2) / torch.clamp(omega.pow(2).sum(dim=-1), min=1.0e-6)
+
+
 def _update_grounded_backroll_state(
     env: ManagerBasedRlEnv,
     asset: Entity,
@@ -11796,12 +11803,19 @@ def _update_grounded_backroll_state(
         & (frontier >= math.radians(30.0))
         & (lateral_axis_z > _BACKROLL_REPEAT_SIDE_INVALID_Z)
     )
+    repeated_offaxis_escape = (
+        env._backroll_repeat_mode
+        & cycle_active
+        & (env._backroll_cycle_offaxis_rotation
+           > _BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION)
+    )
     invalid_now = (
         (env._backroll_max_air_steps > max_air_steps)
         | stalled_too_long
         | landing_timed_out
         | wrong_way
         | repeated_side_flop
+        | repeated_offaxis_escape
     )
     env._backroll_invalid_now = invalid_now & ~env._backroll_invalid
     env._backroll_invalid |= invalid_now
@@ -12038,7 +12052,13 @@ def grounded_backroll_progress(
         ~env._backroll_repeat_mode
         | (ordered_contacts & _grounded_backroll_positive_reward_valid(env))
     )
-    return torch.where(valid, delta / (env.step_dt * target_angle), 0.0)
+    reward = delta / (env.step_dt * target_angle)
+    reward = torch.where(
+        env._backroll_repeat_mode,
+        reward * _grounded_backroll_sagittal_purity(asset),
+        reward,
+    )
+    return torch.where(valid, reward, 0.0)
 
 
 def grounded_backroll_head_pivot(
@@ -12121,7 +12141,13 @@ def grounded_backroll_completion_progress(
     )
     env._backroll_completion_paid = torch.maximum(paid, frontier)
     span = target_angle - start_angle
-    return torch.where(valid, delta / (env.step_dt * span), 0.0)
+    reward = delta / (env.step_dt * span)
+    reward = torch.where(
+        env._backroll_repeat_mode,
+        reward * _grounded_backroll_sagittal_purity(asset),
+        reward,
+    )
+    return torch.where(valid, reward, 0.0)
 
 
 def grounded_backroll_upright_progress(
@@ -12208,6 +12234,7 @@ def grounded_backroll_speed_progress(
     return (
         env._backroll_frontier_delta
         * speed
+        * _grounded_backroll_sagittal_purity(asset)
         * strict_sagittal.float()
         * ordered_contacts.float()
         * (~env._backroll_invalid).float()

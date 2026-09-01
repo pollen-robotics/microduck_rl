@@ -141,7 +141,7 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     forbidden = ("sprint", "distance", "lane", "road", "recovery", "reposition")
     assert not any(token in name for name in cfg.rewards for token in forbidden)
     assert MicroduckRepeatedBackrollRlCfg.experiment_name == "microduck_repeated_backroll"
-    assert MicroduckRepeatedBackrollRlCfg.algorithm.learning_rate == pytest.approx(5.0e-5)
+    assert MicroduckRepeatedBackrollRlCfg.algorithm.learning_rate == pytest.approx(2.5e-5)
     assert MicroduckRepeatedBackrollRlCfg.algorithm.entropy_coef == pytest.approx(1.0e-3)
     assert MicroduckRepeatedBackrollRlCfg.actor.distribution_cfg[
         "init_std"
@@ -467,6 +467,7 @@ def test_repeated_positive_rewards_stop_after_cumulative_offaxis_escape(monkeypa
     )
 
     assert mdp.grounded_backroll_progress(env).item() == 0.0
+    assert mdp.grounded_backroll_invalid_termination(env).item()
     assert mdp.grounded_backroll_speed_progress(env).item() == 0.0
 
     env._backroll_completion_paid[:] = math.radians(195.0)
@@ -479,6 +480,20 @@ def test_repeated_positive_rewards_stop_after_cumulative_offaxis_escape(monkeypa
     env._roulade_max[:] = math.radians(40.0)
     env.common_step_counter += 1
     assert mdp.grounded_backroll_contact_sequence(env).item() == 0.0
+
+
+def test_backward_progress_is_scaled_by_instantaneous_sagittal_purity():
+    _env, asset = _fake_env()
+    asset.data.root_link_ang_vel_b[:] = torch.tensor([[0.0, -6.0, 0.0]])
+    pure = mdp._grounded_backroll_sagittal_purity(asset)
+    asset.data.root_link_ang_vel_b[:] = torch.tensor([[6.0, -6.0, 0.0]])
+    mixed = mdp._grounded_backroll_sagittal_purity(asset)
+    asset.data.root_link_ang_vel_b[:] = torch.tensor([[6.0, 0.0, 0.0]])
+    wrong_axis = mdp._grounded_backroll_sagittal_purity(asset)
+
+    assert pure.item() == pytest.approx(1.0)
+    assert mixed.item() == pytest.approx(0.5)
+    assert wrong_axis.item() == 0.0
 
 
 def test_ordered_contact_rewards_are_one_shot_latches(monkeypatch):

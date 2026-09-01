@@ -413,6 +413,6 @@ MicroduckRepeatedBackrollRlCfg.experiment_name = "microduck_repeated_backroll"
 MicroduckRepeatedBackrollRlCfg.run_name = "microduck_repeated_backroll"
 MicroduckRepeatedBackrollRlCfg.max_iterations = 4000
 MicroduckRepeatedBackrollRlCfg.save_interval = 50
-MicroduckRepeatedBackrollRlCfg.algorithm.learning_rate = 5.0e-5
+MicroduckRepeatedBackrollRlCfg.algorithm.learning_rate = 2.5e-5
 MicroduckRepeatedBackrollRlCfg.algorithm.entropy_coef = 1.0e-3
 MicroduckRepeatedBackrollRlCfg.actor.distribution_cfg["init_std"] = 0.25
