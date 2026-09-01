@@ -88,9 +88,9 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             # bucket must still acquire every latch physically.
             "standing_prob": 0.50,
             "midroll_prob": 0.50,
-            "midroll_pitch_min": math.radians(260.0),
+            "midroll_pitch_min": math.radians(180.0),
             "midroll_pitch_max": math.radians(340.0),
-            "midroll_omega_range": (0.0, 2.0),
+            "midroll_omega_range": (1.0, 3.0),
             "joint_noise_std": 0.0,
             "synthesize_contact_latches": True,
             "recovery_enabled": False,

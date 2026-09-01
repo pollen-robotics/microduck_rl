@@ -192,15 +192,6 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
     ] == [1, 1, 1, 1, 2, 3]
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
-        "midroll_pitch_min"
-    ] == pytest.approx(math.radians(260.0))
-    assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
-        "midroll_pitch_max"
-    ] == pytest.approx(math.radians(340.0))
-    assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
-        "midroll_omega_range"
-    ] == (0.0, 2.0)
-    assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "joint_noise_std"
     ] == pytest.approx(0.0)
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
@@ -214,6 +205,10 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
         stage["params"]["recovery_enabled"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
     ] == [False, False, False, True, True, True]
+    first_stage = REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"]
+    assert first_stage["midroll_pitch_min"] == pytest.approx(math.radians(180.0))
+    assert first_stage["midroll_pitch_max"] == pytest.approx(math.radians(340.0))
+    assert first_stage["midroll_omega_range"] == (1.0, 3.0)
     assert cfg.curriculum["backroll_phase"].params["success_threshold"] == pytest.approx(
         0.70
     )
