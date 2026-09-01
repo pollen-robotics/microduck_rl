@@ -139,6 +139,7 @@ def test_backroll_play_is_deterministic_standing_start():
 
 def test_repeated_backroll_rearms_without_adding_course_objectives():
     cfg = make_microduck_repeated_backroll_env_cfg()
+    play_cfg = make_microduck_repeated_backroll_env_cfg(play=True)
 
     assert cfg.episode_length_s == REPEATED_EPISODE_LENGTH_S == 12.0
     assert "backroll_success" not in cfg.terminations
@@ -208,12 +209,19 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert [
         stage["params"]["reference_state_prob"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
-    ] == [1.0, 0.40, 0.25, 0.10, 0.05, 0.0]
+    ] == [0.50, 0.40, 0.25, 0.10, 0.05, 0.0]
     first_stage = REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"]
-    assert first_stage["reference_phase_range_deg"] == (140.0, 180.0)
+    assert first_stage["reference_phase_range_deg"] == (180.0, 180.0)
+    assert first_stage["reference_source_seed"] == 10
+    assert first_stage["yaw_range"] == pytest.approx(
+        (-math.radians(20.0), math.radians(20.0))
+    )
     assert first_stage["midroll_pitch_min"] == pytest.approx(math.radians(260.0))
     assert first_stage["midroll_pitch_max"] == pytest.approx(math.radians(340.0))
     assert first_stage["midroll_omega_range"] == (0.0, 2.0)
+    play_reset = play_cfg.events["set_grounded_backroll_state"].params
+    assert play_reset["reference_state_prob"] == pytest.approx(0.0)
+    assert play_reset["yaw_range"] == (0.0, 0.0)
     assert cfg.curriculum["backroll_phase"].params["success_threshold"] == pytest.approx(
         0.70
     )
@@ -407,6 +415,7 @@ def test_repeated_reference_reset_uses_physical_state_and_actual_latches(
                 {
                     "qpos": qpos,
                     "qvel": qvel,
+                    "seed": 10,
                     "accum": torch.tensor(math.radians(180.0)),
                     "frontier": torch.tensor(math.radians(190.0)),
                     "phase_center_deg": 180.0,
@@ -417,10 +426,22 @@ def test_repeated_reference_reset_uses_physical_state_and_actual_latches(
                 {
                     "qpos": qpos + 10.0,
                     "qvel": qvel + 10.0,
+                    "seed": 10,
                     "accum": torch.tensor(math.radians(260.0)),
                     "frontier": torch.tensor(math.radians(265.0)),
                     "paid": torch.tensor(math.radians(265.0)),
                     "phase_center_deg": 260.0,
+                    "trunk_latch": torch.tensor(True),
+                    "head_latch": torch.tensor(True),
+                },
+                {
+                    "qpos": qpos + 20.0,
+                    "qvel": qvel + 20.0,
+                    "seed": 9,
+                    "accum": torch.tensor(math.radians(180.0)),
+                    "frontier": torch.tensor(math.radians(190.0)),
+                    "paid": torch.tensor(math.radians(190.0)),
+                    "phase_center_deg": 180.0,
                     "trunk_latch": torch.tensor(True),
                     "head_latch": torch.tensor(True),
                 }
@@ -440,6 +461,7 @@ def test_repeated_reference_reset_uses_physical_state_and_actual_latches(
         reference_state_prob=1.0,
         reference_state_path=str(reference_path),
         reference_phase_range_deg=(180.0, 180.0),
+        reference_source_seed=10,
         yaw_range=(0.0, 0.0),
         joint_noise_std=0.0,
     )

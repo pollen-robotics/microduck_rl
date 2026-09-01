@@ -12119,6 +12119,9 @@ def _grounded_backroll_reference_bank(
         "phase_center_deg": torch.tensor(
             [float(row["phase_center_deg"]) for row in rows], device=env.device
         ),
+        "source_seed": torch.tensor(
+            [int(row["seed"]) for row in rows], device=env.device, dtype=torch.long
+        ),
         "trunk_latch": torch.stack([row["trunk_latch"] for row in rows])
         .to(env.device)
         .bool(),
@@ -12141,15 +12144,17 @@ def _reset_grounded_backroll_reference_states(
     *,
     reference_state_path: str,
     phase_range_deg: tuple,
+    source_seed: Optional[int],
     yaw_range: tuple,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Place environments in real, champion-generated sagittal pivot states."""
     bank = _grounded_backroll_reference_bank(env, reference_state_path)
-    eligible_rows = torch.nonzero(
-        (bank["phase_center_deg"] >= phase_range_deg[0])
-        & (bank["phase_center_deg"] <= phase_range_deg[1]),
-        as_tuple=False,
-    ).squeeze(-1)
+    eligible_mask = (bank["phase_center_deg"] >= phase_range_deg[0]) & (
+        bank["phase_center_deg"] <= phase_range_deg[1]
+    )
+    if source_seed is not None:
+        eligible_mask &= bank["source_seed"] == source_seed
+    eligible_rows = torch.nonzero(eligible_mask, as_tuple=False).squeeze(-1)
     if len(eligible_rows) == 0:
         raise ValueError("backroll reference state bank has no rows in phase range")
     row_ids = eligible_rows[
@@ -12213,6 +12218,7 @@ def reset_grounded_backroll_state(
     reference_state_prob: float = 0.0,
     reference_state_path: Optional[str] = None,
     reference_phase_range_deg: tuple = (0.0, 360.0),
+    reference_source_seed: Optional[int] = None,
     repeat_mode: bool = False,
     recovery_enabled: bool = True,
     mastery_cycles: int = 1,
@@ -12316,6 +12322,7 @@ def reset_grounded_backroll_state(
             reference_ids,
             reference_state_path=reference_state_path,
             phase_range_deg=reference_phase_range_deg,
+            source_seed=reference_source_seed,
             yaw_range=yaw_range,
         )
         spawn_angle[reference_mask] = env._roulade_max[reference_ids]

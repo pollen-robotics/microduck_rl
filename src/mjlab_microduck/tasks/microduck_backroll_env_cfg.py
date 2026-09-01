@@ -97,11 +97,13 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "midroll_omega_range": (0.0, 2.0),
             "joint_noise_std": 0.0,
             "synthesize_contact_latches": True,
-            # Every midroll reset is now a measured champion state at the
-            # missing trunk-to-flat-head pivot transition.  Synthetic tail
-            # states taught straightness, but not the physical leg sweep.
-            "reference_state_prob": 1.0,
-            "reference_phase_range_deg": (140.0, 180.0),
+            # Use one coherent, measured post-contact pivot state for half of
+            # the midroll bucket.  Mixing distinct 140/180 degree states made
+            # standing starts escape through the shoulder/yaw basin.
+            "reference_state_prob": 0.50,
+            "reference_phase_range_deg": (180.0, 180.0),
+            "reference_source_seed": 10,
+            "yaw_range": (-math.radians(20.0), math.radians(20.0)),
             "recovery_enabled": False,
             "ground_recovery_prob": 0.0,
             "mastery_cycles": 1,
@@ -118,6 +120,8 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "synthesize_contact_latches": True,
             "reference_state_prob": 0.40,
             "reference_phase_range_deg": (0.0, 360.0),
+            "reference_source_seed": None,
+            "yaw_range": (-math.pi, math.pi),
             "recovery_enabled": False,
             "ground_recovery_prob": 0.0,
             "mastery_cycles": 1,
@@ -134,6 +138,8 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "synthesize_contact_latches": True,
             "reference_state_prob": 0.25,
             "reference_phase_range_deg": (0.0, 360.0),
+            "reference_source_seed": None,
+            "yaw_range": (-math.pi, math.pi),
             "recovery_enabled": False,
             "ground_recovery_prob": 0.0,
             "mastery_cycles": 1,
@@ -150,6 +156,8 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "synthesize_contact_latches": True,
             "reference_state_prob": 0.10,
             "reference_phase_range_deg": (0.0, 360.0),
+            "reference_source_seed": None,
+            "yaw_range": (-math.pi, math.pi),
             "recovery_enabled": True,
             "ground_recovery_prob": 0.05,
             "mastery_cycles": 1,
@@ -166,6 +174,8 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "synthesize_contact_latches": True,
             "reference_state_prob": 0.05,
             "reference_phase_range_deg": (0.0, 360.0),
+            "reference_source_seed": None,
+            "yaw_range": (-math.pi, math.pi),
             "recovery_enabled": True,
             "ground_recovery_prob": 0.10,
             "mastery_cycles": 2,
@@ -182,6 +192,8 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "synthesize_contact_latches": True,
             "reference_state_prob": 0.0,
             "reference_phase_range_deg": (0.0, 360.0),
+            "reference_source_seed": None,
+            "yaw_range": (-math.pi, math.pi),
             "recovery_enabled": True,
             "ground_recovery_prob": 0.20,
             "mastery_cycles": 3,
@@ -384,6 +396,8 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
         reset_cfg.params.update(
             standing_prob=1.0,
             midroll_prob=0.0,
+            reference_state_prob=0.0,
+            yaw_range=(0.0, 0.0),
             recovery_enabled=True,
         )
     else:
