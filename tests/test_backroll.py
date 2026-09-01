@@ -131,6 +131,7 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert "backroll_success" not in cfg.terminations
     assert cfg.events["set_grounded_backroll_state"].params["repeat_mode"] is True
     assert cfg.rewards["backroll_speed_progress"].func is mdp.grounded_backroll_speed_progress
+    assert cfg.rewards["backroll_rise_velocity"].func is mdp.grounded_backroll_rise_velocity
     assert cfg.rewards["backroll_success"].func is mdp.grounded_backroll_repeat_success_rate
     assert cfg.metrics["backroll_cycle_count"].func is mdp.grounded_backroll_cycle_count
     forbidden = ("sprint", "distance", "lane", "road", "recovery", "reposition")
@@ -140,7 +141,11 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert [
         stage["params"]["standing_prob"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
-    ] == [0.20, 0.30, 0.45, 0.65, 0.85]
+    ] == [0.20, 0.30, 0.45, 0.65, 0.85, 1.0]
+    assert [
+        stage["params"]["mastery_cycles"]
+        for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
+    ] == [1, 1, 1, 2, 2, 3]
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "midroll_pitch_min"
     ] == pytest.approx(math.radians(260.0))
@@ -150,6 +155,15 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert cfg.rewards["backroll_success"].params["later_cycle_bonus"] == pytest.approx(
         1.0
     )
+    assert cfg.rewards["backroll_speed_progress"].weight == 0.0
+    assert cfg.curriculum["backroll_phase"].params["speed_reward_weights"] == [
+        0.0,
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+        3.0,
+    ]
 
 
 def test_backroll_curriculum_matches_mastery_stages():
@@ -212,6 +226,44 @@ def test_reverse_phase_reset_uses_negative_pitch_rate_and_contact_prerequisites(
     assert env.sim.data.qvel[0, 4].item() == pytest.approx(-3.0)
     assert env._backroll_trunk_latch.item()
     assert env._backroll_head_latch.item()
+
+
+def test_repeated_curriculum_counts_the_stage_mastery_cycle_target(monkeypatch):
+    env, _asset = _fake_env()
+    env.sim = SimpleNamespace(
+        data=SimpleNamespace(qpos=torch.zeros(1, 21), qvel=torch.zeros(1, 20))
+    )
+    env.sim.data.qpos[:, 3] = 1.0
+    monkeypatch.setattr(mdp, "_servo_joint_ids", lambda _env, _asset: list(range(14)))
+    env._backroll_started[:] = True
+    env._backroll_repeat_mode[:] = True
+    env._backroll_cycle_count[:] = 1
+    env._backroll_mastery_cycles[:] = 2
+
+    mdp.reset_grounded_backroll_state(
+        env,
+        torch.tensor([0]),
+        standing_prob=1.0,
+        midroll_prob=0.0,
+        repeat_mode=True,
+        mastery_cycles=1,
+        yaw_range=(0.0, 0.0),
+        joint_noise_std=0.0,
+    )
+    assert env._backroll_window_successes.item() == 0
+
+    env._backroll_cycle_count[:] = 1
+    mdp.reset_grounded_backroll_state(
+        env,
+        torch.tensor([0]),
+        standing_prob=1.0,
+        midroll_prob=0.0,
+        repeat_mode=True,
+        mastery_cycles=1,
+        yaw_range=(0.0, 0.0),
+        joint_noise_std=0.0,
+    )
+    assert env._backroll_window_successes.item() == 1
 
 
 def test_negative_body_y_advances_but_forward_rocking_cannot_farm(monkeypatch):
@@ -540,12 +592,45 @@ def test_repeated_backroll_cannot_park_on_trunk_mid_cycle(monkeypatch):
         lambda _env, _asset: torch.ones(1, dtype=torch.bool),
     )
 
-    stall_steps = math.ceil(mdp._BACKROLL_INVALID_STALL_SECONDS / env.step_dt)
+    stall_steps = math.ceil(
+        mdp._BACKROLL_REPEAT_PRE_EXIT_STALL_SECONDS / env.step_dt
+    )
     for _ in range(stall_steps):
         asset.data.root_link_ang_vel_b.zero_()
         mdp.grounded_backroll_progress(env)
         env.common_step_counter += 1
 
+    assert mdp.grounded_backroll_invalid_termination(env).item()
+
+
+def test_repeated_backroll_gets_a_bounded_post_350_landing_budget(monkeypatch):
+    env, asset = _fake_env()
+    env._backroll_repeat_mode[:] = True
+    env.scene.sensors["left_foot_ground_contact"].data.found[:] = 0.0
+    env.scene.sensors["right_foot_ground_contact"].data.found[:] = 0.0
+    env._roulade_accum[:] = math.radians(355.0)
+    env._roulade_max[:] = math.radians(355.0)
+    env._backroll_previous_frontier[:] = math.radians(355.0)
+    env._backroll_trunk_latch[:] = True
+    env._backroll_head_latch[:] = True
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+
+    timeout_steps = math.ceil(
+        mdp._BACKROLL_REPEAT_LANDING_TIMEOUT_SECONDS / env.step_dt
+    )
+    for _ in range(timeout_steps - 2):
+        asset.data.root_link_ang_vel_b.zero_()
+        mdp.grounded_backroll_progress(env)
+        env.common_step_counter += 1
+    assert not mdp.grounded_backroll_invalid_termination(env).item()
+
+    env.common_step_counter += 1
+    mdp.grounded_backroll_progress(env)
     assert mdp.grounded_backroll_invalid_termination(env).item()
 
 
