@@ -397,6 +397,12 @@ def test_backroll_sprint_is_separate_directional_61d_policy():
     assert reverse.events["set_roll_sprint_state"].params[
         "midroll_omega_range"
     ] == (2.5, 5.0)
+    assert reverse.events["set_roll_sprint_state"].params[
+        "recovery_road_return_prob"
+    ] == pytest.approx(0.15)
+    assert reverse.events["set_roll_sprint_state"].params["heading_return_prob"] == pytest.approx(
+        0.05
+    )
     assert list(reverse.observations["actor"].terms) == list(
         forward.observations["actor"].terms
     )
@@ -409,7 +415,7 @@ def test_backroll_sprint_is_separate_directional_61d_policy():
     assert MicroduckBackrollSprintRlCfg.algorithm is not (
         MicroduckRollSprintRlCfg.algorithm
     )
-    assert reverse.rewards["roll_sprint_progress"].weight == 12.0
+    assert reverse.rewards["roll_sprint_progress"].weight == 16.0
     assert (
         reverse.observations["actor"].terms["body_command"].func
         is mdp.roll_sprint_backroll_direction_flag
@@ -420,27 +426,27 @@ def test_backroll_sprint_is_separate_directional_61d_policy():
     )
     assert reverse.rewards["roll_sprint_head_pivot"].weight == 0.5
     assert forward.rewards["roll_sprint_directional_bootstrap"].weight == 0.0
-    assert reverse.rewards["roll_sprint_directional_bootstrap"].weight == 12.0
+    assert reverse.rewards["roll_sprint_directional_bootstrap"].weight == 20.0
     assert reverse.curriculum[
         "roll_sprint_directional_bootstrap_weight"
     ].params["weight_stages"] == [
-        {"step": 0, "weight": 12.0},
-        {"step": 400 * 24, "weight": 8.0},
-        {"step": 800 * 24, "weight": 3.0},
+        {"step": 0, "weight": 20.0},
+        {"step": 300 * 24, "weight": 12.0},
+        {"step": 800 * 24, "weight": 4.0},
         {"step": 1200 * 24, "weight": 0.0},
     ]
     spawn_stages = reverse.curriculum["roll_sprint_spawn_mix"].params[
         "param_stages"
     ]
     assert [stage["params"]["standing_prob"] for stage in spawn_stages] == [
-        0.45,
-        0.50,
+        0.30,
+        0.35,
         0.45,
         0.65,
     ]
     assert [stage["params"]["midroll_prob"] for stage in spawn_stages] == [
-        0.35,
-        0.30,
+        0.55,
+        0.50,
         0.35,
         0.10,
     ]

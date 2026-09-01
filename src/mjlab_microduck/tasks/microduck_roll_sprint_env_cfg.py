@@ -558,6 +558,12 @@ def make_microduck_backroll_sprint_env_cfg(
     # carry enough course-aligned momentum to keep the late-roll lesson alive.
     reset_params["forward_vel_range"] = (0.08, 0.20)
     reset_params["midroll_forward_vel_range"] = (0.20, 0.50)
+    # A90 learned repeated recovery but did not complete a reverse cycle by
+    # iteration 400. Keep recovery examples available, while making late
+    # mid-roll states the dominant early discovery signal and reducing forced
+    # lane-return starts that can trap the actor in a recovery loop.
+    reset_params["recovery_road_return_prob"] = 0.15
+    reset_params["heading_return_prob"] = 0.05
     reset_params.update(
         midroll_pitch_min=math.radians(280.0),
         midroll_pitch_max=math.radians(350.0),
@@ -565,18 +571,18 @@ def make_microduck_backroll_sprint_env_cfg(
     )
     if not play:
         reset_params.update(
-            standing_prob=0.45,
-            midroll_prob=0.35,
+            standing_prob=0.30,
+            midroll_prob=0.55,
             postroll_prob=0.05,
             crouch_prob=0.05,
-            ground_recovery_prob=0.10,
+            ground_recovery_prob=0.05,
         )
         spawn_stages = cfg.curriculum["roll_sprint_spawn_mix"].params[
             "param_stages"
         ]
         stage_mixes = (
-            ((0.45, 0.35, 0.05, 0.05, 0.10), (280.0, 350.0, (2.5, 5.0))),
-            ((0.50, 0.30, 0.05, 0.05, 0.10), (220.0, 350.0, (1.5, 4.5))),
+            ((0.30, 0.55, 0.05, 0.05, 0.05), (280.0, 350.0, (2.5, 5.0))),
+            ((0.35, 0.50, 0.05, 0.05, 0.05), (220.0, 350.0, (1.5, 4.5))),
             ((0.45, 0.35, 0.10, 0.05, 0.05), (100.0, 340.0, (0.5, 3.0))),
             ((0.65, 0.10, 0.10, 0.05, 0.10), (50.0, 340.0, (0.0, 3.0))),
         )
@@ -596,12 +602,12 @@ def make_microduck_backroll_sprint_env_cfg(
     # Backroll discovery needs more dense supported-rotation signal than a
     # continuation of an already learned forward roll. It remains far below
     # the valid frontier objective and decays once complete backrolls emerge.
-    cfg.rewards["roll_sprint_progress"].weight = 12.0
+    cfg.rewards["roll_sprint_progress"].weight = 16.0
     cfg.curriculum["roll_sprint_progress_weight"].params["weight_stages"] = [
-        {"step": 0, "weight": 12.0},
-        {"step": 500 * 24, "weight": 8.0},
-        {"step": 1000 * 24, "weight": 4.0},
-        {"step": 2000 * 24, "weight": 2.0},
+        {"step": 0, "weight": 16.0},
+        {"step": 300 * 24, "weight": 12.0},
+        {"step": 800 * 24, "weight": 6.0},
+        {"step": 1500 * 24, "weight": 2.0},
     ]
     cfg.rewards["roll_sprint_head_pivot"].weight = 0.5
     cfg.curriculum["roll_sprint_head_pivot_weight"].params["weight_stages"] = [
@@ -609,41 +615,41 @@ def make_microduck_backroll_sprint_env_cfg(
         {"step": 1000 * 24, "weight": 0.25},
         {"step": 3000 * 24, "weight": 0.10},
     ]
-    cfg.rewards["roll_sprint_directional_bootstrap"].weight = 12.0
+    cfg.rewards["roll_sprint_directional_bootstrap"].weight = 20.0
     cfg.curriculum["roll_sprint_directional_bootstrap_weight"] = (
         CurriculumTermCfg(
             func=microduck_mdp.reward_weight,
             params={
                 "reward_name": "roll_sprint_directional_bootstrap",
                 "weight_stages": [
-                    {"step": 0, "weight": 12.0},
-                    {"step": 400 * 24, "weight": 8.0},
-                    {"step": 800 * 24, "weight": 3.0},
+                    {"step": 0, "weight": 20.0},
+                    {"step": 300 * 24, "weight": 12.0},
+                    {"step": 800 * 24, "weight": 4.0},
                     {"step": 1200 * 24, "weight": 0.0},
                 ],
             },
         )
     )
-    # The previous run found a recovery basin before it found a reverse roll.
-    # Keep recovery shaping available at reset, then taper the two largest
-    # potentials once the directional roll signal has had time to bootstrap.
+    # A90 found a recovery basin before it found a reverse roll. Keep enough
+    # potential shaping to teach the get-up transition, but taper it before
+    # the roll-heavy discovery signal can be replaced by repeated recovery.
     for curriculum_name, reward_name, weight_stages in (
         (
             "backroll_self_right_upright_weight",
             "roll_sprint_self_right_upright",
             [
-                {"step": 0, "weight": 5.0},
-                {"step": 300 * 24, "weight": 2.0},
-                {"step": 800 * 24, "weight": 1.0},
+                {"step": 0, "weight": 3.0},
+                {"step": 150 * 24, "weight": 1.0},
+                {"step": 500 * 24, "weight": 0.5},
             ],
         ),
         (
             "backroll_self_right_height_weight",
             "roll_sprint_self_right_height",
             [
-                {"step": 0, "weight": 30.0},
-                {"step": 300 * 24, "weight": 12.0},
-                {"step": 800 * 24, "weight": 4.0},
+                {"step": 0, "weight": 12.0},
+                {"step": 150 * 24, "weight": 5.0},
+                {"step": 500 * 24, "weight": 2.0},
             ],
         ),
     ):
