@@ -159,7 +159,7 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert cfg.metrics["backroll_cycle_count"].func is mdp.grounded_backroll_cycle_count
     assert cfg.events["set_grounded_backroll_state"].params[
         "ground_recovery_prob"
-    ] == pytest.approx(0.25)
+    ] == pytest.approx(0.0)
     assert cfg.events["set_grounded_backroll_state"].params[
         "ground_z_range"
     ] == (0.04, 0.05)
@@ -185,37 +185,32 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert [
         stage["params"]["standing_prob"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
-    ] == [0.65, 0.70, 0.75, 0.85, 0.95, 1.0]
+    ] == [0.20, 0.30, 0.40, 0.60, 0.85, 1.0]
     assert [
         stage["params"]["mastery_cycles"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
-    ] == [1, 1, 1, 2, 2, 3]
+    ] == [1, 1, 1, 1, 2, 3]
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "midroll_pitch_min"
-    ] == pytest.approx(math.radians(100.0))
+    ] == pytest.approx(math.radians(260.0))
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "midroll_pitch_max"
-    ] == pytest.approx(math.radians(120.0))
+    ] == pytest.approx(math.radians(340.0))
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "midroll_omega_range"
-    ] == (0.5, 1.0)
-    assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
-        "midroll_z_min"
-    ] == pytest.approx(0.115)
-    assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
-        "midroll_z_max"
-    ] == pytest.approx(0.115)
-    assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
-        "tuck_factor_range"
-    ] == (1.0, 1.0)
+    ] == (0.0, 2.0)
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "joint_noise_std"
     ] == pytest.approx(0.0)
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "synthesize_contact_latches"
-    ] is False
+    ] is True
+    assert [
+        stage["params"]["ground_recovery_prob"]
+        for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
+    ] == [0.0, 0.0, 0.0, 0.05, 0.10, 0.20]
     assert cfg.curriculum["backroll_phase"].params["success_threshold"] == pytest.approx(
-        0.55
+        0.70
     )
     assert cfg.rewards["backroll_completion_progress"].weight > cfg.rewards[
         "backroll_progress"
@@ -901,6 +896,8 @@ def test_repeated_backroll_cannot_park_on_trunk_mid_cycle(monkeypatch):
     env._roulade_accum[:] = math.radians(180.0)
     env._roulade_max[:] = math.radians(180.0)
     env._backroll_previous_frontier[:] = math.radians(180.0)
+    s = 2.0**-0.5
+    asset.data.root_link_quat_w[:] = torch.tensor([[s, 0.0, s, 0.0]])
     monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
     monkeypatch.setattr(
         mdp,
@@ -919,6 +916,33 @@ def test_repeated_backroll_cannot_park_on_trunk_mid_cycle(monkeypatch):
     assert env._backroll_recovery_active.item()
     assert env._backroll_invalid.item()
     assert not mdp.grounded_backroll_invalid_termination(env).item()
+
+
+def test_repeated_backroll_does_not_treat_an_upright_launch_pause_as_a_fall(
+    monkeypatch,
+):
+    env, asset = _fake_env()
+    env._backroll_repeat_mode[:] = True
+    env._roulade_accum[:] = math.radians(46.0)
+    env._roulade_max[:] = math.radians(46.0)
+    env._backroll_previous_frontier[:] = math.radians(46.0)
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+
+    stall_steps = math.ceil(
+        mdp._BACKROLL_REPEAT_PRE_EXIT_STALL_SECONDS / env.step_dt
+    )
+    for _ in range(stall_steps + 5):
+        asset.data.root_link_ang_vel_b.zero_()
+        mdp.grounded_backroll_progress(env)
+        env.common_step_counter += 1
+
+    assert not env._backroll_recovery_active.item()
+    assert not env._backroll_invalid.item()
 
 
 def test_repeated_backroll_gets_a_bounded_post_350_landing_budget(monkeypatch):

@@ -83,40 +83,56 @@ BACKROLL_CURRICULUM_STAGES = [
 REPEATED_BACKROLL_CURRICULUM_STAGES = [
     {
         "params": {
-            # Start before the measured clean-policy stall and require both
-            # ordered contacts to be acquired physically.  This lead-in was
-            # the only audited slice with 4/4 real trunk+head contacts while
-            # every trial stayed inside the 45-degree off-axis gate.
-            "standing_prob": 0.65,
-            "midroll_prob": 0.35,
-            "midroll_pitch_min": math.radians(100.0),
-            "midroll_pitch_max": math.radians(120.0),
-            "midroll_omega_range": (0.5, 1.0),
-            "midroll_z_min": 0.115,
-            "midroll_z_max": 0.115,
-            "tuck_factor_range": (1.0, 1.0),
+            # First learn the strict head-over completion from states where
+            # the ordered contacts have already happened.  The standing
+            # bucket must still acquire every latch physically.
+            "standing_prob": 0.20,
+            "midroll_prob": 0.80,
+            "midroll_pitch_min": math.radians(260.0),
+            "midroll_pitch_max": math.radians(340.0),
+            "midroll_omega_range": (0.0, 2.0),
             "joint_noise_std": 0.0,
-            "synthesize_contact_latches": False,
+            "synthesize_contact_latches": True,
+            "ground_recovery_prob": 0.0,
             "mastery_cycles": 1,
         }
     },
     {
         "params": {
-            "standing_prob": 0.70,
-            "midroll_prob": 0.30,
+            "standing_prob": 0.30,
+            "midroll_prob": 0.70,
             "midroll_pitch_min": math.radians(180.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (1.0, 4.0),
+            "joint_noise_std": 0.01,
+            "synthesize_contact_latches": True,
+            "ground_recovery_prob": 0.0,
             "mastery_cycles": 1,
         }
     },
     {
         "params": {
-            "standing_prob": 0.75,
-            "midroll_prob": 0.25,
+            "standing_prob": 0.40,
+            "midroll_prob": 0.60,
             "midroll_pitch_min": math.radians(90.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (2.0, 5.0),
+            "joint_noise_std": 0.02,
+            "synthesize_contact_latches": True,
+            "ground_recovery_prob": 0.0,
+            "mastery_cycles": 1,
+        }
+    },
+    {
+        "params": {
+            "standing_prob": 0.60,
+            "midroll_prob": 0.40,
+            "midroll_pitch_min": math.radians(20.0),
+            "midroll_pitch_max": math.radians(340.0),
+            "midroll_omega_range": (0.0, 4.0),
+            "joint_noise_std": 0.03,
+            "synthesize_contact_latches": True,
+            "ground_recovery_prob": 0.05,
             "mastery_cycles": 1,
         }
     },
@@ -126,17 +142,10 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "midroll_prob": 0.15,
             "midroll_pitch_min": math.radians(20.0),
             "midroll_pitch_max": math.radians(340.0),
-            "midroll_omega_range": (0.0, 4.0),
-            "mastery_cycles": 2,
-        }
-    },
-    {
-        "params": {
-            "standing_prob": 0.95,
-            "midroll_prob": 0.05,
-            "midroll_pitch_min": math.radians(20.0),
-            "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (0.0, 3.0),
+            "joint_noise_std": 0.03,
+            "synthesize_contact_latches": True,
+            "ground_recovery_prob": 0.10,
             "mastery_cycles": 2,
         }
     },
@@ -147,6 +156,9 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "midroll_pitch_min": math.radians(20.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (0.0, 3.0),
+            "joint_noise_std": 0.03,
+            "synthesize_contact_latches": True,
+            "ground_recovery_prob": 0.20,
             "mastery_cycles": 3,
         }
     },
@@ -338,7 +350,7 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
         repeat_mode=True,
         yaw_range=(0.0, 0.0) if play else (-math.pi, math.pi),
         joint_noise_std=0.0 if play else 0.03,
-        ground_recovery_prob=0.0 if play else 0.25,
+        ground_recovery_prob=0.0,
         ground_z_range=(0.04, 0.05),
     )
     reset_cfg.params.update(**first_stage)
@@ -350,7 +362,7 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
     else:
         cfg.curriculum["backroll_phase"].params.update(
             stages=REPEATED_BACKROLL_CURRICULUM_STAGES,
-            success_threshold=0.55,
+            success_threshold=0.70,
             speed_reward_name="backroll_speed_progress",
             speed_reward_weights=[1.0, 1.0, 1.5, 2.0, 3.0, 3.0],
             invalid_reward_name="backroll_invalid",

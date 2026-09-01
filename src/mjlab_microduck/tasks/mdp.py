@@ -11535,12 +11535,17 @@ _BACKROLL_MAX_AIR_SECONDS = 0.08
 _BACKROLL_LANDING_HOLD_SECONDS = 0.25
 _BACKROLL_INVALID_STALL_SECONDS = 0.50
 _BACKROLL_REPEAT_LANDING_HOLD_SECONDS = 0.10
-_BACKROLL_REPEAT_PRE_EXIT_STALL_SECONDS = 0.50
+_BACKROLL_REPEAT_PRE_EXIT_STALL_SECONDS = 0.30
+_BACKROLL_REPEAT_STALLED_FALL_MAX_RATE = 1.0
 _BACKROLL_REPEAT_LANDING_TIMEOUT_SECONDS = 2.00
 _BACKROLL_REPEAT_MAX_LANDING_ANG_VEL = 4.5
 _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX = math.sin(math.radians(35.0))
 _BACKROLL_REPEAT_SIDE_INVALID_Z = math.sin(math.radians(55.0))
-_BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION = math.radians(45.0)
+# The proven one-shot parent accumulates up to about 152 degrees of transverse
+# angular-rate integral during an otherwise valid sagittal roll.  Keep this as
+# a secondary escape budget; instantaneous lateral-axis and side-flop gates
+# remain the physical sagittal constraints.
+_BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION = math.radians(180.0)
 _BACKROLL_RECOVERY_UPRIGHT_COS = math.cos(math.radians(35.0))
 _BACKROLL_RECOVERY_MIN_HEIGHT = 0.10
 _BACKROLL_RECOVERY_MAX_LIN_SPEED = 0.15
@@ -11874,10 +11879,14 @@ def _update_grounded_backroll_state(
     invalid_pose = (lateral_axis_z > _FLAT_ZERO) | (
         (upright < _BACKROLL_STALL_TILT_COS) & ~trunk & ~head & ~left_foot & ~right_foot
     )
-    repeat_cycle_stalled = (
+    repeat_stalled_fall = (
         env._backroll_repeat_mode
         & cycle_active
         & (frontier < _BACKROLL_LANDING_ANGLE)
+        & support
+        & (upright <= _BACKROLL_STALL_TILT_COS)
+        & (torch.clamp(-asset.data.root_link_ang_vel_b[:, 1], min=0.0)
+           < _BACKROLL_REPEAT_STALLED_FALL_MAX_RATE)
     )
     one_shot_invalid_pose = (
         ~env._backroll_repeat_mode
@@ -11887,7 +11896,7 @@ def _update_grounded_backroll_state(
     stalled_invalid = (
         ~env._backroll_success
         & ~progressed
-        & (one_shot_invalid_pose | repeat_cycle_stalled)
+        & (one_shot_invalid_pose | repeat_stalled_fall)
     )
     env._backroll_invalid_stall_steps = torch.where(
         stalled_invalid,
