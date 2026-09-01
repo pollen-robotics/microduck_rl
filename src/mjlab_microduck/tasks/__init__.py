@@ -79,6 +79,51 @@ class MicroduckStairSpecialistRunner(MicroduckOnPolicyRunner):
         return infos
 
 
+class MicroduckRepeatedBackrollRunner(MicroduckOnPolicyRunner):
+    """Warm-start the repeated skill from the verified one-shot actor only."""
+
+    def __init__(self, env, train_cfg: dict, log_dir=None, device="cpu", **kwargs):
+        distribution_cfg = train_cfg.get("actor", {}).get("distribution_cfg") or {}
+        self._bootstrap_actor_std = float(distribution_cfg.get("init_std", 0.55))
+        super().__init__(env, train_cfg, log_dir, device, **kwargs)
+
+    def load(
+        self,
+        path: str,
+        load_cfg: dict | None = None,
+        strict: bool = True,
+        map_location: str | None = None,
+    ) -> dict:
+        bootstrap_actor = (
+            load_cfg is None
+            and Path(path).parent.name == ".bootstrap-backroll-champion"
+        )
+        if bootstrap_actor:
+            load_cfg = {
+                "actor": True,
+                "critic": False,
+                "optimizer": False,
+                "iteration": False,
+                "rnd": False,
+            }
+        infos = super().load(path, load_cfg, strict, map_location)
+        if bootstrap_actor:
+            distribution = self.alg.actor.distribution
+            with torch.no_grad():
+                if hasattr(distribution, "std_param"):
+                    distribution.std_param.fill_(self._bootstrap_actor_std)
+                elif hasattr(distribution, "log_std_param"):
+                    distribution.log_std_param.fill_(
+                        torch.log(
+                            torch.tensor(
+                                self._bootstrap_actor_std,
+                                device=distribution.log_std_param.device,
+                            )
+                        )
+                    )
+        return infos
+
+
 from .microduck_velocity_env_cfg import (
     make_microduck_velocity_env_cfg,
     MicroduckRlCfg,
@@ -129,7 +174,9 @@ from .microduck_spin_env_cfg import (
 )
 from .microduck_backroll_env_cfg import (
     make_microduck_backroll_env_cfg,
+    make_microduck_repeated_backroll_env_cfg,
     MicroduckBackrollRlCfg,
+    MicroduckRepeatedBackrollRlCfg,
 )
 from .microduck_roulade_env_cfg import (
     make_microduck_roulade_env_cfg,
@@ -387,6 +434,16 @@ register_mjlab_task(
     play_env_cfg=make_microduck_backroll_env_cfg(play=True),
     rl_cfg=MicroduckBackrollRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Repeated grounded backroll: each valid sagittal feet landing rearms a fresh
+# full backward cycle. It remains a stationary skill with no race/course goal.
+register_mjlab_task(
+    task_id="Mjlab-Repeated-Backroll-Flat-MicroDuck",
+    env_cfg=make_microduck_repeated_backroll_env_cfg(),
+    play_env_cfg=make_microduck_repeated_backroll_env_cfg(play=True),
+    rl_cfg=MicroduckRepeatedBackrollRlCfg,
+    runner_cls=MicroduckRepeatedBackrollRunner,
 )
 
 # Roll sprint: repeated supported forward rolls, distance released per cycle.

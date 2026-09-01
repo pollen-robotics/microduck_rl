@@ -1,8 +1,12 @@
-"""One-shot grounded backward roulade for MicroDuck.
+"""One-shot and repeated grounded backward roulades for MicroDuck.
 
 The policy starts from standing, tucks, rolls backward over the trunk and flat
 head top, and lands on both feet. It deliberately has no course, distance,
 lane, recovery, or repeated-cycle objective.
+
+The repeated variant preserves the same 61D/14D policy contract, but rearms
+after every valid feet landing and rewards only new, fast, sagittal progress
+toward the next complete head-over cycle.
 """
 
 import math
@@ -26,6 +30,7 @@ from mjlab_microduck.tasks.microduck_roulade_env_cfg import (
 )
 
 EPISODE_LENGTH_S = 5.0
+REPEATED_EPISODE_LENGTH_S = 12.0
 
 BACKROLL_CURRICULUM_STAGES = [
     {
@@ -71,6 +76,36 @@ BACKROLL_CURRICULUM_STAGES = [
             "midroll_pitch_min": math.radians(20.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (0.0, 3.0),
+        }
+    },
+]
+
+REPEATED_BACKROLL_CURRICULUM_STAGES = [
+    {
+        "params": {
+            "standing_prob": 0.70,
+            "midroll_prob": 0.30,
+            "midroll_pitch_min": math.radians(180.0),
+            "midroll_pitch_max": math.radians(340.0),
+            "midroll_omega_range": (2.0, 4.5),
+        }
+    },
+    {
+        "params": {
+            "standing_prob": 0.85,
+            "midroll_prob": 0.15,
+            "midroll_pitch_min": math.radians(90.0),
+            "midroll_pitch_max": math.radians(340.0),
+            "midroll_omega_range": (2.0, 5.0),
+        }
+    },
+    {
+        "params": {
+            "standing_prob": 1.0,
+            "midroll_prob": 0.0,
+            "midroll_pitch_min": math.radians(20.0),
+            "midroll_pitch_max": math.radians(340.0),
+            "midroll_omega_range": (0.0, 4.0),
         }
     },
 ]
@@ -245,6 +280,66 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     return cfg
 
 
+def make_microduck_repeated_backroll_env_cfg(play: bool = False):
+    """Create a repeated, fast, strictly sagittal grounded-backroll task."""
+    cfg = deepcopy(make_microduck_backroll_env_cfg(play=play))
+    cfg.episode_length_s = REPEATED_EPISODE_LENGTH_S
+
+    first_stage = REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"]
+    reset_cfg = cfg.events["set_grounded_backroll_state"]
+    reset_cfg.params.update(
+        **first_stage,
+        repeat_mode=True,
+        yaw_range=(0.0, 0.0) if play else (-math.pi, math.pi),
+        joint_noise_std=0.0 if play else 0.03,
+    )
+    if play:
+        reset_cfg.params.update(
+            standing_prob=1.0,
+            midroll_prob=0.0,
+        )
+    else:
+        cfg.curriculum["backroll_phase"].params.update(
+            stages=REPEATED_BACKROLL_CURRICULUM_STAGES,
+            success_threshold=0.55,
+        )
+
+    # A valid landing rearms the next cycle, so it is a reward pulse rather
+    # than a termination. Invalid side/airborne/wrong-way solutions still end
+    # the episode early to keep the replay buffer physically honest.
+    cfg.terminations.pop("backroll_success", None)
+    cfg.rewards["backroll_progress"].weight = 10.0
+    cfg.rewards["backroll_completion_progress"].weight = 5.0
+    cfg.rewards["backroll_success"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_repeat_success_rate,
+        weight=12.0,
+        params={"later_cycle_bonus": 0.5, "max_bonus_cycles": 3},
+    )
+    cfg.rewards["backroll_speed_progress"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_speed_progress,
+        weight=6.0,
+        params={"minimum_rate": 2.0, "target_rate": 4.5},
+    )
+    cfg.rewards["backroll_invalid"].weight = -4.0
+    cfg.rewards["backroll_overspeed"].weight = -0.02
+    cfg.rewards["backroll_overspeed"].params = {"omega_max": 7.5}
+    cfg.rewards["backroll_sagittal"].weight = -0.30
+    cfg.rewards["backroll_lateral_velocity"].weight = -1.0
+    cfg.rewards["backroll_flatness"].weight = -1.5
+    cfg.rewards["action_rate_l2"].weight = -0.05
+
+    cfg.metrics["backroll_cycle_count"] = MetricsTermCfg(
+        func=microduck_mdp.grounded_backroll_cycle_count,
+    )
+    cfg.metrics["backroll_max_lateral_axis_z"] = MetricsTermCfg(
+        func=microduck_mdp.grounded_backroll_episode_max_lateral_axis_z,
+    )
+    cfg.metrics["backroll_max_offaxis_deg"] = MetricsTermCfg(
+        func=microduck_mdp.grounded_backroll_episode_max_offaxis_deg,
+    )
+    return cfg
+
+
 MicroduckBackrollRlCfg = deepcopy(MicroduckRouladeRlCfg)
 MicroduckBackrollRlCfg.experiment_name = "microduck_backroll"
 MicroduckBackrollRlCfg.run_name = "microduck_backroll"
@@ -252,3 +347,11 @@ MicroduckBackrollRlCfg.max_iterations = 4000
 MicroduckBackrollRlCfg.save_interval = 50
 MicroduckBackrollRlCfg.algorithm.learning_rate = 1.0e-3
 MicroduckBackrollRlCfg.actor.distribution_cfg["init_std"] = 1.0
+
+MicroduckRepeatedBackrollRlCfg = deepcopy(MicroduckBackrollRlCfg)
+MicroduckRepeatedBackrollRlCfg.experiment_name = "microduck_repeated_backroll"
+MicroduckRepeatedBackrollRlCfg.run_name = "microduck_repeated_backroll"
+MicroduckRepeatedBackrollRlCfg.max_iterations = 4000
+MicroduckRepeatedBackrollRlCfg.save_interval = 50
+MicroduckRepeatedBackrollRlCfg.algorithm.learning_rate = 3.0e-4
+MicroduckRepeatedBackrollRlCfg.actor.distribution_cfg["init_std"] = 0.55

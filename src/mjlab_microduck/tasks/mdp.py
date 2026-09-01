@@ -11532,10 +11532,15 @@ _BACKROLL_MAX_LANDING_ANG_VEL = 2.0
 _BACKROLL_MAX_AIR_SECONDS = 0.08
 _BACKROLL_LANDING_HOLD_SECONDS = 0.25
 _BACKROLL_INVALID_STALL_SECONDS = 0.50
+_BACKROLL_REPEAT_LANDING_HOLD_SECONDS = 0.10
+_BACKROLL_REPEAT_MAX_LANDING_ANG_VEL = 4.5
+_BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX = math.sin(math.radians(35.0))
+_BACKROLL_REPEAT_SIDE_INVALID_Z = math.sin(math.radians(55.0))
+_BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION = math.radians(45.0)
 
 
 def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
-    """Create one-shot grounded-backroll buffers lazily."""
+    """Create grounded-backroll buffers lazily."""
     _roulade_state(env)
     if hasattr(env, "_backroll_trunk_latch"):
         return
@@ -11549,6 +11554,7 @@ def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
     env._backroll_invalid = b.clone()
     env._backroll_invalid_now = b.clone()
     env._backroll_started = b.clone()
+    env._backroll_repeat_mode = b.clone()
     env._backroll_air_steps = i.clone()
     env._backroll_max_air_steps = i.clone()
     env._backroll_landing_hold_steps = i.clone()
@@ -11560,6 +11566,12 @@ def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
     env._backroll_upright_delta = z.clone()
     env._backroll_height_delta = z.clone()
     env._backroll_potential_ready = b.clone()
+    env._backroll_frontier_delta = z.clone()
+    env._backroll_cycle_count = i.clone()
+    env._backroll_cycle_max_lateral_axis_z = z.clone()
+    env._backroll_cycle_offaxis_rotation = z.clone()
+    env._backroll_episode_max_lateral_axis_z = z.clone()
+    env._backroll_episode_max_offaxis_rotation = z.clone()
     env._backroll_last_update_step = -1
     env._backroll_curriculum_stage = 0
     env._backroll_window_episodes = torch.zeros((), dtype=torch.long, device=env.device)
@@ -11624,32 +11636,85 @@ def _update_grounded_backroll_state(
         asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2],
         nan=0.0,
     )
-    ang_speed = torch.nan_to_num(asset.data.root_link_ang_vel_b, nan=0.0).norm(dim=-1)
+    ang_vel_b = torch.nan_to_num(asset.data.root_link_ang_vel_b, nan=0.0)
+    ang_speed = ang_vel_b.norm(dim=-1)
+    lateral_axis_z = torch.nan_to_num(_lateral_axis_z(quat), nan=1.0).abs()
+    cycle_active = (
+        (frontier >= math.radians(10.0))
+        | env._backroll_trunk_latch
+        | env._backroll_head_latch
+    )
+    env._backroll_cycle_max_lateral_axis_z = torch.where(
+        cycle_active,
+        torch.maximum(env._backroll_cycle_max_lateral_axis_z, lateral_axis_z),
+        env._backroll_cycle_max_lateral_axis_z,
+    )
+    offaxis_rate = torch.sqrt(ang_vel_b[:, 0].pow(2) + ang_vel_b[:, 2].pow(2))
+    env._backroll_cycle_offaxis_rotation += (
+        offaxis_rate * env.step_dt * cycle_active.float()
+    )
+    env._backroll_episode_max_lateral_axis_z = torch.maximum(
+        env._backroll_episode_max_lateral_axis_z,
+        env._backroll_cycle_max_lateral_axis_z,
+    )
+    env._backroll_episode_max_offaxis_rotation = torch.maximum(
+        env._backroll_episode_max_offaxis_rotation,
+        env._backroll_cycle_offaxis_rotation,
+    )
+    repeated_sagittal = (
+        (env._backroll_cycle_max_lateral_axis_z
+         <= _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX)
+        & (env._backroll_cycle_offaxis_rotation
+           <= _BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION)
+    )
+    sagittal_landing = ~env._backroll_repeat_mode | repeated_sagittal
+    landing_ang_vel_ok = torch.where(
+        env._backroll_repeat_mode,
+        ang_speed <= _BACKROLL_REPEAT_MAX_LANDING_ANG_VEL,
+        ang_speed <= _BACKROLL_MAX_LANDING_ANG_VEL,
+    )
     landing_candidate = (
         (frontier >= _BACKROLL_LANDING_ANGLE)
+        & ~env._backroll_invalid
         & env._backroll_trunk_latch
         & env._backroll_head_latch
         & left_foot
         & right_foot
         & (height >= _BACKROLL_MIN_LANDING_HEIGHT)
         & (upright >= _BACKROLL_UPRIGHT_COS)
-        & (ang_speed <= _BACKROLL_MAX_LANDING_ANG_VEL)
+        & landing_ang_vel_ok
+        & sagittal_landing
     )
     env._backroll_landing_hold_steps = torch.where(
         landing_candidate,
         env._backroll_landing_hold_steps + 1,
         torch.zeros_like(env._backroll_landing_hold_steps),
     )
-    hold_steps = max(1, math.ceil(_BACKROLL_LANDING_HOLD_SECONDS / env.step_dt))
+    one_shot_hold_steps = max(
+        1,
+        math.ceil(_BACKROLL_LANDING_HOLD_SECONDS / env.step_dt),
+    )
+    repeat_hold_steps = max(
+        1,
+        math.ceil(_BACKROLL_REPEAT_LANDING_HOLD_SECONDS / env.step_dt),
+    )
+    hold_complete = torch.where(
+        env._backroll_repeat_mode,
+        env._backroll_landing_hold_steps >= repeat_hold_steps,
+        env._backroll_landing_hold_steps >= one_shot_hold_steps,
+    )
     env._backroll_success_now = (
-        (env._backroll_landing_hold_steps >= hold_steps)
+        hold_complete
         & ~env._backroll_success
     )
     env._backroll_success |= env._backroll_success_now
+    env._backroll_cycle_count += (
+        env._backroll_success_now & env._backroll_repeat_mode
+    ).long()
 
     progress = frontier - env._backroll_previous_frontier
+    env._backroll_frontier_delta = torch.clamp(progress, min=0.0)
     progressed = progress > 1.0e-4
-    lateral_axis_z = torch.nan_to_num(_lateral_axis_z(quat), nan=1.0).abs()
     invalid_pose = (lateral_axis_z > _FLAT_ZERO) | (
         (upright < _BACKROLL_STALL_TILT_COS) & ~trunk & ~head & ~left_foot & ~right_foot
     )
@@ -11667,10 +11732,16 @@ def _update_grounded_backroll_state(
     max_air_steps = math.ceil(_BACKROLL_MAX_AIR_SECONDS / env.step_dt)
     stall_steps = math.ceil(_BACKROLL_INVALID_STALL_SECONDS / env.step_dt)
     wrong_way = accum < -math.radians(90.0)
+    repeated_side_flop = (
+        env._backroll_repeat_mode
+        & (frontier >= math.radians(30.0))
+        & (lateral_axis_z > _BACKROLL_REPEAT_SIDE_INVALID_Z)
+    )
     invalid_now = (
         (env._backroll_max_air_steps > max_air_steps)
         | (env._backroll_invalid_stall_steps >= stall_steps)
         | wrong_way
+        | repeated_side_flop
     )
     env._backroll_invalid_now = invalid_now & ~env._backroll_invalid
     env._backroll_invalid |= invalid_now
@@ -11692,6 +11763,33 @@ def _update_grounded_backroll_state(
     env._backroll_height_previous = height_potential
     env._backroll_potential_ready = potential_gate
     env._backroll_previous_frontier = frontier.clone()
+
+    # A repeated skill earns one pulse for the completed cycle, then clears all
+    # cycle-local latches/frontiers immediately.  The next attempt must again
+    # earn trunk contact, flat head-top contact, supported rotation, and a
+    # feet-supported sagittal landing; merely remaining upright cannot pay.
+    rearm = env._backroll_success_now & env._backroll_repeat_mode
+    if rearm.any():
+        env._roulade_accum[rearm] = 0.0
+        env._roulade_max[rearm] = 0.0
+        env._roulade_paid[rearm] = 0.0
+        env._roulade_head_latch[rearm] = False
+        env._backroll_trunk_latch[rearm] = False
+        env._backroll_head_latch[rearm] = False
+        env._backroll_success[rearm] = False
+        env._backroll_air_steps[rearm] = 0
+        env._backroll_max_air_steps[rearm] = 0
+        env._backroll_landing_hold_steps[rearm] = 0
+        env._backroll_invalid_stall_steps[rearm] = 0
+        env._backroll_previous_frontier[rearm] = 0.0
+        env._backroll_completion_paid[rearm] = 0.0
+        env._backroll_upright_previous[rearm] = 0.0
+        env._backroll_height_previous[rearm] = 0.0
+        env._backroll_upright_delta[rearm] = 0.0
+        env._backroll_height_delta[rearm] = 0.0
+        env._backroll_potential_ready[rearm] = False
+        env._backroll_cycle_max_lateral_axis_z[rearm] = 0.0
+        env._backroll_cycle_offaxis_rotation[rearm] = 0.0
     env._backroll_last_update_step = step
 
 
@@ -11713,6 +11811,7 @@ def reset_grounded_backroll_state(
     tuck_overrides: Optional[dict] = None,
     tuck_factor_range: tuple = (0.5, 1.0),
     joint_noise_std: float = 0.04,
+    repeat_mode: bool = False,
 ) -> None:
     """Reset a grounded backroll and account for the previous episode."""
     if env_ids is None or len(env_ids) == 0:
@@ -11725,7 +11824,12 @@ def reset_grounded_backroll_state(
     if previous_started.any():
         previous_ids = env_ids[previous_started]
         env._backroll_window_episodes += previous_started.sum()
-        env._backroll_window_successes += env._backroll_success[previous_ids].sum()
+        previous_success = torch.where(
+            env._backroll_repeat_mode[previous_ids],
+            env._backroll_cycle_count[previous_ids] >= 2,
+            env._backroll_success[previous_ids],
+        )
+        env._backroll_window_successes += previous_success.sum()
         finite = torch.isfinite(env.sim.data.qpos[previous_ids]).all(dim=1) & torch.isfinite(
             env.sim.data.qvel[previous_ids]
         ).all(dim=1)
@@ -11767,6 +11871,7 @@ def reset_grounded_backroll_state(
     env._backroll_invalid[env_ids] = False
     env._backroll_invalid_now[env_ids] = False
     env._backroll_started[env_ids] = True
+    env._backroll_repeat_mode[env_ids] = repeat_mode
     env._backroll_air_steps[env_ids] = 0
     env._backroll_max_air_steps[env_ids] = 0
     env._backroll_landing_hold_steps[env_ids] = 0
@@ -11778,6 +11883,12 @@ def reset_grounded_backroll_state(
     env._backroll_upright_delta[env_ids] = 0.0
     env._backroll_height_delta[env_ids] = 0.0
     env._backroll_potential_ready[env_ids] = False
+    env._backroll_frontier_delta[env_ids] = 0.0
+    env._backroll_cycle_count[env_ids] = 0
+    env._backroll_cycle_max_lateral_axis_z[env_ids] = 0.0
+    env._backroll_cycle_offaxis_rotation[env_ids] = 0.0
+    env._backroll_episode_max_lateral_axis_z[env_ids] = 0.0
+    env._backroll_episode_max_offaxis_rotation[env_ids] = 0.0
     env._backroll_last_update_step = -1
 
 
@@ -11911,6 +12022,41 @@ def grounded_backroll_height_progress(
     return env._backroll_height_delta / env.step_dt
 
 
+def grounded_backroll_speed_progress(
+    env: ManagerBasedRlEnv,
+    minimum_rate: float = 2.0,
+    target_rate: float = 4.5,
+    target_angle: float = 2.0 * math.pi,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward fast *new* supported backward progress without rocking annuities.
+
+    The payment is proportional to the current cycle's newly extended angular
+    frontier.  Reversing, revisiting an old angle, spinning in the air, or
+    holding angular velocity without progress therefore earns zero.
+    """
+    if target_rate <= minimum_rate:
+        raise ValueError("target_rate must be greater than minimum_rate")
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    omega_back = torch.nan_to_num(-asset.data.root_link_ang_vel_b[:, 1], nan=0.0)
+    speed = torch.clamp(
+        (omega_back - minimum_rate) / (target_rate - minimum_rate),
+        min=0.0,
+        max=1.0,
+    )
+    strict_sagittal = (
+        env._backroll_cycle_max_lateral_axis_z
+        <= _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX
+    )
+    return (
+        env._backroll_frontier_delta
+        * speed
+        * strict_sagittal.float()
+        / (env.step_dt * target_angle)
+    )
+
+
 def grounded_backroll_success_rate(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -11918,6 +12064,24 @@ def grounded_backroll_success_rate(
     asset: Entity = env.scene[asset_cfg.name]
     _update_grounded_backroll_state(env, asset)
     return env._backroll_success_now.float() / env.step_dt
+
+
+def grounded_backroll_repeat_success_rate(
+    env: ManagerBasedRlEnv,
+    later_cycle_bonus: float = 0.5,
+    max_bonus_cycles: int = 3,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """One pulse per valid cycle, with a bounded preference for chaining."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    completed_before = torch.clamp(
+        env._backroll_cycle_count - 1,
+        min=0,
+        max=max_bonus_cycles,
+    ).float()
+    multiplier = 1.0 + later_cycle_bonus * completed_before
+    return env._backroll_success_now.float() * multiplier / env.step_dt
 
 
 def grounded_backroll_success_termination(
@@ -12000,6 +12164,33 @@ def grounded_backroll_success_fraction(
     asset: Entity = env.scene[asset_cfg.name]
     _update_grounded_backroll_state(env, asset)
     return env._backroll_success.float()
+
+
+def grounded_backroll_cycle_count(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_cycle_count.float()
+
+
+def grounded_backroll_episode_max_lateral_axis_z(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_episode_max_lateral_axis_z
+
+
+def grounded_backroll_episode_max_offaxis_deg(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return torch.rad2deg(env._backroll_episode_max_offaxis_rotation)
 
 
 # ============================================================================

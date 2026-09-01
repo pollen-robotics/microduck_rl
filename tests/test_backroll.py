@@ -8,8 +8,12 @@ from mjlab_microduck.tasks import mdp
 from mjlab_microduck.tasks.microduck_backroll_env_cfg import (
     BACKROLL_CURRICULUM_STAGES,
     EPISODE_LENGTH_S,
+    REPEATED_BACKROLL_CURRICULUM_STAGES,
+    REPEATED_EPISODE_LENGTH_S,
     MicroduckBackrollRlCfg,
+    MicroduckRepeatedBackrollRlCfg,
     make_microduck_backroll_env_cfg,
+    make_microduck_repeated_backroll_env_cfg,
 )
 from mjlab_microduck.tasks.microduck_roulade_env_cfg import (
     make_microduck_roulade_env_cfg,
@@ -118,6 +122,25 @@ def test_backroll_play_is_deterministic_standing_start():
     assert reset["yaw_range"] == (0.0, 0.0)
     assert reset["joint_noise_std"] == 0.0
     assert "backroll_phase" not in cfg.curriculum
+
+
+def test_repeated_backroll_rearms_without_adding_course_objectives():
+    cfg = make_microduck_repeated_backroll_env_cfg()
+
+    assert cfg.episode_length_s == REPEATED_EPISODE_LENGTH_S == 12.0
+    assert "backroll_success" not in cfg.terminations
+    assert cfg.events["set_grounded_backroll_state"].params["repeat_mode"] is True
+    assert cfg.rewards["backroll_speed_progress"].func is mdp.grounded_backroll_speed_progress
+    assert cfg.rewards["backroll_success"].func is mdp.grounded_backroll_repeat_success_rate
+    assert cfg.metrics["backroll_cycle_count"].func is mdp.grounded_backroll_cycle_count
+    forbidden = ("sprint", "distance", "lane", "road", "recovery", "reposition")
+    assert not any(token in name for name in cfg.rewards for token in forbidden)
+    assert MicroduckRepeatedBackrollRlCfg.experiment_name == "microduck_repeated_backroll"
+    assert MicroduckRepeatedBackrollRlCfg.algorithm.learning_rate == pytest.approx(3.0e-4)
+    assert [
+        stage["params"]["standing_prob"]
+        for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
+    ] == [0.70, 0.85, 1.0]
 
 
 def test_backroll_curriculum_matches_mastery_stages():
@@ -259,6 +282,30 @@ def test_completion_push_rejects_airborne_rotation(monkeypatch):
     assert mdp.grounded_backroll_completion_progress(env).item() == 0.0
 
 
+def test_speed_progress_requires_fast_new_backward_frontier(monkeypatch):
+    env, asset = _fake_env()
+    env._backroll_repeat_mode[:] = True
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+
+    asset.data.root_link_ang_vel_b[:, 1] = -4.5
+    first = mdp.grounded_backroll_speed_progress(env)
+    env.common_step_counter += 1
+    asset.data.root_link_ang_vel_b[:, 1] = 4.5
+    rocking = mdp.grounded_backroll_speed_progress(env)
+    env.common_step_counter += 1
+    asset.data.root_link_ang_vel_b[:, 1] = -4.5
+    revisit = mdp.grounded_backroll_speed_progress(env)
+
+    assert first.item() > 0.0
+    assert rocking.item() == 0.0
+    assert revisit.item() == 0.0
+
+
 def test_airborne_and_sideways_rotation_receive_no_progress(monkeypatch):
     env, asset = _fake_env()
     monkeypatch.setattr(
@@ -371,6 +418,64 @@ def test_success_requires_ordered_contacts_and_is_one_shot(monkeypatch):
 
     assert sum(value > 0.0 for value in pulses) == 1
     assert env._backroll_success.item()
+
+
+def test_repeated_backroll_rearms_and_credits_two_distinct_cycles(monkeypatch):
+    env, _asset = _fake_env()
+    env._backroll_repeat_mode[:] = True
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+    hold_steps = math.ceil(
+        mdp._BACKROLL_REPEAT_LANDING_HOLD_SECONDS / env.step_dt
+    )
+
+    pulses = []
+    for expected_count in (1, 2):
+        env._roulade_accum[:] = math.radians(355.0)
+        env._roulade_max[:] = math.radians(355.0)
+        env._roulade_paid[:] = math.radians(355.0)
+        env._backroll_previous_frontier[:] = math.radians(355.0)
+        env._backroll_trunk_latch[:] = True
+        env._backroll_head_latch[:] = True
+        for _ in range(hold_steps + 1):
+            pulses.append(mdp.grounded_backroll_repeat_success_rate(env).item())
+            env.common_step_counter += 1
+        assert env._backroll_cycle_count.item() == expected_count
+        assert env._roulade_max.item() == 0.0
+        assert not env._backroll_trunk_latch.item()
+        assert not env._backroll_head_latch.item()
+        assert not env._backroll_success.item()
+
+    assert sum(value > 0.0 for value in pulses) == 2
+
+
+def test_repeated_backroll_rejects_side_landing(monkeypatch):
+    env, _asset = _fake_env()
+    env._backroll_repeat_mode[:] = True
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.full((1,), 0.7))
+    env._roulade_accum[:] = math.radians(355.0)
+    env._roulade_max[:] = math.radians(355.0)
+    env._backroll_previous_frontier[:] = math.radians(355.0)
+    env._backroll_trunk_latch[:] = True
+    env._backroll_head_latch[:] = True
+
+    hold_steps = math.ceil(
+        mdp._BACKROLL_REPEAT_LANDING_HOLD_SECONDS / env.step_dt
+    )
+    for _ in range(hold_steps + 2):
+        assert mdp.grounded_backroll_repeat_success_rate(env).item() == 0.0
+        env.common_step_counter += 1
+
+    assert env._backroll_cycle_count.item() == 0
 
 
 def test_standing_cannot_farm_backroll_success(monkeypatch):

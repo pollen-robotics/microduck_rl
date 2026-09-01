@@ -19,6 +19,7 @@ from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 
 TASK_ID = "Mjlab-Backroll-Flat-MicroDuck"
+REPEATED_TASK_ID = "Mjlab-Repeated-Backroll-Flat-MicroDuck"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_WIDTH = 1920
 OUTPUT_HEIGHT = 1080
@@ -30,6 +31,17 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument(
+        "--task-id",
+        choices=(TASK_ID, REPEATED_TASK_ID),
+        default=TASK_ID,
+    )
+    parser.add_argument(
+        "--required-cycles",
+        type=int,
+        default=1,
+        help="Valid cycle count required before publishing a proof.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--batch-size",
@@ -111,10 +123,16 @@ def _ffmpeg_writer(
     return subprocess.Popen(command, stdin=subprocess.PIPE)
 
 
-def _load_policy(base_env: ManagerBasedRlEnv, checkpoint: Path, *, device: str):
-    agent_cfg = load_rl_cfg(TASK_ID)
+def _load_policy(
+    base_env: ManagerBasedRlEnv,
+    checkpoint: Path,
+    *,
+    task_id: str,
+    device: str,
+):
+    agent_cfg = load_rl_cfg(task_id)
     env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
-    runner_cls = load_runner_cls(TASK_ID) or MjlabOnPolicyRunner
+    runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
     runner = runner_cls(env, asdict(agent_cfg), device=device)
     runner.load(
         str(checkpoint),
@@ -137,13 +155,15 @@ def main() -> int:
         raise SystemExit("--batch-size must be at least 1")
     if args.env_index < 0 or args.env_index >= args.batch_size:
         raise SystemExit("--env-index must be within [0, --batch-size)")
+    if args.required_cycles < 1:
+        raise SystemExit("--required-cycles must be at least 1")
 
     temporary_dir = REPO_ROOT / ".tmp" / "codex"
     temporary_dir.mkdir(parents=True, exist_ok=True)
     temporary_output = temporary_dir / f"grounded-backroll-{os.getpid()}.mp4"
 
     configure_torch_backends()
-    env_cfg = load_env_cfg(TASK_ID, play=True)
+    env_cfg = load_env_cfg(args.task_id, play=True)
     env_cfg.scene.num_envs = args.batch_size
     env_cfg.seed = args.seed
     env_cfg.auto_reset = False
@@ -180,7 +200,12 @@ def main() -> int:
         device=args.device,
         render_mode="rgb_array",
     )
-    env, policy = _load_policy(base_env, checkpoint, device=args.device)
+    env, policy = _load_policy(
+        base_env,
+        checkpoint,
+        task_id=args.task_id,
+        device=args.device,
+    )
     policy_fps = 1.0 / base_env.step_dt
     steps = round(args.duration / base_env.step_dt)
     hold_frames = round(POST_SUCCESS_HOLD_S * policy_fps)
@@ -208,7 +233,14 @@ def main() -> int:
                 )
             assert writer.stdin is not None
             writer.stdin.write(last_frame.tobytes())
-            if bool(base_env._backroll_success[args.env_index].item()):
+            if args.task_id == REPEATED_TASK_ID:
+                success = bool(
+                    base_env._backroll_cycle_count[args.env_index].item()
+                    >= args.required_cycles
+                )
+            else:
+                success = bool(base_env._backroll_success[args.env_index].item())
+            if success:
                 success = True
                 break
             if (
