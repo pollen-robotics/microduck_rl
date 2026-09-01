@@ -704,6 +704,41 @@ def test_lease_expiry_initiates_zero_stop_without_parent_watchdog() -> None:
     thread.join(timeout=1)
 
 
+def test_command_ack_is_suppressed_if_safety_starts_during_send_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late COMMAND ACK must never trail the lease terminal event."""
+    host, _runtime, parent, thread = _active_host()
+    request = RuntimeMessage(
+        kind="COMMAND",
+        generation=7,
+        operationSequence=2,
+        taskId="1" * 32,
+        payload=CommandPayload(
+            parameters={"vxMps": 0.1, "vyMps": 0.0, "yawRateRadps": 0.0},
+            leaseMs=100,
+        ),
+    )
+    original_send = host._send
+    send_boundary = threading.Event()
+
+    def start_safety_before_original_send(message: RuntimeMessage, **kwargs):
+        if message.kind is RuntimeMessageKind.ACK:
+            host._safety_requested.set()
+            send_boundary.set()
+        return original_send(message, **kwargs)
+
+    monkeypatch.setattr(host, "_send", start_safety_before_original_send)
+    host._command(request)
+    assert send_boundary.is_set()
+    parent.setblocking(False)
+    with pytest.raises(BlockingIOError):
+        parent.recv(65_537)
+    parent.close()
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+
+
 def test_safety_completion_waits_until_terminal_packet_is_published() -> None:
     """The main loop must not close transport while safety terminal send is paused."""
     host, runtime, parent, thread = _active_host()

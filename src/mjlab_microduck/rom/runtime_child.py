@@ -160,6 +160,7 @@ class RuntimeChildHost:
             queue.Queue(maxsize=8)
         )
         self._send_lock = threading.Lock()
+        self._send_context = threading.local()
         self._state_lock = threading.Lock()
         self._stop = threading.Event()
         self._safety_requested = threading.Event()
@@ -200,6 +201,15 @@ class RuntimeChildHost:
         if not acquired:
             return False
         try:
+            # Serialize the safety decision with the packet write.  Without the
+            # in-lock recheck, a COMMAND/STATUS worker can observe a clear
+            # safety flag, lose the send lock to the lease deadman, and publish
+            # its response after the terminal event.  The supervisor then sees
+            # that late response as an unsolicited protocol violation.
+            if self._safety_requested.is_set() and not getattr(
+                self._send_context, "allow_after_safety", False
+            ):
+                return False
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -218,6 +228,16 @@ class RuntimeChildHost:
             return False
         finally:
             self._send_lock.release()
+
+    def _send_safety_terminal(self, message: RuntimeMessage) -> bool:
+        """Publish the one terminal packet that explains a safety stop."""
+        self._send_context.allow_after_safety = True
+        try:
+            # Route through ``_send`` so test and diagnostic wrappers retain the
+            # same packet boundary as normal responses.
+            return self._send(message)
+        finally:
+            del self._send_context.allow_after_safety
 
     def _response(
         self, request: RuntimeMessage, kind: RuntimeMessageKind, payload: object
@@ -445,7 +465,7 @@ class RuntimeChildHost:
                         terminal=terminal.payload,
                     ),
                 )
-            published = self._send(terminal)
+            published = self._send_safety_terminal(terminal)
         if published:
             # The main loop may close transport only after the correlated terminal
             # is fully handed to the kernel. Receipt therefore implies the child
