@@ -793,6 +793,28 @@ def test_repeated_non_top_head_dwell_allows_tuck_grace_then_penalizes(monkeypatc
     assert mdp.grounded_backroll_non_top_head_dwell_penalty(env).item() == 0.0
 
 
+def test_repeated_non_top_head_dwell_taxes_early_rounded_head_stall(monkeypatch):
+    """The rounded head-shell basin is penalized before the head latch window."""
+    env, _asset = _fake_env()
+    env._backroll_repeat_mode[:] = True
+    env._roulade_accum[:] = math.radians(45.0)
+    env._roulade_max[:] = math.radians(45.0)
+    env.scene.sensors["left_foot_ground_contact"].data.found[:] = 0.0
+    env.scene.sensors["right_foot_ground_contact"].data.found[:] = 0.0
+    env.scene.sensors["head_ground_contact"].data.found[:] = 1.0
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.zeros(1, dtype=torch.bool),
+    )
+
+    for step in range(9):
+        env.common_step_counter = step
+        assert mdp.grounded_backroll_non_top_head_dwell_penalty(env).item() == 0.0
+    env.common_step_counter = 9
+    assert mdp.grounded_backroll_non_top_head_dwell_penalty(env).item() == -1.0
+
+
 def test_repeated_positive_rewards_stop_after_cumulative_offaxis_escape(monkeypatch):
     env, asset = _fake_env()
     env._backroll_repeat_mode[:] = True
