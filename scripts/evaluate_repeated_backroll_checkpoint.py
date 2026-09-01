@@ -31,6 +31,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--duration", type=float, default=12.0)
     parser.add_argument("--required-cycles", type=int, default=3)
     parser.add_argument("--seeds", type=int, nargs="+", default=list(DEFAULT_SEEDS))
+    parser.add_argument(
+        "--reset-mode",
+        choices=("standing", "precontact"),
+        default="standing",
+    )
     return parser.parse_args()
 
 
@@ -76,9 +81,12 @@ def evaluate_checkpoint(
     device: str,
     duration_s: float,
     required_cycles: int,
+    reset_mode: str = "standing",
 ) -> dict[str, object]:
     if not seeds or duration_s <= 0.0 or required_cycles < 2:
         raise ValueError("seeds, positive duration, and at least two cycles are required")
+    if reset_mode not in {"standing", "precontact"}:
+        raise ValueError("reset_mode must be 'standing' or 'precontact'")
 
     configure_torch_backends()
     env_cfg = load_env_cfg(TASK_ID, play=True)
@@ -87,9 +95,19 @@ def evaluate_checkpoint(
     env_cfg.auto_reset = False
     env_cfg.episode_length_s = duration_s
     env_cfg.terminations.clear()
+    reset_params = (
+        {"standing_prob": 1.0, "midroll_prob": 0.0}
+        if reset_mode == "standing"
+        else {
+            "standing_prob": 0.0,
+            "midroll_prob": 1.0,
+            "midroll_pitch_min": math.radians(20.0),
+            "midroll_pitch_max": math.radians(29.0),
+            "midroll_omega_range": (1.0, 3.0),
+        }
+    )
     env_cfg.events["set_grounded_backroll_state"].params.update(
-        standing_prob=1.0,
-        midroll_prob=0.0,
+        **reset_params,
         repeat_mode=True,
         yaw_range=(0.0, 0.0),
         joint_noise_std=0.02,
@@ -219,7 +237,9 @@ def evaluate_checkpoint(
         "checkpoint_iteration": _checkpoint_iteration(checkpoint),
         "duration_s": duration_s,
         "required_cycles": required_cycles,
-        "num_standing_trials": len(rows),
+        "reset_mode": reset_mode,
+        "num_standing_trials": len(rows) if reset_mode == "standing" else 0,
+        "num_precontact_trials": len(rows) if reset_mode == "precontact" else 0,
         "consecutive_success_count": successes,
         "consecutive_success_rate": successes / len(rows),
         "proof_available": successes > 0,
@@ -246,6 +266,7 @@ def main() -> int:
         device=args.device,
         duration_s=args.duration,
         required_cycles=args.required_cycles,
+        reset_mode=args.reset_mode,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     if args.output is not None:
