@@ -587,12 +587,12 @@ def make_microduck_backroll_sprint_env_cfg(
     # Backroll discovery needs more dense supported-rotation signal than a
     # continuation of an already learned forward roll. It remains far below
     # the valid frontier objective and decays once complete backrolls emerge.
-    cfg.rewards["roll_sprint_progress"].weight = 8.0
+    cfg.rewards["roll_sprint_progress"].weight = 12.0
     cfg.curriculum["roll_sprint_progress_weight"].params["weight_stages"] = [
-        {"step": 0, "weight": 8.0},
-        {"step": 500 * 24, "weight": 5.0},
-        {"step": 1000 * 24, "weight": 2.0},
-        {"step": 2000 * 24, "weight": 1.0},
+        {"step": 0, "weight": 12.0},
+        {"step": 500 * 24, "weight": 8.0},
+        {"step": 1000 * 24, "weight": 4.0},
+        {"step": 2000 * 24, "weight": 2.0},
     ]
     cfg.rewards["roll_sprint_head_pivot"].weight = 0.5
     cfg.curriculum["roll_sprint_head_pivot_weight"].params["weight_stages"] = [
@@ -600,16 +600,16 @@ def make_microduck_backroll_sprint_env_cfg(
         {"step": 1000 * 24, "weight": 0.25},
         {"step": 3000 * 24, "weight": 0.10},
     ]
-    cfg.rewards["roll_sprint_directional_bootstrap"].weight = 24.0
+    cfg.rewards["roll_sprint_directional_bootstrap"].weight = 12.0
     cfg.curriculum["roll_sprint_directional_bootstrap_weight"] = (
         CurriculumTermCfg(
             func=microduck_mdp.reward_weight,
             params={
                 "reward_name": "roll_sprint_directional_bootstrap",
                 "weight_stages": [
-                    {"step": 0, "weight": 24.0},
-                    {"step": 400 * 24, "weight": 12.0},
-                    {"step": 800 * 24, "weight": 4.0},
+                    {"step": 0, "weight": 12.0},
+                    {"step": 400 * 24, "weight": 8.0},
+                    {"step": 800 * 24, "weight": 3.0},
                     {"step": 1200 * 24, "weight": 0.0},
                 ],
             },
