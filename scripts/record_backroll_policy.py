@@ -134,7 +134,12 @@ def main() -> int:
     env_cfg.episode_length_s = args.duration
     if args.allow_incomplete_diagnostic:
         env_cfg.terminations.clear()
-    env_cfg.viewer.origin_type = type(env_cfg.viewer).OriginType.WORLD
+    # Follow the trunk so a policy that translates during an incomplete attempt
+    # cannot walk into the camera or leave the frame.  The camera remains a
+    # stable three-quarter view; only its target follows the robot.
+    env_cfg.viewer.origin_type = type(env_cfg.viewer).OriginType.ASSET_BODY
+    env_cfg.viewer.entity_name = "robot"
+    env_cfg.viewer.body_name = "trunk_base"
     env_cfg.viewer.lookat = (0.0, 0.0, 0.10)
     env_cfg.viewer.distance = 0.80
     env_cfg.viewer.fovy = 35.0
