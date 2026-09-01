@@ -543,6 +543,36 @@ def test_backroll_midroll_bootstrap_gets_dense_progress_but_no_cycle_credit(
     assert env._roll_sprint_completed[0] == 0.0
 
 
+def test_backroll_midroll_reset_uses_positive_phase_magnitude(monkeypatch):
+    env, _asset = _fake_env(1)
+    env._roulade_accum = torch.zeros(1)
+
+    def fake_reset_roulade_state(reset_env, env_ids, **_kwargs):
+        # The reverse physical pose is signed, but the roll-sprint phase
+        # budget is a positive magnitude so completion still means one turn.
+        reset_env._roulade_accum[env_ids] = -4.0
+
+    monkeypatch.setattr(mdp, "reset_roulade_state", fake_reset_roulade_state)
+    mdp.reset_roll_sprint_state(
+        env,
+        torch.tensor([0]),
+        standing_prob=0.0,
+        midroll_prob=1.0,
+        postroll_prob=0.0,
+        crouch_prob=0.0,
+        ground_recovery_prob=0.0,
+        yaw_range=(0.0, 0.0),
+        road_interior_prob=1.0,
+        road_edge_prob=0.0,
+        road_return_prob=0.0,
+        roll_direction=-1.0,
+    )
+
+    assert env._roll_sprint_accum[0] == pytest.approx(4.0)
+    assert env._roll_sprint_phase_frontier[0] == pytest.approx(4.0)
+    assert not env._roll_sprint_cycle_eligible[0]
+
+
 def test_backroll_directional_bootstrap_pays_only_new_phase_linked_goal_advance(
     monkeypatch,
 ):

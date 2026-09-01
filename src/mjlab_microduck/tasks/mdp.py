@@ -12719,7 +12719,13 @@ def reset_roll_sprint_state(
     )
 
     spawn_accum = torch.zeros(len(env_ids), device=env.device)
-    spawn_accum[is_midroll] = env._roulade_accum[env_ids[is_midroll]]
+    # The physical reverse pose and angular velocity remain signed through
+    # ``roll_direction``. Phase progress is a magnitude, however: a reverse
+    # mid-roll must start at its already-covered positive angle rather than
+    # spending the first half-cycle climbing from a negative accumulator.
+    # Keeping this buffer non-negative lets the shared completion gate require
+    # the same full 2*pi turn for forward and reverse policies.
+    spawn_accum[is_midroll] = env._roulade_accum[env_ids[is_midroll]].abs()
     spawn_cycle_eligible = is_standing.clone()
     spawn_self_righting = is_postroll | is_crouch | is_ground
     spawn_kind = torch.zeros(len(env_ids), dtype=torch.long, device=env.device)
