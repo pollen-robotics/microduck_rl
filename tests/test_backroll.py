@@ -446,6 +446,41 @@ def test_repeated_progress_bridges_contact_windows_then_requires_latches(monkeyp
     assert mdp.grounded_backroll_speed_progress(env).item() > 0.0
 
 
+def test_repeated_positive_rewards_stop_after_cumulative_offaxis_escape(monkeypatch):
+    env, asset = _fake_env()
+    env._backroll_repeat_mode[:] = True
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+    asset.data.root_link_ang_vel_b[:, 1] = -6.0
+    env._roulade_accum[:] = math.radians(200.0)
+    env._roulade_max[:] = math.radians(200.0)
+    env._roulade_paid[:] = math.radians(195.0)
+    env._backroll_previous_frontier[:] = math.radians(195.0)
+    env._backroll_trunk_latch[:] = True
+    env._backroll_head_latch[:] = True
+    env._backroll_cycle_offaxis_rotation[:] = (
+        mdp._BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION + math.radians(1.0)
+    )
+
+    assert mdp.grounded_backroll_progress(env).item() == 0.0
+    assert mdp.grounded_backroll_speed_progress(env).item() == 0.0
+
+    env._backroll_completion_paid[:] = math.radians(195.0)
+    assert mdp.grounded_backroll_completion_progress(env).item() == 0.0
+
+    env.scene.sensors["trunk_ground_contact"].data.found[:] = 1.0
+    env._backroll_trunk_latch[:] = False
+    env._backroll_head_latch[:] = False
+    env._roulade_accum[:] = math.radians(40.0)
+    env._roulade_max[:] = math.radians(40.0)
+    env.common_step_counter += 1
+    assert mdp.grounded_backroll_contact_sequence(env).item() == 0.0
+
+
 def test_ordered_contact_rewards_are_one_shot_latches(monkeypatch):
     env, _asset = _fake_env()
     monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))

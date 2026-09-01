@@ -11585,6 +11585,24 @@ def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
     env._backroll_window_bad_states = torch.zeros((), dtype=torch.long, device=env.device)
 
 
+def _grounded_backroll_cycle_is_sagittal(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Whether the whole current cycle has remained inside the sagittal gate."""
+    return (
+        (env._backroll_cycle_max_lateral_axis_z
+         <= _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX)
+        & (env._backroll_cycle_offaxis_rotation
+           <= _BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION)
+    )
+
+
+def _grounded_backroll_positive_reward_valid(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Reject every positive repeated-skill reward after an off-axis escape."""
+    return (
+        ~env._backroll_repeat_mode
+        | (_grounded_backroll_cycle_is_sagittal(env) & ~env._backroll_invalid)
+    )
+
+
 def _update_grounded_backroll_state(
     env: ManagerBasedRlEnv,
     asset: Entity,
@@ -11673,12 +11691,7 @@ def _update_grounded_backroll_state(
         env._backroll_episode_max_offaxis_rotation,
         env._backroll_cycle_offaxis_rotation,
     )
-    repeated_sagittal = (
-        (env._backroll_cycle_max_lateral_axis_z
-         <= _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX)
-        & (env._backroll_cycle_offaxis_rotation
-           <= _BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION)
-    )
+    repeated_sagittal = _grounded_backroll_cycle_is_sagittal(env)
     sagittal_landing = ~env._backroll_repeat_mode | repeated_sagittal
     landing_ang_vel_ok = torch.where(
         env._backroll_repeat_mode,
@@ -12021,7 +12034,10 @@ def grounded_backroll_progress(
         ((frontier <= _BACKROLL_TRUNK_LATCH_HI) | env._backroll_trunk_latch)
         & ((frontier <= _BACKROLL_HEAD_LATCH_HI) | env._backroll_head_latch)
     )
-    valid = ~env._backroll_repeat_mode | ordered_contacts
+    valid = (
+        ~env._backroll_repeat_mode
+        | (ordered_contacts & _grounded_backroll_positive_reward_valid(env))
+    )
     return torch.where(valid, delta / (env.step_dt * target_angle), 0.0)
 
 
@@ -12050,6 +12066,7 @@ def grounded_backroll_head_pivot(
         * phase.float()
         * _head_top_down(env, asset).float()
         * rate
+        * _grounded_backroll_positive_reward_valid(env).float()
     )
 
 
@@ -12062,10 +12079,15 @@ def grounded_backroll_contact_sequence(
     """Bounded one-shot credit for the ordered trunk then flat-head contacts."""
     asset: Entity = env.scene[asset_cfg.name]
     _update_grounded_backroll_state(env, asset)
-    return (
+    pulse = (
         trunk_value * env._backroll_trunk_latch_now.float()
         + head_value * env._backroll_head_latch_now.float()
-    ) / env.step_dt
+    )
+    return (
+        pulse
+        * _grounded_backroll_positive_reward_valid(env).float()
+        / env.step_dt
+    )
 
 
 def grounded_backroll_completion_progress(
@@ -12094,7 +12116,7 @@ def grounded_backroll_completion_progress(
     delta = torch.clamp(delta, max=max_paid_rate * env.step_dt)
     valid = (
         env._backroll_head_latch
-        & ~env._backroll_invalid
+        & _grounded_backroll_positive_reward_valid(env)
         & (env._backroll_max_air_steps * env.step_dt <= _BACKROLL_MAX_AIR_SECONDS)
     )
     env._backroll_completion_paid = torch.maximum(paid, frontier)
@@ -12108,7 +12130,11 @@ def grounded_backroll_upright_progress(
 ) -> torch.Tensor:
     asset: Entity = env.scene[asset_cfg.name]
     _update_grounded_backroll_state(env, asset)
-    return env._backroll_upright_delta / env.step_dt
+    return (
+        env._backroll_upright_delta
+        * _grounded_backroll_positive_reward_valid(env).float()
+        / env.step_dt
+    )
 
 
 def grounded_backroll_height_progress(
@@ -12117,7 +12143,11 @@ def grounded_backroll_height_progress(
 ) -> torch.Tensor:
     asset: Entity = env.scene[asset_cfg.name]
     _update_grounded_backroll_state(env, asset)
-    return env._backroll_height_delta / env.step_dt
+    return (
+        env._backroll_height_delta
+        * _grounded_backroll_positive_reward_valid(env).float()
+        / env.step_dt
+    )
 
 
 def grounded_backroll_rise_velocity(
@@ -12143,7 +12173,7 @@ def grounded_backroll_rise_velocity(
         torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0),
         min=0.0,
     )
-    valid = env._backroll_head_latch & ~env._backroll_invalid
+    valid = env._backroll_head_latch & _grounded_backroll_positive_reward_valid(env)
     return upward * phase * (height < max_height).float() * valid.float()
 
 
@@ -12170,10 +12200,7 @@ def grounded_backroll_speed_progress(
         min=0.0,
         max=1.0,
     )
-    strict_sagittal = (
-        env._backroll_cycle_max_lateral_axis_z
-        <= _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX
-    )
+    strict_sagittal = _grounded_backroll_cycle_is_sagittal(env)
     ordered_contacts = (
         ((env._roulade_max <= _BACKROLL_TRUNK_LATCH_HI) | env._backroll_trunk_latch)
         & ((env._roulade_max <= _BACKROLL_HEAD_LATCH_HI) | env._backroll_head_latch)
@@ -12183,6 +12210,7 @@ def grounded_backroll_speed_progress(
         * speed
         * strict_sagittal.float()
         * ordered_contacts.float()
+        * (~env._backroll_invalid).float()
         / (env.step_dt * target_angle)
     )
 
