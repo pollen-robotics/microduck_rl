@@ -13381,6 +13381,30 @@ def roll_sprint_reposition_command(
     return command
 
 
+def roll_sprint_backroll_direction_flag(
+    env: ManagerBasedRlEnv,
+    dim: int = 6,
+) -> torch.Tensor:
+    """Expose the dedicated reverse-roll mode in existing body padding.
+
+    A standing forward start and a standing backroll start have identical
+    proprioception.  One binary flag in the pre-existing six-dimensional
+    body-command padding gives the separately trained backroll policy an
+    unambiguous task cue without changing the 61D actor contract or any of
+    the three twist-slot semantics.
+    """
+    if dim < 1:
+        raise ValueError("backroll direction flag needs at least one slot")
+    _roll_sprint_state(env)
+    command = torch.zeros(
+        (env.num_envs, dim),
+        dtype=torch.float32,
+        device=env.device,
+    )
+    command[:, 0] = (env._roll_sprint_roll_direction < 0.0).to(command.dtype)
+    return command
+
+
 def roll_sprint_lane_half_width_curriculum(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,

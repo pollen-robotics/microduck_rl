@@ -410,6 +410,14 @@ def test_backroll_sprint_is_separate_directional_61d_policy():
         MicroduckRollSprintRlCfg.algorithm
     )
     assert reverse.rewards["roll_sprint_progress"].weight == 12.0
+    assert (
+        reverse.observations["actor"].terms["body_command"].func
+        is mdp.roll_sprint_backroll_direction_flag
+    )
+    assert (
+        forward.observations["actor"].terms["body_command"].func
+        is mdp.zero_command_padding
+    )
     assert reverse.rewards["roll_sprint_head_pivot"].weight == 0.5
     assert forward.rewards["roll_sprint_directional_bootstrap"].weight == 0.0
     assert reverse.rewards["roll_sprint_directional_bootstrap"].weight == 12.0
@@ -452,6 +460,18 @@ def test_backroll_sprint_is_separate_directional_61d_policy():
         (0.5, 3.0),
         (0.0, 3.0),
     ]
+
+
+def test_backroll_direction_flag_uses_existing_body_padding_without_twist_change():
+    env, _asset = _fake_env(2)
+    mdp._roll_sprint_state(env)
+    env._roll_sprint_roll_direction[:] = torch.tensor([-1.0, 1.0])
+
+    flag = mdp.roll_sprint_backroll_direction_flag(env)
+
+    assert flag.shape == (2, 6)
+    assert torch.equal(flag[:, 0], torch.tensor([1.0, 0.0]))
+    assert torch.count_nonzero(flag[:, 1:]) == 0
 
 
 def test_backroll_requires_reverse_rotation_and_reverse_translation(monkeypatch):

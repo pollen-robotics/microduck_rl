@@ -540,6 +540,15 @@ def make_microduck_backroll_sprint_env_cfg(
     cfg = make_microduck_roll_sprint_env_cfg(play=play)
     reset_params = cfg.events["set_roll_sprint_state"].params
     reset_params["roll_direction"] = -1.0
+    # Standing forward and standing backroll starts share the same
+    # proprioception. Expose the dedicated reverse mode in the existing
+    # six-dimensional body-command padding without changing the 61D actor
+    # contract or the twist-slot semantics.
+    for group in ("actor", "critic"):
+        cfg.observations[group].terms["body_command"].func = (
+            microduck_mdp.roll_sprint_backroll_direction_flag
+        )
+        cfg.observations[group].terms["body_command"].params = {"dim": 6}
     # Reverse discovery needs many direction-matched mid-roll examples.  Keep
     # a small standing bucket for launch learning, but avoid letting the
     # easier self-right-only basin dominate the first policy updates.
