@@ -40,6 +40,7 @@ def _fake_env():
             root_link_lin_vel_w=torch.zeros(1, 3),
             root_link_pos_w=torch.tensor([[0.0, 0.0, 0.115]]),
             root_link_quat_w=quat,
+            default_joint_pos=torch.zeros(1, 14),
         )
     )
     sensors = {
@@ -156,7 +157,24 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert cfg.rewards["backroll_non_top_head_dwell"].params == {"grace_steps": 9}
     assert cfg.rewards["backroll_success"].func is mdp.grounded_backroll_repeat_success_rate
     assert cfg.metrics["backroll_cycle_count"].func is mdp.grounded_backroll_cycle_count
-    forbidden = ("sprint", "distance", "lane", "road", "recovery", "reposition")
+    assert cfg.events["set_grounded_backroll_state"].params[
+        "ground_recovery_prob"
+    ] == pytest.approx(0.25)
+    assert cfg.events["set_grounded_backroll_state"].params[
+        "ground_z_range"
+    ] == (0.04, 0.05)
+    for group in ("actor", "critic"):
+        assert (
+            cfg.observations[group].terms["command"].func
+            is mdp.grounded_backroll_recovery_command
+        )
+    assert cfg.rewards["backroll_recovery_progress"].weight == pytest.approx(0.25)
+    assert cfg.rewards["backroll_recovery_success"].weight == pytest.approx(5.0)
+    assert (
+        cfg.metrics["backroll_recovery_success_rate"].func
+        is mdp.grounded_backroll_recovery_success_fraction
+    )
+    forbidden = ("sprint", "distance", "lane", "road", "reposition")
     assert not any(token in name for name in cfg.rewards for token in forbidden)
     assert MicroduckRepeatedBackrollRlCfg.experiment_name == "microduck_repeated_backroll"
     assert MicroduckRepeatedBackrollRlCfg.algorithm.learning_rate == pytest.approx(2.5e-5)
@@ -321,6 +339,48 @@ def test_repeated_phase_reset_can_require_physical_contact_latches(monkeypatch):
     assert not env._backroll_trunk_latch.item()
     assert not env._backroll_head_latch.item()
     assert not env._roulade_head_latch.item()
+
+
+def test_repeated_ground_reset_starts_grounded_at_home_in_blocked_recovery(
+    monkeypatch,
+):
+    env, asset = _fake_env()
+    env.sim = SimpleNamespace(
+        data=SimpleNamespace(qpos=torch.zeros(1, 21), qvel=torch.zeros(1, 20))
+    )
+    env.sim.data.qpos[:, 3] = 1.0
+    env.sim.data.qpos[:, 7:] = 9.0
+    env.sim.data.qvel[:, 6:] = 7.0
+    asset.data.default_joint_pos[:] = torch.linspace(-0.3, 0.3, 14)
+    monkeypatch.setattr(mdp, "_servo_joint_ids", lambda _env, _asset: list(range(14)))
+
+    mdp.reset_grounded_backroll_state(
+        env,
+        torch.tensor([0]),
+        standing_prob=1.0,
+        midroll_prob=0.0,
+        repeat_mode=True,
+        ground_recovery_prob=1.0,
+        ground_face_down_prob=1.0,
+        ground_face_up_prob=0.0,
+        ground_left_prob=0.0,
+        ground_right_prob=0.0,
+        ground_z_range=(0.045, 0.045),
+        yaw_range=(0.0, 0.0),
+        joint_noise_std=0.0,
+    )
+
+    assert env._backroll_recovery_active.item()
+    assert env._backroll_recovery_used.item()
+    assert env._backroll_invalid.item()
+    assert env._backroll_recovery_attempt_count.item() == pytest.approx(1.0)
+    assert env._roulade_max.item() == 0.0
+    assert not env._backroll_trunk_latch.item()
+    assert not env._backroll_head_latch.item()
+    assert env.sim.data.qpos[0, 2].item() == pytest.approx(0.045)
+    assert env.sim.data.qpos[0, 5].abs().item() > 0.5
+    assert torch.allclose(env.sim.data.qpos[0, 7:], asset.data.default_joint_pos[0])
+    assert torch.all(env.sim.data.qvel[0, 6:] == 0.0)
 
 
 def test_repeated_curriculum_counts_the_stage_mastery_cycle_target(monkeypatch):
@@ -579,7 +639,9 @@ def test_repeated_positive_rewards_stop_after_cumulative_offaxis_escape(monkeypa
     )
 
     assert mdp.grounded_backroll_progress(env).item() == 0.0
-    assert mdp.grounded_backroll_invalid_termination(env).item()
+    assert env._backroll_recovery_active.item()
+    assert env._backroll_invalid.item()
+    assert not mdp.grounded_backroll_invalid_termination(env).item()
     assert mdp.grounded_backroll_speed_progress(env).item() == 0.0
 
     env._backroll_completion_paid[:] = math.radians(195.0)
@@ -854,7 +916,9 @@ def test_repeated_backroll_cannot_park_on_trunk_mid_cycle(monkeypatch):
         mdp.grounded_backroll_progress(env)
         env.common_step_counter += 1
 
-    assert mdp.grounded_backroll_invalid_termination(env).item()
+    assert env._backroll_recovery_active.item()
+    assert env._backroll_invalid.item()
+    assert not mdp.grounded_backroll_invalid_termination(env).item()
 
 
 def test_repeated_backroll_gets_a_bounded_post_350_landing_budget(monkeypatch):
@@ -885,7 +949,207 @@ def test_repeated_backroll_gets_a_bounded_post_350_landing_budget(monkeypatch):
 
     env.common_step_counter += 1
     mdp.grounded_backroll_progress(env)
+    assert env._backroll_recovery_active.item()
+    assert env._backroll_invalid.item()
+    assert not mdp.grounded_backroll_invalid_termination(env).item()
+
+
+def test_repeated_recovery_rearms_once_then_credits_the_retry(monkeypatch):
+    env, asset = _fake_env()
+    env._backroll_repeat_mode[:] = True
+    env._backroll_invalid[:] = True
+    env._backroll_recovery_active[:] = True
+    env._backroll_recovery_used[:] = True
+    env._backroll_recovery_attempt_count[:] = 1.0
+    env._roulade_accum[:] = math.radians(220.0)
+    env._roulade_max[:] = math.radians(220.0)
+    env._backroll_trunk_latch[:] = True
+    env._backroll_head_latch[:] = True
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+
+    recovery_hold_steps = math.ceil(
+        mdp._BACKROLL_RECOVERY_HOLD_SECONDS / env.step_dt
+    )
+    recovery_pulses = []
+    env.scene.sensors["left_foot_ground_contact"].data.found[:] = 0.0
+    for _ in range(2):
+        recovery_pulses.append(mdp.grounded_backroll_recovery_success(env).item())
+        env.common_step_counter += 1
+    assert env._backroll_recovery_hold_steps.item() == 0
+    env.scene.sensors["left_foot_ground_contact"].data.found[:] = 1.0
+    asset.data.root_link_lin_vel_w[:, 0] = (
+        mdp._BACKROLL_RECOVERY_MAX_LIN_SPEED + 0.01
+    )
+    for _ in range(recovery_hold_steps + 1):
+        recovery_pulses.append(mdp.grounded_backroll_recovery_success(env).item())
+        env.common_step_counter += 1
+    assert env._backroll_recovery_active.item()
+    assert env._backroll_recovery_hold_steps.item() == 0
+    asset.data.root_link_lin_vel_w.zero_()
+    for _ in range(recovery_hold_steps + 1):
+        recovery_pulses.append(mdp.grounded_backroll_recovery_success(env).item())
+        env.common_step_counter += 1
+
+    assert sum(value > 0.0 for value in recovery_pulses) == 1
+    assert not env._backroll_recovery_active.item()
+    assert not env._backroll_invalid.item()
+    assert env._backroll_recovery_rearm_count.item() == 1
+    assert env._backroll_cycle_count.item() == 0
+    assert env._roulade_max.item() == 0.0
+    assert not env._backroll_trunk_latch.item()
+    assert not env._backroll_head_latch.item()
+    assert env._backroll_recovered_cycle_armed.item()
+
+    env._roulade_accum[:] = math.radians(355.0)
+    env._roulade_max[:] = math.radians(355.0)
+    env._roulade_paid[:] = math.radians(355.0)
+    env._backroll_previous_frontier[:] = math.radians(355.0)
+    env._backroll_trunk_latch[:] = True
+    env._backroll_head_latch[:] = True
+    cycle_hold_steps = math.ceil(
+        mdp._BACKROLL_REPEAT_LANDING_HOLD_SECONDS / env.step_dt
+    )
+    for _ in range(cycle_hold_steps + 1):
+        mdp.grounded_backroll_repeat_success_rate(env)
+        env.common_step_counter += 1
+
+    assert env._backroll_cycle_count.item() == 1
+    assert env._backroll_recovered_and_rerolled.item() == pytest.approx(1.0)
+    assert not env._backroll_recovered_cycle_armed.item()
+    assert env._backroll_recovery_rearm_count.item() == 1
+
+
+def test_repeated_recovery_timeout_terminates_and_cannot_open_twice(monkeypatch):
+    env, asset = _fake_env()
+    env._backroll_repeat_mode[:] = True
+    env._backroll_invalid[:] = True
+    env._backroll_recovery_active[:] = True
+    env._backroll_recovery_used[:] = True
+    env._backroll_recovery_attempt_count[:] = 1.0
+    env.scene.sensors["left_foot_ground_contact"].data.found[:] = 0.0
+    env.scene.sensors["right_foot_ground_contact"].data.found[:] = 0.0
+    env.scene.sensors["head_ground_contact"].data.found[:] = 1.0
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.zeros(1, dtype=torch.bool),
+    )
+
+    timeout_steps = math.ceil(
+        mdp._BACKROLL_RECOVERY_TIMEOUT_SECONDS / env.step_dt
+    )
+    for _ in range(timeout_steps):
+        mdp.grounded_backroll_recovery_progress(env)
+        env.common_step_counter += 1
+
+    assert not env._backroll_recovery_active.item()
+    assert env._backroll_recovery_failed.item()
     assert mdp.grounded_backroll_invalid_termination(env).item()
+
+    env._backroll_invalid[:] = False
+    env._backroll_recovery_failed[:] = False
+    env._roulade_accum[:] = math.radians(200.0)
+    env._roulade_max[:] = math.radians(200.0)
+    env._backroll_previous_frontier[:] = math.radians(200.0)
+    env._backroll_cycle_offaxis_rotation[:] = (
+        mdp._BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION + math.radians(1.0)
+    )
+    asset.data.root_link_ang_vel_b.zero_()
+    env.common_step_counter += 1
+    mdp.grounded_backroll_progress(env)
+    assert not env._backroll_recovery_active.item()
+    assert env._backroll_recovery_attempt_count.item() == pytest.approx(1.0)
+    assert mdp.grounded_backroll_invalid_termination(env).item()
+
+
+def test_repeated_recovery_potential_is_delta_only(monkeypatch):
+    env, asset = _fake_env()
+    env._backroll_repeat_mode[:] = True
+    env._backroll_invalid[:] = True
+    env._backroll_recovery_active[:] = True
+    env._backroll_recovery_used[:] = True
+    env.scene.sensors["left_foot_ground_contact"].data.found[:] = 0.0
+    env.scene.sensors["right_foot_ground_contact"].data.found[:] = 0.0
+    env.scene.sensors["head_ground_contact"].data.found[:] = 1.0
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    s = 2.0**-0.5
+    asset.data.root_link_quat_w[:] = torch.tensor([[s, 0.0, s, 0.0]])
+    asset.data.root_link_pos_w[:, 2] = 0.06
+
+    assert mdp.grounded_backroll_recovery_progress(env).item() == 0.0
+    env.common_step_counter += 1
+    asset.data.root_link_quat_w[:] = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    asset.data.root_link_pos_w[:, 2] = 0.10
+    positive = mdp.grounded_backroll_recovery_progress(env).item()
+    assert positive > 0.0
+    env.common_step_counter += 1
+    assert mdp.grounded_backroll_recovery_progress(env).item() == 0.0
+    env.common_step_counter += 1
+    asset.data.root_link_quat_w[:] = torch.tensor([[s, 0.0, s, 0.0]])
+    asset.data.root_link_pos_w[:, 2] = 0.06
+    negative = mdp.grounded_backroll_recovery_progress(env).item()
+    assert negative < 0.0
+    assert (positive + negative) * env.step_dt == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_repeated_recovery_command_preserves_contract_and_flags_mode(monkeypatch):
+    env, _asset = _fake_env()
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+    base_command = torch.tensor([[0.2, -0.1, 0.05]])
+    env.command_manager = SimpleNamespace(
+        get_command=lambda name: base_command if name == "twist" else None
+    )
+
+    normal = mdp.grounded_backroll_recovery_command(env)
+    assert normal.shape == (1, 3)
+    assert torch.equal(normal, base_command)
+
+    env.common_step_counter += 1
+    env._backroll_repeat_mode[:] = True
+    env._backroll_invalid[:] = True
+    env._backroll_recovery_active[:] = True
+    recovery = mdp.grounded_backroll_recovery_command(env)
+    assert recovery[0, 0].item() == pytest.approx(1.0)
+    assert recovery[0, 1:].tolist() == pytest.approx(base_command[0, 1:].tolist())
+
+
+def test_repeated_recovery_blocks_all_roll_credit(monkeypatch):
+    env, asset = _fake_env()
+    env._backroll_repeat_mode[:] = True
+    env._backroll_invalid[:] = True
+    env._backroll_recovery_active[:] = True
+    env._backroll_recovery_used[:] = True
+    env._roulade_accum[:] = math.radians(355.0)
+    env._roulade_max[:] = math.radians(355.0)
+    env._roulade_paid[:] = math.radians(340.0)
+    env._backroll_previous_frontier[:] = math.radians(340.0)
+    env._backroll_completion_paid[:] = math.radians(300.0)
+    env._backroll_trunk_latch[:] = True
+    env._backroll_head_latch[:] = True
+    asset.data.root_link_ang_vel_b[:, 1] = -6.0
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+
+    assert mdp.grounded_backroll_progress(env).item() == 0.0
+    assert mdp.grounded_backroll_speed_progress(env).item() == 0.0
+    assert mdp.grounded_backroll_completion_progress(env).item() == 0.0
+    assert mdp.grounded_backroll_contact_sequence(env).item() == 0.0
+    assert mdp.grounded_backroll_repeat_success_rate(env).item() == 0.0
+    assert env._backroll_cycle_count.item() == 0
 
 
 def test_standing_cannot_farm_backroll_success(monkeypatch):

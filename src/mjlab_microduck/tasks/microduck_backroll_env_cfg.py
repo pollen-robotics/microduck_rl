@@ -4,9 +4,9 @@ The policy starts from standing, tucks, rolls backward over the trunk and flat
 head top, and lands on both feet. It deliberately has no course, distance,
 lane, recovery, or repeated-cycle objective.
 
-The repeated variant preserves the same 61D/14D policy contract, but rearms
-after every valid feet landing and rewards only new, fast, sagittal progress
-toward the next complete head-over cycle.
+The repeated variant preserves the same 61D/14D policy contract, rearms after
+every valid feet landing, and spends one bounded self-right/retry opportunity
+instead of ending immediately after the first recoverable failed attempt.
 """
 
 import math
@@ -338,6 +338,8 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
         repeat_mode=True,
         yaw_range=(0.0, 0.0) if play else (-math.pi, math.pi),
         joint_noise_std=0.0 if play else 0.03,
+        ground_recovery_prob=0.0 if play else 0.25,
+        ground_z_range=(0.04, 0.05),
     )
     reset_cfg.params.update(**first_stage)
     if play:
@@ -355,9 +357,14 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
             invalid_reward_weights=[-2.0, -3.0, -4.0, -6.0, -8.0, -10.0],
         )
 
+    for group in ("actor", "critic"):
+        command_obs = cfg.observations[group].terms["command"]
+        command_obs.func = microduck_mdp.grounded_backroll_recovery_command
+        command_obs.params = {"command_name": "twist"}
+
     # A valid landing rearms the next cycle, so it is a reward pulse rather
-    # than a termination. Invalid side/airborne/wrong-way solutions still end
-    # the episode early to keep the replay buffer physically honest.
+    # than a termination. The first invalid attempt spends one self-right and
+    # retry budget; a second invalid attempt or recovery timeout terminates.
     cfg.terminations.pop("backroll_success", None)
     # A120 reached the first inverted support quickly and then parked.  Make
     # extension through the already-latched 180--350 degree arc materially
@@ -391,6 +398,14 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
         weight=1.0,
         params={"minimum_rate": 2.0, "target_rate": 6.0},
     )
+    cfg.rewards["backroll_recovery_progress"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_recovery_progress,
+        weight=0.25,
+    )
+    cfg.rewards["backroll_recovery_success"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_recovery_success,
+        weight=5.0,
+    )
     cfg.rewards["backroll_invalid"].weight = -2.0
     cfg.rewards["backroll_overspeed"].weight = -0.02
     cfg.rewards["backroll_overspeed"].params = {"omega_max": 7.5}
@@ -410,6 +425,21 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
     )
     cfg.metrics["backroll_max_non_top_head_dwell_s"] = MetricsTermCfg(
         func=microduck_mdp.grounded_backroll_max_non_top_head_dwell_s,
+    )
+    cfg.metrics["backroll_recovery_attempt_count"] = MetricsTermCfg(
+        func=microduck_mdp.grounded_backroll_recovery_attempt_count,
+    )
+    cfg.metrics["backroll_recovery_success_count"] = MetricsTermCfg(
+        func=microduck_mdp.grounded_backroll_recovery_success_count,
+    )
+    cfg.metrics["backroll_recovery_success_rate"] = MetricsTermCfg(
+        func=microduck_mdp.grounded_backroll_recovery_success_fraction,
+    )
+    cfg.metrics["backroll_mean_recovery_latency_s"] = MetricsTermCfg(
+        func=microduck_mdp.grounded_backroll_mean_recovery_latency_s,
+    )
+    cfg.metrics["backroll_recovered_reroll_count"] = MetricsTermCfg(
+        func=microduck_mdp.grounded_backroll_recovered_reroll_count,
     )
     return cfg
 

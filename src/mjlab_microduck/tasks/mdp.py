@@ -11535,12 +11535,18 @@ _BACKROLL_MAX_AIR_SECONDS = 0.08
 _BACKROLL_LANDING_HOLD_SECONDS = 0.25
 _BACKROLL_INVALID_STALL_SECONDS = 0.50
 _BACKROLL_REPEAT_LANDING_HOLD_SECONDS = 0.10
-_BACKROLL_REPEAT_PRE_EXIT_STALL_SECONDS = 1.00
+_BACKROLL_REPEAT_PRE_EXIT_STALL_SECONDS = 0.50
 _BACKROLL_REPEAT_LANDING_TIMEOUT_SECONDS = 2.00
 _BACKROLL_REPEAT_MAX_LANDING_ANG_VEL = 4.5
 _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX = math.sin(math.radians(35.0))
 _BACKROLL_REPEAT_SIDE_INVALID_Z = math.sin(math.radians(55.0))
 _BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION = math.radians(45.0)
+_BACKROLL_RECOVERY_UPRIGHT_COS = math.cos(math.radians(35.0))
+_BACKROLL_RECOVERY_MIN_HEIGHT = 0.10
+_BACKROLL_RECOVERY_MAX_LIN_SPEED = 0.15
+_BACKROLL_RECOVERY_MAX_ANG_SPEED = 2.0
+_BACKROLL_RECOVERY_HOLD_SECONDS = 0.10
+_BACKROLL_RECOVERY_TIMEOUT_SECONDS = 3.0
 
 
 def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
@@ -11582,6 +11588,22 @@ def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
     env._backroll_cycle_offaxis_rotation = z.clone()
     env._backroll_episode_max_lateral_axis_z = z.clone()
     env._backroll_episode_max_offaxis_rotation = z.clone()
+    env._backroll_recovery_active = b.clone()
+    env._backroll_recovery_used = b.clone()
+    env._backroll_recovery_success_now = b.clone()
+    env._backroll_recovery_failed = b.clone()
+    env._backroll_recovery_steps = i.clone()
+    env._backroll_recovery_hold_steps = i.clone()
+    env._backroll_recovery_potential_previous = z.clone()
+    env._backroll_recovery_potential_ready = b.clone()
+    env._backroll_recovery_progress_delta = z.clone()
+    env._backroll_recovery_attempt_count = z.clone()
+    env._backroll_recovery_success_count = z.clone()
+    env._backroll_recovery_latency_total_steps = z.clone()
+    env._backroll_recovery_rearm_count = i.clone()
+    env._backroll_recovered_cycle_armed = b.clone()
+    env._backroll_recovered_and_rerolled = z.clone()
+    env._backroll_recovered_rerolled_now = b.clone()
     env._backroll_last_update_step = -1
     env._backroll_curriculum_stage = 0
     env._backroll_window_episodes = torch.zeros((), dtype=torch.long, device=env.device)
@@ -11603,8 +11625,46 @@ def _grounded_backroll_positive_reward_valid(env: ManagerBasedRlEnv) -> torch.Te
     """Reject every positive repeated-skill reward after an off-axis escape."""
     return (
         ~env._backroll_repeat_mode
-        | (_grounded_backroll_cycle_is_sagittal(env) & ~env._backroll_invalid)
+        | (
+            _grounded_backroll_cycle_is_sagittal(env)
+            & ~env._backroll_invalid
+            & ~env._backroll_recovery_active
+        )
     )
+
+
+def _reset_grounded_backroll_cycle_buffers(
+    env: ManagerBasedRlEnv,
+    reset: torch.Tensor,
+) -> None:
+    """Clear interrupted/completed cycle state without touching episode totals."""
+    if not reset.any():
+        return
+    env._roulade_accum[reset] = 0.0
+    env._roulade_max[reset] = 0.0
+    env._roulade_paid[reset] = 0.0
+    env._roulade_head_latch[reset] = False
+    env._backroll_trunk_latch[reset] = False
+    env._backroll_head_latch[reset] = False
+    env._backroll_trunk_latch_now[reset] = False
+    env._backroll_head_latch_now[reset] = False
+    env._backroll_success[reset] = False
+    env._backroll_air_steps[reset] = 0
+    env._backroll_max_air_steps[reset] = 0
+    env._backroll_landing_hold_steps[reset] = 0
+    env._backroll_invalid_stall_steps[reset] = 0
+    env._backroll_landing_timeout_steps[reset] = 0
+    env._backroll_non_top_head_steps[reset] = 0
+    env._backroll_previous_frontier[reset] = 0.0
+    env._backroll_completion_paid[reset] = 0.0
+    env._backroll_upright_previous[reset] = 0.0
+    env._backroll_height_previous[reset] = 0.0
+    env._backroll_upright_delta[reset] = 0.0
+    env._backroll_height_delta[reset] = 0.0
+    env._backroll_potential_ready[reset] = False
+    env._backroll_frontier_delta[reset] = 0.0
+    env._backroll_cycle_max_lateral_axis_z[reset] = 0.0
+    env._backroll_cycle_offaxis_rotation[reset] = 0.0
 
 
 def _grounded_backroll_sagittal_purity(asset: Entity) -> torch.Tensor:
@@ -11637,10 +11697,18 @@ def _update_grounded_backroll_state(
 ) -> None:
     """Update ordered contacts, grounding, landing hold, and invalid state."""
     _grounded_backroll_state(env)
-    _update_roulade_accum(env, asset)
     step = int(env.common_step_counter)
     if step == env._backroll_last_update_step:
         return
+    recovery_before = env._backroll_recovery_active.clone()
+    if not recovery_before.all():
+        _update_roulade_accum(env, asset)
+    if recovery_before.any():
+        env._roulade_accum[recovery_before] = 0.0
+        env._roulade_max[recovery_before] = 0.0
+        env._roulade_paid[recovery_before] = 0.0
+    env._backroll_recovery_success_now.zero_()
+    env._backroll_recovered_rerolled_now.zero_()
 
     accum, frontier, _ = _roulade_state(env)
     support = _sensor_any_contact(env, _ROULADE_SUPPORT_SENSOR)
@@ -11665,7 +11733,7 @@ def _update_grounded_backroll_state(
         env._backroll_air_steps,
     )
 
-    trunk_phase = (frontier >= _BACKROLL_TRUNK_LATCH_LO) & (
+    trunk_phase = ~recovery_before & (frontier >= _BACKROLL_TRUNK_LATCH_LO) & (
         frontier <= _BACKROLL_TRUNK_LATCH_HI
     )
     previous_trunk_latch = env._backroll_trunk_latch.clone()
@@ -11673,11 +11741,15 @@ def _update_grounded_backroll_state(
     env._backroll_trunk_latch_now = (
         env._backroll_trunk_latch & ~previous_trunk_latch
     )
-    head_phase = (frontier >= _BACKROLL_HEAD_LATCH_LO) & (
+    head_phase = ~recovery_before & (frontier >= _BACKROLL_HEAD_LATCH_LO) & (
         frontier <= _BACKROLL_HEAD_LATCH_HI
     )
     previous_head_latch = env._backroll_head_latch.clone()
-    head_top_down = _head_top_down(env, asset)
+    head_top_down = (
+        torch.zeros_like(recovery_before)
+        if recovery_before.all()
+        else _head_top_down(env, asset)
+    )
     env._backroll_head_latch |= (
         env._backroll_trunk_latch
         & head
@@ -11691,6 +11763,7 @@ def _update_grounded_backroll_state(
     )
     non_top_head_contact = (
         env._backroll_repeat_mode
+        & ~recovery_before
         & head
         & non_top_head_phase
         & ~head_top_down
@@ -11721,7 +11794,7 @@ def _update_grounded_backroll_state(
         (frontier >= math.radians(10.0))
         | env._backroll_trunk_latch
         | env._backroll_head_latch
-    )
+    ) & ~recovery_before
     env._backroll_cycle_max_lateral_axis_z = torch.where(
         cycle_active,
         torch.maximum(env._backroll_cycle_max_lateral_axis_z, lateral_axis_z),
@@ -11747,7 +11820,8 @@ def _update_grounded_backroll_state(
         ang_speed <= _BACKROLL_MAX_LANDING_ANG_VEL,
     )
     landing_candidate = (
-        (frontier >= _BACKROLL_LANDING_ANGLE)
+        ~recovery_before
+        & (frontier >= _BACKROLL_LANDING_ANGLE)
         & ~env._backroll_invalid
         & env._backroll_trunk_latch
         & env._backroll_head_latch
@@ -11784,6 +11858,15 @@ def _update_grounded_backroll_state(
     env._backroll_cycle_count += (
         env._backroll_success_now & env._backroll_repeat_mode
     ).long()
+    env._backroll_recovered_rerolled_now = (
+        env._backroll_success_now
+        & env._backroll_repeat_mode
+        & env._backroll_recovered_cycle_armed
+    )
+    env._backroll_recovered_and_rerolled += (
+        env._backroll_recovered_rerolled_now.float()
+    )
+    env._backroll_recovered_cycle_armed &= ~env._backroll_success_now
 
     progress = frontier - env._backroll_previous_frontier
     env._backroll_frontier_delta = torch.clamp(progress, min=0.0)
@@ -11850,18 +11933,124 @@ def _update_grounded_backroll_state(
         & (env._backroll_cycle_offaxis_rotation
            > _BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION)
     )
-    invalid_now = (
+    cycle_invalid_now = (
         (env._backroll_max_air_steps > max_air_steps)
         | stalled_too_long
         | landing_timed_out
         | wrong_way
         | repeated_side_flop
         | repeated_offaxis_escape
+    ) & ~recovery_before
+    start_recovery = (
+        env._backroll_repeat_mode
+        & cycle_invalid_now
+        & ~env._backroll_recovery_used
     )
-    env._backroll_invalid_now = invalid_now & ~env._backroll_invalid
-    env._backroll_invalid |= invalid_now
 
-    potential_gate = frontier >= _BACKROLL_POTENTIAL_ANGLE
+    recovery_upright = torch.clamp(
+        (upright - math.cos(math.radians(60.0)))
+        / (1.0 - math.cos(math.radians(60.0))),
+        min=0.0,
+        max=1.0,
+    )
+    recovery_height = torch.clamp(
+        (height - 0.05) / (0.115 - 0.05),
+        min=0.0,
+        max=1.0,
+    )
+    recovery_potential = 0.5 * recovery_upright + 0.5 * recovery_height
+    recovery_progress = (
+        recovery_potential - env._backroll_recovery_potential_previous
+    ) / env.step_dt
+    env._backroll_recovery_progress_delta = torch.where(
+        recovery_before & env._backroll_recovery_potential_ready,
+        recovery_progress,
+        torch.zeros_like(recovery_progress),
+    )
+
+    recovery_candidate = (
+        recovery_before
+        & left_foot
+        & right_foot
+        & ~head
+        & (height >= _BACKROLL_RECOVERY_MIN_HEIGHT)
+        & (upright >= _BACKROLL_RECOVERY_UPRIGHT_COS)
+        & (
+            torch.linalg.vector_norm(asset.data.root_link_lin_vel_w, dim=-1)
+            <= _BACKROLL_RECOVERY_MAX_LIN_SPEED
+        )
+        & (ang_speed <= _BACKROLL_RECOVERY_MAX_ANG_SPEED)
+    )
+    recovery_hold = torch.where(
+        recovery_candidate,
+        env._backroll_recovery_hold_steps + 1,
+        torch.zeros_like(env._backroll_recovery_hold_steps),
+    )
+    recovery_hold_steps = max(
+        1,
+        math.ceil(_BACKROLL_RECOVERY_HOLD_SECONDS / env.step_dt),
+    )
+    recovery_success_now = (
+        recovery_candidate
+        & (env._backroll_recovery_hold_steps < recovery_hold_steps)
+        & (recovery_hold >= recovery_hold_steps)
+    )
+    recovery_steps = torch.where(
+        recovery_before,
+        env._backroll_recovery_steps + 1,
+        env._backroll_recovery_steps,
+    )
+    recovery_timeout_steps = math.ceil(
+        _BACKROLL_RECOVERY_TIMEOUT_SECONDS / env.step_dt
+    )
+    recovery_timed_out = (
+        recovery_before
+        & ~recovery_success_now
+        & (recovery_steps >= recovery_timeout_steps)
+    )
+
+    env._backroll_invalid_now = cycle_invalid_now & ~env._backroll_invalid
+    env._backroll_invalid |= cycle_invalid_now
+    env._backroll_invalid[recovery_success_now] = False
+    env._backroll_recovery_active = (
+        (recovery_before | start_recovery)
+        & ~recovery_success_now
+        & ~recovery_timed_out
+    )
+    env._backroll_recovery_used |= start_recovery
+    env._backroll_recovery_failed |= recovery_timed_out
+    env._backroll_recovery_success_now = recovery_success_now
+    env._backroll_recovery_attempt_count += start_recovery.float()
+    env._backroll_recovery_success_count += recovery_success_now.float()
+    env._backroll_recovery_latency_total_steps += torch.where(
+        recovery_success_now,
+        recovery_steps.float(),
+        torch.zeros_like(env._backroll_recovery_latency_total_steps),
+    )
+    env._backroll_recovery_steps = torch.where(
+        start_recovery | recovery_success_now | recovery_timed_out,
+        torch.zeros_like(recovery_steps),
+        recovery_steps,
+    )
+    env._backroll_recovery_hold_steps = torch.where(
+        start_recovery | recovery_success_now | recovery_timed_out,
+        torch.zeros_like(recovery_hold),
+        recovery_hold,
+    )
+    env._backroll_recovery_potential_previous = torch.where(
+        recovery_before | start_recovery,
+        recovery_potential,
+        env._backroll_recovery_potential_previous,
+    )
+    env._backroll_recovery_potential_ready = torch.where(
+        recovery_success_now | recovery_timed_out,
+        torch.zeros_like(env._backroll_recovery_potential_ready),
+        env._backroll_recovery_potential_ready | recovery_before | start_recovery,
+    )
+    env._backroll_recovery_rearm_count += recovery_success_now.long()
+    env._backroll_recovered_cycle_armed |= recovery_success_now
+
+    potential_gate = (frontier >= _BACKROLL_POTENTIAL_ANGLE) & ~recovery_before
     upright_potential = torch.clamp(upright, min=0.0, max=1.0)
     height_potential = torch.clamp(height / 0.115, min=0.0, max=1.0)
     env._backroll_upright_delta = torch.where(
@@ -11879,36 +12068,15 @@ def _update_grounded_backroll_state(
     env._backroll_potential_ready = potential_gate
     env._backroll_previous_frontier = frontier.clone()
 
-    # A repeated skill earns one pulse for the completed cycle, then clears all
-    # cycle-local latches/frontiers immediately.  The next attempt must again
-    # earn trunk contact, flat head-top contact, supported rotation, and a
-    # feet-supported sagittal landing; merely remaining upright cannot pay.
+    # A valid cycle, a newly failed attempt, and a completed self-right all
+    # clear only cycle-local state. Recovery preserves completed-cycle totals,
+    # earns no roll credit, and rearms exactly one retry after the physical
+    # feet/head/upright hold.
     rearm = env._backroll_success_now & env._backroll_repeat_mode
-    if rearm.any():
-        env._roulade_accum[rearm] = 0.0
-        env._roulade_max[rearm] = 0.0
-        env._roulade_paid[rearm] = 0.0
-        env._roulade_head_latch[rearm] = False
-        env._backroll_trunk_latch[rearm] = False
-        env._backroll_head_latch[rearm] = False
-        env._backroll_trunk_latch_now[rearm] = False
-        env._backroll_head_latch_now[rearm] = False
-        env._backroll_success[rearm] = False
-        env._backroll_air_steps[rearm] = 0
-        env._backroll_max_air_steps[rearm] = 0
-        env._backroll_landing_hold_steps[rearm] = 0
-        env._backroll_invalid_stall_steps[rearm] = 0
-        env._backroll_landing_timeout_steps[rearm] = 0
-        env._backroll_non_top_head_steps[rearm] = 0
-        env._backroll_previous_frontier[rearm] = 0.0
-        env._backroll_completion_paid[rearm] = 0.0
-        env._backroll_upright_previous[rearm] = 0.0
-        env._backroll_height_previous[rearm] = 0.0
-        env._backroll_upright_delta[rearm] = 0.0
-        env._backroll_height_delta[rearm] = 0.0
-        env._backroll_potential_ready[rearm] = False
-        env._backroll_cycle_max_lateral_axis_z[rearm] = 0.0
-        env._backroll_cycle_offaxis_rotation[rearm] = 0.0
+    _reset_grounded_backroll_cycle_buffers(
+        env,
+        rearm | start_recovery | recovery_success_now,
+    )
     env._backroll_last_update_step = step
 
 
@@ -11933,6 +12101,12 @@ def reset_grounded_backroll_state(
     repeat_mode: bool = False,
     mastery_cycles: int = 1,
     synthesize_contact_latches: bool = True,
+    ground_recovery_prob: float = 0.0,
+    ground_face_down_prob: float = 0.25,
+    ground_face_up_prob: float = 0.25,
+    ground_left_prob: float = 0.25,
+    ground_right_prob: float = 0.25,
+    ground_z_range: tuple = (0.04, 0.05),
 ) -> None:
     """Reset a grounded backroll and account for the previous episode."""
     if env_ids is None or len(env_ids) == 0:
@@ -11957,9 +12131,23 @@ def reset_grounded_backroll_state(
         ).all(dim=1)
         env._backroll_window_bad_states += (~finite).sum()
 
+    if not 0.0 <= ground_recovery_prob <= 1.0:
+        raise ValueError("ground_recovery_prob must be in [0, 1]")
+    if (
+        len(ground_z_range) != 2
+        or ground_z_range[0] <= 0.0
+        or ground_z_range[1] < ground_z_range[0]
+    ):
+        raise ValueError("ground_z_range must be a positive ordered pair")
+    ground_mask = (
+        repeat_mode
+        & (torch.rand(len(env_ids), device=env.device) < ground_recovery_prob)
+    )
+    regular_ids = env_ids[~ground_mask]
+
     reset_roulade_state(
         env,
-        env_ids,
+        regular_ids,
         asset_cfg=asset_cfg,
         standing_prob=standing_prob,
         midroll_prob=midroll_prob,
@@ -11979,7 +12167,8 @@ def reset_grounded_backroll_state(
         joint_noise_std=joint_noise_std,
         roll_direction=-1.0,
     )
-    spawn_angle = env._roulade_accum[env_ids]
+    spawn_angle = torch.zeros(len(env_ids), device=env.device)
+    spawn_angle[~ground_mask] = env._roulade_accum[regular_ids]
     is_midroll = spawn_angle > 0.0
     if synthesize_contact_latches:
         env._backroll_trunk_latch[env_ids] = is_midroll & (
@@ -12021,6 +12210,58 @@ def reset_grounded_backroll_state(
     env._backroll_cycle_offaxis_rotation[env_ids] = 0.0
     env._backroll_episode_max_lateral_axis_z[env_ids] = 0.0
     env._backroll_episode_max_offaxis_rotation[env_ids] = 0.0
+    env._backroll_recovery_active[env_ids] = False
+    env._backroll_recovery_used[env_ids] = False
+    env._backroll_recovery_success_now[env_ids] = False
+    env._backroll_recovery_failed[env_ids] = False
+    env._backroll_recovery_steps[env_ids] = 0
+    env._backroll_recovery_hold_steps[env_ids] = 0
+    env._backroll_recovery_potential_previous[env_ids] = 0.0
+    env._backroll_recovery_potential_ready[env_ids] = False
+    env._backroll_recovery_progress_delta[env_ids] = 0.0
+    env._backroll_recovery_attempt_count[env_ids] = 0.0
+    env._backroll_recovery_success_count[env_ids] = 0.0
+    env._backroll_recovery_latency_total_steps[env_ids] = 0.0
+    env._backroll_recovery_rearm_count[env_ids] = 0
+    env._backroll_recovered_cycle_armed[env_ids] = False
+    env._backroll_recovered_and_rerolled[env_ids] = 0.0
+    env._backroll_recovered_rerolled_now[env_ids] = False
+
+    ground_ids = env_ids[ground_mask]
+    if len(ground_ids) > 0:
+        servo_ids = torch.as_tensor(
+            _servo_joint_ids(env, asset),
+            device=env.device,
+            dtype=torch.long,
+        )
+        qpos_columns = 7 + servo_ids
+        qvel_columns = 6 + servo_ids
+        env.sim.data.qpos[
+            ground_ids.unsqueeze(1), qpos_columns.unsqueeze(0)
+        ] = asset.data.default_joint_pos[
+            ground_ids.unsqueeze(1), servo_ids.unsqueeze(0)
+        ]
+        env.sim.data.qvel[
+            ground_ids.unsqueeze(1), qvel_columns.unsqueeze(0)
+        ] = 0.0
+        _set_roll_sprint_ground_state(
+            env,
+            ground_ids,
+            yaw_range=yaw_range,
+            face_down_prob=ground_face_down_prob,
+            face_up_prob=ground_face_up_prob,
+            left_prob=ground_left_prob,
+            right_prob=ground_right_prob,
+            z_range=ground_z_range,
+        )
+        env._roulade_roll_direction[ground_ids] = -1.0
+        ground = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        ground[ground_ids] = True
+        _reset_grounded_backroll_cycle_buffers(env, ground)
+        env._backroll_invalid[ground_ids] = True
+        env._backroll_recovery_active[ground_ids] = True
+        env._backroll_recovery_used[ground_ids] = True
+        env._backroll_recovery_attempt_count[ground_ids] = 1.0
     env._backroll_last_update_step = -1
 
 
@@ -12346,7 +12587,7 @@ def grounded_backroll_invalid_termination(
 ) -> torch.Tensor:
     asset: Entity = env.scene[asset_cfg.name]
     _update_grounded_backroll_state(env, asset)
-    return env._backroll_invalid
+    return env._backroll_invalid & ~env._backroll_recovery_active
 
 
 def grounded_backroll_invalid_rate(
@@ -12357,6 +12598,43 @@ def grounded_backroll_invalid_rate(
     asset: Entity = env.scene[asset_cfg.name]
     _update_grounded_backroll_state(env, asset)
     return env._backroll_invalid_now.float() / env.step_dt
+
+
+def grounded_backroll_recovery_command(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Expose retry recovery through twist[0] without changing the 61D contract."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    command = env.command_manager.get_command(command_name).clone()
+    command[:, 0] = torch.where(
+        env._backroll_recovery_active,
+        torch.ones_like(command[:, 0]),
+        command[:, 0],
+    )
+    return command
+
+
+def grounded_backroll_recovery_progress(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Potential-delta self-right shaping; holding any pose pays zero."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_recovery_progress_delta
+
+
+def grounded_backroll_recovery_success(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """One-frame pulse after the physical recovery hold completes."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_recovery_success_now.float() / env.step_dt
 
 
 def grounded_backroll_rotation_deg(
@@ -12429,6 +12707,53 @@ def grounded_backroll_cycle_count(
     asset: Entity = env.scene[asset_cfg.name]
     _update_grounded_backroll_state(env, asset)
     return env._backroll_cycle_count.float()
+
+
+def grounded_backroll_recovery_attempt_count(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_recovery_attempt_count
+
+
+def grounded_backroll_recovery_success_count(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_recovery_success_count
+
+
+def grounded_backroll_recovery_success_fraction(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    attempts = env._backroll_recovery_attempt_count.clamp_min(1.0)
+    return env._backroll_recovery_success_count / attempts
+
+
+def grounded_backroll_mean_recovery_latency_s(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    successes = env._backroll_recovery_success_count.clamp_min(1.0)
+    return env._backroll_recovery_latency_total_steps * env.step_dt / successes
+
+
+def grounded_backroll_recovered_reroll_count(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_recovered_and_rerolled
 
 
 def grounded_backroll_episode_max_lateral_axis_z(
