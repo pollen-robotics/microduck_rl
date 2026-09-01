@@ -567,7 +567,10 @@ def create_app(service: SimulatorTaskService | None, bearer_token: str) -> FastA
     ) -> TaskSnapshot:
         if service is None:
             raise NotReady("simulator is not ready")
-        require_motion_ready()
+        # The service distinguishes an idle slot (which must be fully ready)
+        # from an active lease renewal.  A running task owns the slot, so its
+        # supervisor snapshot intentionally reports slot_releasable=False;
+        # service.command() performs the allow_running readiness check.
         return service.command(task_id, command)
 
     @app.get(

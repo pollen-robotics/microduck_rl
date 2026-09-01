@@ -12,6 +12,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import yaml
@@ -225,6 +226,36 @@ def test_create_is_idempotent_and_uses_camel_case_task_snapshot(
 
     assert first.status_code == second.status_code == 202
     assert first.json()["taskId"] == second.json()["taskId"] == "0" * 32
+
+
+def test_running_task_command_is_not_blocked_by_non_releasable_slot(
+    bearer_token: str,
+):
+    """Lease renewals must reach the service while the active task owns the only slot."""
+    now = datetime(2026, 9, 1, tzinfo=UTC)
+    snapshot = {
+        "taskId": "1" * 32,
+        "state": "RUNNING",
+        "actionCode": "WALK_VELOCITY",
+        "bundleVersion": "1.0.0",
+        "bundleDigest": "sha256:" + "a" * 64,
+        "requestedAt": now,
+        "updatedAt": now,
+    }
+    service = Mock()
+    service.motion_readiness.return_value = (False, ("ACTIVE_TASK",))
+    service.command.return_value = snapshot
+
+    with TestClient(create_app(service, bearer_token)) as client:
+        response = client.put(
+            f"/v1/tasks/{'1' * 32}/command",
+            headers={"Authorization": f"Bearer {bearer_token}"},
+            json={"commandSequence": 1, "parameters": {}, "leaseMs": 100},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "RUNNING"
+    service.command.assert_called_once()
 
 
 @pytest.mark.parametrize(
