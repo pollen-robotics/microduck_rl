@@ -10743,8 +10743,8 @@ def _lateral_axis_z(quat: torch.Tensor) -> torch.Tensor:
     return 2.0 * (quat[:, 2] * quat[:, 3] + quat[:, 0] * quat[:, 1])
 
 
-def _head_top_down(env: ManagerBasedRlEnv, asset: Entity) -> torch.Tensor:
-    """True where the head-top axis points at the floor (dot with -z > min)."""
+def _head_top_axis_world_z(env: ManagerBasedRlEnv, asset: Entity) -> torch.Tensor:
+    """World-z component of the jaw's flat-top axis (negative is down)."""
     if not hasattr(env, "_roulade_head_body_id"):
         ids, _ = asset.find_bodies("jaw_soft")
         env._roulade_head_body_id = ids[0]
@@ -10755,7 +10755,31 @@ def _head_top_down(env: ManagerBasedRlEnv, asset: Entity) -> torch.Tensor:
     axis_world_z = (
         2.0 * (x * z - w * y) * a + 2.0 * (y * z + w * x) * b + (1.0 - 2.0 * (x * x + y * y)) * c
     )
-    return axis_world_z < -_HEAD_TOP_DOWN_MIN
+    return axis_world_z
+
+
+def _head_top_down(env: ManagerBasedRlEnv, asset: Entity) -> torch.Tensor:
+    """True where the head-top axis points at the floor (dot with -z > min)."""
+    return _head_top_axis_world_z(env, asset) < -_HEAD_TOP_DOWN_MIN
+
+
+def _head_top_alignment(env: ManagerBasedRlEnv, asset: Entity) -> torch.Tensor:
+    """Continuous 0..1 alignment potential for rotating onto the flat head top.
+
+    The binary latch remains the physical acceptance gate.  This scalar is
+    only a bounded shaping potential, so the policy gets a gradient while it
+    is actively pivoting from a rounded shell toward the flat top without a
+    static head-contact annuity.  The fallback keeps lightweight unit-test
+    fakes compatible with the existing binary head-top monkeypatches.
+    """
+    if not hasattr(asset, "find_bodies"):
+        return _head_top_down(env, asset).float()
+    axis_world_z = _head_top_axis_world_z(env, asset)
+    return torch.clamp(
+        (0.3 - axis_world_z) / 1.3,
+        min=0.0,
+        max=1.0,
+    )
 
 
 def headstand_contact(
@@ -11582,6 +11606,9 @@ def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
     env._backroll_landing_timeout_steps = i.clone()
     env._backroll_non_top_head_steps = i.clone()
     env._backroll_episode_max_non_top_head_steps = i.clone()
+    env._backroll_head_alignment_previous = z.clone()
+    env._backroll_head_alignment_delta = z.clone()
+    env._backroll_head_alignment_active = b.clone()
     env._backroll_previous_frontier = env._roulade_max.clone()
     env._backroll_completion_paid = env._roulade_max.clone()
     env._backroll_upright_previous = z.clone()
@@ -11672,6 +11699,9 @@ def _reset_grounded_backroll_cycle_buffers(
     env._backroll_invalid_stall_steps[reset] = 0
     env._backroll_landing_timeout_steps[reset] = 0
     env._backroll_non_top_head_steps[reset] = 0
+    env._backroll_head_alignment_previous[reset] = 0.0
+    env._backroll_head_alignment_delta[reset] = 0.0
+    env._backroll_head_alignment_active[reset] = False
     env._backroll_previous_frontier[reset] = 0.0
     env._backroll_completion_paid[reset] = 0.0
     env._backroll_upright_previous[reset] = 0.0
@@ -11766,6 +11796,11 @@ def _update_grounded_backroll_state(
         torch.zeros_like(recovery_before)
         if recovery_before.all()
         else _head_top_down(env, asset)
+    )
+    head_alignment = (
+        torch.zeros_like(frontier)
+        if recovery_before.all()
+        else _head_top_alignment(env, asset)
     )
     env._backroll_head_latch |= (
         env._backroll_trunk_latch
@@ -12090,6 +12125,34 @@ def _update_grounded_backroll_state(
     env._backroll_potential_ready = potential_gate
     env._backroll_previous_frontier = frontier.clone()
 
+    # Continuous, bounded guidance for the rounded-shell -> flat-top
+    # transition.  Snapshot the potential on gate entry, then pay only its
+    # signed change while the robot is actively pivoting.  This supplies a
+    # transition gradient while making a head-rocking loop net zero.
+    head_alignment_active = (
+        env._backroll_repeat_mode
+        & ~recovery_before
+        & ~env._backroll_invalid
+        & env._backroll_trunk_latch
+        & head
+        & (frontier >= _BACKROLL_NON_TOP_HEAD_LO)
+        & (frontier <= _BACKROLL_NON_TOP_HEAD_HI)
+        & (torch.clamp(-ang_vel_b[:, 1], min=0.0) >= 1.0)
+        & (lateral_axis_z <= _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX)
+        & _grounded_backroll_cycle_is_sagittal(env)
+    )
+    head_alignment_gate_entry = head_alignment_active & (
+        ~env._backroll_head_alignment_active
+    )
+    head_alignment_delta = head_alignment - env._backroll_head_alignment_previous
+    env._backroll_head_alignment_delta = torch.where(
+        head_alignment_active & ~head_alignment_gate_entry,
+        head_alignment_delta,
+        torch.zeros_like(head_alignment),
+    )
+    env._backroll_head_alignment_previous = head_alignment
+    env._backroll_head_alignment_active = head_alignment_active
+
     # A valid cycle, a newly failed attempt, and a completed self-right all
     # clear only cycle-local state. Recovery preserves completed-cycle totals,
     # earns no roll credit, and rearms exactly one retry after the physical
@@ -12365,6 +12428,9 @@ def reset_grounded_backroll_state(
     env._backroll_landing_timeout_steps[env_ids] = 0
     env._backroll_non_top_head_steps[env_ids] = 0
     env._backroll_episode_max_non_top_head_steps[env_ids] = 0
+    env._backroll_head_alignment_previous[env_ids] = 0.0
+    env._backroll_head_alignment_delta[env_ids] = 0.0
+    env._backroll_head_alignment_active[env_ids] = False
     env._backroll_previous_frontier[env_ids] = spawn_angle
     env._backroll_completion_paid[env_ids] = spawn_angle
     env._backroll_upright_previous[env_ids] = 0.0
@@ -12573,6 +12639,27 @@ def grounded_backroll_head_pivot(
         * _head_top_down(env, asset).float()
         * rate
         * _grounded_backroll_positive_reward_valid(env).float()
+    )
+
+
+def grounded_backroll_head_alignment_progress(
+    env: ManagerBasedRlEnv,
+    max_paid_rate: float = 1.5,
+) -> torch.Tensor:
+    """Bounded signed potential change from rounded head contact to flat top.
+
+    This term is deliberately gated to active repeated-roll head contact and
+    pays only while the robot actively pivots in the measured contact window.
+    Holding a headstand pays zero, and a closed rocking loop telescopes to zero.
+    """
+    if max_paid_rate < 0.0:
+        raise ValueError("max_paid_rate must be nonnegative")
+    asset: Entity = env.scene["robot"]
+    _update_grounded_backroll_state(env, asset)
+    return torch.clamp(
+        env._backroll_head_alignment_delta,
+        min=-max_paid_rate * env.step_dt,
+        max=max_paid_rate * env.step_dt,
     )
 
 

@@ -157,6 +157,11 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     )
     assert cfg.rewards["backroll_non_top_head_dwell"].weight == pytest.approx(0.5)
     assert cfg.rewards["backroll_non_top_head_dwell"].params == {"grace_steps": 9}
+    assert (
+        cfg.rewards["backroll_head_alignment_progress"].func
+        is mdp.grounded_backroll_head_alignment_progress
+    )
+    assert cfg.rewards["backroll_head_alignment_progress"].weight == pytest.approx(1.5)
     assert cfg.rewards["backroll_success"].func is mdp.grounded_backroll_repeat_success_rate
     assert cfg.metrics["backroll_cycle_count"].func is mdp.grounded_backroll_cycle_count
     assert cfg.events["set_grounded_backroll_state"].params[
@@ -652,6 +657,46 @@ def test_completion_push_requires_head_latch_and_only_pays_new_frontier(monkeypa
     assert forward_rock.item() == 0.0
     assert revisit.item() == 0.0
     assert second_extension.item() > 0.0
+
+
+def test_head_alignment_progress_is_active_only_and_signed(monkeypatch):
+    env, asset = _fake_env()
+    env._backroll_repeat_mode[:] = True
+    env._backroll_trunk_latch[:] = True
+    env._roulade_accum[:] = math.radians(180.0)
+    env._roulade_max[:] = math.radians(180.0)
+    env._backroll_previous_frontier[:] = math.radians(180.0)
+    env._backroll_cycle_max_lateral_axis_z.zero_()
+    env._backroll_cycle_offaxis_rotation.zero_()
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+    alignment = torch.tensor([0.2])
+    monkeypatch.setattr(
+        mdp, "_head_top_alignment", lambda _env, _asset: alignment.clone()
+    )
+    env.scene.sensors["head_ground_contact"].data.found[:] = 1.0
+    asset.data.root_link_ang_vel_b[:, 1] = -1.0
+
+    first = mdp.grounded_backroll_head_alignment_progress(env)
+    env.common_step_counter += 1
+    alignment[:] = 0.4
+    second = mdp.grounded_backroll_head_alignment_progress(env)
+    env.common_step_counter += 1
+    alignment[:] = 0.1
+    backward = mdp.grounded_backroll_head_alignment_progress(env)
+    env.common_step_counter += 1
+    alignment[:] = 0.8
+    asset.data.root_link_ang_vel_b[:, 1] = 0.0
+    static = mdp.grounded_backroll_head_alignment_progress(env)
+
+    assert first.item() == 0.0
+    assert second.item() == pytest.approx(0.03)
+    assert backward.item() == pytest.approx(-0.03)
+    assert static.item() == 0.0
 
 
 def test_completion_push_rejects_airborne_rotation(monkeypatch):

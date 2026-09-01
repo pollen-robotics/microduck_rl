@@ -431,6 +431,11 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
         weight=0.5,
         params={"grace_steps": 9},
     )
+    cfg.rewards["backroll_head_alignment_progress"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_head_alignment_progress,
+        weight=1.5,
+        params={"max_paid_rate": 1.5},
+    )
     cfg.rewards["backroll_completion_progress"].weight = 18.0
     cfg.rewards["backroll_upright_progress"].weight = 5.0
     cfg.rewards["backroll_height_progress"].weight = 4.0
