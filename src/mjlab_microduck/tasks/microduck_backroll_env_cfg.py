@@ -83,14 +83,14 @@ BACKROLL_CURRICULUM_STAGES = [
 REPEATED_BACKROLL_CURRICULUM_STAGES = [
     {
         "params": {
-            # Start from the measured clean-policy stall and require both
-            # ordered contacts to be acquired physically.  This phase was the
-            # only audited reset slice with 4/4 real trunk+head contacts while
+            # Start before the measured clean-policy stall and require both
+            # ordered contacts to be acquired physically.  This lead-in was
+            # the only audited slice with 4/4 real trunk+head contacts while
             # every trial stayed inside the 45-degree off-axis gate.
             "standing_prob": 0.65,
             "midroll_prob": 0.35,
-            "midroll_pitch_min": math.radians(160.0),
-            "midroll_pitch_max": math.radians(180.0),
+            "midroll_pitch_min": math.radians(100.0),
+            "midroll_pitch_max": math.radians(120.0),
             "midroll_omega_range": (0.5, 1.0),
             "midroll_z_min": 0.115,
             "midroll_z_max": 0.115,

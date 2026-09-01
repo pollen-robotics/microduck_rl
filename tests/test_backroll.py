@@ -156,10 +156,10 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     ] == [1, 1, 1, 2, 2, 3]
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "midroll_pitch_min"
-    ] == pytest.approx(math.radians(160.0))
+    ] == pytest.approx(math.radians(100.0))
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "midroll_pitch_max"
-    ] == pytest.approx(math.radians(180.0))
+    ] == pytest.approx(math.radians(120.0))
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "midroll_omega_range"
     ] == (0.5, 1.0)
