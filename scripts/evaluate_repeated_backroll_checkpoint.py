@@ -19,6 +19,8 @@ from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 
+from mjlab_microduck.tasks import mdp as microduck_mdp
+
 TASK_ID = "Mjlab-Repeated-Backroll-Flat-MicroDuck"
 DEFAULT_SEEDS = tuple(range(16))
 
@@ -36,6 +38,12 @@ def _parse_args() -> argparse.Namespace:
         choices=("standing", "precontact"),
         default="standing",
     )
+    parser.add_argument("--precontact-z", type=float, default=0.115)
+    parser.add_argument("--precontact-pitch-min-deg", type=float, default=160.0)
+    parser.add_argument("--precontact-pitch-max-deg", type=float, default=180.0)
+    parser.add_argument("--precontact-omega-min", type=float, default=0.5)
+    parser.add_argument("--precontact-omega-max", type=float, default=1.0)
+    parser.add_argument("--precontact-joint-noise", type=float, default=0.0)
     return parser.parse_args()
 
 
@@ -82,11 +90,26 @@ def evaluate_checkpoint(
     duration_s: float,
     required_cycles: int,
     reset_mode: str = "standing",
+    precontact_z: float = 0.115,
+    precontact_pitch_range_deg: tuple[float, float] = (160.0, 180.0),
+    precontact_omega_range: tuple[float, float] = (0.5, 1.0),
+    precontact_joint_noise: float = 0.0,
 ) -> dict[str, object]:
     if not seeds or duration_s <= 0.0 or required_cycles < 2:
         raise ValueError("seeds, positive duration, and at least two cycles are required")
     if reset_mode not in {"standing", "precontact"}:
         raise ValueError("reset_mode must be 'standing' or 'precontact'")
+    if precontact_z <= 0.0:
+        raise ValueError("precontact_z must be positive")
+    if precontact_pitch_range_deg[1] < precontact_pitch_range_deg[0]:
+        raise ValueError("precontact_pitch_range_deg must be ordered")
+    if (
+        precontact_omega_range[0] < 0.0
+        or precontact_omega_range[1] < precontact_omega_range[0]
+    ):
+        raise ValueError("precontact_omega_range must be nonnegative and ordered")
+    if precontact_joint_noise < 0.0:
+        raise ValueError("precontact_joint_noise must be nonnegative")
 
     configure_torch_backends()
     env_cfg = load_env_cfg(TASK_ID, play=True)
@@ -101,11 +124,11 @@ def evaluate_checkpoint(
         else {
             "standing_prob": 0.0,
             "midroll_prob": 1.0,
-            "midroll_pitch_min": math.radians(20.0),
-            "midroll_pitch_max": math.radians(29.0),
-            "midroll_omega_range": (1.0, 3.0),
-            "midroll_z_min": 0.075,
-            "midroll_z_max": 0.075,
+            "midroll_pitch_min": math.radians(precontact_pitch_range_deg[0]),
+            "midroll_pitch_max": math.radians(precontact_pitch_range_deg[1]),
+            "midroll_omega_range": precontact_omega_range,
+            "midroll_z_min": precontact_z,
+            "midroll_z_max": precontact_z,
             "tuck_factor_range": (1.0, 1.0),
         }
     )
@@ -113,10 +136,19 @@ def evaluate_checkpoint(
         **reset_params,
         repeat_mode=True,
         yaw_range=(0.0, 0.0),
-        joint_noise_std=0.02,
+        joint_noise_std=(
+            precontact_joint_noise if reset_mode == "precontact" else 0.02
+        ),
     )
 
     base_env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=None)
+    if reset_mode == "precontact":
+        # A phase-start audit must prove physical contact acquisition rather
+        # than inheriting the reset helper's synthetic prerequisite latches.
+        microduck_mdp._grounded_backroll_state(base_env)
+        base_env._backroll_trunk_latch.zero_()
+        base_env._backroll_head_latch.zero_()
+        base_env._roulade_head_latch.zero_()
     agent_cfg = load_rl_cfg(TASK_ID)
     env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
     runner_cls = load_runner_cls(TASK_ID) or MjlabOnPolicyRunner
@@ -241,6 +273,16 @@ def evaluate_checkpoint(
         "duration_s": duration_s,
         "required_cycles": required_cycles,
         "reset_mode": reset_mode,
+        "precontact_z": precontact_z if reset_mode == "precontact" else None,
+        "precontact_pitch_range_deg": (
+            list(precontact_pitch_range_deg) if reset_mode == "precontact" else None
+        ),
+        "precontact_omega_range": (
+            list(precontact_omega_range) if reset_mode == "precontact" else None
+        ),
+        "precontact_joint_noise": (
+            precontact_joint_noise if reset_mode == "precontact" else None
+        ),
         "num_standing_trials": len(rows) if reset_mode == "standing" else 0,
         "num_precontact_trials": len(rows) if reset_mode == "precontact" else 0,
         "consecutive_success_count": successes,
@@ -270,6 +312,16 @@ def main() -> int:
         duration_s=args.duration,
         required_cycles=args.required_cycles,
         reset_mode=args.reset_mode,
+        precontact_z=args.precontact_z,
+        precontact_pitch_range_deg=(
+            args.precontact_pitch_min_deg,
+            args.precontact_pitch_max_deg,
+        ),
+        precontact_omega_range=(
+            args.precontact_omega_min,
+            args.precontact_omega_max,
+        ),
+        precontact_joint_noise=args.precontact_joint_noise,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     if args.output is not None:

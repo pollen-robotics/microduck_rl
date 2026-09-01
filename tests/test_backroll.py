@@ -156,25 +156,28 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     ] == [1, 1, 1, 2, 2, 3]
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "midroll_pitch_min"
-    ] == pytest.approx(math.radians(20.0))
+    ] == pytest.approx(math.radians(160.0))
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "midroll_pitch_max"
-    ] == pytest.approx(math.radians(29.0))
+    ] == pytest.approx(math.radians(180.0))
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "midroll_omega_range"
-    ] == (1.0, 3.0)
+    ] == (0.5, 1.0)
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "midroll_z_min"
-    ] == pytest.approx(0.075)
+    ] == pytest.approx(0.115)
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "midroll_z_max"
-    ] == pytest.approx(0.075)
+    ] == pytest.approx(0.115)
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "tuck_factor_range"
     ] == (1.0, 1.0)
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
-        "midroll_pitch_max"
-    ] < math.radians(30.0)
+        "joint_noise_std"
+    ] == pytest.approx(0.0)
+    assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
+        "synthesize_contact_latches"
+    ] is False
     assert cfg.curriculum["backroll_phase"].params["success_threshold"] == pytest.approx(
         0.55
     )
@@ -268,6 +271,38 @@ def test_reverse_phase_reset_uses_negative_pitch_rate_and_contact_prerequisites(
     assert env.sim.data.qvel[0, 4].item() == pytest.approx(-3.0)
     assert env._backroll_trunk_latch.item()
     assert env._backroll_head_latch.item()
+
+
+def test_repeated_phase_reset_can_require_physical_contact_latches(monkeypatch):
+    env, _asset = _fake_env()
+    env.sim = SimpleNamespace(
+        data=SimpleNamespace(
+            qpos=torch.zeros(1, 21),
+            qvel=torch.zeros(1, 20),
+        )
+    )
+    env.sim.data.qpos[:, 3] = 1.0
+    monkeypatch.setattr(mdp, "_servo_joint_ids", lambda _env, _asset: list(range(14)))
+    pitch = math.radians(170.0)
+
+    mdp.reset_grounded_backroll_state(
+        env,
+        torch.tensor([0]),
+        standing_prob=0.0,
+        midroll_prob=1.0,
+        midroll_pitch_min=pitch,
+        midroll_pitch_max=pitch,
+        midroll_omega_range=(0.5, 0.5),
+        standing_tilt_max=0.0,
+        yaw_range=(0.0, 0.0),
+        joint_noise_std=0.0,
+        synthesize_contact_latches=False,
+    )
+
+    assert env._roulade_max.item() == pytest.approx(pitch)
+    assert not env._backroll_trunk_latch.item()
+    assert not env._backroll_head_latch.item()
+    assert not env._roulade_head_latch.item()
 
 
 def test_repeated_curriculum_counts_the_stage_mastery_cycle_target(monkeypatch):

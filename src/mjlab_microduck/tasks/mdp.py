@@ -11907,6 +11907,7 @@ def reset_grounded_backroll_state(
     joint_noise_std: float = 0.04,
     repeat_mode: bool = False,
     mastery_cycles: int = 1,
+    synthesize_contact_latches: bool = True,
 ) -> None:
     """Reset a grounded backroll and account for the previous episode."""
     if env_ids is None or len(env_ids) == 0:
@@ -11955,12 +11956,16 @@ def reset_grounded_backroll_state(
     )
     spawn_angle = env._roulade_accum[env_ids]
     is_midroll = spawn_angle > 0.0
-    env._backroll_trunk_latch[env_ids] = is_midroll & (
-        spawn_angle >= _BACKROLL_TRUNK_LATCH_LO
-    )
-    env._backroll_head_latch[env_ids] = is_midroll & (
-        spawn_angle >= _BACKROLL_HEAD_LATCH_LO
-    )
+    if synthesize_contact_latches:
+        env._backroll_trunk_latch[env_ids] = is_midroll & (
+            spawn_angle >= _BACKROLL_TRUNK_LATCH_LO
+        )
+        env._backroll_head_latch[env_ids] = is_midroll & (
+            spawn_angle >= _BACKROLL_HEAD_LATCH_LO
+        )
+    else:
+        env._backroll_trunk_latch[env_ids] = False
+        env._backroll_head_latch[env_ids] = False
     env._roulade_head_latch[env_ids] = env._backroll_head_latch[env_ids]
     env._backroll_trunk_latch_now[env_ids] = False
     env._backroll_head_latch_now[env_ids] = False

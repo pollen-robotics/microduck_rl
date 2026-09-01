@@ -83,18 +83,20 @@ BACKROLL_CURRICULUM_STAGES = [
 REPEATED_BACKROLL_CURRICULUM_STAGES = [
     {
         "params": {
-            # Start the scaffold immediately before the trunk-contact window so
-            # neither ordered contact latch is synthesized by reset.  These
-            # episodes must physically acquire trunk then flat-head contact;
-            # the standing majority preserves launch discovery.
+            # Start from the measured clean-policy stall and require both
+            # ordered contacts to be acquired physically.  This phase was the
+            # only audited reset slice with 4/4 real trunk+head contacts while
+            # every trial stayed inside the 45-degree off-axis gate.
             "standing_prob": 0.65,
             "midroll_prob": 0.35,
-            "midroll_pitch_min": math.radians(20.0),
-            "midroll_pitch_max": math.radians(29.0),
-            "midroll_omega_range": (1.0, 3.0),
-            "midroll_z_min": 0.075,
-            "midroll_z_max": 0.075,
+            "midroll_pitch_min": math.radians(160.0),
+            "midroll_pitch_max": math.radians(180.0),
+            "midroll_omega_range": (0.5, 1.0),
+            "midroll_z_min": 0.115,
+            "midroll_z_max": 0.115,
             "tuck_factor_range": (1.0, 1.0),
+            "joint_noise_std": 0.0,
+            "synthesize_contact_latches": False,
             "mastery_cycles": 1,
         }
     },
@@ -328,11 +330,11 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
     first_stage = REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"]
     reset_cfg = cfg.events["set_grounded_backroll_state"]
     reset_cfg.params.update(
-        **first_stage,
         repeat_mode=True,
         yaw_range=(0.0, 0.0) if play else (-math.pi, math.pi),
         joint_noise_std=0.0 if play else 0.03,
     )
+    reset_cfg.params.update(**first_stage)
     if play:
         reset_cfg.params.update(
             standing_prob=1.0,
