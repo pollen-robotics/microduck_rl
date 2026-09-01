@@ -573,23 +573,26 @@ def make_microduck_backroll_sprint_env_cfg(
     )
     if not play:
         reset_params.update(
-            standing_prob=0.35,
-            midroll_prob=0.30,
+            standing_prob=0.45,
+            midroll_prob=0.10,
             postroll_prob=0.15,
-            crouch_prob=0.10,
-            ground_recovery_prob=0.10,
+            crouch_prob=0.15,
+            ground_recovery_prob=0.15,
         )
         spawn_stages = cfg.curriculum["roll_sprint_spawn_mix"].params[
             "param_stages"
         ]
         stage_mixes = (
-            ((0.35, 0.30, 0.15, 0.10, 0.10), (50.0, 340.0, (3.0, 5.5))),
-            ((0.45, 0.25, 0.15, 0.05, 0.10), (50.0, 340.0, (2.0, 5.0))),
-            ((0.55, 0.15, 0.10, 0.05, 0.15), (50.0, 340.0, (0.75, 3.5))),
+            ((0.45, 0.10, 0.15, 0.15, 0.15), (50.0, 340.0, (3.0, 5.5))),
+            ((0.45, 0.05, 0.15, 0.15, 0.20), (50.0, 340.0, (2.0, 5.0))),
+            ((0.55, 0.05, 0.10, 0.10, 0.20), (50.0, 340.0, (0.75, 3.5))),
             ((0.65, 0.00, 0.10, 0.05, 0.20), (50.0, 340.0, (0.0, 3.0))),
         )
-        for stage, (mix, roll_window) in zip(spawn_stages, stage_mixes, strict=True):
+        for stage, step, (mix, roll_window) in zip(
+            spawn_stages, (0, 400, 1000, 2000), stage_mixes, strict=True
+        ):
             pitch_min, pitch_max, omega_range = roll_window
+            stage["step"] = step * 24
             stage["params"].update(
                 standing_prob=mix[0],
                 midroll_prob=mix[1],
