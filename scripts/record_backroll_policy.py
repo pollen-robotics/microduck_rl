@@ -148,8 +148,10 @@ def main() -> int:
     env_cfg.seed = args.seed
     env_cfg.auto_reset = False
     env_cfg.episode_length_s = args.duration
-    if args.allow_incomplete_diagnostic:
-        env_cfg.terminations.clear()
+    # The recorder owns the selected variant's fixed horizon and physical
+    # latch checks. Other variants in an exact replay batch must not terminate
+    # the shared vector environment before the followed variant finishes.
+    env_cfg.terminations.clear()
     # Follow the trunk so a policy that translates during an incomplete attempt
     # cannot walk into the camera or leave the frame.  The camera remains a
     # stable three-quarter view; only its target follows the robot.
