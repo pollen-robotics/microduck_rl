@@ -123,7 +123,11 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
         "params": {
             "standing_prob": 0.50,
             "midroll_prob": 0.50,
-            "repeat_mode": True,
+            # Keep one-shot physics through the wider 180--340 degree
+            # reference bridge.  Switching the strict repeat gates here
+            # destroyed the standing basin immediately (A189, iteration 71).
+            # The next stage is the first intentional repeated-cycle handoff.
+            "repeat_mode": False,
             "midroll_pitch_min": math.radians(180.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (1.0, 4.0),
@@ -142,16 +146,21 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.70,
-            "midroll_prob": 0.30,
+            # First strict repeat stage: keep the same aligned, measured
+            # 180-degree basin while the policy learns the post-landing
+            # rearm.  Broad 90-degree starts and stronger angular momentum
+            # wait for the following stage; introducing them here caused the
+            # repeated handoff to collapse before a cycle could be chained.
+            "standing_prob": 0.50,
+            "midroll_prob": 0.50,
             "repeat_mode": True,
-            "midroll_pitch_min": math.radians(90.0),
+            "midroll_pitch_min": math.radians(180.0),
             "midroll_pitch_max": math.radians(340.0),
-            "midroll_omega_range": (2.0, 5.0),
-            "joint_noise_std": 0.02,
+            "midroll_omega_range": (1.0, 4.0),
+            "joint_noise_std": 0.01,
             "synthesize_contact_latches": True,
-            "reference_state_prob": 0.25,
-            "reference_phase_range_deg": (0.0, 360.0),
+            "reference_state_prob": 1.0,
+            "reference_phase_range_deg": (180.0, 180.0),
             "reference_source_seed": None,
             # Preserve the aligned sagittal basin through the early repeat
             # bridge; later stages reintroduce yaw robustness once chaining is

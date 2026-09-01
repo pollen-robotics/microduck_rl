@@ -194,11 +194,11 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert [
         stage["params"]["standing_prob"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
-    ] == [0.50, 0.50, 0.70, 0.80, 0.90, 1.0]
+    ] == [0.50, 0.50, 0.50, 0.80, 0.90, 1.0]
     assert [
         stage["params"]["repeat_mode"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
-    ] == [False, True, True, True, True, True]
+    ] == [False, False, True, True, True, True]
     assert [
         stage["params"]["yaw_range"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES[:3]
@@ -224,7 +224,7 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert [
         stage["params"]["reference_state_prob"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
-    ] == [1.0, 1.0, 0.25, 0.10, 0.05, 0.0]
+    ] == [1.0, 1.0, 1.0, 0.10, 0.05, 0.0]
     first_stage = REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"]
     assert first_stage["reference_phase_range_deg"] == (180.0, 180.0)
     assert first_stage["reference_source_seed"] == 10
