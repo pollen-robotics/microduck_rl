@@ -465,9 +465,9 @@ def test_backroll_sprint_is_separate_directional_61d_policy():
         stage["params"]["midroll_pitch_min"] for stage in spawn_stages
     ] == pytest.approx(
         [
-            math.radians(320.0),
-            math.radians(260.0),
-            math.radians(140.0),
+            math.radians(50.0),
+            math.radians(50.0),
+            math.radians(50.0),
             math.radians(50.0),
         ]
     )
