@@ -71,6 +71,7 @@ instead of locally (see [scripts/hf/README.md](scripts/hf/README.md)).
 | `Mjlab-GroundPick-{Flat,Rough}-MicroDuck` | flat/rough | Crouch and touch the ground with the mouth tip, return to stand |
 | `Mjlab-BallKick-Flat-MicroDuck` | flat | Kick a 70 mm / 15 g ball forward (actor is ball-blind) |
 | `Mjlab-Roulade-Flat-MicroDuck` | flat | Forward roll over the head, land back on the feet |
+| `Mjlab-PlayDead-{Flat,Rough}-MicroDuck` | flat/rough | Stand → flop onto the back and **hold** (opposite of standup) |
 | `Mjlab-Velocity-Flat-MicroDuck-Rollers` | flat | Roller-skate velocity tracking (passive wheels under the feet) |
 | `Mjlab-Velocity-Swizzle-MicroDuck` | flat | Classic symmetric swizzle skating |
 | `Mjlab-RollerCrouch-Flat-MicroDuck` | flat | Crouch while gliding on rollers |
@@ -84,11 +85,14 @@ over the robot at any moment. `scripts/infer_policy.py` rehearses exactly that:
 
 ```bash
 uv run scripts/infer_policy.py --walking walk.onnx --standing stand.onnx \
-    --sitstand sitstand.onnx --roulade roulade.onnx --new-cmd-obs
+    --sitstand sitstand.onnx --roulade roulade.onnx --playdead playdead.onnx \
+    --new-cmd-obs
 ```
 
 Keyboard-driven (velocity commands, `G` ground pick, `Y` sit/stand, `R` roulade,
-`K`/`L` kicks); `--debug`, `--save-csv`, `--record` support sim2real comparisons.
+`K`/`L` kicks, `D` play-dead); `--debug`, `--save-csv`, `--record` support
+sim2real comparisons. Play-dead holds until `D` again — swap standup/sitstand
+to revive; handing walk back from a dead pose is a fall.
 
 ### Backlash variants
 

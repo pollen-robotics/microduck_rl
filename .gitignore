@@ -17,6 +17,7 @@ wheels/
 wandb
 logs
 agents
+clips/
 
 *.pch
 nohup.out

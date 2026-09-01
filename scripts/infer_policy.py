@@ -13,6 +13,11 @@ import termios
 import threading
 import time
 import tty
+
+# EGL must be selected before libmujoco creates a GL context (headless clips).
+if any(a == "--headless" for a in sys.argv):
+    os.environ.setdefault("MUJOCO_GL", "egl")
+
 import numpy as np
 import mujoco
 import mujoco.viewer
@@ -137,8 +142,8 @@ class PolicyInference:
                  sit_onnx_path=None, new_cmd_obs=False, slope_onnx_path=None,
                  sitstand_onnx_path=None,
                  kick_left_onnx_path=None, kick_right_onnx_path=None,
-                 roulade_onnx_path=None,
-                 kick_duration=3.0, roulade_duration=2.0):
+                 roulade_onnx_path=None, playdead_onnx_path=None,
+                 kick_duration=3.0, roulade_duration=2.0, playdead_duration=0.0):
         self.model = model
         self.data = data
         self.action_scale = action_scale
@@ -231,11 +236,12 @@ class PolicyInference:
             sl_input_shape = self.slope_session.get_inputs()[0].shape
             print(f"Slope policy input shape: {sl_input_shape}")
 
-        # Episodic behavior policies (kick left/right, roulade). All three use
-        # the unified 61D obs layout with an ALL-ZERO 13D command (twist forced
-        # ~0 in training, head/body slots zero-padded), so triggering one is a
-        # plain session swap; after `duration` seconds control hands back to
-        # walking/standing (the behavior policies end standing on their own).
+        # Episodic behavior policies (kick left/right, roulade, play-dead). All
+        # use the unified 61D obs layout with an ALL-ZERO 13D command (twist
+        # forced ~0 in training, head/body slots zero-padded), so triggering
+        # one is a plain session swap. Kick/roulade end standing and auto-return
+        # after `duration`. Play-dead HOLDS: duration 0 means stay dead until
+        # D is pressed again (handing back to walk from a dead pose is a fall).
         self.behavior_sessions = {}
         self.behavior_durations = {}
         self.behavior_mode = None       # name of the running behavior, or None
@@ -244,6 +250,7 @@ class PolicyInference:
             ("kick_left", kick_left_onnx_path, kick_duration),
             ("kick_right", kick_right_onnx_path, kick_duration),
             ("roulade", roulade_onnx_path, roulade_duration),
+            ("playdead", playdead_onnx_path, playdead_duration),
         ):
             if not path:
                 continue
@@ -255,13 +262,22 @@ class PolicyInference:
             print(f"\nLoading {name} policy from: {path}")
             self.behavior_sessions[name] = ort.InferenceSession(path)
             self.behavior_durations[name] = duration
+            hold = "hold until D again" if duration <= 0.0 else f"auto-return after {duration:.1f}s"
             print(f"{name} policy input shape: {self.behavior_sessions[name].get_inputs()[0].shape}"
-                  f"  (auto-return after {duration:.1f}s)")
+                  f"  ({hold})")
 
         # Validate at least one policy loaded. A sitstand policy can run alone
         # (it holds the stand at flag=0), unlike the old one-way sit policy.
-        if not self.walking_session and not self.standing_session and not self.is_sitstand:
-            raise ValueError("At least one of --walking, --standing or --sitstand must be provided")
+        # Play-dead-only is allowed for clip recording (hold HOME, then flop).
+        if (
+            not self.walking_session
+            and not self.standing_session
+            and not self.is_sitstand
+            and "playdead" not in self.behavior_sessions
+        ):
+            raise ValueError(
+                "At least one of --walking, --standing, --sitstand or --playdead must be provided"
+            )
 
         # Determine initial active session and policy
         if self.walking_session:
@@ -270,10 +286,15 @@ class PolicyInference:
         elif self.standing_session:
             self.current_policy = "standing"
             self.ort_session = self.standing_session
-        else:
+        elif self.is_sitstand:
             # sitstand-only: start standing (posture flag 0).
             self.current_policy = "sit"
             self.ort_session = self.sit_session
+        else:
+            self.current_policy = "playdead"
+            self.ort_session = self.behavior_sessions["playdead"]
+            self.behavior_mode = "playdead"
+            self.behavior_time_left = float("inf")
 
         # Get input/output names from active session
         self.input_name = self.ort_session.get_inputs()[0].name
@@ -649,15 +670,19 @@ class PolicyInference:
         self.command[2] = 0.0
 
     def trigger_behavior(self, name):
-        """Start an episodic behavior (kick_left / kick_right / roulade).
+        """Start an episodic behavior (kick_left / kick_right / roulade / playdead).
 
-        The behavior policies were trained to run from a standing start with an
-        all-zero command and end standing, so triggering is a session swap; a
-        timer hands control back to walking/standing afterwards.
+        Kick/roulade were trained to run from a standing start with an all-zero
+        command and end standing, so triggering is a session swap; a timer hands
+        control back to walking/standing afterwards. Play-dead does NOT end
+        standing: press D again to hand back (or pass --playdead-duration > 0).
         """
         session = self.behavior_sessions.get(name)
         if session is None:
             print(f"{name} unavailable: no --{name.replace('_', '-')} policy loaded")
+            return
+        if name == "playdead" and self.behavior_mode == "playdead":
+            self._end_behavior()
             return
         if self.behavior_mode is not None:
             print(f"Cannot start {name}: {self.behavior_mode} already in progress")
@@ -674,12 +699,16 @@ class PolicyInference:
         if name in ("kick_left", "kick_right"):
             self._place_ball(name)
         self.behavior_mode = name
-        self.behavior_time_left = self.behavior_durations[name]
+        duration = self.behavior_durations[name]
+        self.behavior_time_left = float("inf") if duration <= 0.0 else duration
         self.vel_cmd = np.zeros(3, dtype=np.float32)
         self.current_policy = name
         self.ort_session = session
         self._update_command()
-        print(f"{name}: started (auto-return in {self.behavior_time_left:.1f}s)")
+        if duration <= 0.0:
+            print(f"{name}: started (hold until D again)")
+        else:
+            print(f"{name}: started (auto-return in {self.behavior_time_left:.1f}s)")
 
     def _place_ball(self, behavior):
         """Teleport the ball in front of the kicking foot, matching training's
@@ -702,6 +731,8 @@ class PolicyInference:
     def update_behavior(self, dt: float):
         """Advance the behavior timer; hand back to walking/standing when done."""
         if self.behavior_mode is None:
+            return
+        if self.behavior_time_left == float("inf"):
             return
         self.behavior_time_left -= dt
         if self.behavior_time_left <= 0.0:
@@ -813,8 +844,10 @@ def main():
     parser.add_argument("--kick-left", type=str, default=None, help="Path to LEFT-foot ball kick policy ONNX (press K to trigger). Requires --new-cmd-obs. Loads a scene with a ball.")
     parser.add_argument("--kick-right", type=str, default=None, help="Path to RIGHT-foot ball kick policy ONNX (press L to trigger). Requires --new-cmd-obs. Loads a scene with a ball.")
     parser.add_argument("--roulade", type=str, default=None, help="Path to roulade (forward roll) policy ONNX (press R to trigger). Requires --new-cmd-obs.")
+    parser.add_argument("--playdead", type=str, default=None, help="Path to play-dead policy ONNX (press D to trigger). Stand → flop and hold. Requires --new-cmd-obs.")
     parser.add_argument("--kick-duration", type=float, default=3.0, help="Seconds a kick policy stays active before handing back to standing/walking (default: 3.0)")
     parser.add_argument("--roulade-duration", type=float, default=2.0, help="Seconds the roulade policy stays active before handing back to standing/walking (default: 2.0, ~the roll itself; the standing/walking policy takes over for the settle)")
+    parser.add_argument("--playdead-duration", type=float, default=0.0, help="Seconds the play-dead policy stays active before handing back. 0 (default) = hold until D again — play-dead does not end standing.")
     parser.add_argument("--lin-vel-x", type=float, default=0.0, help="Initial linear velocity X command (m/s)")
     parser.add_argument("--lin-vel-y", type=float, default=0.0, help="Initial linear velocity Y command (m/s)")
     parser.add_argument("--ang-vel-z", type=float, default=0.0, help="Initial angular velocity Z command (rad/s)")
@@ -824,6 +857,12 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Print observations and actions")
     parser.add_argument("--save-csv", type=str, default=None, help="Save observations and actions to CSV file")
     parser.add_argument("--record", type=str, default=None, help="Enable recording mode: save observations to pickle file on Ctrl+C")
+    parser.add_argument("--video", type=str, default=None, help="Write an mp4 (offscreen EGL renderer). Headless if --headless, else alongside the viewer.")
+    parser.add_argument("--video-seconds", type=float, default=6.0, help="Clip length when --headless (default 6.0). Ignored with the live viewer (record until Q).")
+    parser.add_argument("--video-width", type=int, default=1280)
+    parser.add_argument("--video-height", type=int, default=720)
+    parser.add_argument("--headless", action="store_true", help="No viewer — render --video and exit. For X clips.")
+    parser.add_argument("--auto-playdead", action="store_true", help="Hold the stand for 0.5s then trigger play-dead (clip mode).")
     parser.add_argument("--switch-threshold", type=float, default=0.05, help="Vel command magnitude threshold for walking/standing switch (default: 0.05)")
     parser.add_argument("--ground-pick-period", type=float, default=4.0, help="Ground pick phase period in seconds (default: 4.0)")
     parser.add_argument("--new-cmd-obs", action="store_true",
@@ -844,14 +883,18 @@ def main():
                              "compliant PU sole. e.g. --foot-solref 0.04")
     args = parser.parse_args()
 
-    if not args.walking and not args.standing and not args.sitstand:
-        parser.error("At least one of --walking, --standing or --sitstand must be provided")
+    if not args.walking and not args.standing and not args.sitstand and not args.playdead:
+        parser.error("At least one of --walking, --standing, --sitstand or --playdead must be provided")
+    if args.headless and not args.video:
+        parser.error("--headless requires --video PATH.mp4")
+    if args.auto_playdead and not args.playdead:
+        parser.error("--auto-playdead requires --playdead")
     if args.sitstand and not args.new_cmd_obs:
         parser.error("--sitstand policies use the unified 13D command obs (61D); add --new-cmd-obs")
-    if (args.kick_left or args.kick_right or args.roulade) and not args.new_cmd_obs:
-        parser.error("--kick-left/--kick-right/--roulade policies use the unified 13D command obs (61D); add --new-cmd-obs")
-    if (args.kick_left or args.kick_right or args.roulade) and args.roller:
-        parser.error("kick/roulade policies are trained on the walking robot, not the roller model")
+    if (args.kick_left or args.kick_right or args.roulade or args.playdead) and not args.new_cmd_obs:
+        parser.error("--kick-left/--kick-right/--roulade/--playdead policies use the unified 13D command obs (61D); add --new-cmd-obs")
+    if (args.kick_left or args.kick_right or args.roulade or args.playdead) and args.roller:
+        parser.error("kick/roulade/playdead policies are trained on the walking robot, not the roller model")
 
     # Parse delay arguments
     delay_min_lag = 0
@@ -880,6 +923,9 @@ def main():
     print(f"Loading MuJoCo model from: {xml_path}")
     model = mujoco.MjModel.from_xml_path(xml_path)
     model.opt.timestep = 0.005
+    if args.video:
+        model.vis.global_.offwidth = max(model.vis.global_.offwidth, args.video_width)
+        model.vis.global_.offheight = max(model.vis.global_.offheight, args.video_height)
     data = mujoco.MjData(model)
 
     # XL330 firmware current limit. The motors saturate current at ~1.75 A; since
@@ -936,8 +982,10 @@ def main():
         kick_left_onnx_path=args.kick_left,
         kick_right_onnx_path=args.kick_right,
         roulade_onnx_path=args.roulade,
+        playdead_onnx_path=args.playdead,
         kick_duration=args.kick_duration,
         roulade_duration=args.roulade_duration,
+        playdead_duration=args.playdead_duration,
     )
     policy.set_vel_cmd(args.lin_vel_x, args.lin_vel_y, args.ang_vel_z)
 
@@ -1015,7 +1063,7 @@ def main():
         print(f"{kind} policy: loaded  (press Y to toggle)")
     if policy.slope_session:
         print(f"Slope policy: loaded  (press Y to toggle, passive descent)")
-    _behavior_keys = {"kick_left": "K", "kick_right": "L", "roulade": "R"}
+    _behavior_keys = {"kick_left": "K", "kick_right": "L", "roulade": "R", "playdead": "D"}
     for _name in policy.behavior_sessions:
         print(f"{_name} policy: loaded  (press {_behavior_keys[_name]}, "
               f"auto-return after {policy.behavior_durations[_name]:.1f}s)")
@@ -1035,11 +1083,34 @@ def main():
 
     csv_data = [] if args.save_csv else None
     recorded_observations = [] if args.record else None
-    policy_enabled = not args.record
+    policy_enabled = not args.record and not args.auto_playdead
     policy_enable_time = None
     original_kp = None
+    auto_playdead_fired = not args.auto_playdead
     if args.record:
         original_kp = model.actuator_gainprm[:, 0].copy()
+
+    video_writer = None
+    renderer = None
+    clip_cam = None
+    if args.video:
+        import imageio
+        renderer = mujoco.Renderer(model, height=args.video_height, width=args.video_width)
+        clip_cam = mujoco.MjvCamera()
+        mujoco.mjv_defaultFreeCamera(model, clip_cam)
+        clip_cam.azimuth = 150.0
+        clip_cam.elevation = -20.0
+        clip_cam.distance = 0.62
+        os.makedirs(os.path.dirname(os.path.abspath(args.video)) or ".", exist_ok=True)
+        video_writer = imageio.get_writer(
+            args.video,
+            fps=int(round(1.0 / control_dt)),
+            format="FFMPEG",
+            mode="I",
+            codec="libx264",
+            ffmpeg_params=["-pix_fmt", "yuv420p", "-crf", "18"],
+        )
+        print(f"Recording mp4 → {args.video} ({args.video_width}x{args.video_height} @ {int(round(1.0 / control_dt))} fps)")
 
     # Cache the trunk freejoint qvel address so the push handler can write to
     # the trunk's world-frame linear velocity directly (qvel[0..3]).
@@ -1135,6 +1206,8 @@ def main():
                 policy.trigger_behavior("kick_right")
             elif key == "r":
                 policy.trigger_behavior("roulade")
+            elif key == "d":
+                policy.trigger_behavior("playdead")
             elif key == "q":
                 quit_requested = True
                 print("Quit requested")
@@ -1202,6 +1275,11 @@ def main():
     print("  K:                kick with LEFT foot (requires --kick-left)")
     print("  L:                kick with RIGHT foot (requires --kick-right)")
     print("  R:                roulade / forward roll (requires --roulade)")
+    print("  D:                play dead (requires --playdead; D again to revive)")
+    if args.headless:
+        print(f"Headless clip: {args.video_seconds:.1f}s → {args.video}")
+        if args.auto_playdead:
+            print("  auto-playdead at t=0.5s")
     print(f"  P:                random push (trunk vel = {PUSH_MAX:.1f} m/s in random direction)")
     print("  Q:                quit")
     print("  [ Body pose mode — press B to toggle ]")
@@ -1218,8 +1296,32 @@ def main():
     print("  A / E:            head_roll ±step")
     print("  SPACE:            reset head offset to zero")
 
-    with TerminalInput() as term, \
-         mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False) as viewer:
+    class _NullTerm:
+        def get_keys(self):
+            return []
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            return False
+
+    class _HeadlessViewer:
+        def is_running(self):
+            return True
+        def sync(self):
+            return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            return False
+
+    term_ctx = _NullTerm() if args.headless else TerminalInput()
+    viewer_ctx = (
+        _HeadlessViewer()
+        if args.headless
+        else mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False)
+    )
+
+    with term_ctx as term, viewer_ctx as viewer:
         viewer.sync()
         start_time = time.time()
 
@@ -1250,6 +1352,16 @@ def main():
                                 model.actuator_biasprm[i, 1] = -kp
                             print("Policy inference enabled (after 1s standby)")
                             print(f"  Restored original kp gains (range: [{original_kp.min():.2f}, {original_kp.max():.2f}])")
+
+                sim_t = control_step_count * control_dt
+                if args.auto_playdead and not auto_playdead_fired and sim_t >= 0.5:
+                    policy_enabled = True
+                    if policy.behavior_mode != "playdead":
+                        policy.trigger_behavior("playdead")
+                    auto_playdead_fired = True
+                    print("auto-playdead: triggered")
+                if args.headless and sim_t >= args.video_seconds:
+                    quit_requested = True
 
                 actual_dt = step_start - prev_step_time
                 prev_step_time = step_start
@@ -1347,17 +1459,28 @@ def main():
                 for _ in range(decimation):
                     mujoco.mj_step(model, data)
 
+                if renderer is not None and video_writer is not None and clip_cam is not None:
+                    clip_cam.lookat[:] = data.qpos[qpos_adr:qpos_adr + 3]
+                    clip_cam.lookat[2] += 0.02
+                    renderer.update_scene(data, camera=clip_cam)
+                    video_writer.append_data(np.asarray(renderer.render()))
+
                 viewer.sync()
 
                 elapsed = time.time() - step_start
-                sleep_time = control_dt - elapsed
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
+                if not args.headless:
+                    sleep_time = control_dt - elapsed
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
 
         except KeyboardInterrupt:
             print("\n\nKeyboardInterrupt received (Ctrl+C). Saving data...")
 
     print("\nInference stopped.")
+
+    if video_writer is not None:
+        video_writer.close()
+        print(f"Wrote clip: {args.video}")
 
     if csv_data is not None and len(csv_data) > 0:
         print(f"\nSaving {len(csv_data)} steps to: {args.save_csv}")

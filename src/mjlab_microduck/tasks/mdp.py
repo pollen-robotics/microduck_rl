@@ -5192,6 +5192,179 @@ def head_pose_tracking(
     return per_joint.mean(dim=-1)
 
 
+def body_supine_cos_from_quat(quat: torch.Tensor) -> torch.Tensor:
+    """World-z of body +X: +1 supine (belly up), −1 prone, 0 standing.
+
+    Play-dead is ON THE BACK. ``body_upright_linear`` / upright_cos cannot
+    tell that from a face-plant or a headstand: all three can look "inverted".
+    Face-up spawn is −90° pitch, which leaves body X pointing at the sky
+    (see ``set_random_ground_state``). R[2, 0] = 2 (xz − wy) for [w, x, y, z].
+    """
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    return torch.nan_to_num(2.0 * (x * z - w * y), nan=0.0)
+
+
+def _supine_cos(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    return body_supine_cos_from_quat(asset.data.root_link_quat_w)
+
+
+def _trunk_z(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    return torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+
+
+def _trunk_ang_norm(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    return torch.linalg.norm(
+        torch.nan_to_num(asset.data.root_link_ang_vel_w, nan=0.0), dim=-1
+    )
+
+
+def body_supine_linear(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """+1 fully supine (play-dead), 0 standing, −1 face-down.
+
+    Linear in pitch around standing, so a back-lean has gradient from t=0.
+    Face-down is the opposite sign — the policy is punished for a face-plant.
+    """
+    return _supine_cos(env, asset_cfg)
+
+
+def supine_gaussian(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    std: float = 0.45,
+) -> torch.Tensor:
+    """Sharp peak at fully supine (``supine_cos`` = +1)."""
+    err = 1.0 - _supine_cos(env, asset_cfg)
+    return torch.exp(-(err / std) ** 2)
+
+
+def playdead_height_gaussian(
+    env: ManagerBasedRlEnv,
+    target_height: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    std: float = 0.04,
+) -> torch.Tensor:
+    """Height Gaussian toward the dead rest, gated to the back side of horizontal.
+
+    Ungated, sitting (z ≈ 0.060 vs DEAD_Z ≈ 0.050) scores ~0.94 of the peak
+    while staying upright — the sit basin AGENTS.md warns about. Multiplying
+    by ``clamp(supine_cos, 0, 1)`` makes the peak available only on the back.
+    """
+    gate = torch.clamp(_supine_cos(env, asset_cfg), min=0.0)
+    z = _trunk_z(env, asset_cfg)
+    return gate * torch.exp(-((z - target_height) / std) ** 2)
+
+
+def playdead_height_l1(
+    env: ManagerBasedRlEnv,
+    target_height: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Gated L1 companion to ``playdead_height_gaussian`` (already ≤ 0)."""
+    gate = torch.clamp(_supine_cos(env, asset_cfg), min=0.0)
+    z = _trunk_z(env, asset_cfg)
+    return gate * (-torch.abs(z - target_height))
+
+
+def com_downward_velocity(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    min_height: float = 0.07,
+    max_vz: float = 0.25,
+    min_supine: float = 0.0,
+) -> torch.Tensor:
+    """Reward downward CoM velocity while still high AND already on the back side.
+
+    Zero below ``min_height`` so a dead duck cannot farm bounce-and-drop.
+    Zero at ``supine_cos <= min_supine`` so a polite sit cannot farm the drop.
+    ``max_vz`` caps the jackpot (explosive launch onto the back).
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    com_z = _trunk_z(env, asset_cfg)
+    vz = torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0)
+    above = (com_z > min_height).float()
+    on_back = (_supine_cos(env, asset_cfg) > min_supine).float()
+    return torch.clamp(-vz, min=0.0, max=max_vz) * above * on_back
+
+
+def playdead_hold(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    height_high: float = 0.08,
+    min_supine: float = 0.2,
+    vel_std: float = 0.4,
+) -> torch.Tensor:
+    """Stillness bonus only when already supine and low — the hold, not the fall."""
+    z = _trunk_z(env, asset_cfg)
+    dead = (z < height_high).float() * (_supine_cos(env, asset_cfg) > min_supine).float()
+    return dead * torch.exp(-(_trunk_ang_norm(env, asset_cfg) / vel_std) ** 2)
+
+
+def trunk_grounded_supine(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    min_supine: float = 0.2,
+) -> torch.Tensor:
+    """Trunk-terrain contact while supine (play-dead, not a polite sit)."""
+    if sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+    sensor = env.scene.sensors[sensor_name]
+    found = sensor.data.found
+    if found.dim() > 1:
+        found = found.sum(dim=-1)
+    has_contact = (found > 0).float()
+    on_back = (_supine_cos(env, asset_cfg) >= min_supine).float()
+    return has_contact * on_back
+
+
+def playdead_composite_from_values(
+    supine_cos: torch.Tensor,
+    z: torch.Tensor,
+    ang_norm: torch.Tensor,
+    target_height: float,
+    height_std: float = 0.04,
+    supine_std: float = 0.45,
+    vel_std: float = 0.4,
+) -> torch.Tensor:
+    """Product of Gaussians: height × supine × stillness.
+
+    Sitting / standing / face-down / side all collapse on at least one factor.
+    Broad stds so a nearly-dead pose still scores visibly (~0.2+).
+    """
+    height = torch.exp(-((z - target_height) / height_std) ** 2)
+    supine = torch.exp(-((1.0 - supine_cos) / supine_std) ** 2)
+    still = torch.exp(-(ang_norm / vel_std) ** 2)
+    return height * supine * still
+
+
+def playdead_composite(
+    env: ManagerBasedRlEnv,
+    target_height: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    height_std: float = 0.04,
+    supine_std: float = 0.45,
+    vel_std: float = 0.4,
+) -> torch.Tensor:
+    """Multiplicative goal-state score for play-dead (see ``playdead_composite_from_values``)."""
+    return playdead_composite_from_values(
+        _supine_cos(env, asset_cfg),
+        _trunk_z(env, asset_cfg),
+        _trunk_ang_norm(env, asset_cfg),
+        target_height=target_height,
+        height_std=height_std,
+        supine_std=supine_std,
+        vel_std=vel_std,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # NaN-safe wrappers for the sensor-derived critic observations.
 #
