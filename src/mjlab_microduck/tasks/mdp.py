@@ -11523,11 +11523,10 @@ _BACKROLL_TRUNK_LATCH_LO = math.radians(30.0)
 _BACKROLL_TRUNK_LATCH_HI = math.radians(260.0)
 _BACKROLL_HEAD_LATCH_LO = math.radians(100.0)
 _BACKROLL_HEAD_LATCH_HI = math.radians(300.0)
-# Once a repeat-mode roll makes any supported head contact, the policy has a
-# short grace window to rotate onto the flat head top.  Start the dwell gate at
-# phase zero so a rounded/side head-shell stall cannot wait until the old
-# 150-degree window before being charged.
-_BACKROLL_NON_TOP_HEAD_LO = 0.0
+# Once a repeat-mode roll reaches the measured head-transition window, the
+# policy has a short grace window to rotate onto the flat head top.  Keep the
+# phase qualification so early tuck contact is not mistaken for a stalled pivot.
+_BACKROLL_NON_TOP_HEAD_LO = math.radians(150.0)
 _BACKROLL_NON_TOP_HEAD_HI = math.radians(240.0)
 _BACKROLL_LANDING_ANGLE = math.radians(350.0)
 _BACKROLL_POTENTIAL_ANGLE = math.radians(300.0)
