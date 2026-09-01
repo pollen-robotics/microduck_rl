@@ -212,6 +212,9 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert cfg.curriculum["backroll_phase"].params["success_threshold"] == pytest.approx(
         0.70
     )
+    assert cfg.curriculum["backroll_phase"].params[
+        "required_consecutive_windows"
+    ] == 2
     assert cfg.rewards["backroll_completion_progress"].weight > cfg.rewards[
         "backroll_progress"
     ].weight
@@ -414,6 +417,35 @@ def test_repeated_curriculum_counts_the_stage_mastery_cycle_target(monkeypatch):
         joint_noise_std=0.0,
     )
     assert env._backroll_window_successes.item() == 1
+
+
+def test_repeated_curriculum_requires_two_consecutive_clean_mastery_windows():
+    env, _asset = _fake_env()
+    event_cfg = SimpleNamespace(params={})
+    env.event_manager = SimpleNamespace(
+        get_term_cfg=lambda _name: event_cfg,
+    )
+    stages = [
+        {"params": {"mastery_cycles": 1}},
+        {"params": {"mastery_cycles": 2}},
+    ]
+
+    for expected_stage in (0, 1):
+        env._backroll_window_episodes.fill_(4096)
+        env._backroll_window_successes.fill_(4096)
+        env._backroll_window_bad_states.zero_()
+        actual = mdp.grounded_backroll_curriculum(
+            env,
+            torch.tensor([0]),
+            event_name="set_grounded_backroll_state",
+            stages=stages,
+            required_consecutive_windows=2,
+        )
+        assert actual.item() == expected_stage
+        env.common_step_counter += 50
+
+    assert env._backroll_consecutive_mastery_windows == 0
+    assert event_cfg.params["mastery_cycles"] == 2
 
 
 def test_negative_body_y_advances_but_forward_rocking_cannot_farm(monkeypatch):

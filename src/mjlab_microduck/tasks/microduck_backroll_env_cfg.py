@@ -363,6 +363,7 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
         cfg.curriculum["backroll_phase"].params.update(
             stages=REPEATED_BACKROLL_CURRICULUM_STAGES,
             success_threshold=0.70,
+            required_consecutive_windows=2,
             speed_reward_name="backroll_speed_progress",
             speed_reward_weights=[1.0, 1.0, 1.5, 2.0, 3.0, 3.0],
             invalid_reward_name="backroll_invalid",

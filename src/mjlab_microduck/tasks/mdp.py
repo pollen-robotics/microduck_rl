@@ -11614,6 +11614,7 @@ def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
     env._backroll_window_episodes = torch.zeros((), dtype=torch.long, device=env.device)
     env._backroll_window_successes = torch.zeros((), dtype=torch.long, device=env.device)
     env._backroll_window_bad_states = torch.zeros((), dtype=torch.long, device=env.device)
+    env._backroll_consecutive_mastery_windows = 0
 
 
 def _grounded_backroll_cycle_is_sagittal(env: ManagerBasedRlEnv) -> torch.Tensor:
@@ -12281,14 +12282,17 @@ def grounded_backroll_curriculum(
     stages: list[dict],
     window_episodes: int = 4096,
     success_threshold: float = 0.70,
+    required_consecutive_windows: int = 1,
     speed_reward_name: Optional[str] = None,
     speed_reward_weights: Optional[list[float]] = None,
     invalid_reward_name: Optional[str] = None,
     invalid_reward_weights: Optional[list[float]] = None,
 ) -> torch.Tensor:
-    """Advance phase initialization only after a clean mastery window."""
+    """Advance phase initialization after enough consecutive clean windows."""
     del env_ids
     _grounded_backroll_state(env)
+    if required_consecutive_windows < 1:
+        raise ValueError("required_consecutive_windows must be at least one")
     stage = int(env._backroll_curriculum_stage)
     if env.common_step_counter % 50 == 0:
         episodes = int(env._backroll_window_episodes.item())
@@ -12296,13 +12300,22 @@ def grounded_backroll_curriculum(
             successes = int(env._backroll_window_successes.item())
             bad_states = int(env._backroll_window_bad_states.item())
             success_rate = successes / max(episodes, 1)
+            clean_mastery = success_rate >= success_threshold and bad_states == 0
+            if clean_mastery:
+                env._backroll_consecutive_mastery_windows = min(
+                    env._backroll_consecutive_mastery_windows + 1,
+                    required_consecutive_windows,
+                )
+            else:
+                env._backroll_consecutive_mastery_windows = 0
             if (
-                success_rate >= success_threshold
-                and bad_states == 0
+                env._backroll_consecutive_mastery_windows
+                >= required_consecutive_windows
                 and stage + 1 < len(stages)
             ):
                 stage += 1
                 env._backroll_curriculum_stage = stage
+                env._backroll_consecutive_mastery_windows = 0
             env._backroll_window_episodes.zero_()
             env._backroll_window_successes.zero_()
             env._backroll_window_bad_states.zero_()
