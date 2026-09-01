@@ -136,8 +136,8 @@ def main() -> int:
         env_cfg.terminations.clear()
     env_cfg.viewer.origin_type = type(env_cfg.viewer).OriginType.WORLD
     env_cfg.viewer.lookat = (0.0, 0.0, 0.10)
-    env_cfg.viewer.distance = 0.80
-    env_cfg.viewer.fovy = 35.0
+    env_cfg.viewer.distance = 0.48
+    env_cfg.viewer.fovy = 32.0
     env_cfg.viewer.azimuth = 135.0
     env_cfg.viewer.elevation = -18.0
     env_cfg.viewer.max_extra_envs = 0
