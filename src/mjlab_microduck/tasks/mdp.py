@@ -11718,11 +11718,14 @@ def _update_grounded_backroll_state(
     invalid_pose = (lateral_axis_z > _FLAT_ZERO) | (
         (upright < _BACKROLL_STALL_TILT_COS) & ~trunk & ~head & ~left_foot & ~right_foot
     )
+    repeat_cycle_stalled = env._backroll_repeat_mode & cycle_active
     stalled_invalid = (
         ~env._backroll_success
-        & (frontier < _BACKROLL_LANDING_ANGLE)
         & ~progressed
-        & invalid_pose
+        & (
+            ((frontier < _BACKROLL_LANDING_ANGLE) & invalid_pose)
+            | repeat_cycle_stalled
+        )
     )
     env._backroll_invalid_stall_steps = torch.where(
         stalled_invalid,

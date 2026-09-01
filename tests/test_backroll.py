@@ -478,6 +478,31 @@ def test_repeated_backroll_rejects_side_landing(monkeypatch):
     assert env._backroll_cycle_count.item() == 0
 
 
+def test_repeated_backroll_cannot_park_on_trunk_mid_cycle(monkeypatch):
+    env, asset = _fake_env()
+    env._backroll_repeat_mode[:] = True
+    env.scene.sensors["left_foot_ground_contact"].data.found[:] = 0.0
+    env.scene.sensors["right_foot_ground_contact"].data.found[:] = 0.0
+    env.scene.sensors["trunk_ground_contact"].data.found[:] = 1.0
+    env._roulade_accum[:] = math.radians(180.0)
+    env._roulade_max[:] = math.radians(180.0)
+    env._backroll_previous_frontier[:] = math.radians(180.0)
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+
+    stall_steps = math.ceil(mdp._BACKROLL_INVALID_STALL_SECONDS / env.step_dt)
+    for _ in range(stall_steps):
+        asset.data.root_link_ang_vel_b.zero_()
+        mdp.grounded_backroll_progress(env)
+        env.common_step_counter += 1
+
+    assert mdp.grounded_backroll_invalid_termination(env).item()
+
+
 def test_standing_cannot_farm_backroll_success(monkeypatch):
     env, _asset = _fake_env()
     monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
