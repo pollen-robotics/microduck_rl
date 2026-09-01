@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import shutil
 import subprocess
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import mjlab.tasks  # noqa: F401  # Populate the task registry.
@@ -25,6 +26,57 @@ OUTPUT_WIDTH = 1920
 OUTPUT_HEIGHT = 1080
 OUTPUT_FPS = 60.0
 POST_SUCCESS_HOLD_S = 0.75
+DIAGNOSTIC_MIN_SECONDS = 2.0
+DIAGNOSTIC_STUCK_SECONDS = 1.0
+DIAGNOSTIC_FRONTIER_EPSILON_RAD = math.radians(3.0)
+DIAGNOSTIC_ACTIVE_ANGULAR_RATE = 0.75
+DIAGNOSTIC_ACTIVE_VERTICAL_RATE = 0.03
+
+
+@dataclass
+class DiagnosticStuckDetector:
+    """Cut an incomplete rollout only after meaningful body motion has ended."""
+
+    min_steps: int
+    patience_steps: int
+    frontier_epsilon_rad: float = DIAGNOSTIC_FRONTIER_EPSILON_RAD
+    active_angular_rate: float = DIAGNOSTIC_ACTIVE_ANGULAR_RATE
+    active_vertical_rate: float = DIAGNOSTIC_ACTIVE_VERTICAL_RATE
+    best_frontier_rad: float = 0.0
+    last_cycle_count: int = 0
+    last_activity_step: int = 0
+
+    def update(
+        self,
+        *,
+        step: int,
+        frontier_rad: float,
+        cycle_count: int,
+        angular_speed: float,
+        vertical_speed: float,
+    ) -> bool:
+        """Return true once roll, recovery, and retry motion are all dormant."""
+        if cycle_count > self.last_cycle_count:
+            self.last_cycle_count = cycle_count
+            self.best_frontier_rad = frontier_rad
+            self.last_activity_step = step
+        elif frontier_rad >= self.best_frontier_rad + self.frontier_epsilon_rad:
+            self.best_frontier_rad = frontier_rad
+            self.last_activity_step = step
+
+        # A recovery can move opposite the rewarded backroll direction, so
+        # physical body rotation or upward motion also keeps the diagnostic
+        # alive. Joint jitter alone cannot pad a failed video indefinitely.
+        if (
+            angular_speed >= self.active_angular_rate
+            or abs(vertical_speed) >= self.active_vertical_rate
+        ):
+            self.last_activity_step = step
+
+        return (
+            step >= self.min_steps
+            and step - self.last_activity_step >= self.patience_steps
+        )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -209,12 +261,17 @@ def main() -> int:
     policy_fps = 1.0 / base_env.step_dt
     steps = round(args.duration / base_env.step_dt)
     hold_frames = round(POST_SUCCESS_HOLD_S * policy_fps)
+    stuck_detector = DiagnosticStuckDetector(
+        min_steps=round(DIAGNOSTIC_MIN_SECONDS / base_env.step_dt),
+        patience_steps=round(DIAGNOSTIC_STUCK_SECONDS / base_env.step_dt),
+    )
     writer: subprocess.Popen[bytes] | None = None
     last_frame: np.ndarray | None = None
     success = False
+    stuck_cut = False
 
     try:
-        for _ in range(steps):
+        for step in range(steps):
             with torch.inference_mode():
                 observations = env.get_observations()
                 actions = policy(observations)
@@ -243,6 +300,26 @@ def main() -> int:
             if success:
                 success = True
                 break
+            if args.allow_incomplete_diagnostic:
+                robot = base_env.scene["robot"]
+                env_index = args.env_index
+                frontier_rad = float(base_env._roulade_max[env_index].item())
+                cycle_count = int(base_env._backroll_cycle_count[env_index].item())
+                angular_speed = float(
+                    robot.data.root_link_ang_vel_b[env_index].norm().item()
+                )
+                vertical_speed = float(
+                    robot.data.root_link_lin_vel_w[env_index, 2].item()
+                )
+                stuck_cut = stuck_detector.update(
+                    step=step,
+                    frontier_rad=frontier_rad,
+                    cycle_count=cycle_count,
+                    angular_speed=angular_speed,
+                    vertical_speed=vertical_speed,
+                )
+                if stuck_cut:
+                    break
             if (
                 not args.allow_incomplete_diagnostic
                 and bool(base_env._backroll_invalid[args.env_index].item())
@@ -271,7 +348,12 @@ def main() -> int:
         raise RuntimeError(f"ffmpeg failed with exit code {return_code}")
     output.parent.mkdir(parents=True, exist_ok=True)
     os.replace(temporary_output, output)
-    kind = "proof" if success else "incomplete diagnostic"
+    if success:
+        kind = "proof"
+    elif stuck_cut:
+        kind = "stuck diagnostic"
+    else:
+        kind = "incomplete diagnostic"
     print(f"[grounded-backroll-video] wrote {kind}: {output}")
     return 0
 
