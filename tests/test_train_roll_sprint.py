@@ -136,6 +136,7 @@ def test_training_command_forwards_seed_exactly_once(monkeypatch, tmp_path: Path
         "exploration_std": None,
         "reset_optimizer": False,
         "optimizer_learning_rate": 5e-6,
+        "neutralize_direction_cue": False,
     }
 
 
@@ -184,3 +185,30 @@ def test_reverse_skill_staging_can_reopen_exploration_and_reset_adam(
     assert staged["optimizer_state_dict"]["param_groups"][0]["lr"] == 2.5e-5
     assert staged["iter"] == 0
     assert staged["infos"]["env_state"]["common_step_counter"] == 0
+
+
+def test_reverse_skill_staging_neutralizes_only_new_direction_cue_column(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.pt"
+    destination = tmp_path / "staged.pt"
+    first_layer = torch.arange(4 * 61, dtype=torch.float32).reshape(4, 61)
+    torch.save(
+        {
+            "actor_state_dict": {
+                "mlp.0.weight": first_layer.clone(),
+                "distribution.std_param": torch.tensor([0.2]),
+            },
+            "critic_state_dict": {"value.weight": torch.tensor([[2.0]])},
+            "optimizer_state_dict": {"state": {}, "param_groups": []},
+        },
+        source,
+    )
+
+    MODULE.stage_checkpoint(source, destination, neutralize_direction_cue=True)
+
+    staged = torch.load(destination, map_location="cpu", weights_only=False)
+    weight = staged["actor_state_dict"]["mlp.0.weight"]
+    assert torch.count_nonzero(weight[:, MODULE.DIRECTION_CUE_OBS_INDEX]) == 0
+    assert torch.equal(weight[:, MODULE.DIRECTION_CUE_OBS_INDEX - 1], first_layer[:, 54])
+    assert torch.equal(weight[:, MODULE.DIRECTION_CUE_OBS_INDEX + 1], first_layer[:, 56])

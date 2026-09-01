@@ -33,6 +33,7 @@ DEFAULT_SOURCE = (
     / "2026-08-30_07-54-17_a35_round1_sol_stratified_hard_1024_gate10"
     / "model_9.pt"
 )
+DIRECTION_CUE_OBS_INDEX = 55
 
 
 def _nonnegative_int(value: str) -> int:
@@ -56,6 +57,7 @@ def stage_checkpoint(
     exploration_std: float | None = None,
     reset_optimizer: bool = False,
     optimizer_learning_rate: float | None = None,
+    neutralize_direction_cue: bool = False,
 ) -> None:
     """Copy a PPO snapshot and optionally reopen exploration for a new skill."""
     import torch
@@ -82,6 +84,21 @@ def stage_checkpoint(
             raise SystemExit("Checkpoint actor has no distribution.std_param")
         for key in std_keys:
             payload["actor_state_dict"][key].fill_(exploration_std)
+    if neutralize_direction_cue:
+        cue_columns = 0
+        for key, value in payload["actor_state_dict"].items():
+            if (
+                key.endswith("mlp.0.weight")
+                and isinstance(value, torch.Tensor)
+                and value.ndim == 2
+                and value.shape[1] > DIRECTION_CUE_OBS_INDEX
+            ):
+                value[:, DIRECTION_CUE_OBS_INDEX] = 0.0
+                cue_columns += 1
+        if cue_columns == 0:
+            raise SystemExit(
+                "Checkpoint actor has no compatible first-layer direction cue"
+            )
     optimizer = payload["optimizer_state_dict"]
     if reset_optimizer:
         optimizer["state"] = {}
@@ -124,6 +141,14 @@ def _parse_args() -> argparse.Namespace:
         help="Discard inherited Adam moments while retaining policy and critic weights.",
     )
     parser.add_argument(
+        "--neutralize-direction-cue",
+        action="store_true",
+        help=(
+            "Zero the new reverse direction-cue input column during warm-start "
+            "staging so an old zero-padded policy keeps its launch behavior."
+        ),
+    )
+    parser.add_argument(
         "--save-interval",
         type=int,
         default=100,
@@ -151,6 +176,7 @@ def main() -> int:
         exploration_std=args.exploration_std,
         reset_optimizer=args.reset_optimizer,
         optimizer_learning_rate=args.learning_rate,
+        neutralize_direction_cue=args.neutralize_direction_cue,
     )
 
     train_exe = REPO_ROOT / ".venv" / (
