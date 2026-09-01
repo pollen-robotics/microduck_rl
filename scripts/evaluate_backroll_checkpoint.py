@@ -188,6 +188,9 @@ def evaluate_checkpoint(
     )
 
     base_env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=None)
+    # Apply the configured deterministic reset before measuring the rollout;
+    # construction alone retains the compiled default state.
+    base_env.reset()
     env, policy = _load_policy(base_env, checkpoint, device=device)
     robot = base_env.scene["robot"]
     start_xy = robot.data.root_link_pos_w[:, :2].clone()

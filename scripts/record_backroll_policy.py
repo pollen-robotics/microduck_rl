@@ -252,6 +252,10 @@ def main() -> int:
         device=args.device,
         render_mode="rgb_array",
     )
+    # Manager construction leaves the compiled default robot state in place;
+    # apply the configured standing/repeated reset before the first rollout.
+    # Without this, repeated recordings silently run with repeat_mode=False.
+    base_env.reset()
     env, policy = _load_policy(
         base_env,
         checkpoint,

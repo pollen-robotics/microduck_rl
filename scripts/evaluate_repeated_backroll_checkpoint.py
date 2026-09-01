@@ -142,6 +142,10 @@ def evaluate_checkpoint(
     )
 
     base_env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=None)
+    # Apply the deterministic standing/precontact reset. Environment
+    # construction alone does not run the configured reset event, which would
+    # leave repeat_mode disabled and make every repeated-cycle audit invalid.
+    base_env.reset()
     if reset_mode == "precontact":
         # A phase-start audit must prove physical contact acquisition rather
         # than inheriting the reset helper's synthetic prerequisite latches.
