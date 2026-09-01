@@ -11604,10 +11604,27 @@ def _grounded_backroll_positive_reward_valid(env: ManagerBasedRlEnv) -> torch.Te
 
 
 def _grounded_backroll_sagittal_purity(asset: Entity) -> torch.Tensor:
-    """Fraction of angular energy rotating backward about the desired body-y axis."""
+    """Backward body-y rotation that also stays in the world sagittal plane."""
     omega = torch.nan_to_num(asset.data.root_link_ang_vel_b, nan=0.0)
     omega_back = torch.clamp(-omega[:, 1], min=0.0)
-    return omega_back.pow(2) / torch.clamp(omega.pow(2).sum(dim=-1), min=1.0e-6)
+    angular_purity = omega_back.pow(2) / torch.clamp(
+        omega.pow(2).sum(dim=-1), min=1.0e-6
+    )
+
+    # Body-frame axis purity alone is insufficient: after tipping onto a
+    # shoulder, body-y approaches world vertical and a geometrically wrong
+    # side-spin can still look like pure body-y rotation. Preserve ordinary
+    # reset noise through 5 degrees, then smoothly remove positive shaping
+    # before the 20-degree lateral tilt where the maneuver is visibly leaving
+    # the sagittal plane.
+    lateral_axis_z = torch.nan_to_num(
+        _lateral_axis_z(asset.data.root_link_quat_w), nan=1.0
+    ).abs()
+    full = math.sin(math.radians(5.0))
+    zero = math.sin(math.radians(20.0))
+    t = torch.clamp((zero - lateral_axis_z) / (zero - full), 0.0, 1.0)
+    world_flatness = t * t * (3.0 - 2.0 * t)
+    return angular_purity * world_flatness
 
 
 def _update_grounded_backroll_state(

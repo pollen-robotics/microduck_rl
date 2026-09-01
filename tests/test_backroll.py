@@ -484,6 +484,7 @@ def test_repeated_positive_rewards_stop_after_cumulative_offaxis_escape(monkeypa
 
 def test_backward_progress_is_scaled_by_instantaneous_sagittal_purity():
     _env, asset = _fake_env()
+    asset.data.root_link_quat_w[:] = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
     asset.data.root_link_ang_vel_b[:] = torch.tensor([[0.0, -6.0, 0.0]])
     pure = mdp._grounded_backroll_sagittal_purity(asset)
     asset.data.root_link_ang_vel_b[:] = torch.tensor([[6.0, -6.0, 0.0]])
@@ -494,6 +495,26 @@ def test_backward_progress_is_scaled_by_instantaneous_sagittal_purity():
     assert pure.item() == pytest.approx(1.0)
     assert mixed.item() == pytest.approx(0.5)
     assert wrong_axis.item() == 0.0
+
+
+def test_backward_purity_fades_before_the_robot_can_side_roll():
+    _env, asset = _fake_env()
+    asset.data.root_link_ang_vel_b[:] = torch.tensor([[0.0, -6.0, 0.0]])
+
+    def roll_quaternion(degrees: float) -> torch.Tensor:
+        half = math.radians(degrees) * 0.5
+        return torch.tensor([[math.cos(half), math.sin(half), 0.0, 0.0]])
+
+    asset.data.root_link_quat_w[:] = roll_quaternion(5.0)
+    clean = mdp._grounded_backroll_sagittal_purity(asset)
+    asset.data.root_link_quat_w[:] = roll_quaternion(12.5)
+    fading = mdp._grounded_backroll_sagittal_purity(asset)
+    asset.data.root_link_quat_w[:] = roll_quaternion(20.0)
+    escaped = mdp._grounded_backroll_sagittal_purity(asset)
+
+    assert clean.item() == pytest.approx(1.0)
+    assert 0.0 < fading.item() < 1.0
+    assert escaped.item() == pytest.approx(0.0, abs=1.0e-6)
 
 
 def test_ordered_contact_rewards_are_one_shot_latches(monkeypatch):
