@@ -662,7 +662,10 @@ def test_completion_push_requires_head_latch_and_only_pays_new_frontier(monkeypa
 def test_head_alignment_progress_is_active_only_and_signed(monkeypatch):
     env, asset = _fake_env()
     env._backroll_repeat_mode[:] = True
-    env._backroll_trunk_latch[:] = True
+    # Head-top alignment is a transition guide for the measured head-only
+    # pivot window; it must not be gated out when the trunk sensor never
+    # latches, while the physical completion gate remains unchanged.
+    env._backroll_trunk_latch[:] = False
     env._roulade_accum[:] = math.radians(180.0)
     env._roulade_max[:] = math.radians(180.0)
     env._backroll_previous_frontier[:] = math.radians(180.0)

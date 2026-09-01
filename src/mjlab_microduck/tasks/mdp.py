@@ -12133,7 +12133,6 @@ def _update_grounded_backroll_state(
         env._backroll_repeat_mode
         & ~recovery_before
         & ~env._backroll_invalid
-        & env._backroll_trunk_latch
         & head
         & (frontier >= _BACKROLL_NON_TOP_HEAD_LO)
         & (frontier <= _BACKROLL_NON_TOP_HEAD_HI)
