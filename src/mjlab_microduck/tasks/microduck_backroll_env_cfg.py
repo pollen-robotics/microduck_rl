@@ -132,7 +132,9 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "reference_state_prob": 1.0,
             "reference_phase_range_deg": (180.0, 180.0),
             "reference_source_seed": 10,
-            "yaw_range": (-math.pi, math.pi),
+            # Keep the first repeated handoff in the measured aligned launch
+            # basin; broad yaw DR is introduced only after the second stage.
+            "yaw_range": (0.0, 0.0),
             "recovery_enabled": False,
             "ground_recovery_prob": 0.0,
             "mastery_cycles": 1,
@@ -151,7 +153,10 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "reference_state_prob": 0.25,
             "reference_phase_range_deg": (0.0, 360.0),
             "reference_source_seed": None,
-            "yaw_range": (-math.pi, math.pi),
+            # Preserve the aligned sagittal basin through the early repeat
+            # bridge; later stages reintroduce yaw robustness once chaining is
+            # demonstrated.
+            "yaw_range": (0.0, 0.0),
             "recovery_enabled": False,
             "ground_recovery_prob": 0.0,
             "mastery_cycles": 1,

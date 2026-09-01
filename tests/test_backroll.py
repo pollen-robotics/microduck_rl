@@ -200,6 +200,10 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
     ] == [False, True, True, True, True, True]
     assert [
+        stage["params"]["yaw_range"]
+        for stage in REPEATED_BACKROLL_CURRICULUM_STAGES[:3]
+    ] == [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)]
+    assert [
         stage["params"]["mastery_cycles"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
     ] == [1, 1, 1, 1, 2, 3]
