@@ -549,41 +549,42 @@ def make_microduck_backroll_sprint_env_cfg(
             microduck_mdp.roll_sprint_backroll_direction_flag
         )
         cfg.observations[group].terms["body_command"].params = {"dim": 6}
-    # Reverse discovery needs many direction-matched mid-roll examples.  Keep
-    # a small standing bucket for launch learning, but avoid letting the
-    # easier self-right-only basin dominate the first policy updates.
+    # Reverse discovery needs late, direction-matched mid-roll examples so the
+    # first updates witness a complete backroll rather than only a fall and
+    # recovery.  Keep a small standing bucket for launch learning, then move
+    # toward standing starts after the completion transition is learned.
     # Give both reset buckets a small, direction-matched launch velocity.  A
     # standing robot otherwise has no observable cue that this dedicated
     # policy must choose the reverse roll sign, while mid-roll starts should
     # carry enough course-aligned momentum to keep the late-roll lesson alive.
     reset_params["forward_vel_range"] = (0.08, 0.20)
-    reset_params["midroll_forward_vel_range"] = (0.20, 0.50)
-    # A90 learned repeated recovery but did not complete a reverse cycle by
-    # iteration 400. Keep recovery examples available, while making late
-    # mid-roll states the dominant early discovery signal and reducing forced
-    # lane-return starts that can trap the actor in a recovery loop.
+    reset_params["midroll_forward_vel_range"] = (0.25, 0.65)
+    # A91 learned repeated recovery and directional partial progress but did
+    # not complete a reverse cycle by iteration 290.  Start the next run near
+    # the head-over endpoint to expose the completion and recovery transition,
+    # while retaining a small standing bucket for learning the launch.
     reset_params["recovery_road_return_prob"] = 0.15
     reset_params["heading_return_prob"] = 0.05
     reset_params.update(
-        midroll_pitch_min=math.radians(280.0),
-        midroll_pitch_max=math.radians(350.0),
-        midroll_omega_range=(2.5, 5.0),
+        midroll_pitch_min=math.radians(320.0),
+        midroll_pitch_max=math.radians(355.0),
+        midroll_omega_range=(3.0, 5.5),
     )
     if not play:
         reset_params.update(
-            standing_prob=0.30,
-            midroll_prob=0.55,
-            postroll_prob=0.05,
-            crouch_prob=0.05,
-            ground_recovery_prob=0.05,
+            standing_prob=0.15,
+            midroll_prob=0.75,
+            postroll_prob=0.04,
+            crouch_prob=0.03,
+            ground_recovery_prob=0.03,
         )
         spawn_stages = cfg.curriculum["roll_sprint_spawn_mix"].params[
             "param_stages"
         ]
         stage_mixes = (
-            ((0.30, 0.55, 0.05, 0.05, 0.05), (280.0, 350.0, (2.5, 5.0))),
-            ((0.35, 0.50, 0.05, 0.05, 0.05), (220.0, 350.0, (1.5, 4.5))),
-            ((0.45, 0.35, 0.10, 0.05, 0.05), (100.0, 340.0, (0.5, 3.0))),
+            ((0.15, 0.75, 0.04, 0.03, 0.03), (320.0, 355.0, (3.0, 5.5))),
+            ((0.25, 0.65, 0.05, 0.03, 0.02), (260.0, 350.0, (2.0, 5.0))),
+            ((0.40, 0.45, 0.08, 0.04, 0.03), (140.0, 340.0, (0.75, 3.5))),
             ((0.65, 0.10, 0.10, 0.05, 0.10), (50.0, 340.0, (0.0, 3.0))),
         )
         for stage, (mix, roll_window) in zip(spawn_stages, stage_mixes, strict=True):
@@ -602,11 +603,11 @@ def make_microduck_backroll_sprint_env_cfg(
     # Backroll discovery needs more dense supported-rotation signal than a
     # continuation of an already learned forward roll. It remains far below
     # the valid frontier objective and decays once complete backrolls emerge.
-    cfg.rewards["roll_sprint_progress"].weight = 16.0
+    cfg.rewards["roll_sprint_progress"].weight = 24.0
     cfg.curriculum["roll_sprint_progress_weight"].params["weight_stages"] = [
-        {"step": 0, "weight": 16.0},
-        {"step": 300 * 24, "weight": 12.0},
-        {"step": 800 * 24, "weight": 6.0},
+        {"step": 0, "weight": 24.0},
+        {"step": 300 * 24, "weight": 16.0},
+        {"step": 800 * 24, "weight": 8.0},
         {"step": 1500 * 24, "weight": 2.0},
     ]
     cfg.rewards["roll_sprint_head_pivot"].weight = 0.5
@@ -615,14 +616,14 @@ def make_microduck_backroll_sprint_env_cfg(
         {"step": 1000 * 24, "weight": 0.25},
         {"step": 3000 * 24, "weight": 0.10},
     ]
-    cfg.rewards["roll_sprint_directional_bootstrap"].weight = 20.0
+    cfg.rewards["roll_sprint_directional_bootstrap"].weight = 24.0
     cfg.curriculum["roll_sprint_directional_bootstrap_weight"] = (
         CurriculumTermCfg(
             func=microduck_mdp.reward_weight,
             params={
                 "reward_name": "roll_sprint_directional_bootstrap",
                 "weight_stages": [
-                    {"step": 0, "weight": 20.0},
+                    {"step": 0, "weight": 24.0},
                     {"step": 300 * 24, "weight": 12.0},
                     {"step": 800 * 24, "weight": 4.0},
                     {"step": 1200 * 24, "weight": 0.0},
@@ -638,8 +639,8 @@ def make_microduck_backroll_sprint_env_cfg(
             "backroll_self_right_upright_weight",
             "roll_sprint_self_right_upright",
             [
-                {"step": 0, "weight": 3.0},
-                {"step": 150 * 24, "weight": 1.0},
+                {"step": 0, "weight": 2.0},
+                {"step": 150 * 24, "weight": 0.75},
                 {"step": 500 * 24, "weight": 0.5},
             ],
         ),
@@ -647,9 +648,9 @@ def make_microduck_backroll_sprint_env_cfg(
             "backroll_self_right_height_weight",
             "roll_sprint_self_right_height",
             [
-                {"step": 0, "weight": 12.0},
-                {"step": 150 * 24, "weight": 5.0},
-                {"step": 500 * 24, "weight": 2.0},
+                {"step": 0, "weight": 5.0},
+                {"step": 150 * 24, "weight": 2.0},
+                {"step": 500 * 24, "weight": 1.0},
             ],
         ),
     ):
