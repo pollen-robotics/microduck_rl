@@ -97,11 +97,12 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "midroll_omega_range": (0.0, 2.0),
             "joint_noise_std": 0.0,
             "synthesize_contact_latches": True,
-            # Use one coherent, measured post-contact pivot state for half of
-            # the midroll bucket.  Mixing distinct 140/180 degree states made
-            # standing starts escape through the shoulder/yaw basin.
-            "reference_state_prob": 0.50,
-            "reference_phase_range_deg": (180.0, 180.0),
+            # Always use the two coherent, measured champion states around
+            # the head-contact transition.  The 140-degree precontact row
+            # bridges into the 180-degree pivot row; late random starts skip
+            # the window where head-alignment shaping can provide a gradient.
+            "reference_state_prob": 1.0,
+            "reference_phase_range_deg": (140.0, 180.0),
             "reference_source_seed": 10,
             "yaw_range": (-math.radians(20.0), math.radians(20.0)),
             "recovery_enabled": False,
