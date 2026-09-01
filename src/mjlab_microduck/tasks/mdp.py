@@ -11589,11 +11589,13 @@ def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
     env._backroll_frontier_delta = z.clone()
     env._backroll_cycle_count = i.clone()
     env._backroll_mastery_cycles = torch.ones_like(i)
+    env._backroll_start_is_standing = b.clone()
     env._backroll_cycle_max_lateral_axis_z = z.clone()
     env._backroll_cycle_offaxis_rotation = z.clone()
     env._backroll_episode_max_lateral_axis_z = z.clone()
     env._backroll_episode_max_offaxis_rotation = z.clone()
     env._backroll_recovery_active = b.clone()
+    env._backroll_recovery_enabled = b.clone()
     env._backroll_recovery_used = b.clone()
     env._backroll_recovery_success_now = b.clone()
     env._backroll_recovery_failed = b.clone()
@@ -11614,6 +11616,12 @@ def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
     env._backroll_window_episodes = torch.zeros((), dtype=torch.long, device=env.device)
     env._backroll_window_successes = torch.zeros((), dtype=torch.long, device=env.device)
     env._backroll_window_bad_states = torch.zeros((), dtype=torch.long, device=env.device)
+    env._backroll_window_standing_episodes = torch.zeros(
+        (), dtype=torch.long, device=env.device
+    )
+    env._backroll_window_standing_successes = torch.zeros(
+        (), dtype=torch.long, device=env.device
+    )
     env._backroll_consecutive_mastery_windows = 0
 
 
@@ -11953,6 +11961,7 @@ def _update_grounded_backroll_state(
     ) & ~recovery_before
     start_recovery = (
         env._backroll_repeat_mode
+        & env._backroll_recovery_enabled
         & cycle_invalid_now
         & ~env._backroll_recovery_used
     )
@@ -12109,6 +12118,7 @@ def reset_grounded_backroll_state(
     tuck_factor_range: tuple = (0.5, 1.0),
     joint_noise_std: float = 0.04,
     repeat_mode: bool = False,
+    recovery_enabled: bool = True,
     mastery_cycles: int = 1,
     synthesize_contact_latches: bool = True,
     ground_recovery_prob: float = 0.0,
@@ -12136,6 +12146,11 @@ def reset_grounded_backroll_state(
             env._backroll_success[previous_ids],
         )
         env._backroll_window_successes += previous_success.sum()
+        previous_standing = env._backroll_start_is_standing[previous_ids]
+        env._backroll_window_standing_episodes += previous_standing.sum()
+        env._backroll_window_standing_successes += (
+            previous_success & previous_standing
+        ).sum()
         finite = torch.isfinite(env.sim.data.qpos[previous_ids]).all(dim=1) & torch.isfinite(
             env.sim.data.qvel[previous_ids]
         ).all(dim=1)
@@ -12151,6 +12166,7 @@ def reset_grounded_backroll_state(
         raise ValueError("ground_z_range must be a positive ordered pair")
     ground_mask = (
         repeat_mode
+        & recovery_enabled
         & (torch.rand(len(env_ids), device=env.device) < ground_recovery_prob)
     )
     regular_ids = env_ids[~ground_mask]
@@ -12180,6 +12196,7 @@ def reset_grounded_backroll_state(
     spawn_angle = torch.zeros(len(env_ids), device=env.device)
     spawn_angle[~ground_mask] = env._roulade_accum[regular_ids]
     is_midroll = spawn_angle > 0.0
+    env._backroll_start_is_standing[env_ids] = ~ground_mask & ~is_midroll
     if synthesize_contact_latches:
         env._backroll_trunk_latch[env_ids] = is_midroll & (
             spawn_angle >= _BACKROLL_TRUNK_LATCH_LO
@@ -12199,6 +12216,7 @@ def reset_grounded_backroll_state(
     env._backroll_invalid_now[env_ids] = False
     env._backroll_started[env_ids] = True
     env._backroll_repeat_mode[env_ids] = repeat_mode
+    env._backroll_recovery_enabled[env_ids] = repeat_mode and recovery_enabled
     env._backroll_air_steps[env_ids] = 0
     env._backroll_max_air_steps[env_ids] = 0
     env._backroll_landing_hold_steps[env_ids] = 0
@@ -12283,6 +12301,7 @@ def grounded_backroll_curriculum(
     window_episodes: int = 4096,
     success_threshold: float = 0.70,
     required_consecutive_windows: int = 1,
+    standing_only_mastery: bool = False,
     speed_reward_name: Optional[str] = None,
     speed_reward_weights: Optional[list[float]] = None,
     invalid_reward_name: Optional[str] = None,
@@ -12295,9 +12314,21 @@ def grounded_backroll_curriculum(
         raise ValueError("required_consecutive_windows must be at least one")
     stage = int(env._backroll_curriculum_stage)
     if env.common_step_counter % 50 == 0:
-        episodes = int(env._backroll_window_episodes.item())
+        episodes = int(
+            (
+                env._backroll_window_standing_episodes
+                if standing_only_mastery
+                else env._backroll_window_episodes
+            ).item()
+        )
         if episodes >= window_episodes:
-            successes = int(env._backroll_window_successes.item())
+            successes = int(
+                (
+                    env._backroll_window_standing_successes
+                    if standing_only_mastery
+                    else env._backroll_window_successes
+                ).item()
+            )
             bad_states = int(env._backroll_window_bad_states.item())
             success_rate = successes / max(episodes, 1)
             clean_mastery = success_rate >= success_threshold and bad_states == 0
@@ -12319,6 +12350,8 @@ def grounded_backroll_curriculum(
             env._backroll_window_episodes.zero_()
             env._backroll_window_successes.zero_()
             env._backroll_window_bad_states.zero_()
+            env._backroll_window_standing_episodes.zero_()
+            env._backroll_window_standing_successes.zero_()
     event_cfg = env.event_manager.get_term_cfg(event_name)
     event_cfg.params.update(stages[stage]["params"])
     if speed_reward_name is not None:

@@ -69,6 +69,7 @@ def _fake_env():
     )
     mdp._grounded_backroll_state(env)
     env._roulade_roll_direction[:] = -1.0
+    env._backroll_recovery_enabled[:] = True
     return env, asset
 
 
@@ -185,7 +186,7 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert [
         stage["params"]["standing_prob"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
-    ] == [0.20, 0.30, 0.40, 0.60, 0.85, 1.0]
+    ] == [0.50, 0.60, 0.70, 0.80, 0.90, 1.0]
     assert [
         stage["params"]["mastery_cycles"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
@@ -209,12 +210,17 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
         stage["params"]["ground_recovery_prob"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
     ] == [0.0, 0.0, 0.0, 0.05, 0.10, 0.20]
+    assert [
+        stage["params"]["recovery_enabled"]
+        for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
+    ] == [False, False, False, True, True, True]
     assert cfg.curriculum["backroll_phase"].params["success_threshold"] == pytest.approx(
         0.70
     )
     assert cfg.curriculum["backroll_phase"].params[
         "required_consecutive_windows"
     ] == 2
+    assert cfg.curriculum["backroll_phase"].params["standing_only_mastery"] is True
     assert cfg.rewards["backroll_completion_progress"].weight > cfg.rewards[
         "backroll_progress"
     ].weight
@@ -446,6 +452,59 @@ def test_repeated_curriculum_requires_two_consecutive_clean_mastery_windows():
 
     assert env._backroll_consecutive_mastery_windows == 0
     assert event_cfg.params["mastery_cycles"] == 2
+
+
+def test_repeated_curriculum_cannot_advance_from_phase_successes_alone():
+    env, _asset = _fake_env()
+    event_cfg = SimpleNamespace(params={})
+    env.event_manager = SimpleNamespace(
+        get_term_cfg=lambda _name: event_cfg,
+    )
+    stages = [
+        {"params": {"mastery_cycles": 1}},
+        {"params": {"mastery_cycles": 2}},
+    ]
+    env._backroll_window_episodes.fill_(8192)
+    env._backroll_window_successes.fill_(8192)
+    env._backroll_window_standing_episodes.fill_(4096)
+    env._backroll_window_standing_successes.zero_()
+
+    actual = mdp.grounded_backroll_curriculum(
+        env,
+        torch.tensor([0]),
+        event_name="set_grounded_backroll_state",
+        stages=stages,
+        standing_only_mastery=True,
+    )
+
+    assert actual.item() == 0.0
+    assert env._backroll_curriculum_stage == 0
+
+
+def test_repeated_strict_roll_stage_terminates_failure_before_recovery(monkeypatch):
+    env, asset = _fake_env()
+    env._backroll_repeat_mode[:] = True
+    env._backroll_recovery_enabled[:] = False
+    env._roulade_accum[:] = math.radians(90.0)
+    env._roulade_max[:] = math.radians(90.0)
+    env._backroll_previous_frontier[:] = math.radians(90.0)
+    env._backroll_cycle_offaxis_rotation[:] = (
+        mdp._BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION + math.radians(1.0)
+    )
+    asset.data.root_link_ang_vel_b.zero_()
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+
+    mdp.grounded_backroll_progress(env)
+
+    assert env._backroll_invalid.item()
+    assert not env._backroll_recovery_active.item()
+    assert env._backroll_recovery_attempt_count.item() == 0.0
+    assert mdp.grounded_backroll_invalid_termination(env).item()
 
 
 def test_negative_body_y_advances_but_forward_rocking_cannot_farm(monkeypatch):
