@@ -33,7 +33,8 @@ DEFAULT_SOURCE = (
     / "2026-08-30_07-54-17_a35_round1_sol_stratified_hard_1024_gate10"
     / "model_9.pt"
 )
-DIRECTION_CUE_OBS_INDEX = 55
+ACTOR_DIRECTION_CUE_OBS_INDEX = 55
+CRITIC_DIRECTION_CUE_OBS_INDEX = 68
 
 
 def _nonnegative_int(value: str) -> int:
@@ -91,9 +92,18 @@ def stage_checkpoint(
                 key.endswith("mlp.0.weight")
                 and isinstance(value, torch.Tensor)
                 and value.ndim == 2
-                and value.shape[1] > DIRECTION_CUE_OBS_INDEX
+                and value.shape[1] > ACTOR_DIRECTION_CUE_OBS_INDEX
             ):
-                value[:, DIRECTION_CUE_OBS_INDEX] = 0.0
+                value[:, ACTOR_DIRECTION_CUE_OBS_INDEX] = 0.0
+                cue_columns += 1
+        for key, value in payload["critic_state_dict"].items():
+            if (
+                key.endswith("mlp.0.weight")
+                and isinstance(value, torch.Tensor)
+                and value.ndim == 2
+                and value.shape[1] > CRITIC_DIRECTION_CUE_OBS_INDEX
+            ):
+                value[:, CRITIC_DIRECTION_CUE_OBS_INDEX] = 0.0
                 cue_columns += 1
         if cue_columns == 0:
             raise SystemExit(

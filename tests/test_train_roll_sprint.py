@@ -199,7 +199,10 @@ def test_reverse_skill_staging_neutralizes_only_new_direction_cue_column(
                 "mlp.0.weight": first_layer.clone(),
                 "distribution.std_param": torch.tensor([0.2]),
             },
-            "critic_state_dict": {"value.weight": torch.tensor([[2.0]])},
+            "critic_state_dict": {
+                "mlp.0.weight": torch.arange(2 * 90, dtype=torch.float32).reshape(2, 90),
+                "value.weight": torch.tensor([[2.0]]),
+            },
             "optimizer_state_dict": {"state": {}, "param_groups": []},
         },
         source,
@@ -209,6 +212,22 @@ def test_reverse_skill_staging_neutralizes_only_new_direction_cue_column(
 
     staged = torch.load(destination, map_location="cpu", weights_only=False)
     weight = staged["actor_state_dict"]["mlp.0.weight"]
-    assert torch.count_nonzero(weight[:, MODULE.DIRECTION_CUE_OBS_INDEX]) == 0
-    assert torch.equal(weight[:, MODULE.DIRECTION_CUE_OBS_INDEX - 1], first_layer[:, 54])
-    assert torch.equal(weight[:, MODULE.DIRECTION_CUE_OBS_INDEX + 1], first_layer[:, 56])
+    assert torch.count_nonzero(weight[:, MODULE.ACTOR_DIRECTION_CUE_OBS_INDEX]) == 0
+    assert torch.equal(
+        weight[:, MODULE.ACTOR_DIRECTION_CUE_OBS_INDEX - 1], first_layer[:, 54]
+    )
+    assert torch.equal(
+        weight[:, MODULE.ACTOR_DIRECTION_CUE_OBS_INDEX + 1], first_layer[:, 56]
+    )
+    critic_weight = staged["critic_state_dict"]["mlp.0.weight"]
+    assert torch.count_nonzero(
+        critic_weight[:, MODULE.CRITIC_DIRECTION_CUE_OBS_INDEX]
+    ) == 0
+    assert torch.equal(
+        critic_weight[:, MODULE.CRITIC_DIRECTION_CUE_OBS_INDEX - 1],
+        torch.arange(2, dtype=torch.float32) * 90 + 67,
+    )
+    assert torch.equal(
+        critic_weight[:, MODULE.CRITIC_DIRECTION_CUE_OBS_INDEX + 1],
+        torch.arange(2, dtype=torch.float32) * 90 + 69,
+    )
