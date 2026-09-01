@@ -104,6 +104,9 @@ def evaluate_checkpoint(
             "midroll_pitch_min": math.radians(20.0),
             "midroll_pitch_max": math.radians(29.0),
             "midroll_omega_range": (1.0, 3.0),
+            "midroll_z_min": 0.075,
+            "midroll_z_max": 0.075,
+            "tuck_factor_range": (1.0, 1.0),
         }
     )
     env_cfg.events["set_grounded_backroll_state"].params.update(

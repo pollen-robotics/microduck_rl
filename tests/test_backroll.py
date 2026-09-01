@@ -164,6 +164,15 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
         "midroll_omega_range"
     ] == (1.0, 3.0)
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
+        "midroll_z_min"
+    ] == pytest.approx(0.075)
+    assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
+        "midroll_z_max"
+    ] == pytest.approx(0.075)
+    assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
+        "tuck_factor_range"
+    ] == (1.0, 1.0)
+    assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "midroll_pitch_max"
     ] < math.radians(30.0)
     assert cfg.curriculum["backroll_phase"].params["success_threshold"] == pytest.approx(
