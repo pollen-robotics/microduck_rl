@@ -549,12 +549,10 @@ def make_microduck_backroll_sprint_env_cfg(
             microduck_mdp.roll_sprint_backroll_direction_flag
         )
         cfg.observations[group].terms["body_command"].params = {"dim": 6}
-    # Keep the shared recovery curriculum balanced for the reverse policy. A
-    # reverse-heavy mid-roll bucket teaches rotation and falling, but starves
-    # the phase-zero launch that must precede every valid backroll. The staged
-    # mix below keeps standing, post-roll, crouch, and ground-recovery starts
-    # available while the reverse phase windows provide targeted completion
-    # examples.
+    # Keep the reverse curriculum balanced between phase-zero launch, targeted
+    # completion, and recovery. A94 learned self-righting (about 55% success)
+    # but had no valid reverse cycles, so the early mid-roll bucket needs to be
+    # large enough to expose the completion latch before it is tapered away.
     # Give both reset buckets a small, direction-matched launch velocity.  A
     # standing robot otherwise has no observable cue that this dedicated
     # policy must choose the reverse roll sign, while mid-roll starts should
@@ -570,19 +568,19 @@ def make_microduck_backroll_sprint_env_cfg(
     )
     if not play:
         reset_params.update(
-            standing_prob=0.45,
-            midroll_prob=0.10,
+            standing_prob=0.35,
+            midroll_prob=0.30,
             postroll_prob=0.15,
             crouch_prob=0.10,
-            ground_recovery_prob=0.20,
+            ground_recovery_prob=0.10,
         )
         spawn_stages = cfg.curriculum["roll_sprint_spawn_mix"].params[
             "param_stages"
         ]
         stage_mixes = (
-            ((0.45, 0.10, 0.15, 0.10, 0.20), (320.0, 355.0, (3.0, 5.5))),
-            ((0.45, 0.05, 0.15, 0.15, 0.20), (260.0, 350.0, (2.0, 5.0))),
-            ((0.55, 0.05, 0.10, 0.10, 0.20), (140.0, 340.0, (0.75, 3.5))),
+            ((0.35, 0.30, 0.15, 0.10, 0.10), (320.0, 355.0, (3.0, 5.5))),
+            ((0.45, 0.25, 0.15, 0.05, 0.10), (260.0, 350.0, (2.0, 5.0))),
+            ((0.55, 0.15, 0.10, 0.05, 0.15), (140.0, 340.0, (0.75, 3.5))),
             ((0.65, 0.00, 0.10, 0.05, 0.20), (50.0, 340.0, (0.0, 3.0))),
         )
         for stage, (mix, roll_window) in zip(spawn_stages, stage_mixes, strict=True):
