@@ -101,6 +101,16 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
         "action_rate_l2",
         "gentle_landing",
         "self_collisions",
+        "backroll_contact_sequence",
+    }
+    assert (
+        cfg.rewards["backroll_contact_sequence"].func
+        is mdp.grounded_backroll_contact_sequence
+    )
+    assert cfg.rewards["backroll_contact_sequence"].weight == pytest.approx(0.5)
+    assert cfg.rewards["backroll_contact_sequence"].params == {
+        "trunk_value": 1.0,
+        "head_value": 2.0,
     }
     forbidden = ("sprint", "distance", "lane", "road", "recovery", "reposition")
     assert not any(token in name for name in cfg.rewards for token in forbidden)
@@ -136,6 +146,7 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
         cfg.rewards["backroll_contact_sequence"].func
         is mdp.grounded_backroll_contact_sequence
     )
+    assert cfg.rewards["backroll_contact_sequence"].weight == pytest.approx(2.0)
     assert (
         cfg.rewards["backroll_non_top_head_dwell"].func
         is mdp.grounded_backroll_non_top_head_dwell_penalty

@@ -254,6 +254,11 @@ def make_microduck_backroll_env_cfg(play: bool = False):
         weight=-0.05,
         params={"sensor_name": "self_collision"},
     )
+    cfg.rewards["backroll_contact_sequence"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_contact_sequence,
+        weight=0.5,
+        params={"trunk_value": 1.0, "head_value": 2.0},
+    )
 
     cfg.events.pop("set_roulade_state", None)
     first_stage = BACKROLL_CURRICULUM_STAGES[0]["params"]
@@ -358,11 +363,7 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
     # extension through the already-latched 180--350 degree arc materially
     # more valuable than repeatedly discovering the known 0--180 degree tuck.
     cfg.rewards["backroll_progress"].weight = 5.0
-    cfg.rewards["backroll_contact_sequence"] = RewardTermCfg(
-        func=microduck_mdp.grounded_backroll_contact_sequence,
-        weight=2.0,
-        params={"trunk_value": 1.0, "head_value": 2.0},
-    )
+    cfg.rewards["backroll_contact_sequence"].weight = 2.0
     cfg.rewards["backroll_non_top_head_dwell"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_non_top_head_dwell_penalty,
         weight=0.5,
