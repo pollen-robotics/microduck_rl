@@ -198,10 +198,16 @@ def test_reverse_skill_staging_neutralizes_only_new_direction_cue_column(
             "actor_state_dict": {
                 "mlp.0.weight": first_layer.clone(),
                 "distribution.std_param": torch.tensor([0.2]),
+                "obs_normalizer._mean": torch.zeros(1, 61),
+                "obs_normalizer._var": torch.zeros(1, 61),
+                "obs_normalizer._std": torch.zeros(1, 61),
             },
             "critic_state_dict": {
                 "mlp.0.weight": torch.arange(2 * 90, dtype=torch.float32).reshape(2, 90),
                 "value.weight": torch.tensor([[2.0]]),
+                "obs_normalizer._mean": torch.zeros(1, 90),
+                "obs_normalizer._var": torch.zeros(1, 90),
+                "obs_normalizer._std": torch.zeros(1, 90),
             },
             "optimizer_state_dict": {"state": {}, "param_groups": []},
         },
@@ -231,3 +237,11 @@ def test_reverse_skill_staging_neutralizes_only_new_direction_cue_column(
         critic_weight[:, MODULE.CRITIC_DIRECTION_CUE_OBS_INDEX + 1],
         torch.arange(2, dtype=torch.float32) * 90 + 69,
     )
+    actor_state = staged["actor_state_dict"]
+    assert actor_state["obs_normalizer._mean"][0, MODULE.ACTOR_DIRECTION_CUE_OBS_INDEX] == 0.0
+    assert actor_state["obs_normalizer._var"][0, MODULE.ACTOR_DIRECTION_CUE_OBS_INDEX] == 1.0
+    assert actor_state["obs_normalizer._std"][0, MODULE.ACTOR_DIRECTION_CUE_OBS_INDEX] == 1.0
+    critic_state = staged["critic_state_dict"]
+    assert critic_state["obs_normalizer._mean"][0, MODULE.CRITIC_DIRECTION_CUE_OBS_INDEX] == 0.0
+    assert critic_state["obs_normalizer._var"][0, MODULE.CRITIC_DIRECTION_CUE_OBS_INDEX] == 1.0
+    assert critic_state["obs_normalizer._std"][0, MODULE.CRITIC_DIRECTION_CUE_OBS_INDEX] == 1.0

@@ -105,6 +105,19 @@ def stage_checkpoint(
             ):
                 value[:, CRITIC_DIRECTION_CUE_OBS_INDEX] = 0.0
                 cue_columns += 1
+        for state_name, cue_index in (
+            ("actor_state_dict", ACTOR_DIRECTION_CUE_OBS_INDEX),
+            ("critic_state_dict", CRITIC_DIRECTION_CUE_OBS_INDEX),
+        ):
+            state = payload[state_name]
+            for key in ("obs_normalizer._mean", "obs_normalizer._var", "obs_normalizer._std"):
+                value = state.get(key)
+                if not isinstance(value, torch.Tensor) or value.shape[-1] <= cue_index:
+                    continue
+                if key == "obs_normalizer._mean":
+                    value[..., cue_index] = 0.0
+                else:
+                    value[..., cue_index] = 1.0
         if cue_columns == 0:
             raise SystemExit(
                 "Checkpoint actor has no compatible first-layer direction cue"
