@@ -559,6 +559,11 @@ def make_microduck_backroll_sprint_env_cfg(
     # carry enough course-aligned momentum to keep the late-roll lesson alive.
     reset_params["forward_vel_range"] = (0.08, 0.20)
     reset_params["midroll_forward_vel_range"] = (0.25, 0.65)
+    # The dedicated reverse policy starts with its body facing away from the
+    # fixed +x course. Keep this launch geometry deterministic while the new
+    # policy learns the reverse roll and recovery; canonical play already uses
+    # the same pi-yaw arrangement.
+    reset_params["yaw_range"] = (math.pi, math.pi)
     reset_params["recovery_road_return_prob"] = 0.15
     reset_params["heading_return_prob"] = 0.05
     reset_params.update(

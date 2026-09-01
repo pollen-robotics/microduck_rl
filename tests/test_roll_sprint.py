@@ -403,6 +403,9 @@ def test_backroll_sprint_is_separate_directional_61d_policy():
     assert reverse.events["set_roll_sprint_state"].params["heading_return_prob"] == pytest.approx(
         0.05
     )
+    assert reverse.events["set_roll_sprint_state"].params["yaw_range"] == pytest.approx(
+        (math.pi, math.pi)
+    )
     assert list(reverse.observations["actor"].terms) == list(
         forward.observations["actor"].terms
     )
