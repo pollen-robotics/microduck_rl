@@ -665,6 +665,111 @@ def make_microduck_backroll_sprint_env_cfg(
     return cfg
 
 
+def make_microduck_backroll_skill_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Create a short, completion-first reverse-roll pretraining profile.
+
+    This profile is deliberately separate from the race task. It gives PPO a
+    dense supported phase signal and a bounded completion pulse before the
+    harder frontier, recovery, and road-return objectives are reintroduced in
+    ``Mjlab-Backroll-Sprint-Flat-MicroDuck``.
+    """
+    cfg = make_microduck_backroll_sprint_env_cfg(play=play)
+    cfg.episode_length_s = 8.0
+    reset = cfg.events["set_roll_sprint_state"].params
+    reset.update(
+        standing_prob=1.0 if play else 0.20,
+        midroll_prob=0.0 if play else 0.80,
+        postroll_prob=0.0,
+        crouch_prob=0.0,
+        ground_recovery_prob=0.0,
+        road_interior_prob=1.0,
+        road_edge_prob=0.0,
+        road_return_prob=0.0,
+        recovery_road_return_prob=0.0,
+        heading_return_prob=0.0,
+        yaw_range=(math.pi, math.pi),
+        midroll_pitch_min=math.radians(120.0),
+        midroll_pitch_max=math.radians(340.0),
+        midroll_omega_range=(2.5, 5.5),
+        midroll_forward_vel_range=(0.20, 0.65),
+    )
+    if not play:
+        stages = cfg.curriculum["roll_sprint_spawn_mix"].params["param_stages"]
+        skill_stages = (
+            ((0.20, 0.80, 0.00, 0.00, 0.00), (120.0, 340.0, (2.5, 5.5))),
+            ((0.40, 0.60, 0.00, 0.00, 0.00), (90.0, 340.0, (2.0, 5.0))),
+            ((0.65, 0.35, 0.00, 0.00, 0.00), (50.0, 340.0, (1.0, 4.0))),
+            ((0.85, 0.15, 0.00, 0.00, 0.00), (20.0, 340.0, (0.0, 3.0))),
+        )
+        for stage, (mix, roll_window) in zip(stages, skill_stages, strict=True):
+            pitch_min, pitch_max, omega_range = roll_window
+            stage["params"].update(
+                standing_prob=mix[0],
+                midroll_prob=mix[1],
+                postroll_prob=mix[2],
+                crouch_prob=mix[3],
+                ground_recovery_prob=mix[4],
+                midroll_pitch_min=math.radians(pitch_min),
+                midroll_pitch_max=math.radians(pitch_max),
+                midroll_omega_range=omega_range,
+            )
+    cfg.rewards["roll_sprint_progress"].weight = 48.0
+    cfg.rewards["roll_sprint_distance"].weight = 0.0
+    cfg.rewards["roll_sprint_cycle_rate"].weight = 12.0
+    cfg.rewards["roll_sprint_cycle_rate"].params = {"include_bootstrap": True}
+    cfg.rewards["roll_sprint_directional_bootstrap"].weight = 8.0
+    cfg.rewards["roll_sprint_head_pivot"].weight = 1.5
+    for name in (
+        "roll_sprint_recovery",
+        "roll_sprint_reposition",
+        "roll_sprint_recovered_reroll",
+        "roll_sprint_self_right_upright",
+        "roll_sprint_self_right_height",
+        "roll_sprint_self_right_upward",
+        "roll_sprint_self_right_fallen_tax",
+        "roll_sprint_self_right_success",
+        "roll_sprint_road_return",
+        "roll_sprint_heading_alignment",
+        "roll_sprint_straightness",
+    ):
+        cfg.rewards[name].weight = 0.0
+    curriculum_weights = {
+        "roll_sprint_distance_weight": 0.0,
+        "roll_sprint_road_return_weight": 0.0,
+        "roll_sprint_invalid_cycle_weight": 0.0,
+        "roll_sprint_self_right_upward_weight": 0.0,
+        "roll_sprint_self_right_fallen_tax_weight": 0.0,
+        "roll_sprint_self_right_success_weight": 0.0,
+        "backroll_self_right_upright_weight": 0.0,
+        "backroll_self_right_height_weight": 0.0,
+    }
+    cfg.curriculum["roll_sprint_progress_weight"].params["weight_stages"] = [
+        {"step": 0, "weight": 48.0},
+        {"step": 400 * 24, "weight": 40.0},
+        {"step": 1000 * 24, "weight": 32.0},
+        {"step": 2000 * 24, "weight": 24.0},
+    ]
+    cfg.curriculum["roll_sprint_head_pivot_weight"].params["weight_stages"] = [
+        {"step": 0, "weight": 1.5},
+        {"step": 1000 * 24, "weight": 0.75},
+    ]
+    cfg.curriculum[
+        "roll_sprint_directional_bootstrap_weight"
+    ].params["weight_stages"] = [
+        {"step": 0, "weight": 8.0},
+        {"step": 400 * 24, "weight": 4.0},
+        {"step": 1000 * 24, "weight": 0.0},
+    ]
+    for curriculum_name, weight in curriculum_weights.items():
+        if curriculum_name in cfg.curriculum:
+            cfg.curriculum[curriculum_name].params["weight_stages"] = [
+                {"step": 0, "weight": weight}
+            ]
+    return cfg
+
+
 MicroduckRollSprintRlCfg = RslRlOnPolicyRunnerCfg(
     actor=RslRlModelCfg(
         hidden_dims=(512, 256, 128),
@@ -718,3 +823,8 @@ MicroduckBackrollSprintRlCfg = copy.deepcopy(MicroduckRollSprintRlCfg)
 MicroduckBackrollSprintRlCfg.experiment_name = "microduck_backroll_sprint"
 MicroduckBackrollSprintRlCfg.run_name = "microduck_backroll_sprint"
 MicroduckBackrollSprintRlCfg.save_interval = 50
+
+MicroduckBackrollSkillRlCfg = copy.deepcopy(MicroduckBackrollSprintRlCfg)
+MicroduckBackrollSkillRlCfg.experiment_name = "microduck_backroll_skill"
+MicroduckBackrollSkillRlCfg.run_name = "microduck_backroll_skill"
+MicroduckBackrollSkillRlCfg.save_interval = 50

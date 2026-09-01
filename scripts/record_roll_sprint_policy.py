@@ -231,7 +231,7 @@ def _race_lane_origins(
 
 def _roll_direction_for_task(task_id: str) -> float:
     """Return the signed roll/travel direction encoded by the task id."""
-    return -1.0 if "Backroll-Sprint" in task_id else 1.0
+    return -1.0 if "Backroll" in task_id else 1.0
 
 
 def _arrange_race_start(

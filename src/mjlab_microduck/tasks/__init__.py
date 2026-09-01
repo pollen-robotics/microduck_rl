@@ -132,8 +132,10 @@ from .microduck_roulade_env_cfg import (
     MicroduckRouladeRlCfg,
 )
 from .microduck_roll_sprint_env_cfg import (
+    make_microduck_backroll_skill_env_cfg,
     make_microduck_backroll_sprint_env_cfg,
     make_microduck_roll_sprint_env_cfg,
+    MicroduckBackrollSkillRlCfg,
     MicroduckBackrollSprintRlCfg,
     MicroduckRollSprintRlCfg,
 )
@@ -389,6 +391,16 @@ register_mjlab_task(
     env_cfg=make_microduck_backroll_sprint_env_cfg(),
     play_env_cfg=make_microduck_backroll_sprint_env_cfg(play=True),
     rl_cfg=MicroduckBackrollSprintRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Completion-first reverse-roll pretraining. This keeps the same 61D/14D
+# contract so its actor can be transferred into the later sprint task.
+register_mjlab_task(
+    task_id="Mjlab-Backroll-Skill-Flat-MicroDuck",
+    env_cfg=make_microduck_backroll_skill_env_cfg(),
+    play_env_cfg=make_microduck_backroll_skill_env_cfg(play=True),
+    rl_cfg=MicroduckBackrollSkillRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 

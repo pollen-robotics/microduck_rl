@@ -13436,12 +13436,16 @@ def roll_sprint_lane_half_width_curriculum(
 
 def roll_sprint_cycle_rate(
     env: ManagerBasedRlEnv,
+    include_bootstrap: bool = False,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Low-weight completion-rate metric/reward for valid roll cycles."""
+    """Low-weight completion-rate reward for valid or skill-bootstrap cycles."""
     asset = env.scene[asset_cfg.name]
     _update_roll_sprint_state(env, asset)
-    return env._roll_sprint_completed_now.float() / env.step_dt
+    completed = env._roll_sprint_completed_now
+    if include_bootstrap:
+        completed = completed | env._roll_sprint_bootstrap_completed_now
+    return completed.float() / env.step_dt
 
 
 def roll_sprint_recovery_rate(

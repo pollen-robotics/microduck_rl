@@ -7,10 +7,12 @@ import torch
 from mjlab_microduck.tasks import mdp
 from mjlab_microduck.tasks.microduck_roll_sprint_env_cfg import (
     EPISODE_LENGTH_S,
+    MicroduckBackrollSkillRlCfg,
     TARGET_DISTANCE_M,
     MicroduckBackrollSprintRlCfg,
     MicroduckRollSprintRlCfg,
     make_microduck_backroll_sprint_env_cfg,
+    make_microduck_backroll_skill_env_cfg,
     make_microduck_roll_sprint_env_cfg,
 )
 from mjlab_microduck.tasks.microduck_roulade_env_cfg import (
@@ -500,6 +502,37 @@ def test_backroll_direction_flag_uses_existing_body_padding_without_twist_change
     assert torch.count_nonzero(flag[:, 1:]) == 0
 
 
+def test_backroll_skill_profile_is_completion_first_and_contract_compatible():
+    skill = make_microduck_backroll_skill_env_cfg()
+    sprint = make_microduck_backroll_sprint_env_cfg()
+    assert skill.episode_length_s == pytest.approx(8.0)
+    assert list(skill.observations["actor"].terms) == list(
+        sprint.observations["actor"].terms
+    )
+    assert skill.observations["actor"].terms["body_command"].func is mdp.roll_sprint_backroll_direction_flag
+    assert skill.rewards["roll_sprint_progress"].weight == pytest.approx(48.0)
+    assert skill.rewards["roll_sprint_cycle_rate"].weight == pytest.approx(12.0)
+    assert skill.rewards["roll_sprint_cycle_rate"].params == {
+        "include_bootstrap": True
+    }
+    assert skill.rewards["roll_sprint_distance"].weight == pytest.approx(0.0)
+    assert skill.rewards["roll_sprint_recovery"].weight == pytest.approx(0.0)
+    stages = skill.curriculum["roll_sprint_spawn_mix"].params["param_stages"]
+    assert [stage["params"]["standing_prob"] for stage in stages] == [
+        0.20,
+        0.40,
+        0.65,
+        0.85,
+    ]
+    assert [stage["params"]["midroll_prob"] for stage in stages] == [
+        0.80,
+        0.60,
+        0.35,
+        0.15,
+    ]
+    assert MicroduckBackrollSkillRlCfg.experiment_name == "microduck_backroll_skill"
+
+
 def test_backroll_requires_reverse_rotation_and_reverse_translation(monkeypatch):
     env, asset = _fake_env(1)
     _enable_flat_valid_roll(monkeypatch, env)
@@ -665,6 +698,7 @@ def test_roll_sprint_and_backlash_tasks_are_registered():
     tasks = list_tasks()
     assert "Mjlab-Roll-Sprint-Flat-MicroDuck" in tasks
     assert "Mjlab-Backroll-Sprint-Flat-MicroDuck" in tasks
+    assert "Mjlab-Backroll-Skill-Flat-MicroDuck" in tasks
     assert "Mjlab-Roll-Sprint-Flat-Backlash-MicroDuck" in tasks
 
 

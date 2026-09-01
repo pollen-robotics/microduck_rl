@@ -168,6 +168,10 @@ def test_backroll_video_faces_away_but_credits_the_same_world_race_axis() -> Non
     assert torch.allclose(projected_advance, torch.full((4,), 0.25), atol=1.0e-7)
 
 
+def test_backroll_skill_video_uses_reverse_alignment() -> None:
+    assert MODULE._roll_direction_for_task("Mjlab-Backroll-Skill-Flat-MicroDuck") == -1.0
+
+
 def test_policy_load_precedes_final_race_arrangement_and_observation_refresh(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
