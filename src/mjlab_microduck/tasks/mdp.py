@@ -11942,7 +11942,18 @@ def grounded_backroll_progress(
     delta = torch.clamp(new_paid - torch.clamp(paid, max=target_angle), min=0.0)
     delta = torch.clamp(delta, max=max_paid_rate * env.step_dt)
     env._roulade_paid = torch.maximum(paid, new_paid)
-    return delta / (env.step_dt * target_angle)
+    # In repeated mode, generic ground support is not enough to earn the
+    # maneuver.  A120 rotated to ~170 degrees while missing both the trunk and
+    # flat head-top contacts, then parked inverted.  Stop paying that shortcut
+    # as soon as each ordered contact becomes physically due.  Phase resets
+    # synthesize the already-passed latches, so the reverse curriculum retains
+    # its dense late-roll gradient.
+    ordered_contacts = (
+        ((frontier < _BACKROLL_TRUNK_LATCH_LO) | env._backroll_trunk_latch)
+        & ((frontier < _BACKROLL_HEAD_LATCH_LO) | env._backroll_head_latch)
+    )
+    valid = ~env._backroll_repeat_mode | ordered_contacts
+    return torch.where(valid, delta / (env.step_dt * target_angle), 0.0)
 
 
 def grounded_backroll_head_pivot(
@@ -12052,10 +12063,15 @@ def grounded_backroll_speed_progress(
         env._backroll_cycle_max_lateral_axis_z
         <= _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX
     )
+    ordered_contacts = (
+        ((env._roulade_max < _BACKROLL_TRUNK_LATCH_LO) | env._backroll_trunk_latch)
+        & ((env._roulade_max < _BACKROLL_HEAD_LATCH_LO) | env._backroll_head_latch)
+    )
     return (
         env._backroll_frontier_delta
         * speed
         * strict_sagittal.float()
+        * ordered_contacts.float()
         / (env.step_dt * target_angle)
     )
 

@@ -140,7 +140,16 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert [
         stage["params"]["standing_prob"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
-    ] == [0.70, 0.85, 1.0]
+    ] == [0.20, 0.30, 0.45, 0.65, 0.85]
+    assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
+        "midroll_pitch_min"
+    ] == pytest.approx(math.radians(260.0))
+    assert cfg.rewards["backroll_completion_progress"].weight > cfg.rewards[
+        "backroll_progress"
+    ].weight
+    assert cfg.rewards["backroll_success"].params["later_cycle_bonus"] == pytest.approx(
+        1.0
+    )
 
 
 def test_backroll_curriculum_matches_mastery_stages():
@@ -304,6 +313,43 @@ def test_speed_progress_requires_fast_new_backward_frontier(monkeypatch):
     assert first.item() > 0.0
     assert rocking.item() == 0.0
     assert revisit.item() == 0.0
+
+
+def test_repeated_progress_requires_ordered_trunk_then_head_contacts(monkeypatch):
+    env, asset = _fake_env()
+    env._backroll_repeat_mode[:] = True
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+
+    asset.data.root_link_ang_vel_b[:, 1] = -4.0
+    env._roulade_accum[:] = math.radians(40.0)
+    env._roulade_max[:] = math.radians(40.0)
+    env._roulade_paid[:] = math.radians(35.0)
+    env._backroll_previous_frontier[:] = math.radians(35.0)
+    assert mdp.grounded_backroll_progress(env).item() == 0.0
+    assert mdp.grounded_backroll_speed_progress(env).item() == 0.0
+
+    env._backroll_trunk_latch[:] = True
+    env._roulade_accum[:] = math.radians(120.0)
+    env._roulade_max[:] = math.radians(120.0)
+    env._roulade_paid[:] = math.radians(115.0)
+    env._backroll_previous_frontier[:] = math.radians(115.0)
+    env.common_step_counter += 1
+    assert mdp.grounded_backroll_progress(env).item() == 0.0
+    assert mdp.grounded_backroll_speed_progress(env).item() == 0.0
+
+    env._backroll_head_latch[:] = True
+    env._roulade_accum[:] = math.radians(125.0)
+    env._roulade_max[:] = math.radians(125.0)
+    env._roulade_paid[:] = math.radians(120.0)
+    env._backroll_previous_frontier[:] = math.radians(120.0)
+    env.common_step_counter += 1
+    assert mdp.grounded_backroll_progress(env).item() > 0.0
+    assert mdp.grounded_backroll_speed_progress(env).item() > 0.0
 
 
 def test_airborne_and_sideways_rotation_receive_no_progress(monkeypatch):

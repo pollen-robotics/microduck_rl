@@ -83,17 +83,31 @@ BACKROLL_CURRICULUM_STAGES = [
 REPEATED_BACKROLL_CURRICULUM_STAGES = [
     {
         "params": {
-            "standing_prob": 0.70,
-            "midroll_prob": 0.30,
-            "midroll_pitch_min": math.radians(180.0),
+            # The warm-start already owns the tuck and backward launch.  Most
+            # early experience must therefore begin beyond the observed
+            # inverted parking basin and teach the missing exit/feet landing.
+            # A phase-started episode counts as mastered only after it lands
+            # and then earns a second, full cycle from standing.
+            "standing_prob": 0.20,
+            "midroll_prob": 0.80,
+            "midroll_pitch_min": math.radians(260.0),
             "midroll_pitch_max": math.radians(340.0),
-            "midroll_omega_range": (2.0, 4.5),
+            "midroll_omega_range": (0.5, 2.5),
         }
     },
     {
         "params": {
-            "standing_prob": 0.85,
-            "midroll_prob": 0.15,
+            "standing_prob": 0.30,
+            "midroll_prob": 0.70,
+            "midroll_pitch_min": math.radians(180.0),
+            "midroll_pitch_max": math.radians(340.0),
+            "midroll_omega_range": (1.0, 4.0),
+        }
+    },
+    {
+        "params": {
+            "standing_prob": 0.45,
+            "midroll_prob": 0.55,
             "midroll_pitch_min": math.radians(90.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (2.0, 5.0),
@@ -101,11 +115,20 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 1.0,
-            "midroll_prob": 0.0,
+            "standing_prob": 0.65,
+            "midroll_prob": 0.35,
             "midroll_pitch_min": math.radians(20.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (0.0, 4.0),
+        }
+    },
+    {
+        "params": {
+            "standing_prob": 0.85,
+            "midroll_prob": 0.15,
+            "midroll_pitch_min": math.radians(20.0),
+            "midroll_pitch_max": math.radians(340.0),
+            "midroll_omega_range": (0.0, 3.0),
         }
     },
 ]
@@ -308,19 +331,24 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
     # than a termination. Invalid side/airborne/wrong-way solutions still end
     # the episode early to keep the replay buffer physically honest.
     cfg.terminations.pop("backroll_success", None)
-    cfg.rewards["backroll_progress"].weight = 10.0
-    cfg.rewards["backroll_completion_progress"].weight = 5.0
+    # A120 reached the first inverted support quickly and then parked.  Make
+    # extension through the already-latched 180--350 degree arc materially
+    # more valuable than repeatedly discovering the known 0--180 degree tuck.
+    cfg.rewards["backroll_progress"].weight = 5.0
+    cfg.rewards["backroll_completion_progress"].weight = 18.0
+    cfg.rewards["backroll_upright_progress"].weight = 5.0
+    cfg.rewards["backroll_height_progress"].weight = 4.0
     cfg.rewards["backroll_success"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_repeat_success_rate,
-        weight=12.0,
-        params={"later_cycle_bonus": 0.5, "max_bonus_cycles": 3},
+        weight=20.0,
+        params={"later_cycle_bonus": 1.0, "max_bonus_cycles": 3},
     )
     cfg.rewards["backroll_speed_progress"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_speed_progress,
-        weight=6.0,
-        params={"minimum_rate": 2.0, "target_rate": 4.5},
+        weight=3.0,
+        params={"minimum_rate": 1.5, "target_rate": 4.0},
     )
-    cfg.rewards["backroll_invalid"].weight = -4.0
+    cfg.rewards["backroll_invalid"].weight = -10.0
     cfg.rewards["backroll_overspeed"].weight = -0.02
     cfg.rewards["backroll_overspeed"].params = {"omega_max": 7.5}
     cfg.rewards["backroll_sagittal"].weight = -0.30

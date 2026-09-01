@@ -172,6 +172,22 @@ def evaluate_checkpoint(
                     "valid_grounded_backroll_cycles": cycles,
                     "required_cycles": required_cycles,
                     "consecutive_backroll_success": valid,
+                    "current_cycle_rotation_deg": float(
+                        torch.rad2deg(base_env._roulade_accum[index]).item()
+                    ),
+                    "current_cycle_frontier_deg": float(
+                        torch.rad2deg(base_env._roulade_max[index]).item()
+                    ),
+                    "trunk_contact_latched": bool(
+                        base_env._backroll_trunk_latch[index].item()
+                    ),
+                    "head_top_contact_latched": bool(
+                        base_env._backroll_head_latch[index].item()
+                    ),
+                    "landing_hold_s": float(
+                        base_env._backroll_landing_hold_steps[index].item()
+                        * base_env.step_dt
+                    ),
                     "max_lateral_axis_z": float(
                         base_env._backroll_episode_max_lateral_axis_z[index].item()
                     ),
