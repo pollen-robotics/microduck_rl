@@ -192,7 +192,7 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert [
         stage["params"]["standing_prob"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
-    ] == [0.35, 0.50, 0.70, 0.80, 0.90, 1.0]
+    ] == [0.50, 0.50, 0.70, 0.80, 0.90, 1.0]
     assert [
         stage["params"]["mastery_cycles"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
@@ -218,9 +218,7 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     first_stage = REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"]
     assert first_stage["reference_phase_range_deg"] == (180.0, 180.0)
     assert first_stage["reference_source_seed"] == 10
-    assert first_stage["yaw_range"] == pytest.approx(
-        (-math.radians(20.0), math.radians(20.0))
-    )
+    assert first_stage["yaw_range"] == (0.0, 0.0)
     assert first_stage["midroll_pitch_min"] == pytest.approx(math.radians(260.0))
     assert first_stage["midroll_pitch_max"] == pytest.approx(math.radians(340.0))
     assert first_stage["midroll_omega_range"] == (0.0, 2.0)

@@ -87,13 +87,13 @@ BACKROLL_CURRICULUM_STAGES = [
 REPEATED_BACKROLL_CURRICULUM_STAGES = [
     {
         "params": {
-            # First preserve the measured late-phase basin while keeping a
-            # substantial standing bucket for the policy to learn the launch.
+            # First preserve the measured late-phase basin while giving the
+            # policy an equal-sized standing bucket to learn the launch.
             # A178 model 2600 completed 3/4 direct 180-degree reference
             # rollouts, but no standing trial, so the reference must not be
             # diluted by the weaker 140-degree row yet.
-            "standing_prob": 0.35,
-            "midroll_prob": 0.65,
+            "standing_prob": 0.50,
+            "midroll_prob": 0.50,
             "midroll_pitch_min": math.radians(260.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (0.0, 2.0),
@@ -105,7 +105,10 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "reference_state_prob": 1.0,
             "reference_phase_range_deg": (180.0, 180.0),
             "reference_source_seed": 10,
-            "yaw_range": (-math.radians(20.0), math.radians(20.0)),
+            # Standing audits drifted far off-axis even from this narrow
+            # range; keep the first launch basin aligned while the measured
+            # 180-degree reference bridge remains unchanged.
+            "yaw_range": (0.0, 0.0),
             "recovery_enabled": False,
             "ground_recovery_prob": 0.0,
             "mastery_cycles": 1,
