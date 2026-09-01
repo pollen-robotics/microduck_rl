@@ -224,7 +224,7 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert [
         stage["params"]["recovery_enabled"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
-    ] == [False, False, False, True, True, True]
+    ] == [False, False, True, True, True, True]
     assert [
         stage["params"]["reference_state_prob"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES

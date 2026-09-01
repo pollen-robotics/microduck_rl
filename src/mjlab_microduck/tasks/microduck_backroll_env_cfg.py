@@ -171,7 +171,10 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             # bridge; later stages reintroduce yaw robustness once chaining is
             # demonstrated.
             "yaw_range": (0.0, 0.0),
-            "recovery_enabled": False,
+            # Enable the retry path at the first repeated handoff so an
+            # off-axis/stalled attempt can learn self-right -> reroll rather
+            # than terminating before any recovery transition is observed.
+            "recovery_enabled": True,
             "ground_recovery_prob": 0.0,
             "mastery_cycles": 1,
         }
