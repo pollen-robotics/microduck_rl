@@ -12116,6 +12116,9 @@ def _grounded_backroll_reference_bank(
         "qvel": torch.stack([row["qvel"] for row in rows]).to(env.device),
         "accum": torch.stack([row["accum"] for row in rows]).to(env.device),
         "frontier": torch.stack([row["frontier"] for row in rows]).to(env.device),
+        "phase_center_deg": torch.tensor(
+            [float(row["phase_center_deg"]) for row in rows], device=env.device
+        ),
         "trunk_latch": torch.stack([row["trunk_latch"] for row in rows])
         .to(env.device)
         .bool(),
@@ -12137,11 +12140,21 @@ def _reset_grounded_backroll_reference_states(
     env_ids: torch.Tensor,
     *,
     reference_state_path: str,
+    phase_range_deg: tuple,
     yaw_range: tuple,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Place environments in real, champion-generated sagittal pivot states."""
     bank = _grounded_backroll_reference_bank(env, reference_state_path)
-    row_ids = torch.randint(len(bank["qpos"]), (len(env_ids),), device=env.device)
+    eligible_rows = torch.nonzero(
+        (bank["phase_center_deg"] >= phase_range_deg[0])
+        & (bank["phase_center_deg"] <= phase_range_deg[1]),
+        as_tuple=False,
+    ).squeeze(-1)
+    if len(eligible_rows) == 0:
+        raise ValueError("backroll reference state bank has no rows in phase range")
+    row_ids = eligible_rows[
+        torch.randint(len(eligible_rows), (len(env_ids),), device=env.device)
+    ]
     qpos = bank["qpos"][row_ids].clone()
     qvel = bank["qvel"][row_ids].clone()
     yaw = (
@@ -12199,6 +12212,7 @@ def reset_grounded_backroll_state(
     joint_noise_std: float = 0.04,
     reference_state_prob: float = 0.0,
     reference_state_path: Optional[str] = None,
+    reference_phase_range_deg: tuple = (0.0, 360.0),
     repeat_mode: bool = False,
     recovery_enabled: bool = True,
     mastery_cycles: int = 1,
@@ -12244,6 +12258,11 @@ def reset_grounded_backroll_state(
         raise ValueError("reference_state_prob must be in [0, 1]")
     if reference_state_prob > 0.0 and not reference_state_path:
         raise ValueError("reference_state_path is required when reference states are enabled")
+    if (
+        len(reference_phase_range_deg) != 2
+        or reference_phase_range_deg[1] < reference_phase_range_deg[0]
+    ):
+        raise ValueError("reference_phase_range_deg must be an ordered pair")
     if (
         len(ground_z_range) != 2
         or ground_z_range[0] <= 0.0
@@ -12296,6 +12315,7 @@ def reset_grounded_backroll_state(
             env,
             reference_ids,
             reference_state_path=reference_state_path,
+            phase_range_deg=reference_phase_range_deg,
             yaw_range=yaw_range,
         )
         spawn_angle[reference_mask] = env._roulade_max[reference_ids]

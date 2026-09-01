@@ -208,8 +208,9 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert [
         stage["params"]["reference_state_prob"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
-    ] == [0.50, 0.40, 0.25, 0.10, 0.05, 0.0]
+    ] == [1.0, 0.40, 0.25, 0.10, 0.05, 0.0]
     first_stage = REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"]
+    assert first_stage["reference_phase_range_deg"] == (140.0, 180.0)
     assert first_stage["midroll_pitch_min"] == pytest.approx(math.radians(260.0))
     assert first_stage["midroll_pitch_max"] == pytest.approx(math.radians(340.0))
     assert first_stage["midroll_omega_range"] == (0.0, 2.0)
@@ -408,9 +409,20 @@ def test_repeated_reference_reset_uses_physical_state_and_actual_latches(
                     "qvel": qvel,
                     "accum": torch.tensor(math.radians(180.0)),
                     "frontier": torch.tensor(math.radians(190.0)),
+                    "phase_center_deg": 180.0,
                     "paid": torch.tensor(math.radians(175.0)),
                     "trunk_latch": torch.tensor(True),
                     "head_latch": torch.tensor(False),
+                },
+                {
+                    "qpos": qpos + 10.0,
+                    "qvel": qvel + 10.0,
+                    "accum": torch.tensor(math.radians(260.0)),
+                    "frontier": torch.tensor(math.radians(265.0)),
+                    "paid": torch.tensor(math.radians(265.0)),
+                    "phase_center_deg": 260.0,
+                    "trunk_latch": torch.tensor(True),
+                    "head_latch": torch.tensor(True),
                 }
             ]
         },
@@ -427,6 +439,7 @@ def test_repeated_reference_reset_uses_physical_state_and_actual_latches(
         repeat_mode=True,
         reference_state_prob=1.0,
         reference_state_path=str(reference_path),
+        reference_phase_range_deg=(180.0, 180.0),
         yaw_range=(0.0, 0.0),
         joint_noise_std=0.0,
     )
