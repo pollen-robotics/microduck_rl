@@ -59,6 +59,11 @@ MEDIA_EXTENSIONS = {
     ".mov", ".m4v", ".avi", ".mkv",
 }
 VIDEO_COLLECTIONS = {
+    "backroll": {
+        "label": "Grounded backroll",
+        "description": "One-shot standing-to-standing grounded backroll proofs.",
+        "default": False,
+    },
     "roll-sprint": {
         "label": "Roll sprint",
         "description": "Repeated flat-ground rolls from the current sprint policy.",
@@ -712,6 +717,8 @@ def _media_collection(source: str, relative_path: str) -> str:
     """Map a video path to the dashboard's selectable training run."""
 
     normalized = f"{source}/{relative_path}".lower().replace("_", "-")
+    if "backroll-skill" in normalized or "grounded-backroll" in normalized:
+        return "backroll"
     if "backroll-sprint" in normalized or "backrollsprint" in normalized:
         return "backroll-sprint"
     if "roll-sprint" in normalized or "rollsprint" in normalized:
@@ -867,12 +874,15 @@ def dashboard_state(*, include_metrics: bool = True) -> dict[str, Any]:
         }
         for collection_id, definition in VIDEO_COLLECTIONS.items()
     ]
+    default_video_collection = (
+        "backroll" if video_counts["backroll"] > 0 else "roll-sprint"
+    )
     return {
         "generatedAt": _iso_timestamp(time.time()),
         "repo": REPO_ROOT.name,
         "media": media,
         "videoCollections": video_collections,
-        "defaultVideoCollection": "roll-sprint",
+        "defaultVideoCollection": default_video_collection,
         "rollSprintChampion": _roll_sprint_champion(media),
         "rollSprintEvaluation": (
             _latest_roll_sprint_evaluation()

@@ -127,6 +127,10 @@ from .microduck_spin_env_cfg import (
     make_microduck_spin_env_cfg,
     MicroduckSpinRlCfg,
 )
+from .microduck_backroll_env_cfg import (
+    make_microduck_backroll_env_cfg,
+    MicroduckBackrollRlCfg,
+)
 from .microduck_roulade_env_cfg import (
     make_microduck_roulade_env_cfg,
     MicroduckRouladeRlCfg,
@@ -372,6 +376,16 @@ register_mjlab_task(
     env_cfg=make_microduck_roulade_env_cfg(),
     play_env_cfg=make_microduck_roulade_env_cfg(play=True),
     rl_cfg=MicroduckRouladeRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Grounded backroll: one supported reverse roulade and feet landing. It is a
+# standalone skill with no course, distance, recovery, or repeated-cycle goal.
+register_mjlab_task(
+    task_id="Mjlab-Backroll-Flat-MicroDuck",
+    env_cfg=make_microduck_backroll_env_cfg(),
+    play_env_cfg=make_microduck_backroll_env_cfg(play=True),
+    rl_cfg=MicroduckBackrollRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 

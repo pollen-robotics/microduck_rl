@@ -69,12 +69,15 @@ def test_dashboard_separates_roll_sprint_and_stair_video_collections(tmp_path, m
     media_root = tmp_path / "artifacts"
     roll_dir = media_root / "training" / "roll-sprint-samples"
     backroll_dir = media_root / "training" / "backroll-sprint-samples"
+    grounded_backroll_dir = media_root / "training" / "backroll-skill"
     stair_dir = media_root / "training" / "stair-policy-samples"
     roll_dir.mkdir(parents=True)
     backroll_dir.mkdir(parents=True)
+    grounded_backroll_dir.mkdir(parents=True)
     stair_dir.mkdir(parents=True)
     (roll_dir / "roll-0001.mp4").write_bytes(b"roll")
     (backroll_dir / "backroll-0001.mp4").write_bytes(b"backroll")
+    (grounded_backroll_dir / "proof-0001.mp4").write_bytes(b"grounded")
     (stair_dir / "stair-0001.mp4").write_bytes(b"stair")
     monkeypatch.setattr(serve_dashboard, "FEATURED_MEDIA_FILE", tmp_path / "missing.json")
     monkeypatch.setattr(serve_dashboard, "MEDIA_ROOTS", {"artifacts": media_root})
@@ -85,11 +88,17 @@ def test_dashboard_separates_roll_sprint_and_stair_video_collections(tmp_path, m
     assert by_name == {
         "roll-0001.mp4": "roll-sprint",
         "backroll-0001.mp4": "backroll-sprint",
+        "proof-0001.mp4": "backroll",
         "stair-0001.mp4": "stairs",
     }
-    assert state["defaultVideoCollection"] == "roll-sprint"
+    assert state["defaultVideoCollection"] == "backroll"
     counts = {item["id"]: item["videoCount"] for item in state["videoCollections"]}
-    assert counts == {"roll-sprint": 1, "backroll-sprint": 1, "stairs": 1}
+    assert counts == {
+        "backroll": 1,
+        "roll-sprint": 1,
+        "backroll-sprint": 1,
+        "stairs": 1,
+    }
 
 
 def test_dashboard_pins_exact_retained_champion_above_latest_videos(
