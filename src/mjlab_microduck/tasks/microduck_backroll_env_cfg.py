@@ -83,15 +83,15 @@ BACKROLL_CURRICULUM_STAGES = [
 REPEATED_BACKROLL_CURRICULUM_STAGES = [
     {
         "params": {
-            # Keep enough late-phase starts to teach the missing exit, but make
-            # standing the majority.  With a 0.55 advancement threshold the
-            # scaffolded 35% cannot advance this stage by itself while pure
-            # standing behavior is still failing.
+            # Start the scaffold immediately before the trunk-contact window so
+            # neither ordered contact latch is synthesized by reset.  These
+            # episodes must physically acquire trunk then flat-head contact;
+            # the standing majority preserves launch discovery.
             "standing_prob": 0.65,
             "midroll_prob": 0.35,
-            "midroll_pitch_min": math.radians(260.0),
-            "midroll_pitch_max": math.radians(340.0),
-            "midroll_omega_range": (0.5, 2.5),
+            "midroll_pitch_min": math.radians(20.0),
+            "midroll_pitch_max": math.radians(29.0),
+            "midroll_omega_range": (1.0, 3.0),
             "mastery_cycles": 1,
         }
     },
