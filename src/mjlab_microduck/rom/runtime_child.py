@@ -182,6 +182,8 @@ class RuntimeChildHost:
         self._operation_active = threading.Event()
         self._event_sequence = 0
         self._completion_claim = threading.Lock()
+        self._terminal_claimed = False
+        self._terminal_publication_complete = threading.Event()
         self._sample_thread: threading.Thread | None = None
         self._sample_stop = threading.Event()
         self._latest_sample_metrics: dict[str, object] = {}
@@ -322,6 +324,26 @@ class RuntimeChildHost:
         except queue.Full:
             pass
 
+    def _claim_terminal(
+        self,
+        generation: int | None,
+        task_id: str | None,
+        handle: RuntimeHandle | None,
+    ) -> bool:
+        """Claim the single terminal publication for one active identity."""
+        if generation is None or task_id is None or handle is None:
+            return False
+        with self._state_lock:
+            if (
+                self._terminal_claimed
+                or generation != self._generation
+                or task_id != self._task_id
+                or handle is not self._handle
+            ):
+                return False
+            self._terminal_claimed = True
+            return True
+
     def _deadman(self) -> None:
         while not self._stop.wait(0.01):
             with self._state_lock:
@@ -350,6 +372,18 @@ class RuntimeChildHost:
             reason = self._safety_reason or "RUNTIME_FAILED"
             request = self._last_request
             self._lease_deadline = None
+            generation, task_id = self._generation, self._task_id
+        if request is not None and request.taskId is not None and reason != "PARENT_EOF":
+            with self._state_lock:
+                already_claimed = self._terminal_claimed
+            if already_claimed or (
+                handle is not None
+                and not self._claim_terminal(generation, task_id, handle)
+            ):
+                self._terminal_publication_complete.wait(
+                    timeout=self._fatal_cleanup_timeout_s
+                )
+                return
         if runtime is None:
             self._safety_complete.set()
             return
@@ -466,6 +500,7 @@ class RuntimeChildHost:
                     ),
                 )
             published = self._send_safety_terminal(terminal)
+            self._terminal_publication_complete.set()
         if published:
             # The main loop may close transport only after the correlated terminal
             # is fully handed to the kernel. Receipt therefore implies the child
@@ -609,6 +644,7 @@ class RuntimeChildHost:
 
     def _retire_uncertain_cleanup(self) -> None:
         self._cleanup_timed_out.set()
+        self._terminal_publication_complete.set()
         self._stop.set()
         self._put_message(None)
 
@@ -637,6 +673,13 @@ class RuntimeChildHost:
                     or self._safety_requested.is_set()
                 ):
                     return
+            if not self._claim_terminal(
+                completion.generation, completion.task_id, completion.handle
+            ):
+                self._terminal_publication_complete.wait(
+                    timeout=self._fatal_cleanup_timeout_s
+                )
+                return
             assert self._runtime is not None
             cleanup_result: list[RuntimeEvidence | BaseException] = []
 
@@ -727,6 +770,7 @@ class RuntimeChildHost:
                     ),
                 )
             )
+            self._terminal_publication_complete.set()
             if not published:
                 self._retire_uncertain_cleanup()
                 return
@@ -883,7 +927,13 @@ class RuntimeChildHost:
             if not _cleanup_evidence_is_truthful(evidence):
                 self._retire_uncertain_cleanup()
                 return
+            if not self._claim_terminal(message.generation, message.taskId, handle):
+                self._terminal_publication_complete.wait(
+                    timeout=self._fatal_cleanup_timeout_s
+                )
+                return
             self._send(self._terminal(message, reason, evidence))
+            self._terminal_publication_complete.set()
             with self._state_lock:
                 self._truthfully_stopped_completion = (
                     message.generation,
@@ -954,6 +1004,8 @@ class RuntimeChildHost:
             self._qualification_monitor_started = False
             self._completed_identity = None
             self._truthfully_stopped_completion = None
+            self._terminal_claimed = False
+            self._terminal_publication_complete.clear()
         self._runtime.validate(action, request)
         handle = self._runtime.start(action, request)
         with self._state_lock:

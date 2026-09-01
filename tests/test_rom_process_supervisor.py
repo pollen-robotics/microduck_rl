@@ -364,7 +364,11 @@ def test_terminal_packet_is_consumed_before_immediately_exited_child_is_reaped()
 
         deadline = time.monotonic() + 2
         while (
-            (not delivered or supervisor.snapshot().pid is not None)
+            (
+                not delivered
+                or supervisor.snapshot().pid is not None
+                or not supervisor.snapshot().slot_releasable
+            )
             and time.monotonic() < deadline
         ):
             time.sleep(0.005)
@@ -373,6 +377,7 @@ def test_terminal_packet_is_consumed_before_immediately_exited_child_is_reaped()
         assert supervisor.snapshot().cached_terminal.outcome == "SUCCEEDED"
         assert supervisor.snapshot().state is SupervisorState.NO_CHILD
         assert supervisor.snapshot().slot_releasable is True
+        assert supervisor.snapshot().quarantine_reason == "CHILD_EXITED_AFTER_TERMINAL"
     finally:
         supervisor.close()
 

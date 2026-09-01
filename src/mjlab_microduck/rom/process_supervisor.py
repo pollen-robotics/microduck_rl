@@ -869,6 +869,19 @@ class RuntimeProcessSupervisor:
         try:
             packet = receive_packet(owned_socket)
             if not packet:
+                # A lease-expiry terminal is the child’s final packet: the
+                # safety path closes its control socket immediately afterward.
+                # EOF is therefore an ordered containment boundary, not an
+                # unsolicited protocol response, once a correlated terminal
+                # has already been accepted.
+                cached_terminal = self.snapshot().cached_terminal
+                if (
+                    cached_terminal is not None
+                    and cached_terminal.generation == self._generation
+                ):
+                    self._record("CHILD_EOF_AFTER_TERMINAL")
+                    self._quarantine("CHILD_EXITED_AFTER_TERMINAL")
+                    return
                 raise ConnectionError("child transport closed")
             message = decode_packet(packet)
             if message.kind is not RuntimeMessageKind.TERMINAL_EVENT:

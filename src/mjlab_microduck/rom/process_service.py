@@ -473,6 +473,19 @@ class SimulatorTaskService:
         self._reconcile_reaped_terminal()
         if not self._watchdog_healthy:
             return False, (self._readiness_failure_reason or "WATCHDOG_UNHEALTHY",)
+        snapshot = self._supervisor.snapshot()
+        if (
+            snapshot.state.value == "NO_CHILD"
+            and snapshot.slot_releasable
+            and snapshot.quarantine_reason == "CHILD_EXITED_AFTER_TERMINAL"
+        ):
+            with self._lock:
+                no_active_task = self._active is None
+            if no_active_task:
+                try:
+                    self._supervisor.ensure_ready()
+                except Exception:  # noqa: BLE001 - readiness remains fail closed.
+                    pass
         if self._supervisor.readiness():
             return True, ()
         snap = self._supervisor.snapshot()

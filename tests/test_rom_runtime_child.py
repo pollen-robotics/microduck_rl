@@ -739,6 +739,31 @@ def test_command_ack_is_suppressed_if_safety_starts_during_send_boundary(
     assert not thread.is_alive()
 
 
+def test_safety_stop_does_not_publish_after_completion_claims_terminal() -> None:
+    """Completion and lease deadman paths must share one terminal claim."""
+    host, _runtime, parent, thread = _active_host()
+    host._terminal_claimed = True
+    host._terminal_publication_complete.set()
+    host._last_request = RuntimeMessage(
+        kind="COMMAND",
+        generation=7,
+        operationSequence=2,
+        taskId="1" * 32,
+        payload=CommandPayload(
+            parameters={"vxMps": 0.1, "vyMps": 0.0, "yawRateRadps": 0.0},
+            leaseMs=100,
+        ),
+    )
+    host._request_safety("LEASE_EXPIRED")
+    host._perform_safety_stop()
+    parent.setblocking(False)
+    with pytest.raises(BlockingIOError):
+        parent.recv(65_537)
+    parent.close()
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+
+
 def test_safety_completion_waits_until_terminal_packet_is_published() -> None:
     """The main loop must not close transport while safety terminal send is paused."""
     host, runtime, parent, thread = _active_host()

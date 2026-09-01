@@ -286,6 +286,48 @@ def test_service_does_not_publish_receipt_when_close_raises(tmp_path: Path) -> N
     assert service.shutdown_reap_receipt is None
 
 
+def test_readiness_respawns_child_after_truthful_terminal_eof(tmp_path: Path) -> None:
+    bundle = stand_bundle_fixture.__wrapped__()
+
+    class RespawningSupervisor:
+        def __init__(self) -> None:
+            self.ready = True
+            self.ensure_calls = 0
+
+        def snapshot(self) -> SupervisorSnapshot:
+            if self.ready:
+                return SupervisorSnapshot(
+                    SupervisorState.IDLE, 2, True, None, None, True
+                )
+            return SupervisorSnapshot(
+                SupervisorState.NO_CHILD,
+                1,
+                False,
+                None,
+                "CHILD_EXITED_AFTER_TERMINAL",
+                True,
+            )
+
+        def ensure_ready(self) -> SupervisorSnapshot:
+            self.ensure_calls += 1
+            self.ready = True
+            return self.snapshot()
+
+        def readiness(self) -> bool:
+            return self.snapshot().child_healthy and self.snapshot().slot_releasable
+
+    supervisor = RespawningSupervisor()
+    service = SimulatorTaskService(
+        bundle,
+        SqliteTaskStore(tmp_path / "terminal-eof.sqlite3"),
+        lambda _callback: supervisor,  # type: ignore[arg-type,return-value]
+    )
+    supervisor.ready = False
+
+    assert service.motion_readiness() == (True, ())
+    assert supervisor.ensure_calls == 2
+
+
 def test_service_and_api_publish_only_exact_successful_close_receipt(
     tmp_path: Path,
 ) -> None:
