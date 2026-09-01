@@ -7186,3 +7186,424 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Jump (Elon hop) — bilateral two-foot hop, land standing.
+#
+# Physics note (2026-08-29 BAM/mjlab probe): open-loop crouch→extend with the
+# XL330 M6 model never left the ground. Peak vz ≈ 0.1 m/s (sub-mm hop). A
+# two-foot jump is at the actuator margin. The env therefore:
+#   • pays Δpeak height / Δflight only while BOTH feet are off AND upright
+#     AND trunk z is at/above stand (a sit/fall is not a hop)
+#   • reverse-curriculums a slice of envs already going up / already airborne
+#     so landing is on-policy even if takeoff is rare
+#   • dense takeoff (Δvz while still in contact) + GRF-unloading so there is
+#     a gradient toward hop before the first true flight
+# Latch opens landing recovery. No per-step jackpot for being high.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_JUMP_FEET_SENSOR = "feet_ground_contact"
+
+
+def hopping_from_values(
+    both_air: torch.Tensor,
+    upright_cos: torch.Tensor,
+    z: torch.Tensor,
+    stand_z: float,
+    min_upright: float = 0.7,
+    z_slack: float = 0.01,
+) -> torch.Tensor:
+    """True where the pose counts as a hop, not a sit/fall/skip.
+
+    Sit-fall has feet off too — it is rejected by the z and upright gates.
+    """
+    return (
+        both_air
+        & (upright_cos >= min_upright)
+        & (z >= stand_z - z_slack)
+    )
+
+
+def jump_latch_from_values(
+    flight_s: torch.Tensor,
+    peak_z: torch.Tensor,
+    stand_z: float,
+    min_air_s: float = 0.04,
+    min_peak_above: float = 0.005,
+) -> torch.Tensor:
+    """Latch once the hop is real: ≥40 ms bilateral air or ≥5 mm above stand."""
+    return (flight_s >= min_air_s) | ((peak_z - stand_z) >= min_peak_above)
+
+
+def jump_progress_from_values(
+    peak_z: torch.Tensor,
+    paid_z: torch.Tensor,
+    stand_z: float,
+    target_above: float = 0.03,
+) -> torch.Tensor:
+    """Potential-based peak-height progress in [0, 1] of a `target_above` hop.
+
+    Pays Δ(min(peak, stand+target) − stand) / target. Camping at a height
+    pays zero; overshooting the target forfeits the excess (no jackpot for
+    launching into orbit). Spawn must initialize paid_z to the spawn peak
+    so an airborne reset does not cash its free height.
+    """
+    cap = stand_z + target_above
+    new_paid = torch.clamp(peak_z, max=cap)
+    old_paid = torch.clamp(paid_z, max=cap)
+    delta = torch.clamp(new_paid - old_paid, min=0.0)
+    return delta / max(target_above, 1e-6)
+
+
+def jump_landing_score_from_values(
+    z: torch.Tensor,
+    upright_cos: torch.Tensor,
+    both_down: torch.Tensor,
+    stand_z: float,
+    height_std: float = 0.04,
+    upright_std: float = 0.40,
+) -> torch.Tensor:
+    """Product of Gaussians: stand height × upright × both feet down.
+
+    In-air / fallen / one-foot all collapse on at least one factor.
+    """
+    height = torch.exp(-((z - stand_z) / height_std) ** 2)
+    tilt_err = 1.0 - upright_cos
+    upright = torch.exp(-(tilt_err / upright_std) ** 2)
+    return height * upright * both_down.float()
+
+
+def _jump_upright_cos(quat: torch.Tensor) -> torch.Tensor:
+    return torch.nan_to_num(1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2), nan=0.0)
+
+
+def _jump_n_feet(env: ManagerBasedRlEnv) -> torch.Tensor:
+    if _JUMP_FEET_SENSOR not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+    found = env.scene.sensors[_JUMP_FEET_SENSOR].data.found
+    found = found.view(found.shape[0], -1)
+    return (found > 0).sum(dim=-1)
+
+
+def _jump_state(env: ManagerBasedRlEnv) -> None:
+    if not hasattr(env, "_jump_peak_z"):
+        n = env.num_envs
+        dev = env.device
+        z = torch.zeros(n, device=dev)
+        env._jump_peak_z = z.clone()
+        env._jump_paid_peak = z.clone()
+        env._jump_flight = z.clone()
+        env._jump_paid_flight = z.clone()
+        env._jump_takeoff_paid = z.clone()
+        env._jump_land_paid = z.clone()
+        env._jump_latch = torch.zeros(n, dtype=torch.bool, device=dev)
+        env._jump_last_update = -1
+
+
+def _update_jump_state(
+    env: ManagerBasedRlEnv,
+    asset: Entity,
+    stand_z: float,
+    min_upright: float = 0.7,
+    min_air_s: float = 0.04,
+    min_peak_above: float = 0.005,
+) -> None:
+    """Step-guarded hop bookkeeping (peak, flight time, latch)."""
+    _jump_state(env)
+    step = int(env.common_step_counter)
+    if step == env._jump_last_update:
+        return
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    upright = _jump_upright_cos(asset.data.root_link_quat_w)
+    both_air = _jump_n_feet(env) == 0
+    hopping = hopping_from_values(both_air, upright, z, stand_z, min_upright)
+    env._jump_flight = env._jump_flight + hopping.float() * env.step_dt
+    env._jump_peak_z = torch.where(
+        hopping, torch.maximum(env._jump_peak_z, z), env._jump_peak_z
+    )
+    env._jump_latch = env._jump_latch | jump_latch_from_values(
+        env._jump_flight, env._jump_peak_z, stand_z, min_air_s, min_peak_above
+    )
+    env._jump_last_update = step
+
+
+def reset_jump_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    standing_prob: float = 0.6,
+    crouch_prob: float = 0.2,
+    air_prob: float = 0.2,
+    standing_z_min: float = 0.11,
+    standing_z_max: float = 0.12,
+    standing_tilt_max: float = 0.0,
+    crouch_z_min: float = 0.09,
+    crouch_z_max: float = 0.105,
+    crouch_vz_range: tuple = (0.25, 0.55),
+    crouch_overrides: Optional[dict] = None,
+    crouch_factor_range: tuple = (0.5, 1.0),
+    air_z_min: float = 0.13,
+    air_z_max: float = 0.16,
+    air_vz_range: tuple = (0.0, 0.35),
+    joint_noise_std: float = 0.05,
+    stand_z: float = 0.115,
+    min_air_s: float = 0.04,
+):
+    """Standing / crouched-upward / already-airborne reverse curriculum.
+
+    Standing bucket: HOME joints, learn the takeoff. Crouch bucket: squat
+    on the feet with an upward vz so flight is one impulse away (takeoff
+    last-mile). Air bucket: already hopping, latch pre-set, paid peak set
+    to spawn z so they don't cash free height — they learn the landing.
+    """
+    if env_ids is None or len(env_ids) == 0:
+        return
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    num = len(env_ids)
+    asset: Entity = env.scene[asset_cfg.name]
+    _jump_state(env)
+
+    total = standing_prob + crouch_prob + air_prob
+    p_stand = standing_prob / max(total, 1e-6)
+    p_crouch = crouch_prob / max(total, 1e-6)
+    u = torch.rand(num, device=env.device)
+    is_stand = u < p_stand
+    is_crouch = (u >= p_stand) & (u < p_stand + p_crouch)
+    is_air = ~(is_stand | is_crouch)
+
+    yaw = torch.rand(num, device=env.device) * 2 * np.pi - np.pi
+    tilt = max(standing_tilt_max, 0.0)
+    pitch = (torch.rand(num, device=env.device) * 2 - 1) * tilt
+    roll = (torch.rand(num, device=env.device) * 2 - 1) * tilt
+    cy, sy = torch.cos(yaw * 0.5), torch.sin(yaw * 0.5)
+    cp, sp = torch.cos(pitch * 0.5), torch.sin(pitch * 0.5)
+    cr, sr = torch.cos(roll * 0.5), torch.sin(roll * 0.5)
+    qw = cr * cp * cy + sr * sp * sy
+    qx = sr * cp * cy - cr * sp * sy
+    qy = cr * sp * cy + sr * cp * sy
+    qz = cr * cp * sy - sr * sp * cy
+    quat = torch.stack([qw, qx, qy, qz], dim=1)
+
+    z_stand = (
+        torch.rand(num, device=env.device) * (standing_z_max - standing_z_min)
+        + standing_z_min
+    )
+    z_crouch = (
+        torch.rand(num, device=env.device) * (crouch_z_max - crouch_z_min) + crouch_z_min
+    )
+    z_air = torch.rand(num, device=env.device) * (air_z_max - air_z_min) + air_z_min
+    new_z = torch.where(is_air, z_air, torch.where(is_crouch, z_crouch, z_stand))
+
+    env.sim.data.qpos[env_ids, 2] = new_z
+    env.sim.data.qpos[env_ids, 3:7] = quat
+    env.sim.data.qvel[env_ids, :6] = 0.0
+
+    vz_c = (
+        torch.rand(num, device=env.device) * (crouch_vz_range[1] - crouch_vz_range[0])
+        + crouch_vz_range[0]
+    )
+    vz_a = (
+        torch.rand(num, device=env.device) * (air_vz_range[1] - air_vz_range[0])
+        + air_vz_range[0]
+    )
+    vz = torch.where(is_air, vz_a, torch.where(is_crouch, vz_c, torch.zeros_like(vz_c)))
+    env.sim.data.qvel[env_ids, 2] = vz
+
+    servo_ids = _servo_joint_ids(env, asset)
+    crouch_ids = env_ids[is_crouch]
+    if len(crouch_ids) > 0 and crouch_overrides:
+        fac = (
+            torch.rand(len(crouch_ids), device=env.device)
+            * (crouch_factor_range[1] - crouch_factor_range[0])
+            + crouch_factor_range[0]
+        )
+        for jnt_idx, angle in crouch_overrides.items():
+            col = 7 + servo_ids[jnt_idx]
+            home = env.sim.data.qpos[crouch_ids, col]
+            env.sim.data.qpos[crouch_ids, col] = home + fac * (angle - home)
+    if joint_noise_std > 0.0:
+        cols = torch.tensor([7 + j for j in servo_ids], device=env.device, dtype=torch.long)
+        noise = torch.randn(num, len(cols), device=env.device) * joint_noise_std
+        env.sim.data.qpos[env_ids.unsqueeze(1), cols.unsqueeze(0)] += noise
+
+    env._jump_peak_z[env_ids] = new_z
+    env._jump_paid_peak[env_ids] = new_z
+    env._jump_flight[env_ids] = torch.where(
+        is_air, torch.full((num,), min_air_s, device=env.device), torch.zeros(num, device=env.device)
+    )
+    env._jump_paid_flight[env_ids] = env._jump_flight[env_ids]
+    env._jump_takeoff_paid[env_ids] = torch.clamp(vz, min=0.0)
+    env._jump_land_paid[env_ids] = 0.0
+    env._jump_latch[env_ids] = is_air
+
+
+def jump_progress(
+    env: ManagerBasedRlEnv,
+    stand_z: float = 0.115,
+    target_above: float = 0.03,
+    min_upright: float = 0.7,
+    min_air_s: float = 0.04,
+    min_peak_above: float = 0.005,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay Δpeak hop height, capped at ``target_above`` (see jump_progress_from_values)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_jump_state(env, asset, stand_z, min_upright, min_air_s, min_peak_above)
+    rew = jump_progress_from_values(
+        env._jump_peak_z, env._jump_paid_peak, stand_z, target_above
+    )
+    env._jump_paid_peak = torch.maximum(env._jump_paid_peak, env._jump_peak_z)
+    return rew
+
+
+def jump_flight(
+    env: ManagerBasedRlEnv,
+    stand_z: float = 0.115,
+    target_air_s: float = 0.12,
+    min_upright: float = 0.7,
+    min_air_s: float = 0.04,
+    min_peak_above: float = 0.005,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay Δbilateral-air time while hopping, capped at ``target_air_s``."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_jump_state(env, asset, stand_z, min_upright, min_air_s, min_peak_above)
+    new_paid = torch.clamp(env._jump_flight, max=target_air_s)
+    old_paid = torch.clamp(env._jump_paid_flight, max=target_air_s)
+    delta = torch.clamp(new_paid - old_paid, min=0.0)
+    env._jump_paid_flight = torch.maximum(env._jump_paid_flight, env._jump_flight)
+    return delta / max(target_air_s, 1e-6)
+
+
+def jump_takeoff_vz(
+    env: ManagerBasedRlEnv,
+    stand_z: float = 0.115,
+    max_vz: float = 0.5,
+    min_z: float = 0.08,
+    min_upright: float = 0.7,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Potential-based upward vz while still in contact — the takeoff bootstrap.
+
+    Pays Δvz (capped at ``max_vz``) only with at least one foot down, upright,
+    and not sitting. Spawn initializes takeoff_paid to the reset vz so a
+    crouch-up spawn does not cash its free impulse.
+    """
+    _jump_state(env)
+    asset: Entity = env.scene[asset_cfg.name]
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    vz = torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0)
+    upright = _jump_upright_cos(asset.data.root_link_quat_w)
+    in_contact = _jump_n_feet(env) >= 1
+    gated = in_contact & (upright >= min_upright) & (z >= min_z)
+    target = torch.clamp(vz, min=0.0, max=max_vz)
+    new_paid = torch.where(gated, torch.maximum(env._jump_takeoff_paid, target), env._jump_takeoff_paid)
+    delta = torch.clamp(new_paid - env._jump_takeoff_paid, min=0.0)
+    env._jump_takeoff_paid = new_paid
+    return delta / max(max_vz, 1e-6)
+
+
+def jump_unloading(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = _JUMP_FEET_SENSOR,
+    robot_weight: float = 7.23,
+    stand_z: float = 0.115,
+    min_upright: float = 0.7,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Fraction of body weight unloaded while upright, rising, and near stand.
+
+    Dense pre-flight gradient: 1 when GRF is 0 (flight), 0 when supporting
+    full weight. Gated on vz>0 so a sit (unloading while dropping) is free
+    of this term. Not a jackpot — bounded in [0, 1] per step, and only
+    while going up.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    vz = torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0)
+    upright = _jump_upright_cos(asset.data.root_link_quat_w)
+    rising = (vz > 0.0) & (upright >= min_upright) & (z >= stand_z - 0.02)
+    if sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+    force = env.scene.sensors[sensor_name].data.force
+    if force is None:
+        n = _jump_n_feet(env)
+        unloaded = (2.0 - n.clamp(max=2.0)) / 2.0
+        return unloaded * rising.float()
+    fz = torch.nan_to_num(force[..., 2], nan=0.0)
+    if fz.dim() > 1:
+        fz = fz.sum(dim=-1)
+    # netforce global z is the vertical GRF; contacts pushing up are positive
+    # or negative depending on sign convention — take magnitude of the
+    # supporting component and clamp.
+    support = torch.clamp(fz.abs(), max=robot_weight)
+    unloaded = torch.clamp((robot_weight - support) / max(robot_weight, 1e-6), 0.0, 1.0)
+    return unloaded * rising.float()
+
+
+def jump_landing(
+    env: ManagerBasedRlEnv,
+    stand_z: float = 0.115,
+    height_std: float = 0.04,
+    upright_std: float = 0.40,
+    min_upright: float = 0.7,
+    min_air_s: float = 0.04,
+    min_peak_above: float = 0.005,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Potential-based stand recovery AFTER a hop latch.
+
+    Pays Δ landing-score, so arriving at stand after a hop collects a bounded
+    total (~1) and holding it pays zero — no per-step jackpot. Gate closed
+    until the latch, so a standing spawn that never hops earns nothing here.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_jump_state(env, asset, stand_z, min_upright, min_air_s, min_peak_above)
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    upright = _jump_upright_cos(asset.data.root_link_quat_w)
+    both_down = _jump_n_feet(env) >= 2
+    score = jump_landing_score_from_values(
+        z, upright, both_down, stand_z, height_std, upright_std
+    )
+    score = score * env._jump_latch.float()
+    delta = torch.clamp(score - env._jump_land_paid, min=0.0)
+    env._jump_land_paid = torch.maximum(env._jump_land_paid, score)
+    return delta
+
+
+def jump_head_up(
+    env: ManagerBasedRlEnv,
+    stand_z: float = 0.115,
+    min_upright: float = 0.7,
+    min_air_s: float = 0.04,
+    min_peak_above: float = 0.005,
+    neck_target: float = 0.75,
+    head_target: float = 0.55,
+    std: float = 0.45,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Elon flavour: beak-up while hopping. Zero when not in a hop."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_jump_state(env, asset, stand_z, min_upright, min_air_s, min_peak_above)
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    upright = _jump_upright_cos(asset.data.root_link_quat_w)
+    hopping = hopping_from_values(
+        _jump_n_feet(env) == 0, upright, z, stand_z, min_upright
+    )
+    q = _servo_joint_pos(env, asset)
+    # 5 = neck_pitch, 6 = head_pitch on the 14-servo layout.
+    neck_err = q[:, 5] - neck_target
+    head_err = q[:, 6] - head_target
+    pose = torch.exp(-(neck_err / std) ** 2) * torch.exp(-(head_err / std) ** 2)
+    return pose * hopping.float()
+
