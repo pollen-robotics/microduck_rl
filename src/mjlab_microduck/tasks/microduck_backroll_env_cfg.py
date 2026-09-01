@@ -87,22 +87,23 @@ BACKROLL_CURRICULUM_STAGES = [
 REPEATED_BACKROLL_CURRICULUM_STAGES = [
     {
         "params": {
-            # First learn the strict head-over completion from states where
-            # the ordered contacts have already happened.  The standing
-            # bucket must still acquire every latch physically.
-            "standing_prob": 0.50,
-            "midroll_prob": 0.50,
+            # First preserve the measured late-phase basin while keeping a
+            # substantial standing bucket for the policy to learn the launch.
+            # A178 model 2600 completed 3/4 direct 180-degree reference
+            # rollouts, but no standing trial, so the reference must not be
+            # diluted by the weaker 140-degree row yet.
+            "standing_prob": 0.35,
+            "midroll_prob": 0.65,
             "midroll_pitch_min": math.radians(260.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (0.0, 2.0),
             "joint_noise_std": 0.0,
             "synthesize_contact_latches": True,
-            # Always use the two coherent, measured champion states around
-            # the head-contact transition.  The 140-degree precontact row
-            # bridges into the 180-degree pivot row; late random starts skip
-            # the window where head-alignment shaping can provide a gradient.
+            # Use the measured post-contact pivot row until the standing
+            # launch has a foothold.  Introducing the 140-degree row before
+            # that point reproduced the side-flop basin in direct audits.
             "reference_state_prob": 1.0,
-            "reference_phase_range_deg": (140.0, 180.0),
+            "reference_phase_range_deg": (180.0, 180.0),
             "reference_source_seed": 10,
             "yaw_range": (-math.radians(20.0), math.radians(20.0)),
             "recovery_enabled": False,
@@ -112,16 +113,16 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.60,
-            "midroll_prob": 0.40,
+            "standing_prob": 0.50,
+            "midroll_prob": 0.50,
             "midroll_pitch_min": math.radians(180.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (1.0, 4.0),
             "joint_noise_std": 0.01,
             "synthesize_contact_latches": True,
-            "reference_state_prob": 0.40,
-            "reference_phase_range_deg": (0.0, 360.0),
-            "reference_source_seed": None,
+            "reference_state_prob": 1.0,
+            "reference_phase_range_deg": (180.0, 180.0),
+            "reference_source_seed": 10,
             "yaw_range": (-math.pi, math.pi),
             "recovery_enabled": False,
             "ground_recovery_prob": 0.0,
@@ -404,9 +405,9 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
     else:
         cfg.curriculum["backroll_phase"].params.update(
             stages=REPEATED_BACKROLL_CURRICULUM_STAGES,
-            success_threshold=0.70,
+            success_threshold=0.45,
             required_consecutive_windows=2,
-            standing_only_mastery=True,
+            standing_only_mastery=False,
             speed_reward_name="backroll_speed_progress",
             speed_reward_weights=[1.0, 1.0, 1.5, 2.0, 3.0, 3.0],
             invalid_reward_name="backroll_invalid",

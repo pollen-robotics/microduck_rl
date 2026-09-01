@@ -192,7 +192,7 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert [
         stage["params"]["standing_prob"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
-    ] == [0.50, 0.60, 0.70, 0.80, 0.90, 1.0]
+    ] == [0.35, 0.50, 0.70, 0.80, 0.90, 1.0]
     assert [
         stage["params"]["mastery_cycles"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
@@ -214,9 +214,9 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert [
         stage["params"]["reference_state_prob"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
-    ] == [1.0, 0.40, 0.25, 0.10, 0.05, 0.0]
+    ] == [1.0, 1.0, 0.25, 0.10, 0.05, 0.0]
     first_stage = REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"]
-    assert first_stage["reference_phase_range_deg"] == (140.0, 180.0)
+    assert first_stage["reference_phase_range_deg"] == (180.0, 180.0)
     assert first_stage["reference_source_seed"] == 10
     assert first_stage["yaw_range"] == pytest.approx(
         (-math.radians(20.0), math.radians(20.0))
@@ -228,12 +228,12 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert play_reset["reference_state_prob"] == pytest.approx(0.0)
     assert play_reset["yaw_range"] == (0.0, 0.0)
     assert cfg.curriculum["backroll_phase"].params["success_threshold"] == pytest.approx(
-        0.70
+        0.45
     )
     assert cfg.curriculum["backroll_phase"].params[
         "required_consecutive_windows"
     ] == 2
-    assert cfg.curriculum["backroll_phase"].params["standing_only_mastery"] is True
+    assert cfg.curriculum["backroll_phase"].params["standing_only_mastery"] is False
     assert cfg.rewards["backroll_completion_progress"].weight > cfg.rewards[
         "backroll_progress"
     ].weight
