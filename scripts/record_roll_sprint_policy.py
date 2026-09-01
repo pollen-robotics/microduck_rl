@@ -319,7 +319,7 @@ def _load_policy_then_arrange_start(
                 lane_spacing=race_lane_spacing,
             )
         else:
-            _arrange_race_start(base_env, race_lane_spacing)
+            _arrange_race_start(base_env, lane_spacing=race_lane_spacing)
         _install_race_corridor_visualizer(
             base_env,
             num_lanes=base_env.num_envs,
