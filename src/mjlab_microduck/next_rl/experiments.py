@@ -1,0 +1,252 @@
+"""Immutable experiment inputs and durable operational run state."""
+
+from __future__ import annotations
+
+import hashlib
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from .artifacts import atomic_write_json, canonical_json
+from .capabilities import PlanDecision
+from .schema import ArtifactRef, ExperimentManifest, SkillSpec
+
+
+class DuplicateExperimentError(RuntimeError):
+    """An equivalent experiment is already reserved or has completed."""
+
+
+@dataclass(frozen=True)
+class ReservationDecision:
+    """The explicit action an operator may take for an experiment fingerprint."""
+
+    fingerprint: str
+    action: str
+
+
+_LEARNING_FIELDS = (
+    "skill_id",
+    "spec_version",
+    "task_id",
+    "contract",
+    "environment_config",
+    "agent_config",
+    "code_digest",
+    "dirty_patch_digest",
+    "seed",
+    "parent_policy_digest",
+    "runner_id",
+)
+_OPERATING_KEYS = {
+    "created_at",
+    "hostname",
+    "host",
+    "pid",
+    "output_dir",
+    "output_path",
+    "log_dir",
+    "status",
+    "timestamp",
+}
+_CREDENTIAL_MARKERS = ("credential", "password", "private_key", "secret", "token", "api_key")
+_ACTIVE_STATUSES = frozenset(("pending", "running", "succeeded"))
+_TRANSITIONS = {
+    "planned": frozenset(("pending",)),
+    "pending": frozenset(("running",)),
+    "running": frozenset(("succeeded", "failed", "interrupted")),
+}
+
+
+def _is_operational_or_credential(key: str) -> bool:
+    normalized = key.strip().lower().replace("-", "_")
+    return normalized in _OPERATING_KEYS or any(marker in normalized for marker in _CREDENTIAL_MARKERS)
+
+
+def _normalize(value: Any) -> Any:
+    """Return JSON-compatible learning data with operational secrets removed."""
+    if isinstance(value, Mapping):
+        return {
+            key: _normalize(item)
+            for key, item in value.items()
+            if isinstance(key, str) and not _is_operational_or_credential(key)
+        }
+    if isinstance(value, tuple):
+        return [_normalize(item) for item in value]
+    if isinstance(value, list):
+        return [_normalize(item) for item in value]
+    return value
+
+
+def _manifest_data(manifest: ExperimentManifest | Mapping[str, Any]) -> Mapping[str, Any]:
+    if isinstance(manifest, ExperimentManifest):
+        return manifest.as_dict()
+    if not isinstance(manifest, Mapping):
+        raise TypeError("manifest must be an ExperimentManifest or mapping")
+    return manifest
+
+
+def learning_inputs(manifest: ExperimentManifest | Mapping[str, Any]) -> dict[str, Any]:
+    """Project a manifest onto only inputs that can change learned policy bytes."""
+    data = _manifest_data(manifest)
+    return {field: _normalize(data.get(field)) for field in _LEARNING_FIELDS}
+
+
+def experiment_fingerprint(manifest: ExperimentManifest | Mapping[str, Any]) -> str:
+    """Return the SHA-256 identity of an experiment's immutable learning inputs."""
+    encoded = canonical_json(learning_inputs(manifest)).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def build_experiment_manifest(
+    spec: SkillSpec,
+    decision: PlanDecision,
+    *,
+    task_id: str,
+    code_digest: str,
+    seed: int,
+    runner_id: str,
+    environment_config: Mapping[str, Any],
+    agent_config: Mapping[str, Any],
+    parent_policy: ArtifactRef | None = None,
+    dirty_patch_digest: str | None = None,
+    created_at: str | None = None,
+    output_dir: str | None = None,
+) -> ExperimentManifest:
+    """Build a validated manifest while recording the planner's reproducible choice."""
+    plan: dict[str, Any] = {"disposition": decision.disposition.value, "reason": decision.reason}
+    if decision.capability is not None:
+        plan["capability_id"] = decision.capability.id
+    if decision.improve_reason is not None:
+        plan["improve_reason"] = decision.improve_reason
+    raw: dict[str, Any] = {
+        "skill_id": spec.id,
+        "spec_version": spec.version,
+        "task_id": task_id,
+        "contract": spec.contract.as_dict(),
+        "code_digest": code_digest,
+        "seed": seed,
+        "runner_id": runner_id,
+        "status": "planned",
+        "environment_config": dict(environment_config),
+        "agent_config": dict(agent_config),
+        "metadata": {"plan": plan},
+    }
+    if parent_policy is not None:
+        raw["parent_policy_digest"] = parent_policy.sha256
+    if dirty_patch_digest is not None:
+        raw["dirty_patch_digest"] = dirty_patch_digest
+    if created_at is not None:
+        raw["created_at"] = created_at
+    if output_dir is not None:
+        raw["output_dir"] = output_dir
+    return ExperimentManifest.from_dict(raw)
+
+
+def _exclusive_write_json(path: Path, value: Any) -> None:
+    """Create a JSON record exactly once, including a durable file payload."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(canonical_json(value).encode("utf-8"))
+            output.flush()
+            os.fsync(output.fileno())
+    except BaseException:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+class ExperimentStore:
+    """Filesystem store that separates immutable learning inputs from run state."""
+
+    def __init__(self, root: str | Path) -> None:
+        self.root = Path(root)
+
+    def _directory(self, fingerprint: str) -> Path:
+        if len(fingerprint) != 64 or any(character not in "0123456789abcdef" for character in fingerprint):
+            raise ValueError("fingerprint must be a lowercase SHA-256 digest")
+        return self.root / fingerprint
+
+    def _manifest_path(self, fingerprint: str) -> Path:
+        return self._directory(fingerprint) / "manifest.json"
+
+    def _status_path(self, fingerprint: str) -> Path:
+        return self._directory(fingerprint) / "status.json"
+
+    def _reservation_path(self, fingerprint: str) -> Path:
+        return self._directory(fingerprint) / "reservation.json"
+
+    def _read_json(self, path: Path) -> dict[str, Any]:
+        import json
+
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise TypeError(f"{path} must contain a JSON object")
+        return value
+
+    def create(
+        self,
+        manifest: ExperimentManifest | Mapping[str, Any],
+        *,
+        fingerprint: str | None = None,
+    ) -> str:
+        """Durably record immutable learning inputs and initial operational status."""
+        parsed = manifest if isinstance(manifest, ExperimentManifest) else ExperimentManifest.from_dict(manifest)
+        calculated = experiment_fingerprint(parsed)
+        if fingerprint is not None and fingerprint != calculated:
+            raise ValueError("fingerprint does not match immutable learning inputs")
+        target = fingerprint or calculated
+        immutable = {
+            "fingerprint": target,
+            "learning_inputs": learning_inputs(parsed),
+            "provenance": _normalize(parsed.metadata),
+        }
+        manifest_path = self._manifest_path(target)
+        try:
+            _exclusive_write_json(manifest_path, immutable)
+        except FileExistsError:
+            if self._read_json(manifest_path) != immutable:
+                raise ValueError("immutable learning inputs cannot be changed") from None
+
+        status_path = self._status_path(target)
+        if not status_path.exists():
+            atomic_write_json(status_path, {"status": parsed.status, "history": [{"status": parsed.status}]})
+        return target
+
+    def reserve(self, fingerprint: str) -> ReservationDecision:
+        """Claim a planned run exactly once or return the safe next action."""
+        manifest_path = self._manifest_path(fingerprint)
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"no experiment exists for fingerprint {fingerprint}")
+        current = self._read_json(self._status_path(fingerprint))["status"]
+        if current in _ACTIVE_STATUSES:
+            raise DuplicateExperimentError(f"experiment {fingerprint} is already {current}")
+        if current == "failed":
+            return ReservationDecision(fingerprint, "retry")
+        if current == "interrupted":
+            return ReservationDecision(fingerprint, "resume")
+        if current != "planned":
+            raise ValueError(f"unknown experiment status {current!r}")
+        try:
+            _exclusive_write_json(self._reservation_path(fingerprint), {"fingerprint": fingerprint})
+        except FileExistsError:
+            raise DuplicateExperimentError(f"experiment {fingerprint} is already reserved") from None
+        self.update_status(fingerprint, "pending")
+        return ReservationDecision(fingerprint, "reserved")
+
+    def update_status(self, fingerprint: str, status: str) -> None:
+        """Atomically advance operational state without ever rewriting the manifest."""
+        status_path = self._status_path(fingerprint)
+        current_record = self._read_json(status_path)
+        current = current_record.get("status")
+        if status not in _TRANSITIONS.get(current, frozenset()):
+            raise ValueError(f"cannot transition experiment from {current!r} to {status!r}")
+        history = current_record.get("history")
+        if not isinstance(history, list):
+            raise TypeError("experiment status history must be a list")
+        atomic_write_json(status_path, {"status": status, "history": [*history, {"status": status}]})
