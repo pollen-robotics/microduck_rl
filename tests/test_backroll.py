@@ -115,6 +115,8 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
         "head_value": 2.0,
     }
     assert cfg.rewards["backroll_completion_progress"].weight == pytest.approx(8.0)
+    assert cfg.rewards["backroll_sagittal"].weight == pytest.approx(-0.5)
+    assert cfg.rewards["backroll_flatness"].weight == pytest.approx(-1.0)
     forbidden = ("sprint", "distance", "lane", "road", "recovery", "reposition")
     assert not any(token in name for name in cfg.rewards for token in forbidden)
     assert cfg.events["set_grounded_backroll_state"].func is mdp.reset_grounded_backroll_state

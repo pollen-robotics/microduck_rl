@@ -332,7 +332,12 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     )
     cfg.rewards["backroll_sagittal"] = RewardTermCfg(
         func=microduck_mdp.roulade_sagittal_penalty,
-        weight=-0.1,
+        # A202 model 50 reached the feet/upright envelope but accumulated
+        # 220--330 degrees of off-axis rotation.  Increase only this
+        # task-specific drift tax so the near-landing parent is steered over
+        # the head instead of the shoulder; it remains bounded and does not
+        # cap the required backward angular rate.
+        weight=-0.5,
     )
     cfg.rewards["backroll_lateral_velocity"] = RewardTermCfg(
         func=microduck_mdp.roulade_lateral_velocity_penalty,
@@ -340,7 +345,7 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     )
     cfg.rewards["backroll_flatness"] = RewardTermCfg(
         func=microduck_mdp.roulade_flatness_penalty,
-        weight=-0.5,
+        weight=-1.0,
     )
     cfg.rewards["action_rate_l2"] = RewardTermCfg(
         func=mdp.action_rate_l2,
