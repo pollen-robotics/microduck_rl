@@ -139,7 +139,7 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert cfg.rewards["backroll_speed_progress"].weight == pytest.approx(8.0)
     assert cfg.rewards["backroll_upright_progress"].weight == pytest.approx(8.0)
     assert cfg.rewards["backroll_height_progress"].weight == pytest.approx(4.0)
-    assert cfg.rewards["backroll_rise_velocity"].weight == pytest.approx(1.0)
+    assert cfg.rewards["backroll_rise_velocity"].weight == pytest.approx(0.0)
     assert (
         cfg.rewards["backroll_upright_progress"].func
         is mdp.grounded_backroll_upright_progress
@@ -193,11 +193,7 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
         -10.0,
         -10.0,
     ]
-    assert cfg.curriculum["backroll_sagittal_weight"].func is mdp.reward_weight
-    assert cfg.curriculum["backroll_sagittal_weight"].params["weight_stages"] == [
-        {"step": 0, "weight": -0.10},
-        {"step": 600 * 24, "weight": -0.25},
-    ]
+    assert "backroll_sagittal_weight" not in cfg.curriculum
     assert "backroll_upright_weight" not in cfg.curriculum
     assert "backroll_height_weight" not in cfg.curriculum
     forbidden = ("sprint", "distance", "lane", "road", "recovery", "reposition")
@@ -213,7 +209,7 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert MicroduckBackrollRlCfg.algorithm.learning_rate == pytest.approx(1.0e-4)
     assert MicroduckBackrollRlCfg.algorithm.schedule == "fixed"
     assert MicroduckBackrollRlCfg.algorithm.entropy_coef == pytest.approx(5.0e-4)
-    assert MicroduckBackrollRlCfg.algorithm.anchor_retention == pytest.approx(0.98)
+    assert MicroduckBackrollRlCfg.algorithm.anchor_retention == pytest.approx(0.90)
     assert MicroduckBackrollRlCfg.algorithm.refresh_anchor_on_load is True
     assert (
         MicroduckBackrollRlCfg.algorithm.class_name
@@ -245,6 +241,48 @@ def test_backroll_runner_restores_configured_lr_after_optimizer_resume(monkeypat
     assert infos == {"loaded": "parent.pt"}
     assert runner.alg.learning_rate == pytest.approx(configured_lr)
     assert runner.alg.optimizer.param_groups[0]["lr"] == pytest.approx(configured_lr)
+
+
+def test_backroll_runner_bootstraps_only_actor_and_resets_training_clock(monkeypatch):
+    configured_lr = 1.0e-4
+    runner = object.__new__(MicroduckFrozenActorNormRunner)
+    runner._configured_learning_rate = configured_lr
+    runner._bootstrap_actor_std = 1.0
+    distribution = SimpleNamespace(std_param=torch.nn.Parameter(torch.tensor([0.2])))
+    runner.alg = SimpleNamespace(
+        learning_rate=7.0e-4,
+        optimizer=SimpleNamespace(param_groups=[{"lr": 7.0e-4}]),
+        actor=SimpleNamespace(distribution=distribution),
+    )
+    runner.env = SimpleNamespace(
+        unwrapped=SimpleNamespace(common_step_counter=1899 * 24)
+    )
+    captured = {}
+
+    def fake_load(self, path, load_cfg, strict, map_location):
+        captured["path"] = path
+        captured["load_cfg"] = load_cfg
+        return {"loaded": path}
+
+    monkeypatch.setattr(
+        "mjlab_microduck.tasks.MicroduckOnPolicyRunner.load",
+        fake_load,
+    )
+
+    infos = runner.load(r"C:\run\.bootstrap-full-rotation-parent\model_1899.pt")
+
+    assert infos["loaded"].endswith("model_1899.pt")
+    assert captured["load_cfg"] == {
+        "actor": True,
+        "critic": False,
+        "optimizer": False,
+        "iteration": False,
+        "rnd": False,
+    }
+    assert runner.env.unwrapped.common_step_counter == 0
+    assert runner.alg.learning_rate == pytest.approx(configured_lr)
+    assert runner.alg.optimizer.param_groups[0]["lr"] == pytest.approx(configured_lr)
+    assert distribution.std_param.item() == pytest.approx(1.0)
 
 
 def test_backroll_actor_anchor_preserves_only_a_bounded_residual():
@@ -598,22 +636,10 @@ def test_landing_potential_starts_after_flat_head_pivot_not_before():
 def test_backroll_curriculum_matches_mastery_stages():
     assert [
         stage["params"]["standing_prob"] for stage in BACKROLL_CURRICULUM_STAGES
-    ] == [
-        0.20,
-        0.30,
-        0.40,
-        0.60,
-        0.85,
-    ]
+    ] == [1.0] * 5
     assert [
         stage["params"]["midroll_prob"] for stage in BACKROLL_CURRICULUM_STAGES
-    ] == [
-        0.80,
-        0.70,
-        0.60,
-        0.40,
-        0.15,
-    ]
+    ] == [0.0] * 5
     assert BACKROLL_CURRICULUM_STAGES[0]["params"][
         "midroll_pitch_min"
     ] == pytest.approx(math.radians(250.0))
@@ -626,7 +652,7 @@ def test_backroll_curriculum_matches_mastery_stages():
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"][
         "reference_state_prob"
-    ] == pytest.approx(1.0)
+    ] == pytest.approx(0.0)
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_state_path"]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_phase_range_deg"] == (
         250.0,
@@ -653,20 +679,15 @@ def test_backroll_curriculum_matches_mastery_stages():
     ] == [29.0, 27.0, 25.0, 22.0, 20.0]
     assert [
         stage["params"]["reference_state_prob"] for stage in BACKROLL_CURRICULUM_STAGES
-    ] == [
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-    ]
+    ] == [0.0] * 5
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_source_seed"] is None
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["yaw_range"] == (0.0, 0.0)
     cfg = make_microduck_backroll_env_cfg()
     params = cfg.curriculum["backroll_phase"].params
     assert params["window_episodes"] == 4096
     assert params["success_threshold"] == pytest.approx(0.70)
-    assert params["standing_only_mastery"] is False
+    assert params["standing_only_mastery"] is True
+    assert params["required_consecutive_windows"] == 2
 
 
 def test_backroll_discovery_envelope_admits_bridge_but_rejects_side_roll():
@@ -687,6 +708,15 @@ def test_backroll_discovery_envelope_admits_bridge_but_rejects_side_roll():
         "frontier": torch.full((3,), math.radians(220.0)),
         "trunk_latch": torch.ones(3, dtype=torch.bool),
         "head_latch": torch.ones(3, dtype=torch.bool),
+        "cycle_max_lateral_axis_z": torch.tensor(
+            [
+                math.sin(math.radians(20.0)),
+                math.sin(math.radians(28.5)),
+                math.sin(math.radians(60.0)),
+            ]
+        ),
+        "cycle_offaxis_rotation": torch.zeros(3),
+        "max_air_steps": torch.zeros(3, dtype=torch.long),
     }
 
     final_mask = mdp._grounded_backroll_reference_consistent_rows(
@@ -700,6 +730,28 @@ def test_backroll_discovery_envelope_admits_bridge_but_rejects_side_roll():
 
     assert final_mask.tolist() == [True, False, False]
     assert discovery_mask.tolist() == [True, True, False]
+
+
+def test_strict_reference_filter_rejects_laundered_cycle_history():
+    qpos = torch.zeros(4, 21)
+    qpos[:, 3] = 1.0
+    bank = {
+        "qpos": qpos,
+        "frontier": torch.full((4,), math.radians(220.0)),
+        "trunk_latch": torch.ones(4, dtype=torch.bool),
+        "head_latch": torch.ones(4, dtype=torch.bool),
+        "cycle_max_lateral_axis_z": torch.tensor([0.0, 0.8, 0.0, 0.0]),
+        "cycle_offaxis_rotation": torch.tensor([0.0, 0.0, 10.0, 0.0]),
+        "max_air_steps": torch.tensor([0, 0, 0, 99]),
+    }
+
+    mask = mdp._grounded_backroll_reference_consistent_rows(
+        bank,
+        max_lateral_axis_z=math.sin(math.radians(20.0)),
+        max_air_steps=4,
+    )
+
+    assert mask.tolist() == [True, False, False, False]
 
 
 def test_reverse_phase_reset_uses_negative_pitch_rate_and_contact_prerequisites(
@@ -926,10 +978,15 @@ def test_strict_reference_reset_excludes_side_biased_rows_and_balances_buckets(
                 "phase_center_deg": phase,
                 "trunk_latch": torch.tensor(trunk),
                 "head_latch": torch.tensor(head),
+                "cycle_max_lateral_axis_z": mdp._lateral_axis_z(
+                    qpos[3:7].unsqueeze(0)
+                )[0].abs(),
+                "cycle_offaxis_rotation": torch.tensor(0.1),
+                "max_air_steps": torch.tensor(1),
             }
         )
     reference_path = tmp_path / "strict-reference.pt"
-    torch.save({"rows": rows}, reference_path)
+    torch.save({"schema_version": 2, "rows": rows}, reference_path)
 
     mdp.reset_grounded_backroll_state(
         env,
@@ -950,6 +1007,42 @@ def test_strict_reference_reset_excludes_side_biased_rows_and_balances_buckets(
     assert (angles == 260).any()
     selected = env.sim.data.qpos[angles == 260, 3:7]
     assert torch.allclose(selected[:, 3], torch.zeros_like(selected[:, 3]))
+    assert torch.allclose(env._backroll_cycle_offaxis_rotation, torch.full((24,), 0.1))
+    assert torch.equal(env._backroll_max_air_steps, torch.ones(24, dtype=torch.long))
+
+
+def test_strict_reference_reset_rejects_schema_one_history(monkeypatch, tmp_path):
+    env, _asset = _fake_env()
+    env.sim = SimpleNamespace(
+        data=SimpleNamespace(qpos=torch.zeros(1, 21), qvel=torch.zeros(1, 20))
+    )
+    env.sim.data.qpos[:, 3] = 1.0
+    monkeypatch.setattr(mdp, "_servo_joint_ids", lambda _env, _asset: list(range(14)))
+    row = {
+        "qpos": env.sim.data.qpos[0].clone(),
+        "qvel": env.sim.data.qvel[0].clone(),
+        "seed": 1,
+        "accum": torch.tensor(math.radians(180.0)),
+        "frontier": torch.tensor(math.radians(180.0)),
+        "phase_center_deg": 180.0,
+        "trunk_latch": torch.tensor(True),
+        "head_latch": torch.tensor(True),
+    }
+    reference_path = tmp_path / "legacy-reference.pt"
+    torch.save({"schema_version": 1, "rows": [row]}, reference_path)
+
+    with pytest.raises(ValueError, match="requires schema version 2"):
+        mdp.reset_grounded_backroll_state(
+            env,
+            torch.tensor([0]),
+            standing_prob=0.0,
+            midroll_prob=1.0,
+            reference_state_prob=1.0,
+            reference_state_path=str(reference_path),
+            reference_strict_sagittal=True,
+            yaw_range=(0.0, 0.0),
+            joint_noise_std=0.0,
+        )
 
 
 def test_repeated_curriculum_counts_the_stage_mastery_cycle_target(monkeypatch):
@@ -1614,6 +1707,40 @@ def test_head_contact_only_latches_after_trunk_contact(monkeypatch):
     assert env._backroll_head_latch.item()
 
 
+def test_simultaneous_trunk_and_head_contact_does_not_fake_order(monkeypatch):
+    env, _asset = _fake_env()
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+    env._roulade_accum[:] = math.radians(150.0)
+    env._roulade_max[:] = math.radians(150.0)
+    env.scene.sensors["trunk_ground_contact"].data.found[:] = 1.0
+    env.scene.sensors["head_ground_contact"].data.found[:] = 1.0
+
+    mdp.grounded_backroll_progress(env)
+    assert not env._backroll_trunk_latch.item()
+    assert not env._backroll_head_latch.item()
+
+    env.common_step_counter += 1
+    mdp.grounded_backroll_progress(env)
+    assert not env._backroll_trunk_latch.item()
+    assert not env._backroll_head_latch.item()
+
+    env.scene.sensors["head_ground_contact"].data.found[:] = 0.0
+    env.common_step_counter += 1
+    mdp.grounded_backroll_progress(env)
+    assert env._backroll_trunk_latch.item()
+    assert not env._backroll_head_latch.item()
+
+    env.scene.sensors["head_ground_contact"].data.found[:] = 1.0
+    env.common_step_counter += 1
+    mdp.grounded_backroll_progress(env)
+    assert env._backroll_head_latch.item()
+
+
 def test_airborne_gap_and_wrong_way_completion_are_invalid(monkeypatch):
     env, asset = _fake_env()
     monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
@@ -1714,7 +1841,9 @@ def test_repeated_backroll_rearms_and_credits_two_distinct_cycles(monkeypatch):
     assert sum(value > 0.0 for value in pulses) == 2
 
 
-def test_feet_recontact_bridge_requires_head_release_and_pays_once(monkeypatch):
+def test_feet_recontact_bridge_requires_head_and_trunk_release_and_pays_once(
+    monkeypatch,
+):
     env, _asset = _fake_env()
     monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
     monkeypatch.setattr(
@@ -1734,14 +1863,50 @@ def test_feet_recontact_bridge_requires_head_release_and_pays_once(monkeypatch):
     assert mdp.grounded_backroll_feet_recontact_rate(env).item() == 0.0
     env.common_step_counter += 1
 
-    # Releasing the head while upright enough and supported on both feet emits
-    # exactly one pulse. Holding the same posture cannot farm it.
+    # Releasing only the head while the trunk is still supported is not a feet
+    # landing either.
     env.scene.sensors["head_ground_contact"].data.found[:] = 0.0
+    env.scene.sensors["trunk_ground_contact"].data.found[:] = 1.0
+    assert mdp.grounded_backroll_feet_recontact_rate(env).item() == 0.0
+    env.common_step_counter += 1
+
+    # Releasing both while upright enough and supported on both feet emits
+    # exactly one pulse. Holding the same posture cannot farm it.
+    env.scene.sensors["trunk_ground_contact"].data.found[:] = 0.0
     first = mdp.grounded_backroll_feet_recontact_rate(env)
     env.common_step_counter += 1
     second = mdp.grounded_backroll_feet_recontact_rate(env)
     assert first.item() == pytest.approx(1.0 / env.step_dt)
     assert second.item() == 0.0
+
+
+def test_landing_hold_rejects_head_or_trunk_supported_tripod(monkeypatch):
+    env, _asset = _fake_env()
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+    env._roulade_accum[:] = math.radians(355.0)
+    env._roulade_max[:] = math.radians(355.0)
+    env._backroll_trunk_latch[:] = True
+    env._backroll_head_latch[:] = True
+    env._backroll_feet_recontact_latch[:] = True
+    hold_steps = math.ceil(mdp._BACKROLL_LANDING_HOLD_SECONDS / env.step_dt)
+
+    for sensor_name in ("head_ground_contact", "trunk_ground_contact"):
+        env.scene.sensors[sensor_name].data.found[:] = 1.0
+        for _ in range(hold_steps + 1):
+            assert mdp.grounded_backroll_success_rate(env).item() == 0.0
+            env.common_step_counter += 1
+        env.scene.sensors[sensor_name].data.found[:] = 0.0
+
+    pulses = []
+    for _ in range(hold_steps + 2):
+        pulses.append(mdp.grounded_backroll_success_rate(env).item())
+        env.common_step_counter += 1
+    assert sum(value > 0.0 for value in pulses) == 1
 
 
 def test_landing_readiness_pays_only_new_post_recontact_progress(monkeypatch):
@@ -1779,6 +1944,13 @@ def test_landing_readiness_pays_only_new_post_recontact_progress(monkeypatch):
     env.common_step_counter += 1
     assert mdp.grounded_backroll_landing_readiness_progress(env).item() == 0.0
     assert env._backroll_landing_readiness_paid.item() == pytest.approx(reached)
+
+    # Resting on the trunk after feet contact is not landing progress.
+    env.scene.sensors["trunk_ground_contact"].data.found[:] = 1.0
+    env._roulade_max[:] = math.radians(343.0)
+    env.common_step_counter += 1
+    assert mdp.grounded_backroll_landing_readiness_progress(env).item() == 0.0
+    env.scene.sensors["trunk_ground_contact"].data.found[:] = 0.0
 
     # A head contact cannot extend readiness. Releasing it later may pay only
     # the genuinely new portion, never the missed interval twice.

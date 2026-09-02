@@ -30,6 +30,8 @@ class MicroduckFrozenActorNormRunner(MicroduckOnPolicyRunner):
 
     def __init__(self, env, train_cfg: dict, log_dir=None, device="cpu", **kwargs):
         self._configured_learning_rate = float(train_cfg["algorithm"]["learning_rate"])
+        distribution_cfg = train_cfg.get("actor", {}).get("distribution_cfg") or {}
+        self._bootstrap_actor_std = float(distribution_cfg.get("init_std", 1.0))
         super().__init__(env, train_cfg, log_dir, device, **kwargs)
         normalizer = getattr(self.alg.actor, "obs_normalizer", None)
         if hasattr(normalizer, "until"):
@@ -42,18 +44,48 @@ class MicroduckFrozenActorNormRunner(MicroduckOnPolicyRunner):
         strict: bool = True,
         map_location: str | None = None,
     ) -> dict:
-        """Load the parent while keeping the requested fine-tuning step size.
+        """Load the parent while keeping the requested fine-tuning state.
 
         PyTorch optimizer state includes its parameter-group learning rate. A
         normal resume therefore overwrites a CLI/configured fine-tuning rate
         with the parent's final rate. Restore the explicit child-run rate after
-        loading so a fixed schedule is actually fixed.
+        loading so a fixed schedule is actually fixed. The dedicated full-
+        rotation parent is an actor initializer, not a training resume: its
+        critic, optimizer, iteration, and curriculum clock describe the old
+        false-success objective and must not leak into the strict child run.
         """
 
+        bootstrap_actor = (
+            load_cfg is None
+            and Path(path).parent.name == ".bootstrap-full-rotation-parent"
+        )
+        if bootstrap_actor:
+            load_cfg = {
+                "actor": True,
+                "critic": False,
+                "optimizer": False,
+                "iteration": False,
+                "rnd": False,
+            }
         infos = super().load(path, load_cfg, strict, map_location)
         self.alg.learning_rate = self._configured_learning_rate
         for param_group in self.alg.optimizer.param_groups:
             param_group["lr"] = self._configured_learning_rate
+        if bootstrap_actor:
+            self.env.unwrapped.common_step_counter = 0
+            distribution = self.alg.actor.distribution
+            with torch.no_grad():
+                if hasattr(distribution, "std_param"):
+                    distribution.std_param.fill_(self._bootstrap_actor_std)
+                elif hasattr(distribution, "log_std_param"):
+                    distribution.log_std_param.fill_(
+                        torch.log(
+                            torch.tensor(
+                                self._bootstrap_actor_std,
+                                device=distribution.log_std_param.device,
+                            )
+                        )
+                    )
         return infos
 
 

@@ -66,20 +66,16 @@ BACKROLL_REFERENCE_PHASE_BUCKETS = (
 BACKROLL_CURRICULUM_STAGES = [
     {
         "params": {
-            # A244's strict audit exposed the supposed full-rotation parent as
-            # a side-roll attractor: 0/16 strict sagittal cycles, 76.9 degrees
-            # mean peak lateral-axis tilt, and 199.2 degrees mean off-axis
-            # rotation. Preserve its useful launch only as a minority bucket;
-            # concentrate early PPO evidence on the real 260/290-degree states
-            # where the missing sagittal head-release -> feet-landing suffix
-            # can be learned directly.
-            "standing_prob": 0.20,
-            "midroll_prob": 0.80,
+            # A245 proved that the legacy suffix bank and aggregate promotion
+            # gate teach a straight no-op (0/16 strict successes by model 2000).
+            # Every mastery sample now starts from the actual deployment state.
+            "standing_prob": 1.0,
+            "midroll_prob": 0.0,
             "midroll_pitch_min": math.radians(250.0),
             "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (0.0, 3.0),
             "joint_noise_std": 0.0,
-            "reference_state_prob": 1.0,
+            "reference_state_prob": 0.0,
             "reference_state_path": BACKROLL_REFERENCE_STATE_PATH,
             "reference_phase_range_deg": (250.0, 300.0),
             "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
@@ -92,12 +88,13 @@ BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.30,
-            "midroll_prob": 0.70,
+            "standing_prob": 1.0,
+            "midroll_prob": 0.0,
             "midroll_pitch_min": math.radians(210.0),
             "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (1.0, 4.0),
-            "reference_state_prob": 1.0,
+            "joint_noise_std": 0.01,
+            "reference_state_prob": 0.0,
             "reference_phase_range_deg": (210.0, 300.0),
             "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
             "reference_strict_sagittal": True,
@@ -107,12 +104,13 @@ BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.40,
-            "midroll_prob": 0.60,
+            "standing_prob": 1.0,
+            "midroll_prob": 0.0,
             "midroll_pitch_min": math.radians(170.0),
             "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (2.0, 5.0),
-            "reference_state_prob": 1.0,
+            "joint_noise_std": 0.02,
+            "reference_state_prob": 0.0,
             "reference_phase_range_deg": (170.0, 300.0),
             "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
             "reference_strict_sagittal": True,
@@ -122,12 +120,13 @@ BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.60,
-            "midroll_prob": 0.40,
+            "standing_prob": 1.0,
+            "midroll_prob": 0.0,
             "midroll_pitch_min": math.radians(130.0),
             "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (0.0, 4.0),
-            "reference_state_prob": 1.0,
+            "joint_noise_std": 0.03,
+            "reference_state_prob": 0.0,
             "reference_phase_range_deg": (130.0, 300.0),
             "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
             "reference_strict_sagittal": True,
@@ -137,12 +136,13 @@ BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.85,
-            "midroll_prob": 0.15,
+            "standing_prob": 1.0,
+            "midroll_prob": 0.0,
             "midroll_pitch_min": math.radians(90.0),
             "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (0.0, 3.0),
-            "reference_state_prob": 1.0,
+            "joint_noise_std": 0.04,
+            "reference_state_prob": 0.0,
             "reference_phase_range_deg": (90.0, 300.0),
             "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
             "reference_strict_sagittal": True,
@@ -403,9 +403,9 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     )
     cfg.rewards["backroll_rise_velocity"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_rise_velocity,
-        # A modest bootstrap into the reachable feet-down landing region. It
-        # is head-latched, late-phase gated, and capped by trunk height.
-        weight=1.0,
+        # One-sided upward speed can be farmed without completing the maneuver.
+        # The signed height and upright potentials retain the landing gradient.
+        weight=0.0,
         params={
             "gate_lo": math.radians(180.0),
             "gate_hi": math.radians(260.0),
@@ -522,7 +522,7 @@ def make_microduck_backroll_env_cfg(play: bool = False):
             "midroll_z_max": 0.11,
             "tuck_overrides": BACKROLL_TUCK_OVERRIDES,
             "tuck_factor_range": (0.5, 1.0),
-            "joint_noise_std": 0.0 if play else 0.04,
+            "joint_noise_std": 0.0 if play else first_stage["joint_noise_std"],
         },
     )
     if play:
@@ -541,11 +541,8 @@ def make_microduck_backroll_env_cfg(play: bool = False):
                 "stages": BACKROLL_CURRICULUM_STAGES,
                 "window_episodes": 4096,
                 "success_threshold": 0.70,
-                # Early stages are deliberately suffix-heavy; requiring
-                # standing-only success would prevent them from ever advancing.
-                # By the final 85/15 mix, a 70% aggregate gate necessarily
-                # requires the standing launch to work in most episodes.
-                "standing_only_mastery": False,
+                "required_consecutive_windows": 2,
+                "standing_only_mastery": True,
                 "invalid_reward_name": "backroll_invalid",
                 "invalid_reward_weights": [-5.0, -6.0, -8.0, -10.0, -10.0],
                 "action_rate_reward_name": "action_rate_l2",
@@ -555,16 +552,6 @@ def make_microduck_backroll_env_cfg(play: bool = False):
                     -0.05,
                     -0.075,
                     -0.10,
-                ],
-            },
-        )
-        cfg.curriculum["backroll_sagittal_weight"] = CurriculumTermCfg(
-            func=microduck_mdp.reward_weight,
-            params={
-                "reward_name": "backroll_sagittal",
-                "weight_stages": [
-                    {"step": 0, "weight": -0.10},
-                    {"step": 600 * 24, "weight": -0.25},
                 ],
             },
         )
@@ -762,11 +749,9 @@ _backroll_algorithm_params.update(
 )
 MicroduckBackrollRlCfg.algorithm = AnchoredPpoCfg(
     **_backroll_algorithm_params,
-    # A244 proved that 50% per-update retention preserves the parent's invalid
-    # side-roll trajectory almost unchanged after 500 iterations. Keep a small
-    # proximal pull so its useful standing launch is not erased in one burst,
-    # while allowing PPO to learn a materially different sagittal suffix.
-    anchor_retention=0.98,
+    # Keep a bounded part of the parent's useful launch while allowing the
+    # strict standing-only objective to replace its invalid side-roll suffix.
+    anchor_retention=0.90,
     refresh_anchor_on_load=True,
 )
 MicroduckBackrollRlCfg.actor.distribution_cfg["init_std"] = 1.0

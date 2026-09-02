@@ -158,6 +158,22 @@ def collect_reference_states(args: argparse.Namespace) -> dict[str, object]:
                         .detach()
                         .cpu()
                         .clone(),
+                        "cycle_max_lateral_axis_z": base_env._backroll_cycle_max_lateral_axis_z[
+                            env_index
+                        ]
+                        .detach()
+                        .cpu()
+                        .clone(),
+                        "cycle_offaxis_rotation": base_env._backroll_cycle_offaxis_rotation[
+                            env_index
+                        ]
+                        .detach()
+                        .cpu()
+                        .clone(),
+                        "max_air_steps": base_env._backroll_max_air_steps[env_index]
+                        .detach()
+                        .cpu()
+                        .clone(),
                         "lateral_axis_z": lateral_axis[env_index].clone(),
                     },
                 )
@@ -184,7 +200,7 @@ def collect_reference_states(args: argparse.Namespace) -> dict[str, object]:
     if not rows:
         raise RuntimeError("no strict successful reference states were collected")
     payload: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "task": TASK_ID,
         "checkpoint": str(args.checkpoint.resolve()),
         "checkpoint_sha256": _sha256(args.checkpoint),

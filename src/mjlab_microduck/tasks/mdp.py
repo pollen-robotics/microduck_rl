@@ -11907,7 +11907,9 @@ def _update_grounded_backroll_state(
         frontier <= _BACKROLL_TRUNK_LATCH_HI
     )
     previous_trunk_latch = env._backroll_trunk_latch.clone()
-    env._backroll_trunk_latch |= trunk & trunk_phase
+    # The physical order is back/trunk support followed by a later head-top
+    # pivot. A simultaneous trunk/head crash must not fabricate that history.
+    env._backroll_trunk_latch |= trunk & ~head & trunk_phase
     env._backroll_trunk_latch_now = (
         env._backroll_trunk_latch & ~previous_trunk_latch
     )
@@ -11926,7 +11928,7 @@ def _update_grounded_backroll_state(
         else _head_top_alignment(env, asset)
     )
     env._backroll_head_latch |= (
-        env._backroll_trunk_latch
+        previous_trunk_latch
         & head
         & head_phase
         & head_top_down
@@ -12012,6 +12014,7 @@ def _update_grounded_backroll_state(
         & left_foot
         & right_foot
         & ~head
+        & ~trunk
         & (height >= _BACKROLL_FEET_RECONTACT_MIN_HEIGHT)
         & (upright >= _BACKROLL_FEET_RECONTACT_UPRIGHT_COS)
         & sagittal_landing
@@ -12063,6 +12066,7 @@ def _update_grounded_backroll_state(
         & left_foot
         & right_foot
         & ~head
+        & ~trunk
         & sagittal_landing
         & ~env._backroll_invalid
         & ~recovery_before
@@ -12089,8 +12093,11 @@ def _update_grounded_backroll_state(
         & ~env._backroll_invalid
         & env._backroll_trunk_latch
         & env._backroll_head_latch
+        & env._backroll_feet_recontact_latch
         & left_foot
         & right_foot
+        & ~head
+        & ~trunk
         & (height >= _BACKROLL_MIN_LANDING_HEIGHT)
         & (upright >= _BACKROLL_UPRIGHT_COS)
         & landing_ang_vel_ok
@@ -12395,6 +12402,7 @@ def _grounded_backroll_reference_bank(
     rows = payload.get("rows") if isinstance(payload, dict) else None
     if not rows:
         raise ValueError("backroll reference state bank has no rows")
+    schema_version = int(payload.get("schema_version", 1))
     bank = {
         "qpos": torch.stack([row["qpos"] for row in rows]).to(env.device),
         "qvel": torch.stack([row["qvel"] for row in rows]).to(env.device),
@@ -12412,7 +12420,31 @@ def _grounded_backroll_reference_bank(
         "head_latch": torch.stack([row["head_latch"] for row in rows])
         .to(env.device)
         .bool(),
+        "schema_version": torch.tensor(
+            schema_version,
+            device=env.device,
+            dtype=torch.long,
+        ),
     }
+    if schema_version >= 2:
+        try:
+            bank.update(
+                cycle_max_lateral_axis_z=torch.stack(
+                    [row["cycle_max_lateral_axis_z"] for row in rows]
+                ).to(env.device),
+                cycle_offaxis_rotation=torch.stack(
+                    [row["cycle_offaxis_rotation"] for row in rows]
+                ).to(env.device),
+                max_air_steps=torch.stack(
+                    [row["max_air_steps"] for row in rows]
+                )
+                .to(env.device)
+                .long(),
+            )
+        except KeyError as exc:
+            raise ValueError(
+                "backroll reference schema 2 is missing strict cycle history"
+            ) from exc
     if bank["qpos"].shape[1] != env.sim.data.qpos.shape[1]:
         raise ValueError("backroll reference qpos width does not match the active model")
     if bank["qvel"].shape[1] != env.sim.data.qvel.shape[1]:
@@ -12425,6 +12457,7 @@ def _grounded_backroll_reference_bank(
 def _grounded_backroll_reference_consistent_rows(
     bank: dict[str, torch.Tensor],
     max_lateral_axis_z: float = _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX,
+    max_air_steps: int | None = None,
 ) -> torch.Tensor:
     """Return reset rows that already meet the live sagittal/latch contract.
 
@@ -12433,8 +12466,26 @@ def _grounded_backroll_reference_consistent_rows(
     sagittal envelope and ordered trunk/head prerequisites reject shoulder-
     biased rows before PPO can see them.
     """
+    required_history = {
+        "cycle_max_lateral_axis_z",
+        "cycle_offaxis_rotation",
+        "max_air_steps",
+    }
+    missing_history = required_history.difference(bank)
+    if missing_history:
+        missing = ", ".join(sorted(missing_history))
+        raise ValueError(f"strict backroll reference bank is missing: {missing}")
     lateral_axis_z = _lateral_axis_z(bank["qpos"][:, 3:7]).abs()
-    sagittal = lateral_axis_z <= max_lateral_axis_z
+    sagittal = (
+        (lateral_axis_z <= max_lateral_axis_z)
+        & (bank["cycle_max_lateral_axis_z"] <= max_lateral_axis_z)
+        & (
+            bank["cycle_offaxis_rotation"]
+            <= _BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION
+        )
+    )
+    if max_air_steps is not None:
+        sagittal &= bank["max_air_steps"] <= max_air_steps
     trunk_ordered = (
         ~bank["trunk_latch"]
         | (bank["frontier"] >= _BACKROLL_TRUNK_LATCH_LO)
@@ -12457,7 +12508,13 @@ def _reset_grounded_backroll_reference_states(
     yaw_range: tuple,
     strict_sagittal: bool,
     max_lateral_axis_z: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     """Place environments in real, champion-generated sagittal pivot states."""
     bank = _grounded_backroll_reference_bank(env, reference_state_path)
     eligible_mask = (bank["phase_center_deg"] >= phase_range_deg[0]) & (
@@ -12466,9 +12523,15 @@ def _reset_grounded_backroll_reference_states(
     if source_seed is not None:
         eligible_mask &= bank["source_seed"] == source_seed
     if strict_sagittal:
+        schema_version = int(bank["schema_version"].item())
+        if schema_version < 2:
+            raise ValueError(
+                "strict backroll reference reset requires schema version 2"
+            )
         eligible_mask &= _grounded_backroll_reference_consistent_rows(
             bank,
             max_lateral_axis_z=max_lateral_axis_z,
+            max_air_steps=math.ceil(_BACKROLL_MAX_AIR_SECONDS / env.step_dt),
         )
     if phase_buckets_deg is None:
         eligible_rows = torch.nonzero(eligible_mask, as_tuple=False).squeeze(-1)
@@ -12540,7 +12603,20 @@ def _reset_grounded_backroll_reference_states(
     env._roulade_max[env_ids] = bank["frontier"][row_ids]
     env._roulade_paid[env_ids] = bank["frontier"][row_ids]
     env._roulade_roll_direction[env_ids] = -1.0
-    return bank["trunk_latch"][row_ids], bank["head_latch"][row_ids]
+    return (
+        bank["trunk_latch"][row_ids],
+        bank["head_latch"][row_ids],
+        bank.get("cycle_max_lateral_axis_z", torch.zeros_like(bank["frontier"]))[
+            row_ids
+        ],
+        bank.get("cycle_offaxis_rotation", torch.zeros_like(bank["frontier"]))[
+            row_ids
+        ],
+        bank.get(
+            "max_air_steps",
+            torch.zeros_like(bank["source_seed"]),
+        )[row_ids],
+    )
 
 
 def reset_grounded_backroll_state(
@@ -12675,9 +12751,22 @@ def reset_grounded_backroll_state(
         len(env_ids), dtype=torch.bool, device=env.device
     )
     reference_head_latch = torch.zeros_like(reference_trunk_latch)
+    reference_cycle_max_lateral = torch.zeros(
+        len(env_ids), device=env.device
+    )
+    reference_cycle_offaxis = torch.zeros_like(reference_cycle_max_lateral)
+    reference_max_air_steps = torch.zeros(
+        len(env_ids), dtype=torch.long, device=env.device
+    )
     reference_ids = env_ids[reference_mask]
     if len(reference_ids) > 0:
-        reference_trunk, reference_head = _reset_grounded_backroll_reference_states(
+        (
+            reference_trunk,
+            reference_head,
+            reference_lateral,
+            reference_offaxis,
+            reference_air_steps,
+        ) = _reset_grounded_backroll_reference_states(
             env,
             reference_ids,
             reference_state_path=reference_state_path,
@@ -12691,6 +12780,9 @@ def reset_grounded_backroll_state(
         spawn_angle[reference_mask] = env._roulade_max[reference_ids]
         reference_trunk_latch[reference_mask] = reference_trunk
         reference_head_latch[reference_mask] = reference_head
+        reference_cycle_max_lateral[reference_mask] = reference_lateral
+        reference_cycle_offaxis[reference_mask] = reference_offaxis
+        reference_max_air_steps[reference_mask] = reference_air_steps
     env._backroll_start_is_standing[env_ids] = ~ground_mask & ~is_midroll
     if synthesize_contact_latches:
         env._backroll_trunk_latch[env_ids] = is_midroll & (
@@ -12748,6 +12840,15 @@ def reset_grounded_backroll_state(
     env._backroll_mastery_cycles[env_ids] = max(1, int(mastery_cycles))
     env._backroll_cycle_max_lateral_axis_z[env_ids] = 0.0
     env._backroll_cycle_offaxis_rotation[env_ids] = 0.0
+    env._backroll_max_air_steps[reference_ids] = reference_max_air_steps[
+        reference_mask
+    ]
+    env._backroll_cycle_max_lateral_axis_z[reference_ids] = (
+        reference_cycle_max_lateral[reference_mask]
+    )
+    env._backroll_cycle_offaxis_rotation[reference_ids] = (
+        reference_cycle_offaxis[reference_mask]
+    )
     env._backroll_episode_max_lateral_axis_z[env_ids] = 0.0
     env._backroll_episode_max_offaxis_rotation[env_ids] = 0.0
     env._backroll_recovery_active[env_ids] = False
