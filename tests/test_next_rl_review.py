@@ -186,14 +186,29 @@ def test_multi_seed_family_clips_choose_the_stable_lowest_seed(passing_spec, pas
 
 
 def test_spec_binding_rejects_uniformly_deleted_failed_metric_and_duplicate_name(passing_spec, passing_report, clip_files):
-    bundle = ReviewBundle.build(passing_report, clip_files, spec=passing_spec)
+    two_metric_spec = replace(passing_spec, metrics=(
+        MetricThreshold("falls", "count", "maximum", 0),
+        MetricThreshold("style", "score", "minimum", 1, mandatory=False),
+    ))
+    report = replace(passing_report, scenarios=tuple(
+        replace(
+            scenario,
+            metrics={"falls": 0.0, "style": 0.0},
+            threshold_results=(
+                scenario.threshold_results[0],
+                MetricResult(scenario.scenario_id, "style", "score", "minimum", 1, 0, False, False, 1),
+            ),
+        )
+        for scenario in passing_report.scenarios
+    ))
+    bundle = ReviewBundle.build(report, clip_files, spec=two_metric_spec)
     evidence = json.loads(bundle.evaluation_json)
     for scenario in evidence["scenarios"]:
-        scenario["threshold_results"] = []
-        scenario["metrics"] = {"diagnostic": 12.0}
+        scenario["threshold_results"] = [scenario["threshold_results"][0]]
+        scenario["metrics"] = {"falls": 0.0, "diagnostic": 12.0}
     deleted = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
-    with pytest.raises(ReviewError, match="threshold"):
-        replace(bundle, evaluation_json=deleted, evaluation_digest=hashlib.sha256(deleted.encode()).hexdigest()).verify()
+    with pytest.raises(ReviewError, match="spec threshold"):
+        replace(bundle, evaluation_json=deleted, evaluation_digest=hashlib.sha256(deleted.encode()).hexdigest(), metric_summary={"falls": 0.0}).verify()
 
     duplicate = json.loads(bundle.evaluation_json)
     duplicate["scenarios"][0]["threshold_results"].append({

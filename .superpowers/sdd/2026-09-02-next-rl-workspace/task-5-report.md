@@ -245,3 +245,29 @@ uv run --with pytest pytest tests/ -q
 - Distinct-version approvals now race through a barrier and leave exactly one
   learned record and inventory capability for the skill, with the other marked
   superseded.
+
+## Fix round 5 — capability contract binding
+
+### GREEN evidence
+
+```text
+uv run --with pytest pytest tests/test_next_rl_review.py tests/test_next_rl_promotion.py -q
+31 passed in 0.17s
+
+uv run --with pytest pytest tests/test_next_rl_*.py -q
+109 passed in 1.83s
+
+uv run --with pytest pytest tests/ -q
+305 passed, 1 skipped in 7.97s
+```
+
+### Fixes
+
+- `ReviewBundle.skill_spec` safely exposes only the digest-checked, canonical
+  bound specification. Promotion now requires both the capability robot model
+  and the complete policy contract to equal that specification before any
+  validation, review, approval, or rejection path can proceed.
+- The uniform-omission attack now uses a two-metric spec: removing the same
+  nonmandatory failed metric/result from every scenario, while retaining raw
+  diagnostic data and recomputing bundle fields, is rejected for violating the
+  authoritative spec threshold contract.

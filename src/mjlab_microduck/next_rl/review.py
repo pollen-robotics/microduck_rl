@@ -282,6 +282,13 @@ class ReviewBundle:
     def spec_version(self) -> str:
         return _report(self.evaluation_json, "candidate")["spec_version"]
 
+    @property
+    def skill_spec(self) -> SkillSpec:
+        """Return the canonical SkillSpec bound into this verified review bundle."""
+        if _digest(self.spec_json) != self.spec_digest:
+            raise ReviewError("skill spec digest mismatch")
+        return _spec(self.spec_json)
+
     def as_dict(self) -> dict[str, object]:
         result: dict[str, object] = {"evaluation": self.evaluation_json, "evaluation_digest": self.evaluation_digest,
             "policy_sha256": self.policy_digest, "policy_path": str(self.policy_path), "clips": [clip.as_dict() for clip in self.clips],
@@ -307,9 +314,7 @@ class ReviewBundle:
         if self.passed is not True or _digest(self.evaluation_json) != self.evaluation_digest:
             raise ReviewError("review requires a passing evaluation")
         report = _report(self.evaluation_json, "candidate")
-        if _digest(self.spec_json) != self.spec_digest:
-            raise ReviewError("skill spec digest mismatch")
-        spec = _spec(self.spec_json)
+        spec = self.skill_spec
         _validate_spec(report, spec)
         policy = report["policy"]
         if not isinstance(self.policy_path, Path):

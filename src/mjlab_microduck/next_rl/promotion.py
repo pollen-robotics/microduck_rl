@@ -185,12 +185,17 @@ class PromotionStore:
     def _assert_binding(capability: Capability, bundle: ReviewBundle) -> None:
         try:
             bundle.verify()
+            spec = bundle.skill_spec
         except ReviewError as error:
             raise PromotionError(str(error)) from error
         if capability.id != bundle.skill_id:
             raise PromotionError("capability skill_id does not match evaluated skill_id")
         if capability.version != bundle.spec_version:
             raise PromotionError("capability spec_version does not match evaluated spec_version")
+        if capability.robot_model != spec.contract.robot_model:
+            raise PromotionError("capability robot_model does not match bound skill spec")
+        if capability.contract != spec.contract:
+            raise PromotionError("capability policy contract does not match bound skill spec")
 
     def validate(self, capability: Capability, bundle: ReviewBundle) -> PromotionRecord:
         """Persist passing evaluation evidence for an available capability exactly once."""

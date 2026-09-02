@@ -96,6 +96,13 @@ def test_promotion_requires_capability_matching_evaluated_skill_and_version(stor
         store.request_review(replace(capability, version="2.0.0"), bundle)
 
 
+def test_promotion_requires_capability_matching_bound_robot_and_contract(store, capability, bundle):
+    with pytest.raises(PromotionError, match="robot_model"):
+        store.validate(replace(capability, robot_model="other"), bundle)
+    with pytest.raises(PromotionError, match="policy contract"):
+        store.validate(replace(capability, contract=replace(capability.contract, obs_len=62)), bundle)
+
+
 def test_approval_requires_reviewer_and_exact_bundle(store, capability, bundle):
     review = pending(store, capability, bundle)
     learned = store.approve(review.id, reviewer="rakesh")
