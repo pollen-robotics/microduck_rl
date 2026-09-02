@@ -25,6 +25,13 @@ MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene.xml"
 MICRODUCK_ROLLERS_XML = "src/mjlab_microduck/robot/microduck/scene_rollers.xml"
 MICRODUCK_BALL_XML = "src/mjlab_microduck/robot/microduck/scene_ball.xml"
 
+# New scenes
+MICRODUCK_SIMPLE_XML = "src/mjlab_microduck/robot/microduck/scene_simple.xml"
+MICRODUCK_INTERMEDIATE_XML = "src/mjlab_microduck/robot/microduck/scene_intermediate.xml"
+MICRODUCK_COMPLEX_XML = "src/mjlab_microduck/robot/microduck/scene_complex.xml"
+MICRODUCK_PARKOUR_XML = "src/mjlab_microduck/robot/microduck/scene_parkour.xml"
+MICRODUCK_MAZE_XML = "src/mjlab_microduck/robot/microduck/scene_maze.xml"
+
 # Body pose command constants (must match training constants)
 BODY_CMD_MAX_Z = 0.03              # ±30 mm
 BODY_CMD_MAX_XY = 0.02             # ±20 mm
@@ -803,6 +810,11 @@ class PolicyInference:
 
 def main():
     parser = argparse.ArgumentParser(description="Run ONNX policy in MuJoCo")
+    parser.add_argument("--simple", action="store_true", help="Use the simple scene (robot_walk + one static cube landmark).")
+    parser.add_argument("--intermediate", action="store_true", help="Use the intermediate scene (allcollisions robot + three dynamic pushable cubes).")
+    parser.add_argument("--complex", action="store_true", help="Use the complex scene (allcollisions robot + ramp + static cube wall + one dynamic goal cube).")
+    parser.add_argument("--parkour", action="store_true", help="Use the parkour scene (allcollisions robot + regular staircase + spiral staircase).")
+    parser.add_argument("--maze", action="store_true", help="Use the maze scene (15x15-cell labyrinth, one entrance, two exits).")
     parser.add_argument("--roller", action="store_true", help="Use roller skate robot XML (robot_walk_rollers.xml)")
     parser.add_argument("--scene", type=str, default=None, help="Path to a scene XML, overriding the default pick (e.g. src/mjlab_microduck/robot/microduck/scene_allcollisions.xml)")
     parser.add_argument("--walking", type=str, default=None, help="Path to walking policy ONNX file")
@@ -880,6 +892,16 @@ def main():
         xml_path = MICRODUCK_ROLLERS_XML
     elif args.kick_left or args.kick_right:
         xml_path = MICRODUCK_BALL_XML
+    elif args.simple:
+        xml_path = MICRODUCK_SIMPLE_XML
+    elif args.intermediate:
+        xml_path = MICRODUCK_INTERMEDIATE_XML
+    elif args.complex:
+        xml_path = MICRODUCK_COMPLEX_XML
+    elif args.parkour:
+        xml_path = MICRODUCK_PARKOUR_XML
+    elif args.maze:
+        xml_path = MICRODUCK_MAZE_XML
     else:
         xml_path = MICRODUCK_XML
     print(f"Loading MuJoCo model from: {xml_path}")
@@ -976,10 +998,19 @@ def main():
     # Set initial position to default pose
     freejoint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "trunk_base_freejoint")
     qpos_adr = model.jnt_qposadr[freejoint_id]
-    data.qpos[qpos_adr + 0] = 0.0
-    data.qpos[qpos_adr + 1] = 0.0
-    data.qpos[qpos_adr + 2] = 0.1385 if args.roller else 0.125  # rollers add 13.5mm height
-    data.qpos[qpos_adr + 3:qpos_adr + 7] = [1, 0, 0, 0]
+    if args.maze:
+        # Spawn at the maze entrance (baked into trunk_base's body pose /
+        # the ENTRANCE keyframe), facing into the maze, instead of world
+        # origin — the origin sits inside a wall in this scene.
+        data.qpos[qpos_adr + 0] = 3.375
+        data.qpos[qpos_adr + 1] = 0.225
+        data.qpos[qpos_adr + 2] = 0.12
+        data.qpos[qpos_adr + 3:qpos_adr + 7] = [0.707107, 0, 0, 0.707107]
+    else:
+        data.qpos[qpos_adr + 0] = 0.0
+        data.qpos[qpos_adr + 1] = 0.0
+        data.qpos[qpos_adr + 2] = 0.1385 if args.roller else 0.125  # rollers add 13.5mm height
+        data.qpos[qpos_adr + 3:qpos_adr + 7] = [1, 0, 0, 0]
     for i, qpos_idx in enumerate(policy.joint_qpos_indices):
         data.qpos[qpos_idx] = policy.default_pose[i]
     data.ctrl[:] = policy.default_pose

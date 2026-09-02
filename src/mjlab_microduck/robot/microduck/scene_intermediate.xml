@@ -1,0 +1,61 @@
+<mujoco model="world_intermediate">
+    <!-- INTERMEDIATE world: full-collision robot (needed because these cubes
+         can be pushed INTO the robot's body, not just its feet) + THREE
+         DYNAMIC cubes of different mass/friction. Dynamic = each cube is its
+         own <body> with a <freejoint>, so physics integrates it every step
+         (it can be pushed, knocked over, kicked) — same pattern as ball.xml,
+         generalized to a primitive box instead of a sphere. -->
+    <include file="robot_allcollisions.xml" />
+
+    <visual>
+        <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0" />
+        <rgba haze="0.15 0.25 0.35 1" />
+        <global azimuth="160" elevation="-20" />
+    </visual>
+
+    <asset>
+        <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512"
+            height="3072" />
+        <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4"
+            rgb2="0.1 0.2 0.3"
+            markrgb="0.8 0.8 0.8" width="300" height="300" />
+        <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5"
+            reflectance="0.2" />
+    </asset>
+
+    <worldbody>
+        <light pos="0 0 3.5" dir="0 0 -1" directional="true" />
+        <geom name="floor" size="0 0 0.05" pos="0 0 0" type="plane" material="groundplane" />
+
+        <!-- Light cube (15g, matches ball.xml's kick-ball mass): easy to push. -->
+        <body name="cube_light" pos="0.3 -0.08 0.025">
+            <freejoint name="cube_light_free" />
+            <inertial pos="0 0 0" mass="0.015" diaginertia="6.25e-6 6.25e-6 6.25e-6" />
+            <geom type="box" name="cube_light_geom" size="0.025 0.025 0.025"
+                rgba="0.2 0.7 0.2 1" friction="0.5 0.005 0.0001" />
+        </body>
+
+        <!-- Medium cube (100g): needs a real shove to move. -->
+        <body name="cube_medium" pos="0.3 0 0.03">
+            <freejoint name="cube_medium_free" />
+            <inertial pos="0 0 0" mass="0.1" diaginertia="6e-5 6e-5 6e-5" />
+            <geom type="box" name="cube_medium_geom" size="0.03 0.03 0.03"
+                rgba="0.9 0.6 0.1 1" friction="0.8 0.005 0.0001" />
+        </body>
+
+        <!-- Heavy, high-friction cube (300g): effectively an obstacle, not a toy. -->
+        <body name="cube_heavy" pos="0.3 0.08 0.035">
+            <freejoint name="cube_heavy_free" />
+            <inertial pos="0 0 0" mass="0.3" diaginertia="2e-4 2e-4 2e-4" />
+            <geom type="box" name="cube_heavy_geom" size="0.035 0.035 0.035"
+                rgba="0.3 0.3 0.9 1" friction="1.2 0.01 0.0002" />
+        </body>
+    </worldbody>
+
+    <!-- No keyframe here: each cube's freejoint adds 7 qpos entries, so a
+         fixed qpos keyframe (like scene_walk.xml's) would need hand-counted
+         padding per cube and breaks the moment you add/remove one. Tasks
+         that use this world set cube poses programmatically at reset instead
+         (see microduck_ball_kick_env_cfg.py's reset_ball_in_front_of_foot
+         event for the pattern) — same reason scene_ball.xml skips it. -->
+</mujoco>

@@ -1,0 +1,60 @@
+<mujoco model="world_complex">
+    <!-- COMPLEX world: full-collision robot + a STATIC obstacle course
+         (ramp + a 3-cube wall built by stacking, i.e. composed geometry, not
+         one primitive) + ONE dynamic cube behind the wall. This is the
+         ceiling of what a hand-authored MJCF world should do — anything
+         needing per-episode randomized layouts (rough terrain, procedural
+         stairs) belongs in Python via mjlab's TerrainGeneratorCfg instead;
+         see README.md "Going further: procedural terrain". -->
+    <include file="robot_allcollisions.xml" />
+
+    <visual>
+        <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0" />
+        <rgba haze="0.15 0.25 0.35 1" />
+        <global azimuth="160" elevation="-20" />
+    </visual>
+
+    <asset>
+        <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512"
+            height="3072" />
+        <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4"
+            rgb2="0.1 0.2 0.3"
+            markrgb="0.8 0.8 0.8" width="300" height="300" />
+        <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5"
+            reflectance="0.2" />
+    </asset>
+
+    <worldbody>
+        <light pos="0 0 3.5" dir="0 0 -1" directional="true" />
+        <geom name="floor" size="0 0 0.05" pos="0 0 0" type="plane" material="groundplane" />
+
+        <!-- Static ramp: a box tilted 15deg about the Y axis (euler="0 <rad> 0"),
+             long enough to walk up. Composed the same way robot_allcollisions'
+             stairs terrain is (a tilted box), just hand-placed instead of
+             procedurally generated. -->
+        <geom name="ramp" type="box" size="0.25 0.15 0.01" pos="0.35 0 0.03"
+            euler="0 0.2618 0" rgba="0.5 0.4 0.3 1" />
+
+        <!-- Static 3-cube wall past the ramp: composed geometry (three
+             adjacent primitives reading as one obstacle), not one shape. -->
+        <geom name="wall_cube_1" type="box" size="0.03 0.03 0.03" pos="0.9 -0.07 0.03"
+            rgba="0.6 0.6 0.6 1" />
+        <geom name="wall_cube_2" type="box" size="0.03 0.03 0.03" pos="0.9 0 0.03"
+            rgba="0.6 0.6 0.6 1" />
+        <geom name="wall_cube_3" type="box" size="0.03 0.03 0.03" pos="0.9 0.07 0.03"
+            rgba="0.6 0.6 0.6 1" />
+
+        <!-- One dynamic cube past the wall: same freejoint pattern as
+             intermediate/world.xml, so a policy that clears the ramp+wall has
+             something to interact with on the other side. -->
+        <body name="cube_goal" pos="1.2 0 0.03">
+            <freejoint name="cube_goal_free" />
+            <inertial pos="0 0 0" mass="0.1" diaginertia="6e-5 6e-5 6e-5" />
+            <geom type="box" name="cube_goal_geom" size="0.03 0.03 0.03"
+                rgba="0.9 0.1 0.1 1" friction="0.8 0.005 0.0001" />
+        </body>
+    </worldbody>
+
+    <!-- No keyframe: same reason as intermediate/world.xml (cube_goal's
+         freejoint). -->
+</mujoco>
