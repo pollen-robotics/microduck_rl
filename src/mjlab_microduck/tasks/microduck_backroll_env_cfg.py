@@ -46,8 +46,8 @@ BACKROLL_CURRICULUM_STAGES = [
             # no upright landing under the sagittal gate, so restore the
             # parent's late-phase reset support while retaining a standing
             # bucket for on-policy launch learning.
-            "standing_prob": 0.20,
-            "midroll_prob": 0.80,
+            "standing_prob": 0.40,
+            "midroll_prob": 0.60,
             "midroll_pitch_min": math.radians(180.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (1.0, 3.0),

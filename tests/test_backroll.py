@@ -299,14 +299,14 @@ def test_repeated_first_cycle_relaxation_expires_after_first_cycle():
 
 def test_backroll_curriculum_matches_mastery_stages():
     assert [stage["params"]["standing_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.20,
+        0.40,
         0.30,
         0.40,
         0.60,
         0.85,
     ]
     assert [stage["params"]["midroll_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.80,
+        0.60,
         0.70,
         0.60,
         0.40,
