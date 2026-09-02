@@ -12,6 +12,7 @@ wheels/
 
 # Virtual environments
 .venv
+.worktrees/
 
 # Logs and databases
 wandb
