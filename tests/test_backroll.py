@@ -7,6 +7,7 @@ import torch
 from mjlab_microduck.tasks import mdp
 from mjlab_microduck.tasks.microduck_backroll_env_cfg import (
     BACKROLL_CURRICULUM_STAGES,
+    BACKROLL_TUCK_OVERRIDES,
     EPISODE_LENGTH_S,
     REPEATED_BACKROLL_CURRICULUM_STAGES,
     REPEATED_EPISODE_LENGTH_S,
@@ -16,6 +17,7 @@ from mjlab_microduck.tasks.microduck_backroll_env_cfg import (
     make_microduck_repeated_backroll_env_cfg,
 )
 from mjlab_microduck.tasks.microduck_roulade_env_cfg import (
+    TUCK_OVERRIDES,
     make_microduck_roulade_env_cfg,
 )
 
@@ -166,6 +168,21 @@ def test_backroll_play_is_deterministic_standing_start():
     assert reset["yaw_range"] == (0.0, 0.0)
     assert reset["joint_noise_std"] == 0.0
     assert "backroll_phase" not in cfg.curriculum
+
+
+def test_backroll_launch_tuck_reverses_only_hip_pitch_from_forward_roll():
+    """Backroll launch must seek the measured back-entry, not forward tuck."""
+    cfg = make_microduck_backroll_env_cfg()
+
+    assert cfg.events["set_grounded_backroll_state"].params["tuck_overrides"] == (
+        BACKROLL_TUCK_OVERRIDES
+    )
+    assert BACKROLL_TUCK_OVERRIDES[2] == pytest.approx(-TUCK_OVERRIDES[2])
+    assert BACKROLL_TUCK_OVERRIDES[11] == pytest.approx(-TUCK_OVERRIDES[11])
+    for joint_id in (3, 4, 5, 6, 12, 13):
+        assert BACKROLL_TUCK_OVERRIDES[joint_id] == pytest.approx(
+            TUCK_OVERRIDES[joint_id]
+        )
 
 
 def test_launch_tuck_bootstrap_is_one_shot_and_closes_when_rolling(monkeypatch):

@@ -25,7 +25,6 @@ from mjlab.tasks.velocity import mdp
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.microduck_roulade_env_cfg import (
-    TUCK_OVERRIDES,
     MicroduckRouladeRlCfg,
     make_microduck_roulade_env_cfg,
 )
@@ -35,6 +34,24 @@ REPEATED_EPISODE_LENGTH_S = 12.0
 BACKROLL_REFERENCE_STATE_PATH = str(
     Path(__file__).with_name("data") / "backroll_champion_reference_states.pt"
 )
+
+# Backward launch posture.  This is deliberately not the forward-roulade tuck:
+# the two hip-pitch targets must reverse for the robot to fall onto its back
+# before reaching the head.  A221 used the forward target and deterministically
+# stopped on a non-top head contact around 180 degrees without ever contacting
+# the trunk.  The sign choice is anchored to the measured 100-degree grounded
+# backroll bridge in ``backroll_champion_reference_states.pt``; knees, ankles,
+# and chin tuck retain their physically measured directions.
+BACKROLL_TUCK_OVERRIDES = {
+    2: 1.15,  # left hip_pitch: backward entry
+    3: 1.25,  # left knee
+    4: 1.05,  # left ankle
+    5: -1.0,  # neck_pitch (chin tuck)
+    6: 1.0,  # head_pitch (chin tuck)
+    11: -1.15,  # right hip_pitch: backward entry
+    12: -1.25,  # right knee
+    13: -1.05,  # right ankle
+}
 
 BACKROLL_CURRICULUM_STAGES = [
     {
@@ -320,7 +337,7 @@ def make_microduck_backroll_env_cfg(play: bool = False):
         # then gives way to the real signed-rotation objective.
         weight=2.0,
         params={
-            "target_overrides": TUCK_OVERRIDES,
+            "target_overrides": BACKROLL_TUCK_OVERRIDES,
             "entry_angle": math.radians(45.0),
             "max_paid_rate": 2.5,
         },
@@ -419,7 +436,7 @@ def make_microduck_backroll_env_cfg(play: bool = False):
             "yaw_range": (0.0, 0.0) if play else (-math.pi, math.pi),
             "midroll_z_min": 0.05,
             "midroll_z_max": 0.11,
-            "tuck_overrides": TUCK_OVERRIDES,
+            "tuck_overrides": BACKROLL_TUCK_OVERRIDES,
             "tuck_factor_range": (0.5, 1.0),
             "joint_noise_std": 0.0 if play else 0.04,
         },
