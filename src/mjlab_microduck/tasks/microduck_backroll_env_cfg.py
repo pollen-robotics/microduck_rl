@@ -317,11 +317,15 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     )
     cfg.rewards["backroll_upright_progress"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_upright_progress,
-        weight=1.5,
+        # A212 reaches the ordered trunk/head contacts but settles in a
+        # crouched, non-upright pose before the landing hold.  Strengthen the
+        # late, delta-only potential so the policy has enough signal to finish
+        # the last 50 degrees; this is not a standing annuity.
+        weight=5.0,
     )
     cfg.rewards["backroll_height_progress"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_height_progress,
-        weight=1.0,
+        weight=4.0,
     )
     cfg.rewards["backroll_success"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_success_rate,

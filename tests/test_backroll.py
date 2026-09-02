@@ -115,6 +115,8 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
         "head_value": 2.0,
     }
     assert cfg.rewards["backroll_completion_progress"].weight == pytest.approx(8.0)
+    assert cfg.rewards["backroll_upright_progress"].weight == pytest.approx(5.0)
+    assert cfg.rewards["backroll_height_progress"].weight == pytest.approx(4.0)
     assert cfg.rewards["backroll_sagittal"].weight == pytest.approx(-0.5)
     assert cfg.rewards["backroll_flatness"].weight == pytest.approx(-1.0)
     assert cfg.rewards["backroll_sagittal"].func is mdp.grounded_backroll_sagittal_penalty
