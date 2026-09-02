@@ -70,7 +70,7 @@ class BaselineComparison:
                 "metric_summary": self.metric_summary}
 
 
-def _report(value: str, label: str) -> dict[str, Any]:
+def _report(value: str, label: str, *, require_passing: bool = True) -> dict[str, Any]:
     try:
         raw = json.loads(value)
     except (TypeError, json.JSONDecodeError) as error:
@@ -78,8 +78,8 @@ def _report(value: str, label: str) -> dict[str, Any]:
     if not isinstance(raw, dict) or canonical_json(raw) != value:
         raise ReviewError(f"{label} evaluation must be canonical JSON")
     required = {"skill_id", "spec_version", "evaluator_revision", "passed", "scenarios", "policy"}
-    if set(raw) != required or raw["passed"] is not True:
-        raise ReviewError(f"{label} evaluation must record a passing evaluation")
+    if set(raw) != required or not isinstance(raw["passed"], bool):
+        raise ReviewError(f"{label} evaluation pass status is invalid")
     if not all(isinstance(raw[key], str) and raw[key] for key in ("skill_id", "spec_version", "evaluator_revision")):
         raise ReviewError(f"{label} evaluation identity is invalid")
     policy = raw["policy"]
@@ -90,6 +90,7 @@ def _report(value: str, label: str) -> dict[str, Any]:
     if not isinstance(raw["scenarios"], list) or not raw["scenarios"]:
         raise ReviewError(f"{label} evaluation scenarios are required")
     seen: set[str] = set()
+    mandatory_passed = True
     for scenario in raw["scenarios"]:
         if not isinstance(scenario, dict) or not {"scenario_id", "family", "seed", "policy_sha256", "metrics", "threshold_results"} <= set(scenario):
             raise ReviewError(f"{label} evaluation scenario is invalid")
@@ -100,6 +101,31 @@ def _report(value: str, label: str) -> dict[str, Any]:
             raise ReviewError(f"{label} evaluation scenario is invalid")
         if scenario["policy_sha256"] != policy["sha256"]:
             raise ReviewError(f"{label} scenario policy digest mismatch")
+        metrics = scenario["metrics"]
+        if not isinstance(metrics, dict):
+            raise ReviewError(f"{label} scenario metrics are invalid")
+        for result in scenario["threshold_results"]:
+            fields = {"scenario_id", "metric_name", "unit", "direction", "limit", "value", "mandatory", "passed", "normalized_violation"}
+            if not isinstance(result, dict) or set(result) != fields:
+                raise ReviewError(f"{label} threshold result is invalid")
+            if result["scenario_id"] != scenario["scenario_id"] or result["metric_name"] not in metrics:
+                raise ReviewError(f"{label} threshold scenario binding is invalid")
+            if result["direction"] not in {"minimum", "maximum"} or not isinstance(result["unit"], str) or not result["unit"]:
+                raise ReviewError(f"{label} threshold result is invalid")
+            numeric = ("limit", "value", "normalized_violation")
+            if any(isinstance(result[key], bool) or not isinstance(result[key], (int, float)) or not math.isfinite(result[key]) for key in numeric):
+                raise ReviewError(f"{label} threshold result is invalid")
+            if not isinstance(result["mandatory"], bool) or not isinstance(result["passed"], bool) or metrics[result["metric_name"]] != result["value"]:
+                raise ReviewError(f"{label} threshold result is invalid")
+            passed = result["value"] >= result["limit"] if result["direction"] == "minimum" else result["value"] <= result["limit"]
+            violation = max(0.0, (result["limit"] - result["value"]) if result["direction"] == "minimum" else (result["value"] - result["limit"])) / max(1.0, abs(result["limit"]))
+            if result["passed"] is not passed or result["normalized_violation"] != violation:
+                raise ReviewError(f"{label} threshold result is inconsistent")
+            mandatory_passed = mandatory_passed and (passed or not result["mandatory"])
+    if raw["passed"] is not mandatory_passed:
+        raise ReviewError(f"{label} evaluation threshold pass status is inconsistent")
+    if require_passing and raw["passed"] is not True:
+        raise ReviewError(f"{label} evaluation must record a passing evaluation")
     return raw
 
 
@@ -123,9 +149,10 @@ def _expected(report: Mapping[str, Any]) -> dict[str, tuple[str, int]]:
     selected: dict[str, tuple[str, int]] = {}
     for role in _ROLES[:-1]:
         candidates = families.get(role, [])
-        if len(candidates) != 1:
-            raise ReviewError(f"evaluation requires exactly one {role} scenario")
-        selected[role] = (candidates[0]["scenario_id"], candidates[0]["seed"])
+        if not candidates:
+            raise ReviewError(f"evaluation requires a {role} scenario")
+        candidate = min(candidates, key=lambda item: (item["seed"], item["scenario_id"]))
+        selected[role] = (candidate["scenario_id"], candidate["seed"])
     def key(item: Mapping[str, Any]) -> tuple[float, str]:
         violations = [result.get("normalized_violation", 0.0) for result in item["threshold_results"]]
         if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in violations):
@@ -184,7 +211,7 @@ class ReviewBundle:
         except ArtifactIntegrityError as error:
             raise ReviewError(f"baseline {error}") from error
         text = canonical_json(baseline.as_dict())
-        raw = _report(text, "baseline")
+        raw = _report(text, "baseline", require_passing=False)
         if tuple(raw[key] for key in ("skill_id", "spec_version", "evaluator_revision")) != tuple(candidate[key] for key in ("skill_id", "spec_version", "evaluator_revision")):
             raise ReviewError("baseline evaluation identity does not match")
         identity = lambda item: (item["scenario_id"], item["family"], item["seed"])
@@ -247,7 +274,7 @@ class ReviewBundle:
             base = self.baseline
             if _digest(base.evaluation_json) != base.evaluation_digest:
                 raise ReviewError("baseline evaluation digest mismatch")
-            raw = _report(base.evaluation_json, "baseline")
+            raw = _report(base.evaluation_json, "baseline", require_passing=False)
             if base.metric_summary != _summary(raw):
                 raise ReviewError("baseline metric summary does not match evaluation")
             if raw["policy"]["sha256"] != base.policy_digest or raw["policy"]["path"] != str(base.policy_path):

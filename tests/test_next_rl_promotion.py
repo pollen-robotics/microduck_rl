@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import threading
 from dataclasses import replace
 
@@ -11,6 +13,7 @@ import pytest
 from mjlab_microduck.next_rl.evaluation import EvaluationReport, MetricResult, ScenarioResult, select_worst_case
 from mjlab_microduck.next_rl.promotion import PromotionError, PromotionStore
 from mjlab_microduck.next_rl.review import ReviewBundle, ReviewClip
+from mjlab_microduck.next_rl.artifacts import canonical_json
 from mjlab_microduck.next_rl.schema import ArtifactRef, Capability, PolicyContract
 
 
@@ -57,11 +60,20 @@ def store(tmp_path) -> PromotionStore:
 
 @pytest.fixture
 def prior(store, capability, bundle):
+    store.validate(capability, bundle)
     pending = store.request_review(capability, bundle)
     return store.approve(pending.id, reviewer="previous-reviewer")
 
 
+def pending(store, capability, bundle):
+    store.validate(capability, bundle)
+    return store.request_review(capability, bundle)
+
+
 def test_passing_evaluation_without_human_approval_is_review_pending(store, capability, bundle):
+    with pytest.raises(PromotionError, match="validated"):
+        store.request_review(capability, bundle)
+    store.validate(capability, bundle)
     record = store.request_review(capability, bundle)
     assert record.status == "review_pending"
     assert [entry.action for entry in record.audit] == ["available", "validated", "requested"]
@@ -80,17 +92,17 @@ def test_promotion_requires_capability_matching_evaluated_skill_and_version(stor
 
 
 def test_approval_requires_reviewer_and_exact_bundle(store, capability, bundle):
-    pending = store.request_review(capability, bundle)
-    learned = store.approve(pending.id, reviewer="rakesh")
+    review = pending(store, capability, bundle)
+    learned = store.approve(review.id, reviewer="rakesh")
     assert learned.status == "learned"
     assert learned.approval.review_bundle_digest == bundle.digest
     with pytest.raises(PromotionError, match="reviewer"):
-        store.approve(store.request_review(capability, bundle).id, reviewer=" ")
+        store.approve(review.id, reviewer=" ")
 
 
 def test_approval_updates_durable_inventory_for_planner_observation(store, capability, bundle):
-    pending = store.request_review(capability, bundle)
-    store.approve(pending.id, reviewer="rakesh")
+    review = pending(store, capability, bundle)
+    store.approve(review.id, reviewer="rakesh")
     learned = PromotionStore(store.root).inventory().resolve("hello").capability
     assert learned is not None
     assert learned.status == "learned"
@@ -99,14 +111,19 @@ def test_approval_updates_durable_inventory_for_planner_observation(store, capab
 
 
 def test_rejection_preserves_prior_learned_policy(store, capability, bundle, prior):
-    rejected = store.reject(store.request_review(capability, bundle).id, reviewer="rakesh", reason="leans")
+    evidence = json.loads(bundle.evaluation_json)
+    evidence["spec_version"] = "1.0.1"
+    versioned_json = canonical_json(evidence)
+    candidate_bundle = replace(bundle, evaluation_json=versioned_json, evaluation_digest=hashlib.sha256(versioned_json.encode()).hexdigest())
+    candidate = replace(capability, version="1.0.1")
+    rejected = store.reject(pending(store, candidate, candidate_bundle).id, reviewer="rakesh", reason="leans")
     assert rejected.status == "validated"
     assert store.current_learned("hello") == prior
 
 
 def test_re_request_after_rejection_preserves_audit_and_returns_to_review(store, capability, bundle):
-    pending = store.request_review(capability, bundle)
-    rejected = store.reject(pending.id, reviewer="rakesh", reason="leans")
+    review = pending(store, capability, bundle)
+    rejected = store.reject(review.id, reviewer="rakesh", reason="leans")
     requested = store.request_review(capability, bundle)
     assert requested.id == rejected.id
     assert requested.status == "review_pending"
@@ -114,14 +131,14 @@ def test_re_request_after_rejection_preserves_audit_and_returns_to_review(store,
 
 
 def test_concurrent_approvals_leave_one_authoritative_learned_policy(store, capability, bundle):
-    pending = store.request_review(capability, bundle)
+    review = pending(store, capability, bundle)
     outcomes: list[object] = []
     start = threading.Barrier(3)
 
     def approve() -> None:
         start.wait()
         try:
-            outcomes.append(PromotionStore(store.root).approve(pending.id, reviewer="rakesh"))
+            outcomes.append(PromotionStore(store.root).approve(review.id, reviewer="rakesh"))
         except PromotionError as error:
             outcomes.append(error)
 
@@ -137,6 +154,29 @@ def test_concurrent_approvals_leave_one_authoritative_learned_policy(store, capa
 
 
 def test_rejection_requires_an_auditable_reviewer_and_reason(store, capability, bundle):
-    pending = store.request_review(capability, bundle)
+    review = pending(store, capability, bundle)
     with pytest.raises(PromotionError, match="reason"):
-        store.reject(pending.id, reviewer="rakesh", reason=" ")
+        store.reject(review.id, reviewer="rakesh", reason=" ")
+
+
+def test_validation_persists_an_immutable_exact_evaluation_report(store, capability, bundle):
+    store.validate(capability, bundle)
+    validated = store.inventory().resolve("hello").capability
+    report_path = validated.evaluation.report_path
+
+    assert open(report_path, encoding="utf-8").read() == bundle.evaluation_json
+    with pytest.raises(FileExistsError):
+        store._write_report_once(bundle.digest, "{}")
+
+
+def test_abandoned_lock_is_recovered_but_a_live_lock_is_not_removed(store, capability, bundle, monkeypatch):
+    store.root.mkdir(parents=True)
+    store._lock_path.write_text(json.dumps({"owner": "dead", "pid": 999999, "identity": "dead"}))
+    os.utime(store._lock_path, (0, 0))
+    store.validate(capability, bundle)
+
+    store._lock_path.write_text(json.dumps({"owner": "live", "pid": os.getpid(), "identity": "live"}))
+    os.utime(store._lock_path, (0, 0))
+    monkeypatch.setattr("mjlab_microduck.next_rl.promotion._LOCK_TIMEOUT_SECONDS", 0)
+    with pytest.raises(TimeoutError):
+        store.request_review(capability, bundle)

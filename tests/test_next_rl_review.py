@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 
 import pytest
@@ -83,6 +84,17 @@ def test_bundle_verification_detects_a_clip_changed_after_review(passing_report,
         bundle.verify()
 
 
+def test_bundle_recomputes_mandatory_threshold_semantics(passing_report, clip_files):
+    bundle = ReviewBundle.build(passing_report, clip_files)
+    evidence = json.loads(bundle.evaluation_json)
+    result = evidence["scenarios"][0]["threshold_results"][0]
+    result.update({"value": 1.0, "passed": True, "normalized_violation": 0.0})
+    forged = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+
+    with pytest.raises(ReviewError, match="threshold"):
+        replace(bundle, evaluation_json=forged, evaluation_digest=hashlib.sha256(forged.encode()).hexdigest()).verify()
+
+
 def test_bundle_records_canonical_evaluation_and_clip_evidence(passing_report, clip_files):
     bundle = ReviewBundle.build(passing_report, clip_files)
     assert bundle.policy_digest == passing_report.policy.sha256
@@ -113,3 +125,18 @@ def test_bundle_reverifies_retained_baseline_evidence(passing_report, clip_files
     baseline_policy.unlink()
     with pytest.raises(ReviewError, match="baseline policy"):
         bundle.verify()
+
+
+def test_multi_seed_family_clips_choose_the_stable_lowest_seed(passing_report, clip_files):
+    original = passing_report.scenarios[0]
+    extra = replace(
+        original,
+        scenario_id="nominal-0",
+        seed=1,
+        threshold_results=(replace(original.threshold_results[0], scenario_id="nominal-0"),),
+    )
+    report = replace(passing_report, scenarios=(*passing_report.scenarios, extra))
+    path = clip_files["nominal"].path
+    clip_files["nominal"] = ReviewClip("nominal", "nominal-0", 1, path, report.policy.sha256)
+
+    assert ReviewBundle.build(report, clip_files).clips[0].scenario_id == "nominal-0"

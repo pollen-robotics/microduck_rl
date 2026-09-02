@@ -108,3 +108,52 @@ uv run --with pytest pytest tests/ -q
   provenance; concurrent approvers serialize under the same lock so only one
   succeeds. Rejection restores validated state (or preserves an earlier learned
   policy) and a re-request retains the full audit history.
+
+## Fix round 2 — semantic reports, validated sources, and lock recovery
+
+### RED evidence
+
+Before this round, a forged mandatory threshold result reached only a derived
+metric-summary mismatch rather than an independent threshold-semantics check;
+multiple scenarios in a family were rejected outright; and review requests
+could start from an unvalidated available capability. The focused RED run
+reported these concrete failures:
+
+```text
+FAILED test_bundle_recomputes_mandatory_threshold_semantics
+FAILED test_multi_seed_family_clips_choose_the_stable_lowest_seed
+FAILED test_passing_evaluation_without_human_approval_is_review_pending
+AttributeError: 'PromotionStore' object has no attribute 'validate'
+```
+
+### GREEN evidence
+
+```text
+uv run --with pytest pytest tests/test_next_rl_review.py tests/test_next_rl_promotion.py -q
+25 passed in 0.10s
+
+uv run --with pytest pytest tests/test_next_rl_*.py -q
+103 passed in 1.70s
+
+uv run --with pytest pytest tests/ -q
+299 passed, 1 skipped in 8.51s
+```
+
+### Fixes
+
+- Canonical evaluation parsing now recomputes each threshold's pass/violation
+  semantics and the aggregate mandatory pass flag. Candidate reports must pass;
+  baseline reports may fail, but their declared result must still match the
+  threshold conjunction.
+- Family-role clips select the lowest `(seed, scenario_id)` evaluated scenario,
+  while worst-case selection retains normalized-violation then scenario-ID
+  semantics.
+- `validate()` is now the only `available -> validated` path. `request_review()`
+  accepts only the exact persisted validated evidence, and rejection restores
+  that same candidate for audited re-request.
+- Validation writes the exact canonical evaluation JSON once to a real report
+  path before recording the corresponding `EvaluationRef`; conflicting rewrites
+  are refused.
+- Promotion locks record owner, PID, and identity, recover only aged locks from
+  a dead PID, and leave an aged live-PID lock untouched. The module was also
+  reformatted into conventional readable control flow.
