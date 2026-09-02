@@ -148,8 +148,9 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert cfg.curriculum["backroll_sagittal_weight"].params["weight_stages"] == [
         {"step": 0, "weight": 0.0},
         {"step": 100 * 24, "weight": -0.25},
-        {"step": 250 * 24, "weight": -0.75},
-        {"step": 600 * 24, "weight": -1.25},
+        {"step": 200 * 24, "weight": -2.0},
+        {"step": 250 * 24, "weight": -3.0},
+        {"step": 600 * 24, "weight": -3.0},
     ]
     assert cfg.curriculum["backroll_upright_weight"].params["weight_stages"] == [
         {"step": 0, "weight": 0.0},

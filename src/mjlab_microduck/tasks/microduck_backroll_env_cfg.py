@@ -481,8 +481,15 @@ def make_microduck_backroll_env_cfg(play: bool = False):
                 "weight_stages": [
                     {"step": 0, "weight": 0.0},
                     {"step": 100 * 24, "weight": -0.25},
-                    {"step": 250 * 24, "weight": -0.75},
-                    {"step": 600 * 24, "weight": -1.25},
+                    # A227's checkpoint-250 standing battery preserved the
+                    # trunk/head sequence in every trial but all 16 attempts
+                    # left the sagittal plane after the head pivot.  Price
+                    # only that cross-axis angular rate strongly when the
+                    # landing potentials turn on; a pure backward body-y
+                    # rotation is exactly zero in this term.
+                    {"step": 200 * 24, "weight": -2.0},
+                    {"step": 250 * 24, "weight": -3.0},
+                    {"step": 600 * 24, "weight": -3.0},
                 ],
             },
         )
