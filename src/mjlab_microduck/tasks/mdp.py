@@ -12205,12 +12205,13 @@ def _update_grounded_backroll_state(
     potential_gate = (frontier >= _BACKROLL_POTENTIAL_ANGLE) & ~recovery_before
     upright_component = torch.clamp(upright, min=0.0, max=1.0)
     # The pitch/roll upright cosine alone is blind to a robot that has
-    # rotated onto its side.  Blend in the lateral-axis flatness as a bounded
-    # potential so the final 300--350 degree arc teaches the robot to come
-    # back into the sagittal plane.  Only the delta is paid below; holding a
-    # side pose has no annuity and cannot farm reward.
+    # rotated onto its side.  Bias the bounded potential toward lateral-axis
+    # flatness so the final 300--350 degree arc teaches the robot to come back
+    # into the sagittal plane, rather than merely becoming tall while still
+    # sideways.  Only the delta is paid below; holding a side pose has no
+    # annuity and cannot farm reward.
     flatness_component = torch.clamp(1.0 - lateral_axis_z, min=0.0, max=1.0)
-    upright_potential = 0.5 * (upright_component + flatness_component)
+    upright_potential = 0.25 * upright_component + 0.75 * flatness_component
     height_potential = torch.clamp(height / 0.115, min=0.0, max=1.0)
     env._backroll_upright_delta = torch.where(
         potential_gate & env._backroll_potential_ready,
