@@ -1348,6 +1348,28 @@ def test_repeated_recovery_rearms_once_then_credits_the_retry(monkeypatch):
     assert env._backroll_recovery_rearm_count.item() == 1
 
 
+def test_one_shot_offaxis_rotation_cannot_earn_positive_progress(monkeypatch):
+    env, asset = _fake_env()
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+    monkeypatch.setattr(
+        mdp,
+        "_grounded_backroll_cycle_is_sagittal",
+        lambda _env: torch.zeros(1, dtype=torch.bool),
+    )
+    env._backroll_repeat_mode[:] = False
+    env._backroll_cycle_offaxis_rotation[:] = (
+        mdp._BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION + math.radians(1.0)
+    )
+    asset.data.root_link_ang_vel_b[:, 1] = -3.0
+    assert mdp.grounded_backroll_progress(env).item() == 0.0
+    assert mdp.grounded_backroll_completion_progress(env).item() == 0.0
+
+
 def test_repeated_recovery_timeout_terminates_and_cannot_open_twice(monkeypatch):
     env, asset = _fake_env()
     env._backroll_repeat_mode[:] = True

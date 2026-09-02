@@ -11676,15 +11676,20 @@ def _grounded_backroll_first_cycle_relaxed(env: ManagerBasedRlEnv) -> torch.Tens
 
 
 def _grounded_backroll_positive_reward_valid(env: ManagerBasedRlEnv) -> torch.Tensor:
-    """Reject every positive repeated-skill reward after an off-axis escape."""
+    """Reject positive skill reward after an off-axis escape.
+
+    The one-shot bridge is also trained in the repeated-task curriculum.  It
+    must not keep paying a side-roll just because ``repeat_mode`` is disabled:
+    that lets the policy maximize rotation while never learning the sagittal
+    landing gate.  The explicitly relaxed first repeated cycle retains the
+    audited parent envelope; every other cycle, including one-shot training,
+    must remain inside the measured sagittal bounds.
+    """
     first_cycle_relaxed = _grounded_backroll_first_cycle_relaxed(env)
     return (
-        ~env._backroll_repeat_mode
-        | (
-            (first_cycle_relaxed | _grounded_backroll_cycle_is_sagittal(env))
-            & ~env._backroll_invalid
-            & ~env._backroll_recovery_active
-        )
+        (first_cycle_relaxed | _grounded_backroll_cycle_is_sagittal(env))
+        & ~env._backroll_invalid
+        & ~env._backroll_recovery_active
     )
 
 
@@ -12620,10 +12625,10 @@ def grounded_backroll_progress(
         ((frontier <= _BACKROLL_TRUNK_LATCH_HI) | env._backroll_trunk_latch)
         & ((frontier <= _BACKROLL_HEAD_LATCH_HI) | env._backroll_head_latch)
     )
-    valid = (
-        ~env._backroll_repeat_mode
-        | (ordered_contacts & _grounded_backroll_positive_reward_valid(env))
-    )
+    # The one-shot bridge is subject to the same sagittal gate as repeated
+    # training.  Otherwise a side-roll can keep collecting rotation shaping
+    # while never satisfying the physical landing criterion.
+    valid = ordered_contacts & _grounded_backroll_positive_reward_valid(env)
     reward = delta / (env.step_dt * target_angle)
     first_cycle_relaxed = _grounded_backroll_first_cycle_relaxed(env)
     purity = _grounded_backroll_sagittal_purity(asset)
