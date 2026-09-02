@@ -12325,14 +12325,39 @@ def _grounded_backroll_reference_bank(
     return bank
 
 
+def _grounded_backroll_reference_consistent_rows(
+    bank: dict[str, torch.Tensor],
+) -> torch.Tensor:
+    """Return reset rows that already meet the live sagittal/latch contract.
+
+    Reference-state initialization may carry contact history only when that
+    history belongs to the captured physical state.  The same 20-degree
+    sagittal envelope and ordered trunk/head prerequisites used at runtime
+    reject legacy shoulder-biased rows before PPO can see them.
+    """
+    lateral_axis_z = _lateral_axis_z(bank["qpos"][:, 3:7]).abs()
+    sagittal = lateral_axis_z <= _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX
+    trunk_ordered = (
+        ~bank["trunk_latch"]
+        | (bank["frontier"] >= _BACKROLL_TRUNK_LATCH_LO)
+    )
+    head_ordered = (
+        (~bank["head_latch"] | bank["trunk_latch"])
+        & (~bank["head_latch"] | (bank["frontier"] >= _BACKROLL_HEAD_LATCH_LO))
+    )
+    return sagittal & trunk_ordered & head_ordered
+
+
 def _reset_grounded_backroll_reference_states(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
     *,
     reference_state_path: str,
     phase_range_deg: tuple,
+    phase_buckets_deg: Optional[tuple[tuple[float, float], ...]],
     source_seed: Optional[int],
     yaw_range: tuple,
+    strict_sagittal: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Place environments in real, champion-generated sagittal pivot states."""
     bank = _grounded_backroll_reference_bank(env, reference_state_path)
@@ -12341,12 +12366,44 @@ def _reset_grounded_backroll_reference_states(
     )
     if source_seed is not None:
         eligible_mask &= bank["source_seed"] == source_seed
-    eligible_rows = torch.nonzero(eligible_mask, as_tuple=False).squeeze(-1)
-    if len(eligible_rows) == 0:
+    if strict_sagittal:
+        eligible_mask &= _grounded_backroll_reference_consistent_rows(bank)
+    if phase_buckets_deg is None:
+        eligible_rows = torch.nonzero(eligible_mask, as_tuple=False).squeeze(-1)
+        if len(eligible_rows) == 0:
+            raise ValueError("backroll reference state bank has no rows in phase range")
+        row_ids = eligible_rows[
+            torch.randint(len(eligible_rows), (len(env_ids),), device=env.device)
+        ]
+    else:
+        bucket_rows = []
+        for lo, hi in phase_buckets_deg:
+            rows = torch.nonzero(
+                eligible_mask
+                & (bank["phase_center_deg"] >= lo)
+                & (bank["phase_center_deg"] <= hi),
+                as_tuple=False,
+            ).squeeze(-1)
+            if len(rows) > 0:
+                bucket_rows.append(rows)
+        if not bucket_rows:
+            raise ValueError("backroll reference state bank has no rows in phase buckets")
+        bucket_ids = torch.randint(
+            len(bucket_rows), (len(env_ids),), device=env.device
+        )
+        row_ids = torch.empty(len(env_ids), dtype=torch.long, device=env.device)
+        for bucket_index, rows in enumerate(bucket_rows):
+            selected = bucket_ids == bucket_index
+            if selected.any():
+                row_ids[selected] = rows[
+                    torch.randint(
+                        len(rows),
+                        (int(selected.sum().item()),),
+                        device=env.device,
+                    )
+                ]
+    if len(row_ids) == 0:
         raise ValueError("backroll reference state bank has no rows in phase range")
-    row_ids = eligible_rows[
-        torch.randint(len(eligible_rows), (len(env_ids),), device=env.device)
-    ]
     qpos = bank["qpos"][row_ids].clone()
     qvel = bank["qvel"][row_ids].clone()
     yaw = (
@@ -12405,7 +12462,9 @@ def reset_grounded_backroll_state(
     reference_state_prob: float = 0.0,
     reference_state_path: Optional[str] = None,
     reference_phase_range_deg: tuple = (0.0, 360.0),
+    reference_phase_buckets_deg: Optional[tuple[tuple[float, float], ...]] = None,
     reference_source_seed: Optional[int] = None,
+    reference_strict_sagittal: bool = False,
     repeat_mode: bool = False,
     relaxed_first_cycle: bool = False,
     recovery_enabled: bool = True,
@@ -12457,6 +12516,12 @@ def reset_grounded_backroll_state(
         or reference_phase_range_deg[1] < reference_phase_range_deg[0]
     ):
         raise ValueError("reference_phase_range_deg must be an ordered pair")
+    if reference_phase_buckets_deg is not None:
+        if not reference_phase_buckets_deg:
+            raise ValueError("reference_phase_buckets_deg must not be empty")
+        for bucket in reference_phase_buckets_deg:
+            if len(bucket) != 2 or bucket[1] < bucket[0]:
+                raise ValueError("reference phase buckets must be ordered pairs")
     if (
         len(ground_z_range) != 2
         or ground_z_range[0] <= 0.0
@@ -12510,8 +12575,10 @@ def reset_grounded_backroll_state(
             reference_ids,
             reference_state_path=reference_state_path,
             phase_range_deg=reference_phase_range_deg,
+            phase_buckets_deg=reference_phase_buckets_deg,
             source_seed=reference_source_seed,
             yaw_range=yaw_range,
+            strict_sagittal=reference_strict_sagittal,
         )
         spawn_angle[reference_mask] = env._roulade_max[reference_ids]
         reference_trunk_latch[reference_mask] = reference_trunk

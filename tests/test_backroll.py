@@ -23,53 +23,53 @@ from mjlab_microduck.tasks.microduck_roulade_env_cfg import (
 
 
 class _Scene:
-    def __init__(self, asset, sensors):
+    def __init__(self, asset, sensors, num_envs=1):
         self.asset = asset
         self.sensors = sensors
-        self.terrain = SimpleNamespace(env_origins=torch.zeros(1, 3))
+        self.terrain = SimpleNamespace(env_origins=torch.zeros(num_envs, 3))
 
     def __getitem__(self, name):
         assert name == "robot"
         return self.asset
 
 
-def _fake_env():
-    quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+def _fake_env(num_envs=1):
+    quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(num_envs, 1)
     asset = SimpleNamespace(
         data=SimpleNamespace(
-            root_link_ang_vel_b=torch.zeros(1, 3),
-            root_link_lin_vel_b=torch.zeros(1, 3),
-            root_link_lin_vel_w=torch.zeros(1, 3),
-            root_link_pos_w=torch.tensor([[0.0, 0.0, 0.115]]),
+            root_link_ang_vel_b=torch.zeros(num_envs, 3),
+            root_link_lin_vel_b=torch.zeros(num_envs, 3),
+            root_link_lin_vel_w=torch.zeros(num_envs, 3),
+            root_link_pos_w=torch.tensor([[0.0, 0.0, 0.115]]).repeat(num_envs, 1),
             root_link_quat_w=quat,
-            joint_pos=torch.zeros(1, 14),
-            default_joint_pos=torch.zeros(1, 14),
+            joint_pos=torch.zeros(num_envs, 14),
+            default_joint_pos=torch.zeros(num_envs, 14),
         )
     )
     asset.find_joints = lambda _pattern: (list(range(14)), [])
     sensors = {
         "robot_ground_contact": SimpleNamespace(
-            data=SimpleNamespace(found=torch.ones(1, 1))
+            data=SimpleNamespace(found=torch.ones(num_envs, 1))
         ),
         "trunk_ground_contact": SimpleNamespace(
-            data=SimpleNamespace(found=torch.zeros(1, 1))
+            data=SimpleNamespace(found=torch.zeros(num_envs, 1))
         ),
         "head_ground_contact": SimpleNamespace(
-            data=SimpleNamespace(found=torch.zeros(1, 1))
+            data=SimpleNamespace(found=torch.zeros(num_envs, 1))
         ),
         "left_foot_ground_contact": SimpleNamespace(
-            data=SimpleNamespace(found=torch.ones(1, 1))
+            data=SimpleNamespace(found=torch.ones(num_envs, 1))
         ),
         "right_foot_ground_contact": SimpleNamespace(
-            data=SimpleNamespace(found=torch.ones(1, 1))
+            data=SimpleNamespace(found=torch.ones(num_envs, 1))
         ),
     }
     env = SimpleNamespace(
-        num_envs=1,
+        num_envs=num_envs,
         device=torch.device("cpu"),
         step_dt=0.02,
         common_step_counter=0,
-        scene=_Scene(asset, sensors),
+        scene=_Scene(asset, sensors, num_envs),
     )
     mdp._grounded_backroll_state(env)
     env._roulade_roll_direction[:] = -1.0
@@ -482,10 +482,10 @@ def test_backroll_curriculum_matches_mastery_stages():
         0.15,
     ]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_pitch_min"] == pytest.approx(
-        math.radians(180.0)
+        math.radians(90.0)
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_pitch_max"] == pytest.approx(
-        math.radians(340.0)
+        math.radians(270.0)
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_omega_range"] == (
         1.0,
@@ -499,9 +499,23 @@ def test_backroll_curriculum_matches_mastery_stages():
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_state_path"]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_phase_range_deg"] == (
-        255.0,
-        265.0,
+        90.0,
+        270.0,
     )
+    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_phase_buckets_deg"] == (
+        (90.0, 110.0),
+        (130.0, 150.0),
+        (250.0, 270.0),
+    )
+    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_strict_sagittal"]
+    assert not BACKROLL_CURRICULUM_STAGES[0]["params"]["synthesize_contact_latches"]
+    assert [stage["params"]["reference_state_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
+        1.0,
+        1.0,
+        0.70,
+        0.35,
+        0.10,
+    ]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_source_seed"] is None
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["yaw_range"] == (0.0, 0.0)
     cfg = make_microduck_backroll_env_cfg()
@@ -697,6 +711,67 @@ def test_repeated_reference_reset_uses_physical_state_and_actual_latches(
     assert env._backroll_trunk_latch.item()
     assert not env._backroll_head_latch.item()
     assert not env._backroll_start_is_standing.item()
+
+
+def test_strict_reference_reset_excludes_side_biased_rows_and_balances_buckets(
+    monkeypatch,
+    tmp_path,
+):
+    env, _asset = _fake_env(24)
+    env.sim = SimpleNamespace(
+        data=SimpleNamespace(qpos=torch.zeros(24, 21), qvel=torch.zeros(24, 20))
+    )
+    env.sim.data.qpos[:, 3] = 1.0
+    monkeypatch.setattr(mdp, "_servo_joint_ids", lambda _env, _asset: list(range(14)))
+    qvel = torch.zeros(20)
+    good_100 = torch.zeros(21)
+    good_100[3] = 1.0
+    good_140 = good_100.clone()
+    good_260 = good_100.clone()
+    side_260 = good_100.clone()
+    side_260[3] = math.sqrt(3.0) / 2.0
+    side_260[4] = 0.5
+    rows = []
+    for phase, qpos, trunk, head in (
+        (100.0, good_100, False, False),
+        (140.0, good_140, False, False),
+        (260.0, good_260, True, True),
+        (260.0, side_260, True, True),
+    ):
+        rows.append(
+            {
+                "qpos": qpos,
+                "qvel": qvel,
+                "seed": 1,
+                "accum": torch.tensor(math.radians(phase)),
+                "frontier": torch.tensor(math.radians(phase)),
+                "phase_center_deg": phase,
+                "trunk_latch": torch.tensor(trunk),
+                "head_latch": torch.tensor(head),
+            }
+        )
+    reference_path = tmp_path / "strict-reference.pt"
+    torch.save({"rows": rows}, reference_path)
+
+    mdp.reset_grounded_backroll_state(
+        env,
+        torch.arange(24),
+        standing_prob=0.0,
+        midroll_prob=1.0,
+        reference_state_prob=1.0,
+        reference_state_path=str(reference_path),
+        reference_phase_range_deg=(90.0, 270.0),
+        reference_phase_buckets_deg=((90.0, 110.0), (130.0, 150.0), (250.0, 270.0)),
+        reference_strict_sagittal=True,
+        yaw_range=(0.0, 0.0),
+        joint_noise_std=0.0,
+    )
+
+    angles = torch.round(torch.rad2deg(env._roulade_max)).to(torch.long)
+    assert set(angles.tolist()) == {100, 140, 260}
+    assert (angles == 260).any()
+    selected = env.sim.data.qpos[angles == 260, 3:7]
+    assert torch.allclose(selected[:, 3], torch.zeros_like(selected[:, 3]))
 
 
 def test_repeated_curriculum_counts_the_stage_mastery_cycle_target(monkeypatch):

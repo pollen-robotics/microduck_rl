@@ -56,35 +56,29 @@ BACKROLL_TUCK_OVERRIDES = {
 BACKROLL_CURRICULUM_STAGES = [
     {
         "params": {
-            # A116 is the strongest measured parent (14/16 complete
-            # landings).  Its successful curriculum exposed the learner to
-            # the full grounded 180--340 degree completion arc.  The
-            # A206-only 100--180 degree bridge produced ordered contacts but
-            # no upright landing under the sagittal gate, so restore the
-            # parent's late-phase reset support while retaining a standing
-            # bucket for on-policy launch learning.  A213's late-pose reward
-            # branch still passed the contact sequence but failed every
-            # A213/A214 standing-heavy variants still produced zero strict
-            # standing successes while the late reference basin reliably
-            # reached trunk/head contacts.  Teach the final feet/upright
-            # transition first, then reintroduce standing starts in stage 1.
+            # The previous curriculum spent every phase reset at 260 degrees.
+            # That made a head-pivot/side-exit basin easy to optimize while
+            # leaving the launch and pre-head transitions underrepresented.
+            # Sample the strictly sagittal, measured 100, 140, and 260 degree
+            # states uniformly: launch -> pre-head -> head-exit.  Each stored
+            # latch is the latch measured when that exact state was captured;
+            # synthetic states start with no historical contact credit.
             "standing_prob": 0.20,
             "midroll_prob": 0.80,
-            "midroll_pitch_min": math.radians(180.0),
-            "midroll_pitch_max": math.radians(340.0),
+            "midroll_pitch_min": math.radians(90.0),
+            "midroll_pitch_max": math.radians(270.0),
             "midroll_omega_range": (1.0, 3.0),
             "joint_noise_std": 0.0,
-            # Seed the late-phase bucket from measured sagittal states.  The
-            # bank was collected only from physically aligned roll segments,
-            # so this supplies the correction target without relaxing the
-            # landing gate or inventing a scripted action sequence.
             "reference_state_prob": 1.0,
             "reference_state_path": BACKROLL_REFERENCE_STATE_PATH,
-            # The 260-degree reference rows are the only late bank examples
-            # verified inside the strict 20-degree sagittal envelope.  The
-            # stored 290-degree rows carry the old side-roll bias and must not
-            # re-enter the new objective through reset initialization.
-            "reference_phase_range_deg": (255.0, 265.0),
+            "reference_phase_range_deg": (90.0, 270.0),
+            "reference_phase_buckets_deg": (
+                (90.0, 110.0),
+                (130.0, 150.0),
+                (250.0, 270.0),
+            ),
+            "reference_strict_sagittal": True,
+            "synthesize_contact_latches": False,
             "reference_source_seed": None,
             "yaw_range": (0.0, 0.0),
         }
@@ -93,9 +87,18 @@ BACKROLL_CURRICULUM_STAGES = [
         "params": {
             "standing_prob": 0.30,
             "midroll_prob": 0.70,
-            "midroll_pitch_min": math.radians(180.0),
-            "midroll_pitch_max": math.radians(340.0),
+            "midroll_pitch_min": math.radians(90.0),
+            "midroll_pitch_max": math.radians(270.0),
             "midroll_omega_range": (1.0, 4.0),
+            "reference_state_prob": 1.0,
+            "reference_phase_range_deg": (90.0, 270.0),
+            "reference_phase_buckets_deg": (
+                (90.0, 110.0),
+                (130.0, 150.0),
+                (250.0, 270.0),
+            ),
+            "reference_strict_sagittal": True,
+            "synthesize_contact_latches": False,
         }
     },
     {
@@ -105,6 +108,15 @@ BACKROLL_CURRICULUM_STAGES = [
             "midroll_pitch_min": math.radians(90.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (2.0, 5.0),
+            "reference_state_prob": 0.70,
+            "reference_phase_range_deg": (90.0, 270.0),
+            "reference_phase_buckets_deg": (
+                (90.0, 110.0),
+                (130.0, 150.0),
+                (250.0, 270.0),
+            ),
+            "reference_strict_sagittal": True,
+            "synthesize_contact_latches": False,
         }
     },
     {
@@ -114,6 +126,15 @@ BACKROLL_CURRICULUM_STAGES = [
             "midroll_pitch_min": math.radians(20.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (0.0, 4.0),
+            "reference_state_prob": 0.35,
+            "reference_phase_range_deg": (90.0, 270.0),
+            "reference_phase_buckets_deg": (
+                (90.0, 110.0),
+                (130.0, 150.0),
+                (250.0, 270.0),
+            ),
+            "reference_strict_sagittal": True,
+            "synthesize_contact_latches": False,
         }
     },
     {
@@ -123,6 +144,15 @@ BACKROLL_CURRICULUM_STAGES = [
             "midroll_pitch_min": math.radians(20.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (0.0, 3.0),
+            "reference_state_prob": 0.10,
+            "reference_phase_range_deg": (90.0, 270.0),
+            "reference_phase_buckets_deg": (
+                (90.0, 110.0),
+                (130.0, 150.0),
+                (250.0, 270.0),
+            ),
+            "reference_strict_sagittal": True,
+            "synthesize_contact_latches": False,
         }
     },
 ]
