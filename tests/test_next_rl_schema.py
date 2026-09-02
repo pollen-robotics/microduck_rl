@@ -13,7 +13,9 @@ from mjlab_microduck.next_rl.artifacts import (
 )
 from mjlab_microduck.next_rl.schema import (
     ArtifactRef,
+    Capability,
     EvaluationRef,
+    ExperimentManifest,
     MetricThreshold,
     PolicyContract,
     SchemaError,
@@ -34,6 +36,49 @@ def skill_dict(**overrides: object) -> dict[str, object]:
         "metrics": [metric("falls")],
         "training_seeds": [1, 2],
         "evaluation_seeds": [3, 4],
+    }
+    value.update(overrides)
+    return value
+
+
+def evaluation_dict(**overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "kind": "evaluation_report",
+        "policy_sha256": "a" * 64,
+        "report_path": "evaluation.json",
+        "passed": True,
+        "metric_results": {"falls": 0},
+        "approval_provenance": "review-42.json",
+    }
+    value.update(overrides)
+    return value
+
+
+def learned_capability_dict(**overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "id": "standing",
+        "version": "1.0.0",
+        "aliases": ["stand"],
+        "robot_model": "microduck",
+        "contract": PolicyContract.microduck().as_dict(),
+        "status": "learned",
+        "policy": {"path": "policy.onnx", "kind": "onnx", "sha256": "a" * 64},
+        "evaluation": evaluation_dict(),
+    }
+    value.update(overrides)
+    return value
+
+
+def experiment_dict(**overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "skill_id": "standing",
+        "spec_version": "1.0.0",
+        "task_id": "Mjlab-Standing-Flat-MicroDuck",
+        "contract": PolicyContract.microduck().as_dict(),
+        "code_digest": "a" * 64,
+        "seed": 1,
+        "runner_id": "local",
+        "status": "planned",
     }
     value.update(overrides)
     return value
@@ -115,6 +160,50 @@ def test_strict_evaluation_requires_a_passed_report_and_metric_results():
                 "passed": True,
             }
         )
+
+
+def test_learned_capability_rejects_a_failed_evaluation():
+    raw = learned_capability_dict(evaluation=evaluation_dict(passed=False))
+    with pytest.raises(SchemaError, match="passing evaluation"):
+        Capability.from_dict(raw)
+
+
+def test_learned_capability_rejects_legacy_only_evidence():
+    raw = learned_capability_dict(
+        evaluation={
+            "kind": "legacy_runtime_shipped",
+            "policy_sha256": "a" * 64,
+            "runtime_repository": "pollen-robotics/microduck",
+            "runtime_commit": "abc123",
+            "approval_provenance": "README.md",
+        }
+    )
+    with pytest.raises(SchemaError, match="evaluation_report"):
+        Capability.from_dict(raw)
+
+
+def test_learned_capability_rejects_an_unapproved_evaluation():
+    raw = learned_capability_dict(evaluation=evaluation_dict(approval_provenance=""))
+    with pytest.raises(SchemaError, match="approval"):
+        Capability.from_dict(raw)
+
+
+def test_normal_evaluation_rejects_legacy_only_fields():
+    raw = evaluation_dict(runtime_repository="pollen-robotics/microduck")
+    with pytest.raises(SchemaError, match="unknown field"):
+        EvaluationRef.from_dict(raw)
+
+
+@pytest.mark.parametrize("metadata", [{"tags": {"unsafe"}}, {"limit": float("nan")}, {"value": object()}])
+def test_metadata_rejects_non_json_values(metadata):
+    with pytest.raises(SchemaError, match="metadata"):
+        SkillSpec.from_dict(skill_dict(metadata=metadata))
+
+
+@pytest.mark.parametrize("field", ["created_at", "output_dir"])
+def test_experiment_rejects_empty_optional_text(field):
+    with pytest.raises(SchemaError, match=field):
+        ExperimentManifest.from_dict(experiment_dict(**{field: ""}))
 
 
 def test_artifact_requires_a_sha256_digest():

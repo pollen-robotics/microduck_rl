@@ -92,11 +92,13 @@ def _metadata(value: Any) -> Mapping[str, Any]:
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
         return MappingProxyType({key: _freeze(item) for key, item in _mapping(value, "metadata").items()})
-    if isinstance(value, list):
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return tuple(_freeze(item) for item in value)
-    if isinstance(value, tuple):
-        return tuple(_freeze(item) for item in value)
-    return value
+    if value is None or isinstance(value, (bool, str, int)):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    raise SchemaError("metadata must contain only finite JSON-compatible values")
 
 
 def _as_json(value: Any) -> Any:
@@ -310,30 +312,45 @@ class EvaluationRef:
 
     @classmethod
     def from_dict(cls, raw: Any) -> EvaluationRef:
-        optional = {"report_path", "passed", "metric_results", "runtime_repository", "runtime_commit", "approval_provenance", "metadata"}
-        value = _fields(raw, {"kind", "policy_sha256"}, optional, "evaluation")
+        value = _mapping(raw, "evaluation")
         kind = value["kind"]
         if kind not in cls.KINDS:
             raise SchemaError(f"evaluation kind must be one of {cls.KINDS}")
+        if kind == "evaluation_report":
+            value = _fields(
+                value,
+                {"kind", "policy_sha256", "report_path", "passed", "metric_results"},
+                {"approval_provenance", "metadata"},
+                "evaluation report",
+            )
+        else:
+            value = _fields(
+                value,
+                {"kind", "policy_sha256", "runtime_repository", "runtime_commit", "approval_provenance"},
+                {"metadata"},
+                "legacy evaluation",
+            )
         digest = _text(value["policy_sha256"], "evaluation policy_sha256")
         if not _SHA256.fullmatch(digest):
             raise SchemaError("evaluation policy_sha256 must be a lowercase SHA-256 digest")
         if kind == "evaluation_report":
-            required = {"report_path", "passed", "metric_results"}
-            if missing := required - value.keys():
-                raise SchemaError(f"evaluation report missing required field {min(missing)!r}")
             report_path = _text(value["report_path"], "report_path")
             if not isinstance(value["passed"], bool):
                 raise SchemaError("evaluation passed must be a boolean")
             metric_results = _mapping(value["metric_results"], "metric_results")
             parsed_metrics = {name: _number(result, f"metric_results.{name}") for name, result in metric_results.items()}
-            return cls(kind, digest, report_path, value["passed"], MappingProxyType(parsed_metrics), metadata=_metadata(value.get("metadata", {})))
-        required = {"runtime_repository", "runtime_commit", "approval_provenance"}
-        if missing := required - value.keys():
-            raise SchemaError(f"legacy evaluation missing required field {min(missing)!r}")
-        prohibited = {"report_path", "passed", "metric_results"} & value.keys()
-        if prohibited:
-            raise SchemaError("legacy evaluation cannot claim numeric metric evidence")
+            approval = value.get("approval_provenance")
+            if approval is not None:
+                approval = _text(approval, "approval_provenance")
+            return cls(
+                kind,
+                digest,
+                report_path,
+                value["passed"],
+                MappingProxyType(parsed_metrics),
+                approval_provenance=approval,
+                metadata=_metadata(value.get("metadata", {})),
+            )
         return cls(
             kind, digest, runtime_repository=_text(value["runtime_repository"], "runtime_repository"),
             runtime_commit=_text(value["runtime_commit"], "runtime_commit"),
@@ -382,6 +399,13 @@ class Capability:
         evaluation = EvaluationRef.from_dict(value["evaluation"]) if "evaluation" in value else None
         if status == "learned" and (policy is None or evaluation is None):
             raise SchemaError("learned capability requires policy and evaluation evidence")
+        if status == "learned" and evaluation is not None:
+            if evaluation.kind != "evaluation_report":
+                raise SchemaError("learned capability requires an evaluation_report")
+            if evaluation.passed is not True:
+                raise SchemaError("learned capability requires a passing evaluation")
+            if not evaluation.approval_provenance:
+                raise SchemaError("learned capability requires approval evidence")
         if policy is not None and evaluation is not None and policy.sha256 != evaluation.policy_sha256:
             raise SchemaError("capability policy and evaluation digest mismatch")
         return cls(_text(value["id"], "capability id"), version, _strings(value["aliases"], "aliases"), _text(value["robot_model"], "robot_model"), PolicyContract.from_dict(value["contract"]), status, policy, evaluation, _metadata(value.get("metadata", {})))
@@ -431,7 +455,13 @@ class ExperimentManifest:
         for key in ("code_digest", "parent_policy_digest", "dirty_patch_digest"):
             if key in value and value[key] is not None and not _SHA256.fullmatch(_text(value[key], key)):
                 raise SchemaError(f"{key} must be a lowercase SHA-256 digest")
-        return cls(_text(value["skill_id"], "skill_id"), version, _text(value["task_id"], "task_id"), PolicyContract.from_dict(value["contract"]), _text(value["code_digest"], "code_digest"), _integer(value["seed"], "seed"), _text(value["runner_id"], "runner_id"), status, _metadata(value.get("environment_config", {})), _metadata(value.get("agent_config", {})), value.get("parent_policy_digest"), value.get("dirty_patch_digest"), value.get("created_at"), value.get("output_dir"), _metadata(value.get("metadata", {})))
+        created_at = value.get("created_at")
+        if created_at is not None:
+            created_at = _text(created_at, "created_at")
+        output_dir = value.get("output_dir")
+        if output_dir is not None:
+            output_dir = _text(output_dir, "output_dir")
+        return cls(_text(value["skill_id"], "skill_id"), version, _text(value["task_id"], "task_id"), PolicyContract.from_dict(value["contract"]), _text(value["code_digest"], "code_digest"), _integer(value["seed"], "seed"), _text(value["runner_id"], "runner_id"), status, _metadata(value.get("environment_config", {})), _metadata(value.get("agent_config", {})), value.get("parent_policy_digest"), value.get("dirty_patch_digest"), created_at, output_dir, _metadata(value.get("metadata", {})))
 
     def as_dict(self) -> dict[str, Any]:
         result = {"skill_id": self.skill_id, "spec_version": self.spec_version, "task_id": self.task_id, "contract": self.contract.as_dict(), "code_digest": self.code_digest, "seed": self.seed, "runner_id": self.runner_id, "status": self.status}
