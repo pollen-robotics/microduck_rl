@@ -194,7 +194,7 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert [
         stage["params"]["standing_prob"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
-    ] == [0.50, 0.50, 0.50, 0.80, 0.90, 1.0]
+    ] == [0.25, 0.50, 0.50, 0.80, 0.90, 1.0]
     assert [
         stage["params"]["repeat_mode"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
@@ -230,12 +230,12 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
     ] == [1.0, 1.0, 1.0, 0.10, 0.05, 0.0]
     first_stage = REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"]
-    assert first_stage["reference_phase_range_deg"] == (180.0, 180.0)
-    assert first_stage["reference_source_seed"] == 10
+    assert first_stage["reference_phase_range_deg"] == (100.0, 180.0)
+    assert first_stage["reference_source_seed"] is None
     assert first_stage["yaw_range"] == (0.0, 0.0)
-    assert first_stage["midroll_pitch_min"] == pytest.approx(math.radians(260.0))
-    assert first_stage["midroll_pitch_max"] == pytest.approx(math.radians(340.0))
-    assert first_stage["midroll_omega_range"] == (0.0, 2.0)
+    assert first_stage["midroll_pitch_min"] == pytest.approx(math.radians(100.0))
+    assert first_stage["midroll_pitch_max"] == pytest.approx(math.radians(180.0))
+    assert first_stage["midroll_omega_range"] == (1.0, 3.0)
     play_reset = play_cfg.events["set_grounded_backroll_state"].params
     assert play_reset["repeat_mode"] is True
     assert play_reset["relaxed_first_cycle"] is False

@@ -89,28 +89,29 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
         "params": {
             # First preserve the measured late-phase basin while giving the
             # policy an equal-sized standing bucket to learn the launch.
-            # A178 model 2600 completed 3/4 direct 180-degree reference
-            # rollouts, but no standing trial, so the reference must not be
-            # diluted by the weaker 140-degree row yet.
-            "standing_prob": 0.50,
-            "midroll_prob": 0.50,
+            # A197/A198 standing audits stayed at ~1 degree while the parent
+            # only knew a late 180-degree bridge.  Put an earlier, grounded
+            # 100--180 degree reference bridge beside a standing bucket so
+            # PPO can learn launch -> trunk/head contact before the strict
+            # landing gate is introduced.
+            "standing_prob": 0.25,
+            "midroll_prob": 0.75,
             # Bridge from the audited one-shot champion before enabling the
             # stricter repeated-cycle state machine.  The champion can earn
             # one physically valid roll here; standing mastery then unlocks
             # recovery/rearm and repeated-cycle credit in a later stage.
             "repeat_mode": False,
             "relaxed_first_cycle": False,
-            "midroll_pitch_min": math.radians(260.0),
-            "midroll_pitch_max": math.radians(340.0),
-            "midroll_omega_range": (0.0, 2.0),
+            "midroll_pitch_min": math.radians(100.0),
+            "midroll_pitch_max": math.radians(180.0),
+            "midroll_omega_range": (1.0, 3.0),
             "joint_noise_std": 0.0,
             "synthesize_contact_latches": True,
-            # Use the measured post-contact pivot row until the standing
-            # launch has a foothold.  Introducing the 140-degree row before
-            # that point reproduced the side-flop basin in direct audits.
+            # Include the measured pre-contact rows; unlike synthetic pitch
+            # starts these carry the correct grounded pose and signed velocity.
             "reference_state_prob": 1.0,
-            "reference_phase_range_deg": (180.0, 180.0),
-            "reference_source_seed": 10,
+            "reference_phase_range_deg": (100.0, 180.0),
+            "reference_source_seed": None,
             # Standing audits drifted far off-axis even from this narrow
             # range; keep the first launch basin aligned while the measured
             # 180-degree reference bridge remains unchanged.
