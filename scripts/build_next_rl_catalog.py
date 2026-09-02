@@ -76,12 +76,12 @@ def build_catalog(runtime_repo: Path) -> dict[str, object]:
     runtime_repo = runtime_repo.resolve()
     runtime_commit = _git(runtime_repo, "rev-parse", "HEAD")
     repository = _runtime_repository(runtime_repo)
-    readme = _git_bytes(runtime_repo, "show", "HEAD:policies/README.md")
+    readme = _git_bytes(runtime_repo, "show", f"{runtime_commit}:policies/README.md")
     approval_sha256 = hashlib.sha256(readme).hexdigest()
     records: list[dict[str, object]] = []
     for capability_id, filename in SHIPPED.items():
         relative_path = f"policies/{filename}"
-        digest = hashlib.sha256(_git_bytes(runtime_repo, "show", f"HEAD:{relative_path}")).hexdigest()
+        digest = hashlib.sha256(_git_bytes(runtime_repo, "show", f"{runtime_commit}:{relative_path}")).hexdigest()
         records.append(
             {
                 "id": capability_id,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import subprocess
 import sys
@@ -139,6 +140,14 @@ def run_catalog(runtime_repo: Path, output: Path, *extra: str) -> subprocess.Com
     )
 
 
+def load_catalog_module():
+    module_spec = importlib.util.spec_from_file_location("next_rl_catalog_test", SCRIPT)
+    assert module_spec is not None and module_spec.loader is not None
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    return module
+
+
 def test_builtin_catalog_contains_shipped_runtime_skills():
     inventory = CapabilityInventory.load_builtin()
     assert {"walking", "standing", "sitstand", "ground-pick", "kick-left", "kick-right", "roulade"} <= inventory.ids
@@ -256,6 +265,23 @@ def test_catalog_check_uses_head_policy_when_worktree_policy_changes(runtime_rep
     (runtime_repo / "policies/alpha_walking.onnx").write_bytes(b"uncommitted replacement")
     result = run_catalog(runtime_repo, output, "--check")
     assert result.returncode == 0, result.stderr
+
+
+def test_catalog_generator_reads_every_object_from_the_captured_commit(runtime_repo: Path, monkeypatch):
+    catalog = load_catalog_module()
+    captured_commit = git(runtime_repo, "rev-parse", "HEAD")
+    object_specs: list[tuple[str, ...]] = []
+    original_git_bytes = catalog._git_bytes
+
+    def record_object_spec(repo: Path, *args: str) -> bytes:
+        object_specs.append(args)
+        return original_git_bytes(repo, *args)
+
+    monkeypatch.setattr(catalog, "_git_bytes", record_object_spec)
+    catalog.build_catalog(runtime_repo)
+
+    expected_paths = {"policies/README.md", *(f"policies/{filename}" for filename in SHIPPED_FILENAMES)}
+    assert set(object_specs) == {("show", f"{captured_commit}:{path}") for path in expected_paths}
 
 
 def test_catalog_generator_requires_readme_tracked_at_recorded_commit(runtime_repo: Path, tmp_path: Path):
