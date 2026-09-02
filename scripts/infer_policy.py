@@ -8,6 +8,7 @@ import os
 import pickle
 import queue
 import select
+import struct
 import sys
 import termios
 import threading
@@ -17,6 +18,39 @@ import numpy as np
 import mujoco
 import mujoco.viewer
 import onnxruntime as ort
+
+
+# JOYSTICK COMMANDS, probably on /dev/input/js0
+# install jtest-gtk to see the mapping of axes/buttons
+# ┌────────────────────────┬────────────────────────────────┐
+# │         Input          │             Action             │
+# ├────────────────────────┼────────────────────────────────┤
+# │ Left stick up/down     │ forward / backward             │
+# ├────────────────────────┼────────────────────────────────┤
+# │ Left stick left/right  │ strafe left/right              │
+# ├────────────────────────┼────────────────────────────────┤
+# │ Right stick left/right │ turn left/right                │
+# ├────────────────────────┼────────────────────────────────┤
+# │ A button               │ toggle policy inference on/off │
+# ├────────────────────────┼────────────────────────────────┤
+# │ B button               │ coast (zero all commands)      │
+# ├────────────────────────┼────────────────────────────────┤
+# │ Y button               │ toggle head mode               │
+# ├────────────────────────┼────────────────────────────────┤
+# │ X button               │ toggle sit / slope             │
+# ├────────────────────────┼────────────────────────────────┤
+# │ L1 button              │ trigger ground pick            │
+# ├────────────────────────┼────────────────────────────────┤
+# │ R1 button              │ no action                      │
+# ├────────────────────────┼────────────────────────────────┤
+# │ L2                     │ kick left                      │
+# ├────────────────────────┼────────────────────────────────┤
+# │ R2                     │ kick right                     │
+# ├────────────────────────┼────────────────────────────────┤
+# │ Select                 │ toggle body pose mode          │
+# ├────────────────────────┼────────────────────────────────┤
+# │ Start                  │ quit                           │
+# └────────────────────────┴────────────────────────────────┘
 
 MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene.xml"
 # MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene_ramps.xml"
@@ -153,26 +187,74 @@ class TerminalInput:
 
     _ARROWS = {"A": "up", "B": "down", "C": "right", "D": "left"}
 
-    def __init__(self):
+    # Joystick support (Linux joystick API, /dev/input/js*): a second reader
+    # thread translates stick/button events into the SAME symbolic keys the
+    # stdin reader produces ("up"/"down"/"left"/"right"/letters), pushed into
+    # the same queue. main()'s `for key in term.get_keys(): handle_key(key)`
+    # loop needs no changes — it can't tell keyboard and joystick apart.
+    # js_event struct: unsigned int time; short value; unsigned char type; unsigned char number
+    _JS_EVENT_FMT = "IhBB"
+    _JS_EVENT_SIZE = struct.calcsize(_JS_EVENT_FMT)
+    _JS_EVENT_BUTTON = 0x01
+    _JS_EVENT_AXIS = 0x02
+    _JS_EVENT_INIT = 0x80  # OR'd into type on the synthetic startup replay
+    _JS_DEADZONE = 8000    # of ±32767
+    # Axis numbers as reported by `jstest /dev/input/js0` on a Switch Pro
+    # Controller: 0/1 = left stick X/Y, 2/3 = right stick X/Y, 4/5 = D-pad.
+    _JS_AXIS_LX = 0
+    _JS_AXIS_LY = 1
+    _JS_AXIS_RX = 2
+    # Button numbers (same controller): BtnA=0 BtnB=1 BtnX=2 BtnY=3 BtnZ=4
+    # BtnTL=5 BtnTR=6 BtnTL2(ZL)=7 BtnTR2(ZR)=8 BtnSelect=9 BtnStart=10.
+    _JS_BUTTON_KEYS = {
+        0: "t",   # A: toggle policy inference on/off
+        1: " ",   # B: coast / reset (panic button)
+        2: "h",   # X: toggle head mode
+        3: "y",   # Y: toggle sit / slope
+        4: "r",   # Z: roulade
+        5: "g",   # L: ground pick
+        7: "k",   # ZL: kick left
+        8: "l",   # ZR: kick right
+        9: "b",   # Select: toggle body pose mode
+        10: "q",  # Start: quit
+    }
+
+    def __init__(self, joystick_path=None):
         self._queue = queue.Queue()
         self.enabled = sys.stdin.isatty()
         self._fd = sys.stdin.fileno() if self.enabled else -1
         self._old_attrs = None
         self._stop = threading.Event()
+        self._joystick_path = joystick_path
+        self._joy_fd = -1
 
     def __enter__(self):
         if not self.enabled:
             print("WARNING: stdin is not a TTY — keyboard control disabled")
-            return self
-        self._old_attrs = termios.tcgetattr(self._fd)
-        tty.setcbreak(self._fd)
-        threading.Thread(target=self._reader, daemon=True).start()
+        else:
+            self._old_attrs = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
+            threading.Thread(target=self._reader, daemon=True).start()
+
+        if self._joystick_path:
+            try:
+                self._joy_fd = os.open(self._joystick_path, os.O_RDONLY | os.O_NONBLOCK)
+                print(f"Joystick enabled: {self._joystick_path}")
+                print("  Left stick: move (fwd/back/strafe)  |  Right stick X: turn")
+                print("  A: toggle policy  B: coast  X: head mode  Y: sit/slope")
+                print("  L: ground pick  ZL/ZR: kick left/right  Select: body pose  Start: quit")
+                threading.Thread(target=self._joy_reader, daemon=True).start()
+            except OSError as e:
+                print(f"WARNING: could not open joystick {self._joystick_path}: {e}")
+                self._joy_fd = -1
         return self
 
     def __exit__(self, *exc):
         self._stop.set()
         if self._old_attrs is not None:
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_attrs)
+        if self._joy_fd >= 0:
+            os.close(self._joy_fd)
 
     def _read1(self, timeout):
         """Read one byte from stdin, or None on timeout. os.read (unbuffered):
@@ -206,6 +288,46 @@ class TerminalInput:
                 keys.append(self._queue.get_nowait())
             except queue.Empty:
                 return keys
+
+    def _axis_to_key(self, number, value):
+        """Map one joystick axis reading to the symbolic key a held arrow
+        key would produce, or None if the axis is inside its deadzone."""
+        if abs(value) < self._JS_DEADZONE:
+            return None
+        if number == self._JS_AXIS_LY:
+            return "up" if value < 0 else "down"     # stick pushed away = negative
+        if number == self._JS_AXIS_LX:
+            return "left" if value < 0 else "right"
+        if number == self._JS_AXIS_RX:
+            return "a" if value < 0 else "e"          # reuse turn-left/right keys
+        return None
+
+    def _joy_reader(self):
+        """Background thread: read raw js_event records from the joystick
+        device and re-emit them as the same symbolic keys handle_key()
+        already understands. A held stick direction is re-pushed once per
+        poll (~10 Hz) so it behaves like a held arrow key."""
+        axis_key = {}  # axis number -> currently-held symbolic key, or None
+        while not self._stop.is_set():
+            r, _, _ = select.select([self._joy_fd], [], [], 0.1)
+            if r:
+                try:
+                    data = os.read(self._joy_fd, self._JS_EVENT_SIZE)
+                except OSError:
+                    data = b""
+                if len(data) == self._JS_EVENT_SIZE:
+                    _t, value, ev_type, number = struct.unpack(self._JS_EVENT_FMT, data)
+                    ev_type &= ~self._JS_EVENT_INIT
+                    if ev_type == self._JS_EVENT_BUTTON:
+                        if value == 1:
+                            key = self._JS_BUTTON_KEYS.get(number)
+                            if key:
+                                self._queue.put(key)
+                    elif ev_type == self._JS_EVENT_AXIS:
+                        axis_key[number] = self._axis_to_key(number, value)
+            for key in axis_key.values():
+                if key:
+                    self._queue.put(key)
 
 
 class PolicyInference:
@@ -943,6 +1065,10 @@ def main():
                         help="Override the foot sliding friction (mu) to emulate the real grippy "
                              "PU sole. Training used mu~1.0 (range 0.7-1.3); real PU is likely "
                              "~1.5-2.5. e.g. --foot-friction 2.0")
+    parser.add_argument("--joystick", type=str, nargs="?", const="/dev/input/js0", default=None,
+                        help="Enable joystick control alongside the keyboard. Pass a device path "
+                             "(default /dev/input/js0 if given bare). Left stick moves, right stick "
+                             "X turns, buttons mirror the keyboard shortcuts (see printed mapping).")
     parser.add_argument("--foot-solref", type=float, default=None,
                         help="Soften foot contact: solref time constant (s) for the foot geoms "
                              "(default sim ~0.02 = stiff/rigid). Larger = softer, to emulate the "
@@ -1357,7 +1483,7 @@ def main():
     print("  A / E:            head_roll ±step")
     print("  SPACE:            reset head offset to zero")
 
-    with TerminalInput() as term, \
+    with TerminalInput(joystick_path=args.joystick) as term, \
          mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False) as viewer:
         viewer.sync()
         start_time = time.time()
