@@ -30,8 +30,23 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--duration", type=float, default=5.0)
     parser.add_argument("--seeds", type=int, nargs="+", default=list(DEFAULT_SEEDS))
+    parser.add_argument(
+        "--phase-centers-deg",
+        type=float,
+        nargs="+",
+        default=list(PHASE_CENTERS_DEG),
+        help="Phase centers to capture; defaults to the full successful-roll bank.",
+    )
     parser.add_argument("--max-yaw-deg", type=float, default=20.0)
     parser.add_argument("--phase-tolerance-deg", type=float, default=16.0)
+    parser.add_argument(
+        "--allow-incomplete-strict",
+        action="store_true",
+        help=(
+            "Keep physically observed partial states that satisfy the live sagittal, "
+            "off-axis, and support-history gates without requiring final success."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -69,6 +84,8 @@ def _load_policy(base_env: ManagerBasedRlEnv, checkpoint: Path, device: str):
 def collect_reference_states(args: argparse.Namespace) -> dict[str, object]:
     if not args.seeds:
         raise ValueError("at least one seed is required")
+    if not args.phase_centers_deg:
+        raise ValueError("at least one phase center is required")
     configure_torch_backends()
     env_cfg = load_env_cfg(TASK_ID, play=True)
     env_cfg.scene.num_envs = len(args.seeds)
@@ -88,7 +105,8 @@ def collect_reference_states(args: argparse.Namespace) -> dict[str, object]:
     env, policy = _load_policy(base_env, args.checkpoint, args.device)
     robot = base_env.scene["robot"]
     start_heading = _heading_from_quat(robot.data.root_link_quat_w).clone()
-    centers = torch.tensor(PHASE_CENTERS_DEG)
+    phase_centers_deg = tuple(float(value) for value in args.phase_centers_deg)
+    centers = torch.tensor(phase_centers_deg)
     candidates: dict[tuple[int, int], tuple[float, dict[str, object]]] = {}
     steps = math.ceil(args.duration / base_env.step_dt)
 
@@ -130,7 +148,7 @@ def collect_reference_states(args: argparse.Namespace) -> dict[str, object]:
                     distance,
                     {
                         "seed": args.seeds[env_index],
-                        "phase_center_deg": PHASE_CENTERS_DEG[center_index],
+                        "phase_center_deg": phase_centers_deg[center_index],
                         "phase_deg": phase,
                         "step": step,
                         "qpos": local_qpos,
@@ -182,18 +200,38 @@ def collect_reference_states(args: argparse.Namespace) -> dict[str, object]:
         yaw_deg = torch.rad2deg(
             torch.acos((final_heading * start_heading).sum(dim=-1).clamp(-1.0, 1.0))
         ).detach().cpu()
-        eligible_envs = {
-            index
-            for index in range(len(args.seeds))
-            if base_env._backroll_success[index].item()
-            and not base_env._backroll_invalid[index].item()
-            and yaw_deg[index].item() <= args.max_yaw_deg
-        }
-        rows = [
-            value[1]
-            for (env_index, _), value in sorted(candidates.items())
-            if env_index in eligible_envs
-        ]
+        if args.allow_incomplete_strict:
+            max_lateral_axis_z = math.sin(math.radians(20.0))
+            max_offaxis_rotation = math.radians(90.0)
+            max_air_steps = math.ceil(
+                microduck_mdp._BACKROLL_MAX_AIR_SECONDS / base_env.step_dt
+            )
+            rows = [
+                value[1]
+                for _, value in sorted(candidates.items())
+                if float(value[1]["cycle_max_lateral_axis_z"])
+                <= max_lateral_axis_z
+                and float(value[1]["cycle_offaxis_rotation"])
+                <= max_offaxis_rotation
+                and int(value[1]["max_air_steps"]) <= max_air_steps
+                and (
+                    not bool(value[1]["head_latch"])
+                    or bool(value[1]["trunk_latch"])
+                )
+            ]
+        else:
+            eligible_envs = {
+                index
+                for index in range(len(args.seeds))
+                if base_env._backroll_success[index].item()
+                and not base_env._backroll_invalid[index].item()
+                and yaw_deg[index].item() <= args.max_yaw_deg
+            }
+            rows = [
+                value[1]
+                for (env_index, _), value in sorted(candidates.items())
+                if env_index in eligible_envs
+            ]
     finally:
         env.close()
 
@@ -206,7 +244,8 @@ def collect_reference_states(args: argparse.Namespace) -> dict[str, object]:
         "checkpoint_sha256": _sha256(args.checkpoint),
         "seeds": list(args.seeds),
         "max_yaw_deg": args.max_yaw_deg,
-        "phase_centers_deg": list(PHASE_CENTERS_DEG),
+        "phase_centers_deg": list(phase_centers_deg),
+        "allow_incomplete_strict": bool(args.allow_incomplete_strict),
         "rows": rows,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

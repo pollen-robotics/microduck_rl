@@ -33,7 +33,7 @@ from mjlab_microduck.tasks.microduck_roulade_env_cfg import (
 EPISODE_LENGTH_S = 5.0
 REPEATED_EPISODE_LENGTH_S = 12.0
 BACKROLL_REFERENCE_STATE_PATH = str(
-    Path(__file__).with_name("data") / "backroll_champion_reference_states.pt"
+    Path(__file__).with_name("data") / "backroll_strict_entry_states.pt"
 )
 
 # Backward launch posture.  This is deliberately not the forward-roulade tuck:
@@ -57,27 +57,26 @@ BACKROLL_TUCK_OVERRIDES = {
 BACKROLL_REFERENCE_PHASE_BUCKETS = (
     (90.0, 110.0),
     (130.0, 150.0),
-    (170.0, 190.0),
-    (210.0, 230.0),
-    (250.0, 270.0),
-    (280.0, 300.0),
 )
 
 BACKROLL_CURRICULUM_STAGES = [
     {
         "params": {
-            # A245 proved that the legacy suffix bank and aggregate promotion
-            # gate teach a straight no-op (0/16 strict successes by model 2000).
-            # Every mastery sample now starts from the actual deployment state.
-            "standing_prob": 1.0,
-            "midroll_prob": 0.0,
-            "midroll_pitch_min": math.radians(250.0),
-            "midroll_pitch_max": math.radians(300.0),
-            "midroll_omega_range": (0.0, 3.0),
+            # A246 model 250/300 reached a clean 168--181 degree sagittal
+            # frontier in 7/16 standing seeds, but contacted the head before
+            # the trunk and then rested there for the remaining four seconds.
+            # Keep standing as the majority while oversampling the physically
+            # realized 100/140-degree entry states immediately before that
+            # measured failure. Promotion still uses standing-only success.
+            "standing_prob": 0.75,
+            "midroll_prob": 0.25,
+            "midroll_pitch_min": math.radians(90.0),
+            "midroll_pitch_max": math.radians(150.0),
+            "midroll_omega_range": (2.0, 5.0),
             "joint_noise_std": 0.0,
-            "reference_state_prob": 0.0,
+            "reference_state_prob": 1.0,
             "reference_state_path": BACKROLL_REFERENCE_STATE_PATH,
-            "reference_phase_range_deg": (250.0, 300.0),
+            "reference_phase_range_deg": (90.0, 150.0),
             "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
             "reference_strict_sagittal": True,
             "synthesize_contact_latches": False,
@@ -88,14 +87,14 @@ BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 1.0,
-            "midroll_prob": 0.0,
-            "midroll_pitch_min": math.radians(210.0),
-            "midroll_pitch_max": math.radians(300.0),
+            "standing_prob": 0.80,
+            "midroll_prob": 0.20,
+            "midroll_pitch_min": math.radians(90.0),
+            "midroll_pitch_max": math.radians(150.0),
             "midroll_omega_range": (1.0, 4.0),
             "joint_noise_std": 0.01,
-            "reference_state_prob": 0.0,
-            "reference_phase_range_deg": (210.0, 300.0),
+            "reference_state_prob": 1.0,
+            "reference_phase_range_deg": (90.0, 150.0),
             "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
             "reference_strict_sagittal": True,
             "synthesize_contact_latches": False,
@@ -104,14 +103,14 @@ BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 1.0,
-            "midroll_prob": 0.0,
-            "midroll_pitch_min": math.radians(170.0),
-            "midroll_pitch_max": math.radians(300.0),
+            "standing_prob": 0.85,
+            "midroll_prob": 0.15,
+            "midroll_pitch_min": math.radians(90.0),
+            "midroll_pitch_max": math.radians(150.0),
             "midroll_omega_range": (2.0, 5.0),
             "joint_noise_std": 0.02,
-            "reference_state_prob": 0.0,
-            "reference_phase_range_deg": (170.0, 300.0),
+            "reference_state_prob": 1.0,
+            "reference_phase_range_deg": (90.0, 150.0),
             "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
             "reference_strict_sagittal": True,
             "synthesize_contact_latches": False,
@@ -120,14 +119,14 @@ BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 1.0,
-            "midroll_prob": 0.0,
-            "midroll_pitch_min": math.radians(130.0),
-            "midroll_pitch_max": math.radians(300.0),
+            "standing_prob": 0.90,
+            "midroll_prob": 0.10,
+            "midroll_pitch_min": math.radians(90.0),
+            "midroll_pitch_max": math.radians(150.0),
             "midroll_omega_range": (0.0, 4.0),
             "joint_noise_std": 0.03,
-            "reference_state_prob": 0.0,
-            "reference_phase_range_deg": (130.0, 300.0),
+            "reference_state_prob": 1.0,
+            "reference_phase_range_deg": (90.0, 150.0),
             "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
             "reference_strict_sagittal": True,
             "synthesize_contact_latches": False,
@@ -139,11 +138,11 @@ BACKROLL_CURRICULUM_STAGES = [
             "standing_prob": 1.0,
             "midroll_prob": 0.0,
             "midroll_pitch_min": math.radians(90.0),
-            "midroll_pitch_max": math.radians(300.0),
+            "midroll_pitch_max": math.radians(150.0),
             "midroll_omega_range": (0.0, 3.0),
             "joint_noise_std": 0.04,
             "reference_state_prob": 0.0,
-            "reference_phase_range_deg": (90.0, 300.0),
+            "reference_phase_range_deg": (90.0, 150.0),
             "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
             "reference_strict_sagittal": True,
             "synthesize_contact_latches": False,
@@ -351,7 +350,7 @@ def make_microduck_backroll_env_cfg(play: bool = False):
         func=microduck_mdp.grounded_backroll_progress,
         # Partial rotation is only a bootstrap.  A full ordered grounded
         # backroll and stable feet landing are the task objective.
-        weight=4.0,
+        weight=8.0,
         params={"target_angle": 2.0 * math.pi, "max_paid_rate": 5.0},
     )
     cfg.rewards["backroll_launch_tuck_progress"] = RewardTermCfg(
@@ -503,8 +502,23 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     )
     cfg.rewards["backroll_contact_sequence"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_contact_sequence,
-        weight=0.5,
+        weight=2.0,
         params={"trunk_value": 1.0, "head_value": 2.0},
+    )
+    cfg.rewards["backroll_non_top_head_dwell"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_non_top_head_dwell_penalty,
+        # A246 model 250/300 spent roughly four seconds resting on a rounded
+        # head contact. A short grace preserves the dynamic transit; sustained
+        # parking is strictly worse than continuing toward the flat top.
+        weight=0.5,
+        params={"grace_steps": 9},
+    )
+    cfg.rewards["backroll_head_alignment_progress"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_head_alignment_progress,
+        # Signed potential: improving rounded-shell -> flat-top alignment pays,
+        # holding and closed rocking loops do not.
+        weight=1.5,
+        params={"max_paid_rate": 1.5},
     )
 
     cfg.events.pop("set_roulade_state", None)

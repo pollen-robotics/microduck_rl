@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,7 @@ from mjlab_microduck.tasks import MicroduckFrozenActorNormRunner, mdp
 from mjlab_microduck.tasks.backroll_ppo import AnchoredPPO
 from mjlab_microduck.tasks.microduck_backroll_env_cfg import (
     BACKROLL_CURRICULUM_STAGES,
+    BACKROLL_REFERENCE_STATE_PATH,
     BACKROLL_TUCK_OVERRIDES,
     EPISODE_LENGTH_S,
     REPEATED_BACKROLL_CURRICULUM_STAGES,
@@ -116,17 +118,30 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
         "gentle_landing",
         "self_collisions",
         "backroll_contact_sequence",
+        "backroll_non_top_head_dwell",
+        "backroll_head_alignment_progress",
     }
     assert (
         cfg.rewards["backroll_contact_sequence"].func
         is mdp.grounded_backroll_contact_sequence
     )
-    assert cfg.rewards["backroll_contact_sequence"].weight == pytest.approx(0.5)
+    assert cfg.rewards["backroll_contact_sequence"].weight == pytest.approx(2.0)
     assert cfg.rewards["backroll_contact_sequence"].params == {
         "trunk_value": 1.0,
         "head_value": 2.0,
     }
-    assert cfg.rewards["backroll_progress"].weight == pytest.approx(4.0)
+    assert cfg.rewards["backroll_progress"].weight == pytest.approx(8.0)
+    assert (
+        cfg.rewards["backroll_non_top_head_dwell"].func
+        is mdp.grounded_backroll_non_top_head_dwell_penalty
+    )
+    assert cfg.rewards["backroll_non_top_head_dwell"].weight == pytest.approx(0.5)
+    assert cfg.rewards["backroll_non_top_head_dwell"].params == {"grace_steps": 9}
+    assert (
+        cfg.rewards["backroll_head_alignment_progress"].func
+        is mdp.grounded_backroll_head_alignment_progress
+    )
+    assert cfg.rewards["backroll_head_alignment_progress"].weight == pytest.approx(1.5)
     assert (
         cfg.rewards["backroll_launch_tuck_progress"].func
         is mdp.grounded_backroll_launch_tuck_progress
@@ -636,35 +651,31 @@ def test_landing_potential_starts_after_flat_head_pivot_not_before():
 def test_backroll_curriculum_matches_mastery_stages():
     assert [
         stage["params"]["standing_prob"] for stage in BACKROLL_CURRICULUM_STAGES
-    ] == [1.0] * 5
+    ] == [0.75, 0.80, 0.85, 0.90, 1.0]
     assert [
         stage["params"]["midroll_prob"] for stage in BACKROLL_CURRICULUM_STAGES
-    ] == [0.0] * 5
+    ] == [0.25, 0.20, 0.15, 0.10, 0.0]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"][
         "midroll_pitch_min"
-    ] == pytest.approx(math.radians(250.0))
+    ] == pytest.approx(math.radians(90.0))
     assert BACKROLL_CURRICULUM_STAGES[0]["params"][
         "midroll_pitch_max"
-    ] == pytest.approx(math.radians(300.0))
-    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_omega_range"] == (0.0, 3.0)
+    ] == pytest.approx(math.radians(150.0))
+    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_omega_range"] == (2.0, 5.0)
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["joint_noise_std"] == pytest.approx(
         0.0
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"][
         "reference_state_prob"
-    ] == pytest.approx(0.0)
+    ] == pytest.approx(1.0)
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_state_path"]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_phase_range_deg"] == (
-        250.0,
-        300.0,
+        90.0,
+        150.0,
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_phase_buckets_deg"] == (
         (90.0, 110.0),
         (130.0, 150.0),
-        (170.0, 190.0),
-        (210.0, 230.0),
-        (250.0, 270.0),
-        (280.0, 300.0),
     )
     assert all(
         stage["params"]["reference_phase_buckets_deg"]
@@ -679,7 +690,7 @@ def test_backroll_curriculum_matches_mastery_stages():
     ] == [29.0, 27.0, 25.0, 22.0, 20.0]
     assert [
         stage["params"]["reference_state_prob"] for stage in BACKROLL_CURRICULUM_STAGES
-    ] == [0.0] * 5
+    ] == [1.0, 1.0, 1.0, 1.0, 0.0]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_source_seed"] is None
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["yaw_range"] == (0.0, 0.0)
     cfg = make_microduck_backroll_env_cfg()
@@ -688,6 +699,31 @@ def test_backroll_curriculum_matches_mastery_stages():
     assert params["success_threshold"] == pytest.approx(0.70)
     assert params["standing_only_mastery"] is True
     assert params["required_consecutive_windows"] == 2
+
+
+def test_backroll_entry_bank_is_strict_physical_a246_history():
+    path = Path(BACKROLL_REFERENCE_STATE_PATH)
+    assert path.is_file()
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    assert payload["schema_version"] == 2
+    assert payload["allow_incomplete_strict"] is True
+    assert payload["checkpoint_sha256"] == (
+        "efe9327dfb655d01183722bfe641de1ab433c07ea585f09c8c92dd1ccac827d9"
+    )
+    rows = payload["rows"]
+    assert len(rows) == 32
+    assert {float(row["phase_center_deg"]) for row in rows} == {100.0, 140.0}
+    assert all(not bool(row["trunk_latch"]) for row in rows)
+    assert all(not bool(row["head_latch"]) for row in rows)
+    assert all(
+        float(row["cycle_max_lateral_axis_z"])
+        <= math.sin(math.radians(20.0))
+        for row in rows
+    )
+    assert all(
+        float(row["cycle_offaxis_rotation"]) <= math.radians(90.0)
+        for row in rows
+    )
 
 
 def test_backroll_discovery_envelope_admits_bridge_but_rejects_side_roll():
@@ -1286,7 +1322,7 @@ def test_completion_push_requires_head_latch_and_only_pays_new_frontier(monkeypa
 
 def test_head_alignment_progress_is_active_only_and_signed(monkeypatch):
     env, asset = _fake_env()
-    env._backroll_repeat_mode[:] = True
+    env._backroll_repeat_mode[:] = False
     # Head-top alignment is a transition guide for the measured head-only
     # pivot window; it must not be gated out when the trunk sensor never
     # latches, while the physical completion gate remains unchanged.
@@ -1455,9 +1491,12 @@ def test_repeated_progress_bridges_contact_windows_then_requires_latches(monkeyp
     assert mdp.grounded_backroll_speed_progress(env).item() > 0.0
 
 
-def test_repeated_non_top_head_dwell_allows_tuck_grace_then_penalizes(monkeypatch):
+@pytest.mark.parametrize("repeat_mode", [False, True])
+def test_non_top_head_dwell_allows_tuck_grace_then_penalizes(
+    monkeypatch, repeat_mode
+):
     env, _asset = _fake_env()
-    env._backroll_repeat_mode[:] = True
+    env._backroll_repeat_mode[:] = repeat_mode
     env._roulade_accum[:] = math.radians(177.0)
     env._roulade_max[:] = math.radians(177.0)
     env.scene.sensors["left_foot_ground_contact"].data.found[:] = 0.0

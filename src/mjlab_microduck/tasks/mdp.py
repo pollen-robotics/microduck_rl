@@ -11939,8 +11939,7 @@ def _update_grounded_backroll_state(
         & (frontier <= _BACKROLL_NON_TOP_HEAD_HI)
     )
     non_top_head_contact = (
-        env._backroll_repeat_mode
-        & ~recovery_before
+        ~recovery_before
         & head
         & non_top_head_phase
         & ~head_top_down
@@ -12356,8 +12355,7 @@ def _update_grounded_backroll_state(
     # signed change while the robot is actively pivoting.  This supplies a
     # transition gradient while making a head-rocking loop net zero.
     head_alignment_active = (
-        env._backroll_repeat_mode
-        & ~recovery_before
+        ~recovery_before
         & ~env._backroll_invalid
         & head
         & (frontier >= _BACKROLL_NON_TOP_HEAD_LO)
@@ -13134,8 +13132,8 @@ def grounded_backroll_head_alignment_progress(
 ) -> torch.Tensor:
     """Bounded signed potential change from rounded head contact to flat top.
 
-    This term is deliberately gated to active repeated-roll head contact and
-    pays only while the robot actively pivots in the measured contact window.
+    This term is deliberately gated to active backroll head contact and pays
+    only while the robot actively pivots in the measured contact window.
     Holding a headstand pays zero, and a closed rocking loop telescopes to zero.
     """
     if max_paid_rate < 0.0:
