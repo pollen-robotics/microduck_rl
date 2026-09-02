@@ -97,6 +97,7 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
         "backroll_launch_tuck_progress",
         "backroll_head_pivot",
         "backroll_completion_progress",
+        "backroll_speed_progress",
         "backroll_upright_progress",
         "backroll_height_progress",
         "backroll_success",
@@ -129,11 +130,17 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert cfg.rewards["backroll_completion_progress"].params["start_angle"] == pytest.approx(
         math.radians(110.0)
     )
-    assert cfg.rewards["backroll_upright_progress"].weight == pytest.approx(0.0)
-    assert cfg.rewards["backroll_height_progress"].weight == pytest.approx(0.0)
+    assert cfg.rewards["backroll_speed_progress"].weight == pytest.approx(3.0)
+    assert cfg.rewards["backroll_speed_progress"].params == {
+        "minimum_rate": 2.0,
+        "target_rate": 4.5,
+        "target_angle": 2.0 * math.pi,
+    }
+    assert cfg.rewards["backroll_upright_progress"].weight == pytest.approx(2.0)
+    assert cfg.rewards["backroll_height_progress"].weight == pytest.approx(2.0)
     assert cfg.rewards["backroll_success"].weight == pytest.approx(20.0)
     assert cfg.rewards["backroll_invalid"].weight == pytest.approx(-1.0)
-    assert cfg.rewards["backroll_sagittal"].weight == pytest.approx(0.0)
+    assert cfg.rewards["backroll_sagittal"].weight == pytest.approx(-0.10)
     assert cfg.rewards["backroll_flatness"].weight == pytest.approx(-1.0)
     assert cfg.rewards["backroll_sagittal"].func is mdp.grounded_backroll_sagittal_penalty
     assert cfg.rewards["backroll_flatness"].func is mdp.grounded_backroll_flatness_penalty
@@ -146,19 +153,18 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     ] == [-1.0, -2.0, -3.0, -4.0, -4.0]
     assert cfg.curriculum["backroll_sagittal_weight"].func is mdp.reward_weight
     assert cfg.curriculum["backroll_sagittal_weight"].params["weight_stages"] == [
-        {"step": 0, "weight": 0.0},
-        {"step": 100 * 24, "weight": -0.25},
-        {"step": 200 * 24, "weight": -2.0},
-        {"step": 250 * 24, "weight": -3.0},
-        {"step": 600 * 24, "weight": -3.0},
+        {"step": 0, "weight": -0.10},
+        {"step": 600 * 24, "weight": -0.25},
     ]
     assert cfg.curriculum["backroll_upright_weight"].params["weight_stages"] == [
-        {"step": 0, "weight": 0.0},
-        {"step": 200 * 24, "weight": 5.0},
+        {"step": 0, "weight": 2.0},
+        {"step": 100 * 24, "weight": 3.0},
+        {"step": 300 * 24, "weight": 5.0},
     ]
     assert cfg.curriculum["backroll_height_weight"].params["weight_stages"] == [
-        {"step": 0, "weight": 0.0},
-        {"step": 200 * 24, "weight": 4.0},
+        {"step": 0, "weight": 2.0},
+        {"step": 100 * 24, "weight": 3.0},
+        {"step": 300 * 24, "weight": 4.0},
     ]
     forbidden = ("sprint", "distance", "lane", "road", "recovery", "reposition")
     assert not any(token in name for name in cfg.rewards for token in forbidden)
@@ -482,20 +488,20 @@ def test_backroll_curriculum_matches_mastery_stages():
         0.15,
     ]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_pitch_min"] == pytest.approx(
-        math.radians(90.0)
+        math.radians(260.0)
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_pitch_max"] == pytest.approx(
-        math.radians(270.0)
+        math.radians(340.0)
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_omega_range"] == (
-        1.0,
-        3.0,
+        1.5,
+        4.0,
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["joint_noise_std"] == pytest.approx(
         0.0
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_state_prob"] == pytest.approx(
-        1.0
+        0.50
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_state_path"]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_phase_range_deg"] == (
@@ -508,12 +514,12 @@ def test_backroll_curriculum_matches_mastery_stages():
         (250.0, 270.0),
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_strict_sagittal"]
-    assert not BACKROLL_CURRICULUM_STAGES[0]["params"]["synthesize_contact_latches"]
+    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["synthesize_contact_latches"]
     assert [stage["params"]["reference_state_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        1.0,
-        1.0,
-        0.70,
-        0.35,
+        0.50,
+        0.50,
+        0.50,
+        0.25,
         0.10,
     ]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_source_seed"] is None
@@ -522,6 +528,7 @@ def test_backroll_curriculum_matches_mastery_stages():
     params = cfg.curriculum["backroll_phase"].params
     assert params["window_episodes"] == 4096
     assert params["success_threshold"] == pytest.approx(0.70)
+    assert params["standing_only_mastery"] is True
 
 
 def test_reverse_phase_reset_uses_negative_pitch_rate_and_contact_prerequisites(

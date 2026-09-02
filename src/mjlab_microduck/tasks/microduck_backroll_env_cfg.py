@@ -56,20 +56,21 @@ BACKROLL_TUCK_OVERRIDES = {
 BACKROLL_CURRICULUM_STAGES = [
     {
         "params": {
-            # The previous curriculum spent every phase reset at 260 degrees.
-            # That made a head-pivot/side-exit basin easy to optimize while
-            # leaving the launch and pre-head transitions underrepresented.
-            # Sample the strictly sagittal, measured 100, 140, and 260 degree
-            # states uniformly: launch -> pre-head -> head-exit.  Each stored
-            # latch is the latch measured when that exact state was captured;
-            # synthetic states start with no historical contact credit.
+            # A229 proved that the measured 100/140/260-degree states teach a
+            # straight ordered head pivot, but offer no example of the final
+            # head-to-feet suffix: standing evaluation rose to 147 degrees and
+            # then stalled.  Keep half of the mid-roll starts in those measured
+            # bridge states and put the other half in a strictly sagittal,
+            # momentum-carrying 260--340 degree suffix.  Only the procedural
+            # suffix synthesizes already-passed contact latches; standing starts
+            # must still earn trunk and flat-head contact physically.
             "standing_prob": 0.20,
             "midroll_prob": 0.80,
-            "midroll_pitch_min": math.radians(90.0),
-            "midroll_pitch_max": math.radians(270.0),
-            "midroll_omega_range": (1.0, 3.0),
+            "midroll_pitch_min": math.radians(260.0),
+            "midroll_pitch_max": math.radians(340.0),
+            "midroll_omega_range": (1.5, 4.0),
             "joint_noise_std": 0.0,
-            "reference_state_prob": 1.0,
+            "reference_state_prob": 0.50,
             "reference_state_path": BACKROLL_REFERENCE_STATE_PATH,
             "reference_phase_range_deg": (90.0, 270.0),
             "reference_phase_buckets_deg": (
@@ -78,7 +79,7 @@ BACKROLL_CURRICULUM_STAGES = [
                 (250.0, 270.0),
             ),
             "reference_strict_sagittal": True,
-            "synthesize_contact_latches": False,
+            "synthesize_contact_latches": True,
             "reference_source_seed": None,
             "yaw_range": (0.0, 0.0),
         }
@@ -87,10 +88,10 @@ BACKROLL_CURRICULUM_STAGES = [
         "params": {
             "standing_prob": 0.30,
             "midroll_prob": 0.70,
-            "midroll_pitch_min": math.radians(90.0),
-            "midroll_pitch_max": math.radians(270.0),
+            "midroll_pitch_min": math.radians(180.0),
+            "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (1.0, 4.0),
-            "reference_state_prob": 1.0,
+            "reference_state_prob": 0.50,
             "reference_phase_range_deg": (90.0, 270.0),
             "reference_phase_buckets_deg": (
                 (90.0, 110.0),
@@ -98,7 +99,7 @@ BACKROLL_CURRICULUM_STAGES = [
                 (250.0, 270.0),
             ),
             "reference_strict_sagittal": True,
-            "synthesize_contact_latches": False,
+            "synthesize_contact_latches": True,
         }
     },
     {
@@ -108,7 +109,7 @@ BACKROLL_CURRICULUM_STAGES = [
             "midroll_pitch_min": math.radians(90.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (2.0, 5.0),
-            "reference_state_prob": 0.70,
+            "reference_state_prob": 0.50,
             "reference_phase_range_deg": (90.0, 270.0),
             "reference_phase_buckets_deg": (
                 (90.0, 110.0),
@@ -116,7 +117,7 @@ BACKROLL_CURRICULUM_STAGES = [
                 (250.0, 270.0),
             ),
             "reference_strict_sagittal": True,
-            "synthesize_contact_latches": False,
+            "synthesize_contact_latches": True,
         }
     },
     {
@@ -126,7 +127,7 @@ BACKROLL_CURRICULUM_STAGES = [
             "midroll_pitch_min": math.radians(20.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (0.0, 4.0),
-            "reference_state_prob": 0.35,
+            "reference_state_prob": 0.25,
             "reference_phase_range_deg": (90.0, 270.0),
             "reference_phase_buckets_deg": (
                 (90.0, 110.0),
@@ -134,7 +135,7 @@ BACKROLL_CURRICULUM_STAGES = [
                 (250.0, 270.0),
             ),
             "reference_strict_sagittal": True,
-            "synthesize_contact_latches": False,
+            "synthesize_contact_latches": True,
         }
     },
     {
@@ -152,7 +153,7 @@ BACKROLL_CURRICULUM_STAGES = [
                 (250.0, 270.0),
             ),
             "reference_strict_sagittal": True,
-            "synthesize_contact_latches": False,
+            "synthesize_contact_latches": True,
         }
     },
 ]
@@ -393,16 +394,29 @@ def make_microduck_backroll_env_cfg(play: bool = False):
             "max_paid_rate": 6.0,
         },
     )
+    cfg.rewards["backroll_speed_progress"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_speed_progress,
+        # A229 checkpoint 150 acquired the complete ordered contact sequence
+        # but settled on the head at 147 degrees.  Pay only *new* supported
+        # frontier while its sagittal backward rate is useful; rocking,
+        # revisiting an angle, spinning in the air, or leaving the strict gate
+        # remains worth zero.
+        weight=3.0,
+        params={
+            "minimum_rate": 2.0,
+            "target_rate": 4.5,
+            "target_angle": 2.0 * math.pi,
+        },
+    )
     cfg.rewards["backroll_upright_progress"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_upright_progress,
-        # A225 showed that this valid late-phase potential must not influence
-        # the initial standing-launch discovery.  The curriculum enables it
-        # after the launch bridge has had 200 PPO iterations to form.
-        weight=0.0,
+        # The mixed late suffix now supplies states where this signed potential
+        # is learnable without paying a standing annuity.
+        weight=2.0,
     )
     cfg.rewards["backroll_height_progress"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_height_progress,
-        weight=0.0,
+        weight=2.0,
     )
     cfg.rewards["backroll_success"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_success_rate,
@@ -422,10 +436,12 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     )
     cfg.rewards["backroll_sagittal"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_sagittal_penalty,
-        # Start neutral so the standing tuck can be discovered. A step-based
-        # curriculum turns on the continuous, trunk-gated off-axis budget only
-        # after the policy has had an initial exploration window.
-        weight=0.0,
+        # Positive skill rewards already hard-gate at 20 degrees and a
+        # 30-degree escape terminates the attempt.  A229 showed that abruptly
+        # raising this rate tax to -2/-3 before any landing was learned caused
+        # shorter episodes and 16/16 side exits.  Keep only a small continuous
+        # hint during discovery; tighten after a genuine suffix exists.
+        weight=-0.10,
     )
     cfg.rewards["backroll_lateral_velocity"] = RewardTermCfg(
         func=microduck_mdp.roulade_lateral_velocity_penalty,
@@ -492,6 +508,7 @@ def make_microduck_backroll_env_cfg(play: bool = False):
                 "stages": BACKROLL_CURRICULUM_STAGES,
                 "window_episodes": 4096,
                 "success_threshold": 0.70,
+                "standing_only_mastery": True,
                 "invalid_reward_name": "backroll_invalid",
                 "invalid_reward_weights": [-1.0, -2.0, -3.0, -4.0, -4.0],
                 "action_rate_reward_name": "action_rate_l2",
@@ -509,17 +526,8 @@ def make_microduck_backroll_env_cfg(play: bool = False):
             params={
                 "reward_name": "backroll_sagittal",
                 "weight_stages": [
-                    {"step": 0, "weight": 0.0},
-                    {"step": 100 * 24, "weight": -0.25},
-                    # A227's checkpoint-250 standing battery preserved the
-                    # trunk/head sequence in every trial but all 16 attempts
-                    # left the sagittal plane after the head pivot.  Price
-                    # only that cross-axis angular rate strongly when the
-                    # landing potentials turn on; a pure backward body-y
-                    # rotation is exactly zero in this term.
-                    {"step": 200 * 24, "weight": -2.0},
-                    {"step": 250 * 24, "weight": -3.0},
-                    {"step": 600 * 24, "weight": -3.0},
+                    {"step": 0, "weight": -0.10},
+                    {"step": 600 * 24, "weight": -0.25},
                 ],
             },
         )
@@ -534,8 +542,9 @@ def make_microduck_backroll_env_cfg(play: bool = False):
             params={
                 "reward_name": "backroll_upright_progress",
                 "weight_stages": [
-                    {"step": 0, "weight": 0.0},
-                    {"step": 200 * 24, "weight": 5.0},
+                    {"step": 0, "weight": 2.0},
+                    {"step": 100 * 24, "weight": 3.0},
+                    {"step": 300 * 24, "weight": 5.0},
                 ],
             },
         )
@@ -544,8 +553,9 @@ def make_microduck_backroll_env_cfg(play: bool = False):
             params={
                 "reward_name": "backroll_height_progress",
                 "weight_stages": [
-                    {"step": 0, "weight": 0.0},
-                    {"step": 200 * 24, "weight": 4.0},
+                    {"step": 0, "weight": 2.0},
+                    {"step": 100 * 24, "weight": 3.0},
+                    {"step": 300 * 24, "weight": 4.0},
                 ],
             },
         )
