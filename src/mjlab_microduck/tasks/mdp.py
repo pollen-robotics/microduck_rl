@@ -3882,8 +3882,10 @@ def joint_vel_l2_when_standing(
     total_speed = torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])
     is_standing_cmd = (total_speed < command_threshold).float()
 
+    # Leg joints (left hip-ankle: 0-4, right hip-ankle: 9-13).
+    # Servo view: passive_* joints (backlash, wheels) don't shift the indices.
     leg_indices = list(range(0, 5)) + list(range(9, 14))
-    joint_vel = asset.data.joint_vel[:, leg_indices]
+    joint_vel = _servo_joint_vel(env, asset)[:, leg_indices]
     vel_sq = torch.sum(joint_vel ** 2, dim=-1)
 
     return is_standing_cmd * vel_sq
@@ -4190,9 +4192,10 @@ def set_random_ground_state(
                                     HOME (whatever ``reset_robot_joints`` set).
 
     Args:
-        sitting_joint_overrides: ``{qpos_joint_index: angle_rad}`` to write into
-            ``qpos[7+idx]`` for envs sampled into the sitting bucket. ``None``
-            keeps joints at whatever ``reset_robot_joints`` already set.
+        sitting_joint_overrides: ``{servo_joint_index: angle_rad}`` to write into
+            ``qpos[7 + servo_ids[idx]]`` for envs sampled into the sitting
+            bucket — servo indices, so passive_* joints don't shift them.
+            ``None`` keeps joints at whatever ``reset_robot_joints`` already set.
     """
     if env_ids is None or len(env_ids) == 0:
         return
