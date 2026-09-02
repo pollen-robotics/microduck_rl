@@ -174,9 +174,32 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert MicroduckBackrollRlCfg.experiment_name == "microduck_backroll"
     assert MicroduckBackrollRlCfg.max_iterations == 4000
     assert MicroduckBackrollRlCfg.save_interval == 50
-    assert MicroduckBackrollRlCfg.algorithm.learning_rate == pytest.approx(1.0e-3)
+    assert MicroduckBackrollRlCfg.algorithm.learning_rate == pytest.approx(2.5e-5)
+    assert MicroduckBackrollRlCfg.algorithm.schedule == "fixed"
+    assert MicroduckBackrollRlCfg.algorithm.entropy_coef == pytest.approx(5.0e-4)
     assert MicroduckBackrollRlCfg.actor.distribution_cfg["init_std"] == 1.0
     assert load_runner_cls("Mjlab-Backroll-Flat-MicroDuck") is MicroduckFrozenActorNormRunner
+
+
+def test_backroll_runner_restores_configured_lr_after_optimizer_resume(monkeypatch):
+    configured_lr = 2.5e-5
+    runner = object.__new__(MicroduckFrozenActorNormRunner)
+    runner._configured_learning_rate = configured_lr
+    runner.alg = SimpleNamespace(
+        learning_rate=7.59375e-4,
+        optimizer=SimpleNamespace(param_groups=[{"lr": 7.59375e-4}]),
+    )
+
+    monkeypatch.setattr(
+        "mjlab_microduck.tasks.MicroduckOnPolicyRunner.load",
+        lambda self, path, load_cfg, strict, map_location: {"loaded": path},
+    )
+
+    infos = runner.load("parent.pt")
+
+    assert infos == {"loaded": "parent.pt"}
+    assert runner.alg.learning_rate == pytest.approx(configured_lr)
+    assert runner.alg.optimizer.param_groups[0]["lr"] == pytest.approx(configured_lr)
 
 
 def test_backroll_play_is_deterministic_standing_start():

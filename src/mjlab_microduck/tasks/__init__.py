@@ -29,10 +29,32 @@ class MicroduckFrozenActorNormRunner(MicroduckOnPolicyRunner):
     """
 
     def __init__(self, env, train_cfg: dict, log_dir=None, device="cpu", **kwargs):
+        self._configured_learning_rate = float(train_cfg["algorithm"]["learning_rate"])
         super().__init__(env, train_cfg, log_dir, device, **kwargs)
         normalizer = getattr(self.alg.actor, "obs_normalizer", None)
         if hasattr(normalizer, "until"):
             normalizer.until = 0
+
+    def load(
+        self,
+        path: str,
+        load_cfg: dict | None = None,
+        strict: bool = True,
+        map_location: str | None = None,
+    ) -> dict:
+        """Load the parent while keeping the requested fine-tuning step size.
+
+        PyTorch optimizer state includes its parameter-group learning rate. A
+        normal resume therefore overwrites a CLI/configured fine-tuning rate
+        with the parent's final rate. Restore the explicit child-run rate after
+        loading so a fixed schedule is actually fixed.
+        """
+
+        infos = super().load(path, load_cfg, strict, map_location)
+        self.alg.learning_rate = self._configured_learning_rate
+        for param_group in self.alg.optimizer.param_groups:
+            param_group["lr"] = self._configured_learning_rate
+        return infos
 
 
 class MicroduckStairSpecialistRunner(MicroduckOnPolicyRunner):
