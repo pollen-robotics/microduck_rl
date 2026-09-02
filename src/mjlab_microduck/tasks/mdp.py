@@ -3537,6 +3537,192 @@ def terrain_levels_slope(env: ManagerBasedRlEnv, env_ids: torch.Tensor) -> torch
     return torch.mean(terrain.terrain_levels.float())
 
 
+# ---------------------------------------------------------------------------
+# Step-up skill — one square-edged rise, triggered before the edge.
+# ---------------------------------------------------------------------------
+
+_STEP_UP_FEET_CFG = SceneEntityCfg(
+    "robot", site_names=("left_foot", "right_foot")
+)
+
+
+def _step_up_success_mask(
+    env: ManagerBasedRlEnv,
+    min_forward_distance: float,
+    min_trunk_height: float,
+    min_upright_cos: float,
+    max_lateral_offset: float | None = None,
+    min_foot_forward: float | None = None,
+    min_foot_height: float | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    feet_cfg: SceneEntityCfg = _STEP_UP_FEET_CFG,
+) -> "torch.Tensor":
+    asset = env.scene[asset_cfg.name]
+    origin = env.scene.terrain.env_origins
+    forward = asset.data.root_link_pos_w[:, 0] - origin[:, 0]
+    lateral = asset.data.root_link_pos_w[:, 1] - origin[:, 1]
+    height = asset.data.root_link_pos_w[:, 2] - origin[:, 2]
+    quat = asset.data.root_link_quat_w
+    upright = 1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2)
+    success = (
+        (forward >= min_forward_distance)
+        & (height >= min_trunk_height)
+        & (upright >= min_upright_cos)
+    )
+    if max_lateral_offset is not None:
+        success &= lateral.abs() <= max_lateral_offset
+    if min_foot_forward is not None or min_foot_height is not None:
+        if min_foot_forward is None or min_foot_height is None:
+            raise ValueError(
+                "min_foot_forward and min_foot_height must be provided together"
+            )
+        feet = asset.data.site_pos_w[:, feet_cfg.site_ids]
+        feet_on_upper = (
+            (feet[..., 0] - origin[:, None, 0] >= min_foot_forward)
+            & (feet[..., 2] - origin[:, None, 2] >= min_foot_height)
+        )
+        if max_lateral_offset is not None:
+            feet_on_upper &= (
+                feet[..., 1] - origin[:, None, 1]
+            ).abs() <= max_lateral_offset
+        success &= feet_on_upper.all(dim=1)
+    return success
+
+
+def step_up_success(
+    env: ManagerBasedRlEnv,
+    min_forward_distance: float,
+    min_trunk_height: float,
+    min_upright_cos: float,
+    max_lateral_offset: float | None = None,
+    min_foot_forward: float | None = None,
+    min_foot_height: float | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    feet_cfg: SceneEntityCfg = _STEP_UP_FEET_CFG,
+) -> "torch.Tensor":
+    """One-frame success reward; paired with ``step_complete`` termination."""
+    return _step_up_success_mask(
+        env,
+        min_forward_distance,
+        min_trunk_height,
+        min_upright_cos,
+        max_lateral_offset,
+        min_foot_forward,
+        min_foot_height,
+        asset_cfg,
+        feet_cfg,
+    ).float()
+
+
+def step_up_complete(
+    env: ManagerBasedRlEnv,
+    min_forward_distance: float,
+    min_trunk_height: float,
+    min_upright_cos: float,
+    max_lateral_offset: float | None = None,
+    min_foot_forward: float | None = None,
+    min_foot_height: float | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    feet_cfg: SceneEntityCfg = _STEP_UP_FEET_CFG,
+) -> "torch.Tensor":
+    """Terminate only after the trunk is clearly upright on the upper floor."""
+    return _step_up_success_mask(
+        env,
+        min_forward_distance,
+        min_trunk_height,
+        min_upright_cos,
+        max_lateral_offset,
+        min_foot_forward,
+        min_foot_height,
+        asset_cfg,
+        feet_cfg,
+    )
+
+
+def step_up_out_of_bounds(
+    env: ManagerBasedRlEnv,
+    max_lateral_offset: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> "torch.Tensor":
+    """Terminate an attempted side bypass before it can earn crossing credit."""
+    asset = env.scene[asset_cfg.name]
+    origin = env.scene.terrain.env_origins
+    lateral = asset.data.root_link_pos_w[:, 1] - origin[:, 1]
+    return lateral.abs() > max_lateral_offset
+
+
+def step_up_forward_velocity(
+    env: ManagerBasedRlEnv,
+    cap: float = 0.6,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> "torch.Tensor":
+    """Reward world-forward motion toward the fixed step, capped for safety."""
+    asset = env.scene[asset_cfg.name]
+    vx = torch.nan_to_num(
+        asset.data.root_link_lin_vel_w[:, 0], nan=0.0, posinf=0.0, neginf=0.0
+    )
+    return torch.clamp(vx, min=0.0, max=cap)
+
+
+def step_up_foot_milestone(
+    env: ManagerBasedRlEnv,
+    min_foot_forward: float,
+    min_foot_height: float,
+    required_feet: int,
+    state_key: str,
+    max_lateral_offset: float | None = None,
+    feet_cfg: SceneEntityCfg = _STEP_UP_FEET_CFG,
+) -> "torch.Tensor":
+    """Pay once when one or both feet clear and land past the edge."""
+    if required_feet < 1:
+        raise ValueError("required_feet must be at least one")
+
+    asset = env.scene[feet_cfg.name]
+    origin = env.scene.terrain.env_origins
+    feet = asset.data.site_pos_w[:, feet_cfg.site_ids]
+    cleared = (
+        (feet[..., 0] - origin[:, None, 0] >= min_foot_forward)
+        & (feet[..., 2] - origin[:, None, 2] >= min_foot_height)
+    )
+    if max_lateral_offset is not None:
+        cleared &= (
+            feet[..., 1] - origin[:, None, 1]
+        ).abs() <= max_lateral_offset
+    reached = cleared.sum(dim=1) >= required_feet
+
+    seen = getattr(env, state_key, None)
+    if seen is None or seen.shape != reached.shape or seen.device != reached.device:
+        seen = torch.zeros_like(reached)
+        setattr(env, state_key, seen)
+    seen[env.episode_length_buf <= 1] = False
+    reward = reached & ~seen
+    seen |= reached
+    return reward.float()
+
+
+def terrain_levels_step_up(
+    env: ManagerBasedRlEnv,
+    env_ids: "torch.Tensor",
+    min_forward_distance: float,
+    min_trunk_height: float,
+    min_upright_cos: float,
+    max_lateral_offset: float | None = None,
+) -> "torch.Tensor":
+    """Promote step height only after an upright upper-floor arrival."""
+    terrain = env.scene.terrain
+    success = _step_up_success_mask(
+        env,
+        min_forward_distance,
+        min_trunk_height,
+        min_upright_cos,
+        max_lateral_offset,
+    )[env_ids]
+    move_up = success
+    move_down = torch.zeros_like(success)
+    terrain.update_env_origins(env_ids, move_up, move_down)
+    return torch.mean(terrain.terrain_levels.float())
+
+
 def velocity_command_ranges_curriculum(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,

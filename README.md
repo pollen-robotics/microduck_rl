@@ -72,6 +72,8 @@ instead of locally (see [scripts/hf/README.md](scripts/hf/README.md)).
 | `Mjlab-GroundPick-{Flat,Rough}-MicroDuck` | flat/rough | Crouch and touch the ground with the mouth tip, return to stand |
 | `Mjlab-BallKick-Flat-MicroDuck` | flat | Kick a 70 mm / 15 g ball forward (actor is ball-blind) |
 | `Mjlab-Roulade-Flat-MicroDuck` | flat | Forward roll over the head, land back on the feet |
+| `Mjlab-StepUp-MicroDuck` | 0–25 mm step curriculum | Ascend one square-edged step after external alignment |
+| `Mjlab-StepUpFull-MicroDuck` | fixed 25 mm step | Final fine-tuning for a 25 mm household threshold |
 | `Mjlab-Velocity-Flat-MicroDuck-Rollers` | flat | Roller-skate velocity tracking (passive wheels under the feet) |
 | `Mjlab-Velocity-Swizzle-MicroDuck` | flat | Classic symmetric swizzle skating |
 | `Mjlab-RollerCrouch-Flat-MicroDuck` | flat | Crouch while gliding on rollers |
