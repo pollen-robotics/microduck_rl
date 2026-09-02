@@ -474,21 +474,21 @@ def test_landing_potential_starts_after_flat_head_pivot_not_before():
 
 def test_backroll_curriculum_matches_mastery_stages():
     assert [stage["params"]["standing_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.20,
+        0.30,
         0.30,
         0.40,
         0.60,
         0.85,
     ]
     assert [stage["params"]["midroll_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.80,
+        0.70,
         0.70,
         0.60,
         0.40,
         0.15,
     ]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_pitch_min"] == pytest.approx(
-        math.radians(260.0)
+        math.radians(150.0)
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_pitch_max"] == pytest.approx(
         math.radians(340.0)
@@ -501,7 +501,7 @@ def test_backroll_curriculum_matches_mastery_stages():
         0.0
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_state_prob"] == pytest.approx(
-        0.50
+        0.40
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_state_path"]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_phase_range_deg"] == (
@@ -516,7 +516,7 @@ def test_backroll_curriculum_matches_mastery_stages():
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_strict_sagittal"]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["synthesize_contact_latches"]
     assert [stage["params"]["reference_state_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.50,
+        0.40,
         0.50,
         0.50,
         0.25,

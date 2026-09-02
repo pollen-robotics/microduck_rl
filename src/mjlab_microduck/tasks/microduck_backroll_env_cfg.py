@@ -56,21 +56,20 @@ BACKROLL_TUCK_OVERRIDES = {
 BACKROLL_CURRICULUM_STAGES = [
     {
         "params": {
-            # A229 proved that the measured 100/140/260-degree states teach a
-            # straight ordered head pivot, but offer no example of the final
-            # head-to-feet suffix: standing evaluation rose to 147 degrees and
-            # then stalled.  Keep half of the mid-roll starts in those measured
-            # bridge states and put the other half in a strictly sagittal,
-            # momentum-carrying 260--340 degree suffix.  Only the procedural
-            # suffix synthesizes already-passed contact latches; standing starts
-            # must still earn trunk and flat-head contact physically.
-            "standing_prob": 0.20,
-            "midroll_prob": 0.80,
-            "midroll_pitch_min": math.radians(260.0),
+            # A232 learned the 300-degree feet/landing bridge in its late-start
+            # population, but deterministic standing stayed at 146--160
+            # degrees. The reset distribution had no procedural states between
+            # the measured 140-degree reference and the 260-degree suffix.
+            # Fill that on-policy gap continuously while retaining real
+            # 100/140/260-degree references, late suffix starts, and enough
+            # standing launches to transfer the connected skill.
+            "standing_prob": 0.30,
+            "midroll_prob": 0.70,
+            "midroll_pitch_min": math.radians(150.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (1.5, 4.0),
             "joint_noise_std": 0.0,
-            "reference_state_prob": 0.50,
+            "reference_state_prob": 0.40,
             "reference_state_path": BACKROLL_REFERENCE_STATE_PATH,
             "reference_phase_range_deg": (90.0, 270.0),
             "reference_phase_buckets_deg": (
