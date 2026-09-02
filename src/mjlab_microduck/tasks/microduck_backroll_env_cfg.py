@@ -39,11 +39,22 @@ BACKROLL_REFERENCE_STATE_PATH = str(
 BACKROLL_CURRICULUM_STAGES = [
     {
         "params": {
-            "standing_prob": 0.20,
-            "midroll_prob": 0.80,
-            "midroll_pitch_min": math.radians(180.0),
-            "midroll_pitch_max": math.radians(340.0),
+            # The strict sagittal gate removed the old side-roll shortcut,
+            # but A200 standing audits still stopped near 60 degrees while
+            # the synthetic late starts kept learning.  Start with a
+            # measured, grounded 100--180 degree bridge and a larger aligned
+            # standing bucket so the launch receives on-policy gradient.
+            "standing_prob": 0.40,
+            "midroll_prob": 0.60,
+            "midroll_pitch_min": math.radians(100.0),
+            "midroll_pitch_max": math.radians(180.0),
             "midroll_omega_range": (1.0, 3.0),
+            "joint_noise_std": 0.0,
+            "reference_state_prob": 1.0,
+            "reference_state_path": BACKROLL_REFERENCE_STATE_PATH,
+            "reference_phase_range_deg": (100.0, 180.0),
+            "reference_source_seed": None,
+            "yaw_range": (0.0, 0.0),
         }
     },
     {

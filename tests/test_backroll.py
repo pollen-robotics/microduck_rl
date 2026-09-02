@@ -295,26 +295,42 @@ def test_repeated_first_cycle_relaxation_expires_after_first_cycle():
 
 def test_backroll_curriculum_matches_mastery_stages():
     assert [stage["params"]["standing_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.20,
+        0.40,
         0.30,
         0.40,
         0.60,
         0.85,
     ]
     assert [stage["params"]["midroll_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.80,
+        0.60,
         0.70,
         0.60,
         0.40,
         0.15,
     ]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_pitch_min"] == pytest.approx(
+        math.radians(100.0)
+    )
+    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_pitch_max"] == pytest.approx(
         math.radians(180.0)
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_omega_range"] == (
         1.0,
         3.0,
     )
+    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["joint_noise_std"] == pytest.approx(
+        0.0
+    )
+    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_state_prob"] == pytest.approx(
+        1.0
+    )
+    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_state_path"]
+    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_phase_range_deg"] == (
+        100.0,
+        180.0,
+    )
+    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_source_seed"] is None
+    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["yaw_range"] == (0.0, 0.0)
     cfg = make_microduck_backroll_env_cfg()
     params = cfg.curriculum["backroll_phase"].params
     assert params["window_episodes"] == 4096
