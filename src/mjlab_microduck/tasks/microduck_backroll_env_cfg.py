@@ -53,6 +53,15 @@ BACKROLL_TUCK_OVERRIDES = {
     13: -1.05,  # right ankle
 }
 
+BACKROLL_REFERENCE_PHASE_BUCKETS = (
+    (90.0, 110.0),
+    (130.0, 150.0),
+    (170.0, 190.0),
+    (210.0, 230.0),
+    (250.0, 270.0),
+    (280.0, 300.0),
+)
+
 BACKROLL_CURRICULUM_STAGES = [
     {
         "params": {
@@ -63,9 +72,12 @@ BACKROLL_CURRICULUM_STAGES = [
             # final 20-degree gate. Expose all six real trajectory phases under
             # a 29-degree discovery envelope, retain the 30-degree hard side
             # rejection plus continuous straightness pressure, and tighten the
-            # envelope only after standing success.
-            "standing_prob": 0.20,
-            "midroll_prob": 0.80,
+            # envelope only after standing success. A234 additionally moved
+            # the actor normalizer by L2 0.63 in 50 updates and erased every
+            # standing contact latch, so half of every discovery batch now
+            # rehearses standing while the actor normalizer stays frozen.
+            "standing_prob": 0.50,
+            "midroll_prob": 0.50,
             "midroll_pitch_min": math.radians(90.0),
             "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (1.5, 4.0),
@@ -73,14 +85,7 @@ BACKROLL_CURRICULUM_STAGES = [
             "reference_state_prob": 1.0,
             "reference_state_path": BACKROLL_REFERENCE_STATE_PATH,
             "reference_phase_range_deg": (90.0, 300.0),
-            "reference_phase_buckets_deg": (
-                (90.0, 110.0),
-                (130.0, 150.0),
-                (170.0, 190.0),
-                (210.0, 230.0),
-                (250.0, 270.0),
-                (280.0, 300.0),
-            ),
+            "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
             "reference_strict_sagittal": True,
             "synthesize_contact_latches": False,
             "sagittal_tolerance_deg": 29.0,
@@ -90,77 +95,61 @@ BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.30,
-            "midroll_prob": 0.70,
-            "midroll_pitch_min": math.radians(180.0),
-            "midroll_pitch_max": math.radians(340.0),
+            "standing_prob": 0.60,
+            "midroll_prob": 0.40,
+            "midroll_pitch_min": math.radians(90.0),
+            "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (1.0, 4.0),
-            "reference_state_prob": 0.50,
-            "reference_phase_range_deg": (90.0, 270.0),
-            "reference_phase_buckets_deg": (
-                (90.0, 110.0),
-                (130.0, 150.0),
-                (250.0, 270.0),
-            ),
+            "reference_state_prob": 1.0,
+            "reference_phase_range_deg": (90.0, 300.0),
+            "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
             "reference_strict_sagittal": True,
-            "synthesize_contact_latches": True,
+            "synthesize_contact_latches": False,
             "sagittal_tolerance_deg": 27.0,
         }
     },
     {
         "params": {
-            "standing_prob": 0.40,
-            "midroll_prob": 0.60,
+            "standing_prob": 0.70,
+            "midroll_prob": 0.30,
             "midroll_pitch_min": math.radians(90.0),
-            "midroll_pitch_max": math.radians(340.0),
+            "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (2.0, 5.0),
-            "reference_state_prob": 0.50,
-            "reference_phase_range_deg": (90.0, 270.0),
-            "reference_phase_buckets_deg": (
-                (90.0, 110.0),
-                (130.0, 150.0),
-                (250.0, 270.0),
-            ),
+            "reference_state_prob": 1.0,
+            "reference_phase_range_deg": (90.0, 300.0),
+            "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
             "reference_strict_sagittal": True,
-            "synthesize_contact_latches": True,
+            "synthesize_contact_latches": False,
             "sagittal_tolerance_deg": 25.0,
         }
     },
     {
         "params": {
-            "standing_prob": 0.60,
-            "midroll_prob": 0.40,
-            "midroll_pitch_min": math.radians(20.0),
-            "midroll_pitch_max": math.radians(340.0),
+            "standing_prob": 0.80,
+            "midroll_prob": 0.20,
+            "midroll_pitch_min": math.radians(90.0),
+            "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (0.0, 4.0),
-            "reference_state_prob": 0.25,
-            "reference_phase_range_deg": (90.0, 270.0),
-            "reference_phase_buckets_deg": (
-                (90.0, 110.0),
-                (130.0, 150.0),
-                (250.0, 270.0),
-            ),
+            "reference_state_prob": 1.0,
+            "reference_phase_range_deg": (90.0, 300.0),
+            "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
             "reference_strict_sagittal": True,
-            "synthesize_contact_latches": True,
+            "synthesize_contact_latches": False,
             "sagittal_tolerance_deg": 22.0,
         }
     },
     {
         "params": {
-            "standing_prob": 0.85,
-            "midroll_prob": 0.15,
-            "midroll_pitch_min": math.radians(20.0),
-            "midroll_pitch_max": math.radians(340.0),
+            "standing_prob": 0.90,
+            "midroll_prob": 0.10,
+            "midroll_pitch_min": math.radians(90.0),
+            "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (0.0, 3.0),
-            "reference_state_prob": 0.10,
-            "reference_phase_range_deg": (90.0, 270.0),
-            "reference_phase_buckets_deg": (
-                (90.0, 110.0),
-                (130.0, 150.0),
-                (250.0, 270.0),
-            ),
+            "reference_state_prob": 1.0,
+            "reference_phase_range_deg": (90.0, 300.0),
+            "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
             "reference_strict_sagittal": True,
-            "synthesize_contact_latches": True,
+            "synthesize_contact_latches": False,
             "sagittal_tolerance_deg": 20.0,
         }
     },

@@ -3,8 +3,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from mjlab.tasks.registry import load_runner_cls
 
-from mjlab_microduck.tasks import mdp
+from mjlab_microduck.tasks import MicroduckFrozenActorNormRunner, mdp
 from mjlab_microduck.tasks.microduck_backroll_env_cfg import (
     BACKROLL_CURRICULUM_STAGES,
     BACKROLL_TUCK_OVERRIDES,
@@ -175,6 +176,7 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert MicroduckBackrollRlCfg.save_interval == 50
     assert MicroduckBackrollRlCfg.algorithm.learning_rate == pytest.approx(1.0e-3)
     assert MicroduckBackrollRlCfg.actor.distribution_cfg["init_std"] == 1.0
+    assert load_runner_cls("Mjlab-Backroll-Flat-MicroDuck") is MicroduckFrozenActorNormRunner
 
 
 def test_backroll_play_is_deterministic_standing_start():
@@ -475,18 +477,18 @@ def test_landing_potential_starts_after_flat_head_pivot_not_before():
 
 def test_backroll_curriculum_matches_mastery_stages():
     assert [stage["params"]["standing_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.20,
-        0.30,
-        0.40,
+        0.50,
         0.60,
-        0.85,
+        0.70,
+        0.80,
+        0.90,
     ]
     assert [stage["params"]["midroll_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.80,
-        0.70,
-        0.60,
+        0.50,
         0.40,
-        0.15,
+        0.30,
+        0.20,
+        0.10,
     ]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_pitch_min"] == pytest.approx(
         math.radians(90.0)
@@ -517,6 +519,11 @@ def test_backroll_curriculum_matches_mastery_stages():
         (250.0, 270.0),
         (280.0, 300.0),
     )
+    assert all(
+        stage["params"]["reference_phase_buckets_deg"]
+        == BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_phase_buckets_deg"]
+        for stage in BACKROLL_CURRICULUM_STAGES
+    )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_strict_sagittal"]
     assert not BACKROLL_CURRICULUM_STAGES[0]["params"]["synthesize_contact_latches"]
     assert [
@@ -525,10 +532,10 @@ def test_backroll_curriculum_matches_mastery_stages():
     ] == [29.0, 27.0, 25.0, 22.0, 20.0]
     assert [stage["params"]["reference_state_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
         1.0,
-        0.50,
-        0.50,
-        0.25,
-        0.10,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
     ]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_source_seed"] is None
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["yaw_range"] == (0.0, 0.0)

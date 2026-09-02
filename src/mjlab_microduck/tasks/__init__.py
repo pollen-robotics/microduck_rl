@@ -19,13 +19,13 @@ class MicroduckOnPolicyRunner(VelocityOnPolicyRunner):
 
 
 class MicroduckFrozenActorNormRunner(MicroduckOnPolicyRunner):
-    """Preserve the transferred walking policy's observation coordinates.
+    """Preserve a transferred actor's observation coordinates.
 
     Contact-rich reverse starts have a very different observation distribution
-    from the manufacturer's runway gait. Updating the actor normalizer shifts
-    even unchanged runway observations and destroys walking within a few PPO
-    iterations. The critic normalizer remains adaptive; only the actor's
-    transferred input transform is frozen.
+    from standing or runway motion. Updating the actor normalizer shifts even
+    unchanged source observations and can destroy the inherited skill within a
+    few PPO iterations. The critic normalizer remains adaptive; only the
+    actor's transferred input transform is frozen.
     """
 
     def __init__(self, env, train_cfg: dict, log_dir=None, device="cpu", **kwargs):
@@ -433,7 +433,7 @@ register_mjlab_task(
     env_cfg=make_microduck_backroll_env_cfg(),
     play_env_cfg=make_microduck_backroll_env_cfg(play=True),
     rl_cfg=MicroduckBackrollRlCfg,
-    runner_cls=MicroduckOnPolicyRunner,
+    runner_cls=MicroduckFrozenActorNormRunner,
 )
 
 # Repeated grounded backroll: each valid sagittal feet landing rearms a fresh
