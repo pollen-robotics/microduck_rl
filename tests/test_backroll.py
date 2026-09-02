@@ -318,14 +318,14 @@ def test_late_pose_potential_can_correct_side_basin_without_opening_rotation_cre
 
 def test_backroll_curriculum_matches_mastery_stages():
     assert [stage["params"]["standing_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.60,
+        0.20,
         0.30,
         0.40,
         0.60,
         0.85,
     ]
     assert [stage["params"]["midroll_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.40,
+        0.80,
         0.70,
         0.60,
         0.40,
@@ -349,7 +349,7 @@ def test_backroll_curriculum_matches_mastery_stages():
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_state_path"]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_phase_range_deg"] == (
-        180.0,
+        260.0,
         290.0,
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_source_seed"] is None

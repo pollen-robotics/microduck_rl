@@ -47,10 +47,12 @@ BACKROLL_CURRICULUM_STAGES = [
             # parent's late-phase reset support while retaining a standing
             # bucket for on-policy launch learning.  A213's late-pose reward
             # branch still passed the contact sequence but failed every
-            # deterministic standing-start audit, so bias this first stage
-            # toward full launch trajectories while retaining late references.
-            "standing_prob": 0.60,
-            "midroll_prob": 0.40,
+            # A213/A214 standing-heavy variants still produced zero strict
+            # standing successes while the late reference basin reliably
+            # reached trunk/head contacts.  Teach the final feet/upright
+            # transition first, then reintroduce standing starts in stage 1.
+            "standing_prob": 0.20,
+            "midroll_prob": 0.80,
             "midroll_pitch_min": math.radians(180.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (1.0, 3.0),
@@ -61,7 +63,7 @@ BACKROLL_CURRICULUM_STAGES = [
             # landing gate or inventing a scripted action sequence.
             "reference_state_prob": 1.0,
             "reference_state_path": BACKROLL_REFERENCE_STATE_PATH,
-            "reference_phase_range_deg": (180.0, 290.0),
+            "reference_phase_range_deg": (260.0, 290.0),
             "reference_source_seed": None,
             "yaw_range": (0.0, 0.0),
         }
