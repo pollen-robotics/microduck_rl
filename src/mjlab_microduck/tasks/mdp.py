@@ -11622,13 +11622,14 @@ _BACKROLL_REPEAT_PRE_EXIT_STALL_SECONDS = 0.30
 _BACKROLL_REPEAT_STALLED_FALL_MAX_RATE = 1.0
 _BACKROLL_REPEAT_LANDING_TIMEOUT_SECONDS = 2.00
 _BACKROLL_REPEAT_MAX_LANDING_ANG_VEL = 4.5
-_BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX = math.sin(math.radians(35.0))
-_BACKROLL_REPEAT_SIDE_INVALID_Z = math.sin(math.radians(55.0))
-# The proven one-shot parent accumulates up to about 152 degrees of transverse
-# angular-rate integral during an otherwise valid sagittal roll.  Keep this as
-# a secondary escape budget; instantaneous lateral-axis and side-flop gates
-# remain the physical sagittal constraints.
-_BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION = math.radians(180.0)
+# A real backroll stays in the sagittal plane.  The previous 35-degree
+# completion envelope and 55-degree one-shot escape let a shoulder/side motion
+# collect enough dense rotation credit to become the PPO attractor.  Keep a
+# small tolerance for modelling noise, but reject the visible side-roll before
+# it can collect another transition reward.
+_BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX = math.sin(math.radians(20.0))
+_BACKROLL_REPEAT_SIDE_INVALID_Z = math.sin(math.radians(30.0))
+_BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION = math.radians(90.0)
 _BACKROLL_RECOVERY_UPRIGHT_COS = math.cos(math.radians(35.0))
 _BACKROLL_RECOVERY_MIN_HEIGHT = 0.10
 _BACKROLL_RECOVERY_MAX_LIN_SPEED = 0.15
@@ -11723,7 +11724,7 @@ def _grounded_backroll_cycle_is_sagittal(env: ManagerBasedRlEnv) -> torch.Tensor
 
 
 def _grounded_backroll_first_cycle_relaxed(env: ManagerBasedRlEnv) -> torch.Tensor:
-    """Allow the proven one-shot envelope only for the first repeat cycle."""
+    """Read the legacy reset flag; it never grants a geometry exemption."""
     return (
         env._backroll_repeat_mode
         & env._backroll_relaxed_first_cycle
@@ -11732,35 +11733,24 @@ def _grounded_backroll_first_cycle_relaxed(env: ManagerBasedRlEnv) -> torch.Tens
 
 
 def _grounded_backroll_positive_reward_valid(env: ManagerBasedRlEnv) -> torch.Tensor:
-    """Reject positive skill reward after an off-axis escape.
+    """Require the sagittal physical gate for every positive skill reward.
 
-    The one-shot bridge is also trained in the repeated-task curriculum.  It
-    must not keep paying a side-roll just because ``repeat_mode`` is disabled:
-    that lets the policy maximize rotation while never learning the sagittal
-    landing gate.  The explicitly relaxed first repeated cycle retains the
-    audited parent envelope; every other cycle, including one-shot training,
-    must remain inside the measured sagittal bounds.
+    A warm-start may retain its action mean, never a relaxed geometry rule:
+    a partial shoulder roll is not an admissible precursor to a backroll in
+    either the one-shot or repeated curriculum.
     """
-    first_cycle_relaxed = _grounded_backroll_first_cycle_relaxed(env)
     return (
-        (first_cycle_relaxed | _grounded_backroll_cycle_is_sagittal(env))
+        _grounded_backroll_cycle_is_sagittal(env)
         & ~env._backroll_invalid
         & ~env._backroll_recovery_active
     )
 
 
 def _grounded_backroll_potential_reward_valid(env: ManagerBasedRlEnv) -> torch.Tensor:
-    """Allow late pose correction to escape a non-sagittal roll basin.
-
-    Rotation and completion rewards stay behind the strict sagittal gate.  The
-    upright/flatness potential is different: after 300 degrees it must provide
-    a bounded delta signal that can steer a side-biased trajectory back into
-    the sagittal landing envelope.  It is still disabled before the late
-    phase, after invalidation, and during recovery, so standing or a static
-    fallen pose cannot farm it.
-    """
+    """Pay late landing potentials only inside the real backroll envelope."""
     return (
         (env._roulade_max >= _BACKROLL_POTENTIAL_ANGLE)
+        & _grounded_backroll_cycle_is_sagittal(env)
         & ~env._backroll_invalid
         & ~env._backroll_recovery_active
     )
@@ -11953,13 +11943,10 @@ def _update_grounded_backroll_state(
         env._backroll_episode_max_offaxis_rotation,
         env._backroll_cycle_offaxis_rotation,
     )
-    first_cycle_relaxed = _grounded_backroll_first_cycle_relaxed(env)
     repeated_sagittal = _grounded_backroll_cycle_is_sagittal(env)
-    # Every counted landing must satisfy the measured sagittal physical gate.
-    # The relaxed envelope is intentionally limited to the first cycle of a
-    # repeated run; one-shot stages must not promote a side/off-axis landing
-    # into curriculum mastery.
-    sagittal_landing = first_cycle_relaxed | repeated_sagittal
+    # Every counted landing must satisfy the same narrow sagittal physical
+    # gate.  A checkpoint warm-start never relaxes this maneuver definition.
+    sagittal_landing = repeated_sagittal
     landing_ang_vel_ok = torch.where(
         env._backroll_repeat_mode,
         ang_speed <= _BACKROLL_REPEAT_MAX_LANDING_ANG_VEL,
@@ -12072,25 +12059,23 @@ def _update_grounded_backroll_state(
         & (env._backroll_landing_timeout_steps >= landing_timeout_steps)
     )
     wrong_way = accum < -math.radians(90.0)
-    strict_repeat = env._backroll_repeat_mode & ~first_cycle_relaxed
-    repeated_side_flop = (
-        strict_repeat
+    side_escape = (
+        cycle_active
         & (frontier >= math.radians(30.0))
         & (lateral_axis_z > _BACKROLL_REPEAT_SIDE_INVALID_Z)
     )
-    repeated_offaxis_escape = (
-        strict_repeat
-        & cycle_active
+    offaxis_escape = (
+        cycle_active
         & (env._backroll_cycle_offaxis_rotation
-           > _BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION)
+            > _BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION)
     )
     cycle_invalid_now = (
         (env._backroll_max_air_steps > max_air_steps)
         | stalled_too_long
         | landing_timed_out
         | wrong_way
-        | repeated_side_flop
-        | repeated_offaxis_escape
+        | side_escape
+        | offaxis_escape
     ) & ~recovery_before
     start_recovery = (
         env._backroll_repeat_mode
@@ -12711,11 +12696,8 @@ def grounded_backroll_progress(
     # while never satisfying the physical landing criterion.
     valid = ordered_contacts & _grounded_backroll_positive_reward_valid(env)
     reward = delta / (env.step_dt * target_angle)
-    first_cycle_relaxed = _grounded_backroll_first_cycle_relaxed(env)
     purity = _grounded_backroll_sagittal_purity(asset)
-    purity = torch.where(first_cycle_relaxed, torch.ones_like(purity), purity)
-    reward = torch.where(env._backroll_repeat_mode, reward * purity, reward)
-    return torch.where(valid, reward, 0.0)
+    return torch.where(valid, reward * purity, 0.0)
 
 
 def grounded_backroll_head_pivot(
@@ -12743,6 +12725,7 @@ def grounded_backroll_head_pivot(
         * phase.float()
         * _head_top_down(env, asset).float()
         * rate
+        * _grounded_backroll_sagittal_purity(asset)
         * _grounded_backroll_positive_reward_valid(env).float()
     )
 
@@ -12833,11 +12816,8 @@ def grounded_backroll_completion_progress(
     env._backroll_completion_paid = torch.maximum(paid, frontier)
     span = target_angle - start_angle
     reward = delta / (env.step_dt * span)
-    first_cycle_relaxed = _grounded_backroll_first_cycle_relaxed(env)
     purity = _grounded_backroll_sagittal_purity(asset)
-    purity = torch.where(first_cycle_relaxed, torch.ones_like(purity), purity)
-    reward = torch.where(env._backroll_repeat_mode, reward * purity, reward)
-    return torch.where(valid, reward, 0.0)
+    return torch.where(valid, reward * purity, 0.0)
 
 
 def grounded_backroll_upright_progress(
@@ -12916,10 +12896,7 @@ def grounded_backroll_speed_progress(
         min=0.0,
         max=1.0,
     )
-    strict_sagittal = (
-        _grounded_backroll_first_cycle_relaxed(env)
-        | _grounded_backroll_cycle_is_sagittal(env)
-    )
+    strict_sagittal = _grounded_backroll_cycle_is_sagittal(env)
     ordered_contacts = (
         ((env._roulade_max <= _BACKROLL_TRUNK_LATCH_HI) | env._backroll_trunk_latch)
         & ((env._roulade_max <= _BACKROLL_HEAD_LATCH_HI) | env._backroll_head_latch)

@@ -179,9 +179,9 @@ REPEATED_BACKROLL_CURRICULUM_STAGES = [
             "standing_prob": 0.50,
             "midroll_prob": 0.50,
             "repeat_mode": True,
-            # Let the proven one-shot envelope earn the first cycle, then
-            # enforce the strict sagittal gate after the first rearm.
-            "relaxed_first_cycle": True,
+            # The reference state can aid discovery, but every cycle must use
+            # the same strict sagittal maneuver gate.
+            "relaxed_first_cycle": False,
             "midroll_pitch_min": math.radians(180.0),
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (1.0, 4.0),
@@ -303,7 +303,9 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     cfg.rewards.clear()
     cfg.rewards["backroll_progress"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_progress,
-        weight=8.0,
+        # Partial rotation is only a bootstrap.  A full ordered grounded
+        # backroll and stable feet landing are the task objective.
+        weight=4.0,
         params={"target_angle": 2.0 * math.pi, "max_paid_rate": 5.0},
     )
     cfg.rewards["backroll_head_pivot"] = RewardTermCfg(
@@ -313,7 +315,7 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     )
     cfg.rewards["backroll_completion_progress"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_completion_progress,
-        weight=8.0,
+        weight=12.0,
         params={
             "start_angle": math.radians(150.0),
             "target_angle": math.radians(350.0),
@@ -334,11 +336,11 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     )
     cfg.rewards["backroll_success"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_success_rate,
-        weight=10.0,
+        weight=20.0,
     )
     cfg.rewards["backroll_invalid"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_invalid_rate,
-        weight=-2.0,
+        weight=-4.0,
     )
     cfg.rewards["backroll_overspeed"] = RewardTermCfg(
         func=microduck_mdp.roulade_overspeed_penalty,

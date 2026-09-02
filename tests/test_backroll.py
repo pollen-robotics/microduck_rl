@@ -114,9 +114,12 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
         "trunk_value": 1.0,
         "head_value": 2.0,
     }
-    assert cfg.rewards["backroll_completion_progress"].weight == pytest.approx(8.0)
+    assert cfg.rewards["backroll_progress"].weight == pytest.approx(4.0)
+    assert cfg.rewards["backroll_completion_progress"].weight == pytest.approx(12.0)
     assert cfg.rewards["backroll_upright_progress"].weight == pytest.approx(5.0)
     assert cfg.rewards["backroll_height_progress"].weight == pytest.approx(4.0)
+    assert cfg.rewards["backroll_success"].weight == pytest.approx(20.0)
+    assert cfg.rewards["backroll_invalid"].weight == pytest.approx(-4.0)
     assert cfg.rewards["backroll_sagittal"].weight == pytest.approx(-0.5)
     assert cfg.rewards["backroll_flatness"].weight == pytest.approx(-1.0)
     assert cfg.rewards["backroll_sagittal"].func is mdp.grounded_backroll_sagittal_penalty
@@ -208,7 +211,7 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert [
         stage["params"]["relaxed_first_cycle"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
-    ] == [False, False, True, False, False, False]
+    ] == [False, False, False, False, False, False]
     assert [
         stage["params"]["yaw_range"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES[:3]
@@ -284,7 +287,7 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     ]
 
 
-def test_repeated_first_cycle_relaxation_expires_after_first_cycle():
+def test_repeated_first_cycle_relaxation_cannot_open_the_sagittal_gate():
     env, _asset = _fake_env()
     env._backroll_repeat_mode[:] = True
     env._backroll_relaxed_first_cycle[:] = True
@@ -292,20 +295,24 @@ def test_repeated_first_cycle_relaxation_expires_after_first_cycle():
     env._backroll_cycle_offaxis_rotation[:] = 10.0
 
     assert mdp._grounded_backroll_first_cycle_relaxed(env).item() is True
-    assert mdp._grounded_backroll_positive_reward_valid(env).item() is True
+    assert mdp._grounded_backroll_positive_reward_valid(env).item() is False
 
     env._backroll_cycle_count[:] = 1
     assert mdp._grounded_backroll_first_cycle_relaxed(env).item() is False
     assert mdp._grounded_backroll_positive_reward_valid(env).item() is False
 
 
-def test_late_pose_potential_can_correct_side_basin_without_opening_rotation_credit():
+def test_late_pose_potential_does_not_reward_a_side_basin():
     env, _asset = _fake_env()
     env._roulade_max[:] = math.radians(320.0)
     env._backroll_cycle_max_lateral_axis_z[:] = 1.0
     env._backroll_cycle_offaxis_rotation[:] = math.radians(240.0)
 
     assert mdp._grounded_backroll_positive_reward_valid(env).item() is False
+    assert mdp._grounded_backroll_potential_reward_valid(env).item() is False
+
+    env._backroll_cycle_max_lateral_axis_z.zero_()
+    env._backroll_cycle_offaxis_rotation.zero_()
     assert mdp._grounded_backroll_potential_reward_valid(env).item() is True
 
     env._roulade_max[:] = math.radians(120.0)
@@ -1067,6 +1074,30 @@ def test_airborne_and_sideways_rotation_receive_no_progress(monkeypatch):
     env.scene.sensors["robot_ground_contact"].data.found[:] = 1.0
     monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.ones(1))
     assert _next_step(env, asset, -2.0).item() == 0.0
+
+
+def test_one_shot_side_escape_is_terminal_and_cannot_collect_skill_rewards(monkeypatch):
+    env, asset = _fake_env()
+    monkeypatch.setattr(
+        mdp,
+        "_lateral_axis_z",
+        lambda _quat: torch.full((1,), math.sin(math.radians(31.0))),
+    )
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+    env._roulade_accum[:] = math.radians(31.0)
+    env._roulade_max[:] = math.radians(31.0)
+    env._roulade_paid[:] = math.radians(31.0)
+    env._backroll_previous_frontier[:] = math.radians(31.0)
+    asset.data.root_link_ang_vel_b[:, 1] = -2.0
+
+    assert mdp.grounded_backroll_progress(env).item() == 0.0
+    assert env._backroll_invalid.item() is True
+    assert mdp.grounded_backroll_head_pivot(env).item() == 0.0
+    assert mdp.grounded_backroll_contact_sequence(env).item() == 0.0
 
 
 def test_head_contact_only_latches_after_trunk_contact(monkeypatch):
