@@ -299,24 +299,24 @@ def test_repeated_first_cycle_relaxation_expires_after_first_cycle():
 
 def test_backroll_curriculum_matches_mastery_stages():
     assert [stage["params"]["standing_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.40,
+        0.20,
         0.30,
         0.40,
         0.60,
         0.85,
     ]
     assert [stage["params"]["midroll_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.60,
+        0.80,
         0.70,
         0.60,
         0.40,
         0.15,
     ]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_pitch_min"] == pytest.approx(
-        math.radians(100.0)
+        math.radians(180.0)
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_pitch_max"] == pytest.approx(
-        math.radians(180.0)
+        math.radians(340.0)
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_omega_range"] == (
         1.0,
@@ -326,7 +326,7 @@ def test_backroll_curriculum_matches_mastery_stages():
         0.0
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_state_prob"] == pytest.approx(
-        1.0
+        0.0
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_state_path"]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_phase_range_deg"] == (

@@ -39,18 +39,23 @@ BACKROLL_REFERENCE_STATE_PATH = str(
 BACKROLL_CURRICULUM_STAGES = [
     {
         "params": {
-            # The strict sagittal gate removed the old side-roll shortcut,
-            # but A200 standing audits still stopped near 60 degrees while
-            # the synthetic late starts kept learning.  Start with a
-            # measured, grounded 100--180 degree bridge and a larger aligned
-            # standing bucket so the launch receives on-policy gradient.
-            "standing_prob": 0.40,
-            "midroll_prob": 0.60,
-            "midroll_pitch_min": math.radians(100.0),
-            "midroll_pitch_max": math.radians(180.0),
+            # A116 is the strongest measured parent (14/16 complete
+            # landings).  Its successful curriculum exposed the learner to
+            # the full grounded 180--340 degree completion arc.  The
+            # A206-only 100--180 degree bridge produced ordered contacts but
+            # no upright landing under the sagittal gate, so restore the
+            # parent's late-phase reset support while retaining a standing
+            # bucket for on-policy launch learning.
+            "standing_prob": 0.20,
+            "midroll_prob": 0.80,
+            "midroll_pitch_min": math.radians(180.0),
+            "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (1.0, 3.0),
             "joint_noise_std": 0.0,
-            "reference_state_prob": 1.0,
+            # Use the analytic sagittal late-phase reset here.  The champion
+            # parent learned from this direct 180--340 degree envelope; the
+            # sparse 100--180 reference bank is reserved for later bridges.
+            "reference_state_prob": 0.0,
             "reference_state_path": BACKROLL_REFERENCE_STATE_PATH,
             "reference_phase_range_deg": (100.0, 180.0),
             "reference_source_seed": None,
