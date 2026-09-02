@@ -312,6 +312,19 @@ def make_microduck_backroll_env_cfg(play: bool = False):
         weight=4.0,
         params={"target_angle": 2.0 * math.pi, "max_paid_rate": 5.0},
     )
+    cfg.rewards["backroll_launch_tuck_progress"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_launch_tuck_progress,
+        # A218's first three audited checkpoints stayed at HOME from standing
+        # while late reference states supplied the visible training reward.
+        # This bounded potential pays once on the way to the measured tuck,
+        # then gives way to the real signed-rotation objective.
+        weight=2.0,
+        params={
+            "target_overrides": TUCK_OVERRIDES,
+            "entry_angle": math.radians(45.0),
+            "max_paid_rate": 2.5,
+        },
+    )
     cfg.rewards["backroll_head_pivot"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_head_pivot,
         weight=0.5,
@@ -344,7 +357,10 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     )
     cfg.rewards["backroll_invalid"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_invalid_rate,
-        weight=-4.0,
+        # Keep invalid physical solutions terminal, but at stage 0 a single
+        # exploratory tuck/roll must not be worse than holding HOME forever.
+        # The curriculum restores the full rejection cost after discovery.
+        weight=-1.0,
     )
     cfg.rewards["backroll_overspeed"] = RewardTermCfg(
         func=microduck_mdp.roulade_overspeed_penalty,
@@ -425,6 +441,8 @@ def make_microduck_backroll_env_cfg(play: bool = False):
                 "stages": BACKROLL_CURRICULUM_STAGES,
                 "window_episodes": 4096,
                 "success_threshold": 0.70,
+                "invalid_reward_name": "backroll_invalid",
+                "invalid_reward_weights": [-1.0, -2.0, -3.0, -4.0, -4.0],
                 "action_rate_reward_name": "action_rate_l2",
                 "action_rate_reward_weights": [
                     0.0,

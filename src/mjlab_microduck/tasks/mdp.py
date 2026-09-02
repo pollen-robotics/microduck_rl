@@ -11679,6 +11679,8 @@ def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
     env._backroll_height_delta = z.clone()
     env._backroll_potential_ready = b.clone()
     env._backroll_frontier_delta = z.clone()
+    # Bounded, one-shot physical tuck progress for the standing bootstrap.
+    env._backroll_launch_tuck_paid = z.clone()
     env._backroll_cycle_count = i.clone()
     env._backroll_mastery_cycles = torch.ones_like(i)
     env._backroll_start_is_standing = b.clone()
@@ -11794,6 +11796,7 @@ def _reset_grounded_backroll_cycle_buffers(
     env._backroll_height_delta[reset] = 0.0
     env._backroll_potential_ready[reset] = False
     env._backroll_frontier_delta[reset] = 0.0
+    env._backroll_launch_tuck_paid[reset] = 0.0
     env._backroll_cycle_max_lateral_axis_z[reset] = 0.0
     env._backroll_cycle_offaxis_rotation[reset] = 0.0
 
@@ -12535,6 +12538,7 @@ def reset_grounded_backroll_state(
     env._backroll_height_delta[env_ids] = 0.0
     env._backroll_potential_ready[env_ids] = False
     env._backroll_frontier_delta[env_ids] = 0.0
+    env._backroll_launch_tuck_paid[env_ids] = 0.0
     env._backroll_cycle_count[env_ids] = 0
     env._backroll_mastery_cycles[env_ids] = max(1, int(mastery_cycles))
     env._backroll_cycle_max_lateral_axis_z[env_ids] = 0.0
@@ -12716,6 +12720,76 @@ def grounded_backroll_progress(
     reward = delta / (env.step_dt * target_angle)
     purity = _grounded_backroll_sagittal_purity(asset)
     return torch.where(valid, reward * purity, 0.0)
+
+
+def _grounded_backroll_launch_tuck_potential(
+    env: ManagerBasedRlEnv,
+    asset: Entity,
+    target_overrides: Optional[dict],
+) -> torch.Tensor:
+    """Return HOME-to-tuck progress on the explicitly requested servo subset."""
+    if not target_overrides:
+        return torch.zeros(env.num_envs, device=env.device)
+    joint_pos = _servo_joint_pos(env, asset)
+    home = _servo_default_joint_pos(env, asset)
+    target = home.clone()
+    active = torch.zeros(home.shape[-1], dtype=torch.bool, device=env.device)
+    for joint_index, angle in target_overrides.items():
+        if joint_index < 0 or joint_index >= home.shape[-1]:
+            raise ValueError("launch-tuck override index is outside the servo layout")
+        target[:, joint_index] = float(angle)
+        active[joint_index] = True
+    if not active.any():
+        return torch.zeros(env.num_envs, device=env.device)
+    # Normalize by each servo's HOME-to-tuck excursion.  HOME scores zero,
+    # tuck scores one, and overshooting a servo cannot increase the score.
+    span = (target - home).abs().clamp_min(0.25)
+    residual = ((joint_pos - target).abs() / span).clamp(max=1.0)
+    return 1.0 - residual[:, active].mean(dim=-1)
+
+
+def grounded_backroll_launch_tuck_progress(
+    env: ManagerBasedRlEnv,
+    target_overrides: Optional[dict] = None,
+    entry_angle: float = math.radians(45.0),
+    max_paid_rate: float = 2.5,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay new physical tuck progress only before a standing backroll starts.
+
+    A218's independent standing audits at checkpoints 50, 100, and 150 held
+    HOME indefinitely while the late reference bucket supplied all observed
+    reward.  This max-so-far potential gives PPO a short bridge into the
+    measured tuck. It requires both feet and a valid sagittal attempt, turns
+    off after 45 degrees, and cannot pay from lying, a shoulder roll, repeated
+    rocking, or holding the tucked pose.
+    """
+    if entry_angle <= 0.0 or max_paid_rate < 0.0:
+        raise ValueError("entry_angle must be positive and max_paid_rate nonnegative")
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    potential = _grounded_backroll_launch_tuck_potential(
+        env, asset, target_overrides
+    )
+    left_foot = _sensor_any_contact(env, _BACKROLL_LEFT_FOOT_SENSOR)
+    right_foot = _sensor_any_contact(env, _BACKROLL_RIGHT_FOOT_SENSOR)
+    both_feet = (
+        torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        if left_foot is None or right_foot is None
+        else left_foot & right_foot
+    )
+    eligible = (
+        env._backroll_start_is_standing
+        & both_feet
+        & (env._roulade_max <= entry_angle)
+        & _grounded_backroll_positive_reward_valid(env)
+    )
+    paid = env._backroll_launch_tuck_paid
+    new_paid = torch.where(eligible, torch.maximum(paid, potential), paid)
+    delta = torch.clamp(new_paid - paid, min=0.0)
+    delta = torch.clamp(delta, max=max_paid_rate * env.step_dt)
+    env._backroll_launch_tuck_paid = new_paid
+    return delta / env.step_dt
 
 
 def grounded_backroll_head_pivot(

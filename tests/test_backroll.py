@@ -40,9 +40,11 @@ def _fake_env():
             root_link_lin_vel_w=torch.zeros(1, 3),
             root_link_pos_w=torch.tensor([[0.0, 0.0, 0.115]]),
             root_link_quat_w=quat,
+            joint_pos=torch.zeros(1, 14),
             default_joint_pos=torch.zeros(1, 14),
         )
     )
+    asset.find_joints = lambda _pattern: (list(range(14)), [])
     sensors = {
         "robot_ground_contact": SimpleNamespace(
             data=SimpleNamespace(found=torch.ones(1, 1))
@@ -90,6 +92,7 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     )
     assert set(cfg.rewards) == {
         "backroll_progress",
+        "backroll_launch_tuck_progress",
         "backroll_head_pivot",
         "backroll_completion_progress",
         "backroll_upright_progress",
@@ -115,11 +118,16 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
         "head_value": 2.0,
     }
     assert cfg.rewards["backroll_progress"].weight == pytest.approx(4.0)
+    assert (
+        cfg.rewards["backroll_launch_tuck_progress"].func
+        is mdp.grounded_backroll_launch_tuck_progress
+    )
+    assert cfg.rewards["backroll_launch_tuck_progress"].weight == pytest.approx(2.0)
     assert cfg.rewards["backroll_completion_progress"].weight == pytest.approx(12.0)
     assert cfg.rewards["backroll_upright_progress"].weight == pytest.approx(5.0)
     assert cfg.rewards["backroll_height_progress"].weight == pytest.approx(4.0)
     assert cfg.rewards["backroll_success"].weight == pytest.approx(20.0)
-    assert cfg.rewards["backroll_invalid"].weight == pytest.approx(-4.0)
+    assert cfg.rewards["backroll_invalid"].weight == pytest.approx(-1.0)
     assert cfg.rewards["backroll_sagittal"].weight == pytest.approx(-0.5)
     assert cfg.rewards["backroll_flatness"].weight == pytest.approx(-1.0)
     assert cfg.rewards["backroll_sagittal"].func is mdp.grounded_backroll_sagittal_penalty
@@ -128,6 +136,9 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert cfg.curriculum["backroll_phase"].params[
         "action_rate_reward_weights"
     ] == [0.0, -0.025, -0.05, -0.075, -0.10]
+    assert cfg.curriculum["backroll_phase"].params[
+        "invalid_reward_weights"
+    ] == [-1.0, -2.0, -3.0, -4.0, -4.0]
     forbidden = ("sprint", "distance", "lane", "road", "recovery", "reposition")
     assert not any(token in name for name in cfg.rewards for token in forbidden)
     assert cfg.events["set_grounded_backroll_state"].func is mdp.reset_grounded_backroll_state
@@ -148,6 +159,57 @@ def test_backroll_play_is_deterministic_standing_start():
     assert reset["yaw_range"] == (0.0, 0.0)
     assert reset["joint_noise_std"] == 0.0
     assert "backroll_phase" not in cfg.curriculum
+
+
+def test_launch_tuck_bootstrap_is_one_shot_and_closes_when_rolling(monkeypatch):
+    env, asset = _fake_env()
+    overrides = {2: -1.0, 5: 1.0}
+    env._backroll_start_is_standing[:] = True
+    monkeypatch.setattr(
+        mdp,
+        "_update_grounded_backroll_state",
+        lambda _env, _asset: None,
+    )
+
+    # HOME earns nothing. Moving physically toward the configured tuck earns
+    # one bounded frontier increment; holding it cannot become an annuity.
+    assert (
+        mdp.grounded_backroll_launch_tuck_progress(
+            env,
+            target_overrides=overrides,
+        ).item()
+        == pytest.approx(0.0)
+    )
+    env.common_step_counter += 1
+    asset.data.joint_pos[:, 2] = -1.0
+    asset.data.joint_pos[:, 5] = 1.0
+    first_tuck = mdp.grounded_backroll_launch_tuck_progress(
+        env,
+        target_overrides=overrides,
+    )
+    assert first_tuck.item() > 0.0
+    env.common_step_counter += 1
+    assert (
+        mdp.grounded_backroll_launch_tuck_progress(
+            env,
+            target_overrides=overrides,
+        ).item()
+        == pytest.approx(0.0)
+    )
+
+    # The bootstrap cannot follow a roll into the floor or compensate for the
+    # real supported signed-rotation/contact requirements.
+    env._roulade_accum[:] = math.radians(50.0)
+    env._roulade_max[:] = math.radians(50.0)
+    env._backroll_launch_tuck_paid.zero_()
+    env.common_step_counter += 1
+    assert (
+        mdp.grounded_backroll_launch_tuck_progress(
+            env,
+            target_overrides=overrides,
+        ).item()
+        == pytest.approx(0.0)
+    )
 
 
 def test_repeated_backroll_rearms_without_adding_course_objectives():
