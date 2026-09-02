@@ -11749,6 +11749,23 @@ def _grounded_backroll_positive_reward_valid(env: ManagerBasedRlEnv) -> torch.Te
     )
 
 
+def _grounded_backroll_potential_reward_valid(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Allow late pose correction to escape a non-sagittal roll basin.
+
+    Rotation and completion rewards stay behind the strict sagittal gate.  The
+    upright/flatness potential is different: after 300 degrees it must provide
+    a bounded delta signal that can steer a side-biased trajectory back into
+    the sagittal landing envelope.  It is still disabled before the late
+    phase, after invalidation, and during recovery, so standing or a static
+    fallen pose cannot farm it.
+    """
+    return (
+        (env._roulade_max >= _BACKROLL_POTENTIAL_ANGLE)
+        & ~env._backroll_invalid
+        & ~env._backroll_recovery_active
+    )
+
+
 def _reset_grounded_backroll_cycle_buffers(
     env: ManagerBasedRlEnv,
     reset: torch.Tensor,
@@ -12830,7 +12847,7 @@ def grounded_backroll_upright_progress(
     _update_grounded_backroll_state(env, asset)
     return (
         env._backroll_upright_delta
-        * _grounded_backroll_positive_reward_valid(env).float()
+        * _grounded_backroll_potential_reward_valid(env).float()
         / env.step_dt
     )
 
@@ -12843,7 +12860,7 @@ def grounded_backroll_height_progress(
     _update_grounded_backroll_state(env, asset)
     return (
         env._backroll_height_delta
-        * _grounded_backroll_positive_reward_valid(env).float()
+        * _grounded_backroll_potential_reward_valid(env).float()
         / env.step_dt
     )
 

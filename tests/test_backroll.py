@@ -297,6 +297,23 @@ def test_repeated_first_cycle_relaxation_expires_after_first_cycle():
     assert mdp._grounded_backroll_positive_reward_valid(env).item() is False
 
 
+def test_late_pose_potential_can_correct_side_basin_without_opening_rotation_credit():
+    env, _asset = _fake_env()
+    env._roulade_max[:] = math.radians(320.0)
+    env._backroll_cycle_max_lateral_axis_z[:] = 1.0
+    env._backroll_cycle_offaxis_rotation[:] = math.radians(240.0)
+
+    assert mdp._grounded_backroll_positive_reward_valid(env).item() is False
+    assert mdp._grounded_backroll_potential_reward_valid(env).item() is True
+
+    env._roulade_max[:] = math.radians(120.0)
+    assert mdp._grounded_backroll_potential_reward_valid(env).item() is False
+
+    env._roulade_max[:] = math.radians(320.0)
+    env._backroll_invalid[:] = True
+    assert mdp._grounded_backroll_potential_reward_valid(env).item() is False
+
+
 def test_backroll_curriculum_matches_mastery_stages():
     assert [stage["params"]["standing_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
         0.40,
