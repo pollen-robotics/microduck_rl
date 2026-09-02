@@ -13175,6 +13175,7 @@ def grounded_backroll_speed_progress(
     minimum_rate: float = 2.0,
     target_rate: float = 4.5,
     target_angle: float = 2.0 * math.pi,
+    require_head_latch: bool = False,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Reward fast *new* supported backward progress without rocking annuities.
@@ -13198,6 +13199,8 @@ def grounded_backroll_speed_progress(
         ((env._roulade_max <= _BACKROLL_TRUNK_LATCH_HI) | env._backroll_trunk_latch)
         & ((env._roulade_max <= _BACKROLL_HEAD_LATCH_HI) | env._backroll_head_latch)
     )
+    if require_head_latch:
+        ordered_contacts &= env._backroll_trunk_latch & env._backroll_head_latch
     return (
         env._backroll_frontier_delta
         * speed

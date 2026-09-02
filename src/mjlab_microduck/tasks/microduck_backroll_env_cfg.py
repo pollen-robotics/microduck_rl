@@ -412,6 +412,9 @@ def make_microduck_backroll_env_cfg(play: bool = False):
             "minimum_rate": 2.5,
             "target_rate": 6.0,
             "target_angle": 2.0 * math.pi,
+            # A242's ungated high-speed term reached 186 degrees without the
+            # trunk/head latches. Only accelerate the already-valid pivot.
+            "require_head_latch": True,
         },
     )
     cfg.rewards["backroll_feet_recontact"] = RewardTermCfg(

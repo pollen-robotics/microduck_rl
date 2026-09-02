@@ -138,6 +138,7 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
         "minimum_rate": 2.5,
         "target_rate": 6.0,
         "target_angle": 2.0 * math.pi,
+        "require_head_latch": True,
     }
     assert cfg.rewards["backroll_feet_recontact"].weight == pytest.approx(5.0)
     assert (
@@ -1229,6 +1230,34 @@ def test_speed_progress_requires_fast_new_backward_frontier(monkeypatch):
     assert first.item() > 0.0
     assert rocking.item() == 0.0
     assert revisit.item() == 0.0
+
+
+def test_post_head_speed_progress_requires_ordered_latches(monkeypatch):
+    env, asset = _fake_env()
+    env._backroll_repeat_mode[:] = True
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+    asset.data.root_link_ang_vel_b[:, 1] = -5.0
+
+    without_latches = mdp.grounded_backroll_speed_progress(
+        env,
+        require_head_latch=True,
+    )
+    env._backroll_trunk_latch[:] = True
+    env._backroll_head_latch[:] = True
+    env._backroll_previous_frontier[:] = env._roulade_max
+    env.common_step_counter += 1
+    with_latches = mdp.grounded_backroll_speed_progress(
+        env,
+        require_head_latch=True,
+    )
+
+    assert without_latches.item() == 0.0
+    assert with_latches.item() > 0.0
 
 
 def test_repeated_progress_bridges_contact_windows_then_requires_latches(monkeypatch):
