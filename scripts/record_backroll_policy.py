@@ -26,7 +26,11 @@ OUTPUT_WIDTH = 1920
 OUTPUT_HEIGHT = 1080
 OUTPUT_FPS = 60.0
 POST_SUCCESS_HOLD_S = 0.75
-DIAGNOSTIC_MIN_SECONDS = 2.0
+# A stalled diagnostic must be long enough to show the complete failed attempt
+# but never waste a 20-second dashboard slot on a motionless robot.  Recovery
+# or a new roll frontier resets the separate idle timer below, so active retry
+# behavior remains visible for the full configured duration.
+DIAGNOSTIC_MIN_SECONDS = 6.0
 DIAGNOSTIC_STUCK_SECONDS = 1.0
 DIAGNOSTIC_FRONTIER_EPSILON_RAD = math.radians(3.0)
 DIAGNOSTIC_ACTIVE_ANGULAR_RATE = 0.75

@@ -36,6 +36,27 @@ def test_static_diagnostic_cuts_only_after_minimum_and_patience() -> None:
     )
 
 
+def test_default_static_diagnostic_is_six_seconds_at_50_hz() -> None:
+    detector = RECORD.DiagnosticStuckDetector(
+        min_steps=round(RECORD.DIAGNOSTIC_MIN_SECONDS / 0.02),
+        patience_steps=round(RECORD.DIAGNOSTIC_STUCK_SECONDS / 0.02),
+    )
+    assert not detector.update(
+        step=299,
+        frontier_rad=0.0,
+        cycle_count=0,
+        angular_speed=0.0,
+        vertical_speed=0.0,
+    )
+    assert detector.update(
+        step=300,
+        frontier_rad=0.0,
+        cycle_count=0,
+        angular_speed=0.0,
+        vertical_speed=0.0,
+    )
+
+
 def test_roll_frontier_progress_delays_stuck_cut() -> None:
     detector = _detector()
     assert not detector.update(
