@@ -66,30 +66,22 @@ BACKROLL_REFERENCE_PHASE_BUCKETS = (
 BACKROLL_CURRICULUM_STAGES = [
     {
         "params": {
-            # A233 proved that synthetic 150--340-degree resets improve their
-            # own suffix metrics but do not transfer to standing. The captured
-            # successful physical trajectory instead crosses a brief 28.5
-            # degree lateral-axis tilt at 180--220 degrees, just outside the
-            # final 20-degree gate. Expose all six real trajectory phases under
-            # a 29-degree discovery envelope, retain the 30-degree hard side
-            # rejection plus continuous straightness pressure, and tighten the
-            # envelope only after standing success. A234 additionally moved
-            # the actor normalizer by L2 0.63 in 50 updates and erased every
-            # standing contact latch. Freezing it in A235/A236 proved that a
-            # 50/50 reset batch still overwrites the fragile standing launch:
-            # ordered standing contacts fell from 14/16 to 9/16 at the normal
-            # learning rate and to 1/16 even at one-sixth rate. Preserve the
-            # parent with a standing-dominant batch. Ten percent still gives
-            # about 819 physical late-phase trajectories per 8192-env rollout.
-            "standing_prob": 0.90,
-            "midroll_prob": 0.10,
-            "midroll_pitch_min": math.radians(90.0),
+            # A244's strict audit exposed the supposed full-rotation parent as
+            # a side-roll attractor: 0/16 strict sagittal cycles, 76.9 degrees
+            # mean peak lateral-axis tilt, and 199.2 degrees mean off-axis
+            # rotation. Preserve its useful launch only as a minority bucket;
+            # concentrate early PPO evidence on the real 260/290-degree states
+            # where the missing sagittal head-release -> feet-landing suffix
+            # can be learned directly.
+            "standing_prob": 0.20,
+            "midroll_prob": 0.80,
+            "midroll_pitch_min": math.radians(250.0),
             "midroll_pitch_max": math.radians(300.0),
-            "midroll_omega_range": (1.5, 4.0),
+            "midroll_omega_range": (0.0, 3.0),
             "joint_noise_std": 0.0,
             "reference_state_prob": 1.0,
             "reference_state_path": BACKROLL_REFERENCE_STATE_PATH,
-            "reference_phase_range_deg": (90.0, 300.0),
+            "reference_phase_range_deg": (250.0, 300.0),
             "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
             "reference_strict_sagittal": True,
             "synthesize_contact_latches": False,
@@ -100,13 +92,13 @@ BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.925,
-            "midroll_prob": 0.075,
-            "midroll_pitch_min": math.radians(90.0),
+            "standing_prob": 0.30,
+            "midroll_prob": 0.70,
+            "midroll_pitch_min": math.radians(210.0),
             "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (1.0, 4.0),
             "reference_state_prob": 1.0,
-            "reference_phase_range_deg": (90.0, 300.0),
+            "reference_phase_range_deg": (210.0, 300.0),
             "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
             "reference_strict_sagittal": True,
             "synthesize_contact_latches": False,
@@ -115,13 +107,13 @@ BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.95,
-            "midroll_prob": 0.05,
-            "midroll_pitch_min": math.radians(90.0),
+            "standing_prob": 0.40,
+            "midroll_prob": 0.60,
+            "midroll_pitch_min": math.radians(170.0),
             "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (2.0, 5.0),
             "reference_state_prob": 1.0,
-            "reference_phase_range_deg": (90.0, 300.0),
+            "reference_phase_range_deg": (170.0, 300.0),
             "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
             "reference_strict_sagittal": True,
             "synthesize_contact_latches": False,
@@ -130,13 +122,13 @@ BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.975,
-            "midroll_prob": 0.025,
-            "midroll_pitch_min": math.radians(90.0),
+            "standing_prob": 0.60,
+            "midroll_prob": 0.40,
+            "midroll_pitch_min": math.radians(130.0),
             "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (0.0, 4.0),
             "reference_state_prob": 1.0,
-            "reference_phase_range_deg": (90.0, 300.0),
+            "reference_phase_range_deg": (130.0, 300.0),
             "reference_phase_buckets_deg": BACKROLL_REFERENCE_PHASE_BUCKETS,
             "reference_strict_sagittal": True,
             "synthesize_contact_latches": False,
@@ -145,8 +137,8 @@ BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.99,
-            "midroll_prob": 0.01,
+            "standing_prob": 0.85,
+            "midroll_prob": 0.15,
             "midroll_pitch_min": math.radians(90.0),
             "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (0.0, 3.0),
@@ -396,6 +388,30 @@ def make_microduck_backroll_env_cfg(play: bool = False):
             "max_paid_rate": 6.0,
         },
     )
+    cfg.rewards["backroll_upright_progress"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_upright_progress,
+        # Signed potential change after ordered flat-head contact. The
+        # potential is 75% sagittal flatness and 25% upright posture, so a
+        # late reference can learn to undo its remaining shoulder tilt while
+        # holding either pose produces no annuity.
+        weight=8.0,
+    )
+    cfg.rewards["backroll_height_progress"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_height_progress,
+        # Potential-based rise shaping inside the same strict cycle gate.
+        weight=4.0,
+    )
+    cfg.rewards["backroll_rise_velocity"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_rise_velocity,
+        # A modest bootstrap into the reachable feet-down landing region. It
+        # is head-latched, late-phase gated, and capped by trunk height.
+        weight=1.0,
+        params={
+            "gate_lo": math.radians(180.0),
+            "gate_hi": math.radians(260.0),
+            "max_height": 0.125,
+        },
+    )
     cfg.rewards["backroll_speed_progress"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_speed_progress,
         # A229 checkpoint 150 acquired the complete ordered contact sequence
@@ -525,7 +541,11 @@ def make_microduck_backroll_env_cfg(play: bool = False):
                 "stages": BACKROLL_CURRICULUM_STAGES,
                 "window_episodes": 4096,
                 "success_threshold": 0.70,
-                "standing_only_mastery": True,
+                # Early stages are deliberately suffix-heavy; requiring
+                # standing-only success would prevent them from ever advancing.
+                # By the final 85/15 mix, a 70% aggregate gate necessarily
+                # requires the standing launch to work in most episodes.
+                "standing_only_mastery": False,
                 "invalid_reward_name": "backroll_invalid",
                 "invalid_reward_weights": [-5.0, -6.0, -8.0, -10.0, -10.0],
                 "action_rate_reward_name": "action_rate_l2",
@@ -735,17 +755,18 @@ MicroduckBackrollRlCfg.max_iterations = 4000
 MicroduckBackrollRlCfg.save_interval = 50
 _backroll_algorithm_params = vars(deepcopy(MicroduckBackrollRlCfg.algorithm))
 _backroll_algorithm_params.update(
-    learning_rate=2.5e-5,
+    learning_rate=1.0e-4,
     schedule="fixed",
     entropy_coef=5.0e-4,
     class_name="mjlab_microduck.tasks.backroll_ppo.AnchoredPPO",
 )
 MicroduckBackrollRlCfg.algorithm = AnchoredPpoCfg(
     **_backroll_algorithm_params,
-    # Re-anchor each explicitly selected checkpoint so improvement can ratchet
-    # forward. A240 proved 50% retention preserves the local behavior basin;
-    # A241 model 300 supplies the new measured 182-degree parent for A242.
-    anchor_retention=0.50,
+    # A244 proved that 50% per-update retention preserves the parent's invalid
+    # side-roll trajectory almost unchanged after 500 iterations. Keep a small
+    # proximal pull so its useful standing launch is not erased in one burst,
+    # while allowing PPO to learn a materially different sagittal suffix.
+    anchor_retention=0.98,
     refresh_anchor_on_load=True,
 )
 MicroduckBackrollRlCfg.actor.distribution_cfg["init_std"] = 1.0

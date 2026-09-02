@@ -19,6 +19,8 @@ from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 
+from mjlab_microduck.tasks import mdp as microduck_mdp
+
 TASK_ID = "Mjlab-Backroll-Flat-MicroDuck"
 DEFAULT_SEEDS = tuple(range(16))
 
@@ -59,7 +61,7 @@ def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
 
 
 def _heading_from_quat(quat: torch.Tensor) -> torch.Tensor:
-    """Return the planar heading of MicroDuck's body-forward +y axis."""
+    """Recover planar body-+x heading from the projected body-+y axis."""
     quat = torch.nan_to_num(quat, nan=0.0)
     w, x, y, z = quat.unbind(dim=-1)
     body_y_x = 2.0 * (x * y - w * z)
@@ -112,6 +114,30 @@ def _case_rows(
     displacement = robot.data.root_link_pos_w[:, :2] - start_xy
     lateral_axis = torch.stack((-start_heading[:, 1], start_heading[:, 0]), dim=-1)
     lateral = torch.abs((displacement * lateral_axis).sum(dim=-1))
+    max_lateral_axis_z = torch.clamp(
+        base_env._backroll_episode_max_lateral_axis_z.abs(),
+        min=0.0,
+        max=1.0,
+    )
+    max_lateral_axis_deg = torch.rad2deg(torch.asin(max_lateral_axis_z))
+    max_offaxis_rotation_deg = torch.rad2deg(
+        base_env._backroll_episode_max_offaxis_rotation
+    )
+    strict_sagittal = microduck_mdp._grounded_backroll_cycle_is_sagittal(base_env)
+    quat = torch.nan_to_num(robot.data.root_link_quat_w, nan=0.0)
+    final_upright = torch.nan_to_num(
+        1.0 - 2.0 * (quat[:, 1].square() + quat[:, 2].square()),
+        nan=-1.0,
+    )
+    final_tilt_deg = torch.rad2deg(torch.acos(final_upright.clamp(-1.0, 1.0)))
+    final_height = torch.nan_to_num(
+        robot.data.root_link_pos_w[:, 2] - base_env.scene.terrain.env_origins[:, 2],
+        nan=0.0,
+    )
+    final_angular_speed = torch.linalg.vector_norm(
+        torch.nan_to_num(robot.data.root_link_ang_vel_b, nan=0.0),
+        dim=-1,
+    )
 
     rows: list[dict[str, object]] = []
     for index, seed in enumerate(seeds):
@@ -143,6 +169,15 @@ def _case_rows(
                     base_env._backroll_landing_hold_steps[index].item()
                     * base_env.step_dt
                 ),
+                "max_lateral_axis_z": float(max_lateral_axis_z[index].item()),
+                "max_lateral_axis_deg": float(max_lateral_axis_deg[index].item()),
+                "max_offaxis_rotation_deg": float(
+                    max_offaxis_rotation_deg[index].item()
+                ),
+                "strict_sagittal_cycle": bool(strict_sagittal[index].item()),
+                "final_trunk_height_m": float(final_height[index].item()),
+                "final_trunk_tilt_deg": float(final_tilt_deg[index].item()),
+                "final_angular_speed_rad_s": float(final_angular_speed[index].item()),
                 "lateral_displacement_m": float(lateral[index].item()),
                 "yaw_deviation_deg": float(yaw_deviation[index].item()),
                 "peak_vertical_impact_mps2": float(peak_impact[index].item()),
@@ -253,7 +288,7 @@ def evaluate_checkpoint(
     feet_recontacts = sum(bool(row["feet_recontact_latched"]) for row in rows)
     eligible = [row for row in rows if row["grounded_backroll_success"]]
     report: dict[str, object] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "task": TASK_ID,
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": _sha256(checkpoint),
@@ -266,6 +301,17 @@ def evaluate_checkpoint(
         "grounded_backroll_success_rate": successes / len(rows),
         "feet_recontact_count": feet_recontacts,
         "feet_recontact_rate": feet_recontacts / len(rows),
+        "strict_sagittal_count": sum(
+            bool(row["strict_sagittal_cycle"]) for row in rows
+        ),
+        "mean_max_lateral_axis_deg": sum(
+            float(row["max_lateral_axis_deg"]) for row in rows
+        )
+        / len(rows),
+        "mean_max_offaxis_rotation_deg": sum(
+            float(row["max_offaxis_rotation_deg"]) for row in rows
+        )
+        / len(rows),
         "mean_max_landing_readiness": sum(
             float(row["max_landing_readiness"]) for row in rows
         )

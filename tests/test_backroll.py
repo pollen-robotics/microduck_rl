@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from torch import nn
 from mjlab.tasks.registry import load_runner_cls
+from torch import nn
 
 from mjlab_microduck.tasks import MicroduckFrozenActorNormRunner, mdp
 from mjlab_microduck.tasks.backroll_ppo import AnchoredPPO
@@ -100,6 +100,9 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
         "backroll_launch_tuck_progress",
         "backroll_head_pivot",
         "backroll_completion_progress",
+        "backroll_upright_progress",
+        "backroll_height_progress",
+        "backroll_rise_velocity",
         "backroll_speed_progress",
         "backroll_feet_recontact",
         "backroll_landing_readiness",
@@ -130,10 +133,25 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     )
     assert cfg.rewards["backroll_launch_tuck_progress"].weight == pytest.approx(2.0)
     assert cfg.rewards["backroll_completion_progress"].weight == pytest.approx(12.0)
-    assert cfg.rewards["backroll_completion_progress"].params["start_angle"] == pytest.approx(
-        math.radians(110.0)
-    )
+    assert cfg.rewards["backroll_completion_progress"].params[
+        "start_angle"
+    ] == pytest.approx(math.radians(110.0))
     assert cfg.rewards["backroll_speed_progress"].weight == pytest.approx(8.0)
+    assert cfg.rewards["backroll_upright_progress"].weight == pytest.approx(8.0)
+    assert cfg.rewards["backroll_height_progress"].weight == pytest.approx(4.0)
+    assert cfg.rewards["backroll_rise_velocity"].weight == pytest.approx(1.0)
+    assert (
+        cfg.rewards["backroll_upright_progress"].func
+        is mdp.grounded_backroll_upright_progress
+    )
+    assert (
+        cfg.rewards["backroll_height_progress"].func
+        is mdp.grounded_backroll_height_progress
+    )
+    assert (
+        cfg.rewards["backroll_rise_velocity"].func
+        is mdp.grounded_backroll_rise_velocity
+    )
     assert cfg.rewards["backroll_speed_progress"].params == {
         "minimum_rate": 2.5,
         "target_rate": 6.0,
@@ -154,15 +172,27 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert cfg.rewards["backroll_invalid"].weight == pytest.approx(-5.0)
     assert cfg.rewards["backroll_sagittal"].weight == pytest.approx(-0.10)
     assert cfg.rewards["backroll_flatness"].weight == pytest.approx(-1.0)
-    assert cfg.rewards["backroll_sagittal"].func is mdp.grounded_backroll_sagittal_penalty
-    assert cfg.rewards["backroll_flatness"].func is mdp.grounded_backroll_flatness_penalty
+    assert (
+        cfg.rewards["backroll_sagittal"].func is mdp.grounded_backroll_sagittal_penalty
+    )
+    assert (
+        cfg.rewards["backroll_flatness"].func is mdp.grounded_backroll_flatness_penalty
+    )
     assert cfg.rewards["action_rate_l2"].weight == pytest.approx(0.0)
-    assert cfg.curriculum["backroll_phase"].params[
-        "action_rate_reward_weights"
-    ] == [0.0, -0.025, -0.05, -0.075, -0.10]
-    assert cfg.curriculum["backroll_phase"].params[
-        "invalid_reward_weights"
-    ] == [-5.0, -6.0, -8.0, -10.0, -10.0]
+    assert cfg.curriculum["backroll_phase"].params["action_rate_reward_weights"] == [
+        0.0,
+        -0.025,
+        -0.05,
+        -0.075,
+        -0.10,
+    ]
+    assert cfg.curriculum["backroll_phase"].params["invalid_reward_weights"] == [
+        -5.0,
+        -6.0,
+        -8.0,
+        -10.0,
+        -10.0,
+    ]
     assert cfg.curriculum["backroll_sagittal_weight"].func is mdp.reward_weight
     assert cfg.curriculum["backroll_sagittal_weight"].params["weight_stages"] == [
         {"step": 0, "weight": -0.10},
@@ -172,22 +202,28 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert "backroll_height_weight" not in cfg.curriculum
     forbidden = ("sprint", "distance", "lane", "road", "recovery", "reposition")
     assert not any(token in name for name in cfg.rewards for token in forbidden)
-    assert cfg.events["set_grounded_backroll_state"].func is mdp.reset_grounded_backroll_state
+    assert (
+        cfg.events["set_grounded_backroll_state"].func
+        is mdp.reset_grounded_backroll_state
+    )
     assert cfg.curriculum["backroll_phase"].func is mdp.grounded_backroll_curriculum
     assert MicroduckBackrollRlCfg.experiment_name == "microduck_backroll"
     assert MicroduckBackrollRlCfg.max_iterations == 4000
     assert MicroduckBackrollRlCfg.save_interval == 50
-    assert MicroduckBackrollRlCfg.algorithm.learning_rate == pytest.approx(2.5e-5)
+    assert MicroduckBackrollRlCfg.algorithm.learning_rate == pytest.approx(1.0e-4)
     assert MicroduckBackrollRlCfg.algorithm.schedule == "fixed"
     assert MicroduckBackrollRlCfg.algorithm.entropy_coef == pytest.approx(5.0e-4)
-    assert MicroduckBackrollRlCfg.algorithm.anchor_retention == pytest.approx(0.50)
+    assert MicroduckBackrollRlCfg.algorithm.anchor_retention == pytest.approx(0.98)
     assert MicroduckBackrollRlCfg.algorithm.refresh_anchor_on_load is True
     assert (
         MicroduckBackrollRlCfg.algorithm.class_name
         == "mjlab_microduck.tasks.backroll_ppo.AnchoredPPO"
     )
     assert MicroduckBackrollRlCfg.actor.distribution_cfg["init_std"] == 1.0
-    assert load_runner_cls("Mjlab-Backroll-Flat-MicroDuck") is MicroduckFrozenActorNormRunner
+    assert (
+        load_runner_cls("Mjlab-Backroll-Flat-MicroDuck")
+        is MicroduckFrozenActorNormRunner
+    )
 
 
 def test_backroll_runner_restores_configured_lr_after_optimizer_resume(monkeypatch):
@@ -296,13 +332,10 @@ def test_launch_tuck_bootstrap_is_one_shot_and_closes_when_rolling(monkeypatch):
 
     # HOME earns nothing. Moving physically toward the configured tuck earns
     # one bounded frontier increment; holding it cannot become an annuity.
-    assert (
-        mdp.grounded_backroll_launch_tuck_progress(
-            env,
-            target_overrides=overrides,
-        ).item()
-        == pytest.approx(0.0)
-    )
+    assert mdp.grounded_backroll_launch_tuck_progress(
+        env,
+        target_overrides=overrides,
+    ).item() == pytest.approx(0.0)
     env.common_step_counter += 1
     asset.data.joint_pos[:, 2] = -1.0
     asset.data.joint_pos[:, 5] = 1.0
@@ -312,13 +345,10 @@ def test_launch_tuck_bootstrap_is_one_shot_and_closes_when_rolling(monkeypatch):
     )
     assert first_tuck.item() > 0.0
     env.common_step_counter += 1
-    assert (
-        mdp.grounded_backroll_launch_tuck_progress(
-            env,
-            target_overrides=overrides,
-        ).item()
-        == pytest.approx(0.0)
-    )
+    assert mdp.grounded_backroll_launch_tuck_progress(
+        env,
+        target_overrides=overrides,
+    ).item() == pytest.approx(0.0)
 
     # The bootstrap cannot follow a roll into the floor or compensate for the
     # real supported signed-rotation/contact requirements.
@@ -326,13 +356,10 @@ def test_launch_tuck_bootstrap_is_one_shot_and_closes_when_rolling(monkeypatch):
     env._roulade_max[:] = math.radians(50.0)
     env._backroll_launch_tuck_paid.zero_()
     env.common_step_counter += 1
-    assert (
-        mdp.grounded_backroll_launch_tuck_progress(
-            env,
-            target_overrides=overrides,
-        ).item()
-        == pytest.approx(0.0)
-    )
+    assert mdp.grounded_backroll_launch_tuck_progress(
+        env,
+        target_overrides=overrides,
+    ).item() == pytest.approx(0.0)
 
 
 def test_sagittal_penalty_prices_small_persistent_twist_but_not_pitch(monkeypatch):
@@ -371,8 +398,14 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     # Training starts with the audited one-shot champion bridge; repeated
     # rearm/recovery is enabled only after standing mastery advances stage 0.
     assert cfg.events["set_grounded_backroll_state"].params["repeat_mode"] is False
-    assert cfg.rewards["backroll_speed_progress"].func is mdp.grounded_backroll_speed_progress
-    assert cfg.rewards["backroll_rise_velocity"].func is mdp.grounded_backroll_rise_velocity
+    assert (
+        cfg.rewards["backroll_speed_progress"].func
+        is mdp.grounded_backroll_speed_progress
+    )
+    assert (
+        cfg.rewards["backroll_rise_velocity"].func
+        is mdp.grounded_backroll_rise_velocity
+    )
     assert (
         cfg.rewards["backroll_contact_sequence"].func
         is mdp.grounded_backroll_contact_sequence
@@ -389,14 +422,18 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
         is mdp.grounded_backroll_head_alignment_progress
     )
     assert cfg.rewards["backroll_head_alignment_progress"].weight == pytest.approx(1.5)
-    assert cfg.rewards["backroll_success"].func is mdp.grounded_backroll_repeat_success_rate
+    assert (
+        cfg.rewards["backroll_success"].func
+        is mdp.grounded_backroll_repeat_success_rate
+    )
     assert cfg.metrics["backroll_cycle_count"].func is mdp.grounded_backroll_cycle_count
     assert cfg.events["set_grounded_backroll_state"].params[
         "ground_recovery_prob"
     ] == pytest.approx(0.0)
-    assert cfg.events["set_grounded_backroll_state"].params[
-        "ground_z_range"
-    ] == (0.04, 0.05)
+    assert cfg.events["set_grounded_backroll_state"].params["ground_z_range"] == (
+        0.04,
+        0.05,
+    )
     for group in ("actor", "critic"):
         assert (
             cfg.observations[group].terms["command"].func
@@ -410,9 +447,15 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     )
     forbidden = ("sprint", "distance", "lane", "road", "reposition")
     assert not any(token in name for name in cfg.rewards for token in forbidden)
-    assert MicroduckRepeatedBackrollRlCfg.experiment_name == "microduck_repeated_backroll"
-    assert MicroduckRepeatedBackrollRlCfg.algorithm.learning_rate == pytest.approx(2.5e-5)
-    assert MicroduckRepeatedBackrollRlCfg.algorithm.entropy_coef == pytest.approx(1.0e-3)
+    assert (
+        MicroduckRepeatedBackrollRlCfg.experiment_name == "microduck_repeated_backroll"
+    )
+    assert MicroduckRepeatedBackrollRlCfg.algorithm.learning_rate == pytest.approx(
+        2.5e-5
+    )
+    assert MicroduckRepeatedBackrollRlCfg.algorithm.entropy_coef == pytest.approx(
+        1.0e-3
+    )
     assert MicroduckRepeatedBackrollRlCfg.actor.distribution_cfg[
         "init_std"
     ] == pytest.approx(0.25)
@@ -421,8 +464,7 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
     ] == [0.25, 0.50, 0.50, 0.80, 0.90, 1.0]
     assert [
-        stage["params"]["repeat_mode"]
-        for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
+        stage["params"]["repeat_mode"] for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
     ] == [False, False, True, True, True, True]
     assert [
         stage["params"]["relaxed_first_cycle"]
@@ -439,9 +481,10 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
         "joint_noise_std"
     ] == pytest.approx(0.0)
-    assert REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"][
-        "synthesize_contact_latches"
-    ] is True
+    assert (
+        REPEATED_BACKROLL_CURRICULUM_STAGES[0]["params"]["synthesize_contact_latches"]
+        is True
+    )
     assert [
         stage["params"]["ground_recovery_prob"]
         for stage in REPEATED_BACKROLL_CURRICULUM_STAGES
@@ -466,16 +509,15 @@ def test_repeated_backroll_rearms_without_adding_course_objectives():
     assert play_reset["relaxed_first_cycle"] is False
     assert play_reset["reference_state_prob"] == pytest.approx(0.0)
     assert play_reset["yaw_range"] == (0.0, 0.0)
-    assert cfg.curriculum["backroll_phase"].params["success_threshold"] == pytest.approx(
-        0.45
-    )
     assert cfg.curriculum["backroll_phase"].params[
-        "required_consecutive_windows"
-    ] == 2
+        "success_threshold"
+    ] == pytest.approx(0.45)
+    assert cfg.curriculum["backroll_phase"].params["required_consecutive_windows"] == 2
     assert cfg.curriculum["backroll_phase"].params["standing_only_mastery"] is True
-    assert cfg.rewards["backroll_completion_progress"].weight > cfg.rewards[
-        "backroll_progress"
-    ].weight
+    assert (
+        cfg.rewards["backroll_completion_progress"].weight
+        > cfg.rewards["backroll_progress"].weight
+    )
     assert cfg.rewards["backroll_success"].params["later_cycle_bonus"] == pytest.approx(
         1.0
     )
@@ -554,39 +596,40 @@ def test_landing_potential_starts_after_flat_head_pivot_not_before():
 
 
 def test_backroll_curriculum_matches_mastery_stages():
-    assert [stage["params"]["standing_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.90,
-        0.925,
-        0.95,
-        0.975,
-        0.99,
+    assert [
+        stage["params"]["standing_prob"] for stage in BACKROLL_CURRICULUM_STAGES
+    ] == [
+        0.20,
+        0.30,
+        0.40,
+        0.60,
+        0.85,
     ]
-    assert [stage["params"]["midroll_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.10,
-        0.075,
-        0.05,
-        0.025,
-        0.01,
+    assert [
+        stage["params"]["midroll_prob"] for stage in BACKROLL_CURRICULUM_STAGES
+    ] == [
+        0.80,
+        0.70,
+        0.60,
+        0.40,
+        0.15,
     ]
-    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_pitch_min"] == pytest.approx(
-        math.radians(90.0)
-    )
-    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_pitch_max"] == pytest.approx(
-        math.radians(300.0)
-    )
-    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_omega_range"] == (
-        1.5,
-        4.0,
-    )
+    assert BACKROLL_CURRICULUM_STAGES[0]["params"][
+        "midroll_pitch_min"
+    ] == pytest.approx(math.radians(250.0))
+    assert BACKROLL_CURRICULUM_STAGES[0]["params"][
+        "midroll_pitch_max"
+    ] == pytest.approx(math.radians(300.0))
+    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_omega_range"] == (0.0, 3.0)
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["joint_noise_std"] == pytest.approx(
         0.0
     )
-    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_state_prob"] == pytest.approx(
-        1.0
-    )
+    assert BACKROLL_CURRICULUM_STAGES[0]["params"][
+        "reference_state_prob"
+    ] == pytest.approx(1.0)
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_state_path"]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_phase_range_deg"] == (
-        90.0,
+        250.0,
         300.0,
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_phase_buckets_deg"] == (
@@ -608,7 +651,9 @@ def test_backroll_curriculum_matches_mastery_stages():
         stage["params"]["sagittal_tolerance_deg"]
         for stage in BACKROLL_CURRICULUM_STAGES
     ] == [29.0, 27.0, 25.0, 22.0, 20.0]
-    assert [stage["params"]["reference_state_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
+    assert [
+        stage["params"]["reference_state_prob"] for stage in BACKROLL_CURRICULUM_STAGES
+    ] == [
         1.0,
         1.0,
         1.0,
@@ -621,7 +666,7 @@ def test_backroll_curriculum_matches_mastery_stages():
     params = cfg.curriculum["backroll_phase"].params
     assert params["window_episodes"] == 4096
     assert params["success_threshold"] == pytest.approx(0.70)
-    assert params["standing_only_mastery"] is True
+    assert params["standing_only_mastery"] is False
 
 
 def test_backroll_discovery_envelope_admits_bridge_but_rejects_side_roll():
@@ -814,7 +859,7 @@ def test_repeated_reference_reset_uses_physical_state_and_actual_latches(
                     "phase_center_deg": 180.0,
                     "trunk_latch": torch.tensor(True),
                     "head_latch": torch.tensor(True),
-                }
+                },
             ]
         },
         reference_path,
@@ -1334,9 +1379,7 @@ def test_repeated_non_top_head_dwell_allows_tuck_grace_then_penalizes(monkeypatc
     values = []
     for step in range(10):
         env.common_step_counter = step
-        values.append(
-            mdp.grounded_backroll_non_top_head_dwell_penalty(env).item()
-        )
+        values.append(mdp.grounded_backroll_non_top_head_dwell_penalty(env).item())
 
     assert values[:9] == [0.0] * 9
     assert values[9] == -1.0
@@ -1649,9 +1692,7 @@ def test_repeated_backroll_rearms_and_credits_two_distinct_cycles(monkeypatch):
         "_head_top_down",
         lambda _env, _asset: torch.ones(1, dtype=torch.bool),
     )
-    hold_steps = math.ceil(
-        mdp._BACKROLL_REPEAT_LANDING_HOLD_SECONDS / env.step_dt
-    )
+    hold_steps = math.ceil(mdp._BACKROLL_REPEAT_LANDING_HOLD_SECONDS / env.step_dt)
 
     pulses = []
     for expected_count in (1, 2):
@@ -1765,9 +1806,7 @@ def test_repeated_backroll_rejects_side_landing(monkeypatch):
     env._backroll_trunk_latch[:] = True
     env._backroll_head_latch[:] = True
 
-    hold_steps = math.ceil(
-        mdp._BACKROLL_REPEAT_LANDING_HOLD_SECONDS / env.step_dt
-    )
+    hold_steps = math.ceil(mdp._BACKROLL_REPEAT_LANDING_HOLD_SECONDS / env.step_dt)
     for _ in range(hold_steps + 2):
         assert mdp.grounded_backroll_repeat_success_rate(env).item() == 0.0
         env.common_step_counter += 1
@@ -1816,9 +1855,7 @@ def test_repeated_backroll_cannot_park_on_trunk_mid_cycle(monkeypatch):
         lambda _env, _asset: torch.ones(1, dtype=torch.bool),
     )
 
-    stall_steps = math.ceil(
-        mdp._BACKROLL_REPEAT_PRE_EXIT_STALL_SECONDS / env.step_dt
-    )
+    stall_steps = math.ceil(mdp._BACKROLL_REPEAT_PRE_EXIT_STALL_SECONDS / env.step_dt)
     for _ in range(stall_steps):
         asset.data.root_link_ang_vel_b.zero_()
         mdp.grounded_backroll_progress(env)
@@ -1844,9 +1881,7 @@ def test_repeated_backroll_does_not_treat_an_upright_launch_pause_as_a_fall(
         lambda _env, _asset: torch.ones(1, dtype=torch.bool),
     )
 
-    stall_steps = math.ceil(
-        mdp._BACKROLL_REPEAT_PRE_EXIT_STALL_SECONDS / env.step_dt
-    )
+    stall_steps = math.ceil(mdp._BACKROLL_REPEAT_PRE_EXIT_STALL_SECONDS / env.step_dt)
     for _ in range(stall_steps + 5):
         asset.data.root_link_ang_vel_b.zero_()
         mdp.grounded_backroll_progress(env)
@@ -1907,9 +1942,7 @@ def test_repeated_recovery_rearms_once_then_credits_the_retry(monkeypatch):
         lambda _env, _asset: torch.ones(1, dtype=torch.bool),
     )
 
-    recovery_hold_steps = math.ceil(
-        mdp._BACKROLL_RECOVERY_HOLD_SECONDS / env.step_dt
-    )
+    recovery_hold_steps = math.ceil(mdp._BACKROLL_RECOVERY_HOLD_SECONDS / env.step_dt)
     recovery_pulses = []
     env.scene.sensors["left_foot_ground_contact"].data.found[:] = 0.0
     for _ in range(2):
@@ -1917,9 +1950,7 @@ def test_repeated_recovery_rearms_once_then_credits_the_retry(monkeypatch):
         env.common_step_counter += 1
     assert env._backroll_recovery_hold_steps.item() == 0
     env.scene.sensors["left_foot_ground_contact"].data.found[:] = 1.0
-    asset.data.root_link_lin_vel_w[:, 0] = (
-        mdp._BACKROLL_RECOVERY_MAX_LIN_SPEED + 0.01
-    )
+    asset.data.root_link_lin_vel_w[:, 0] = mdp._BACKROLL_RECOVERY_MAX_LIN_SPEED + 0.01
     for _ in range(recovery_hold_steps + 1):
         recovery_pulses.append(mdp.grounded_backroll_recovery_success(env).item())
         env.common_step_counter += 1
@@ -1998,9 +2029,7 @@ def test_repeated_recovery_timeout_terminates_and_cannot_open_twice(monkeypatch)
         lambda _env, _asset: torch.zeros(1, dtype=torch.bool),
     )
 
-    timeout_steps = math.ceil(
-        mdp._BACKROLL_RECOVERY_TIMEOUT_SECONDS / env.step_dt
-    )
+    timeout_steps = math.ceil(mdp._BACKROLL_RECOVERY_TIMEOUT_SECONDS / env.step_dt)
     for _ in range(timeout_steps):
         mdp.grounded_backroll_recovery_progress(env)
         env.common_step_counter += 1
