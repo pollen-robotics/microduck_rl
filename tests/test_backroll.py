@@ -124,6 +124,10 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert cfg.rewards["backroll_flatness"].weight == pytest.approx(-1.0)
     assert cfg.rewards["backroll_sagittal"].func is mdp.grounded_backroll_sagittal_penalty
     assert cfg.rewards["backroll_flatness"].func is mdp.grounded_backroll_flatness_penalty
+    assert cfg.rewards["action_rate_l2"].weight == pytest.approx(0.0)
+    assert cfg.curriculum["backroll_phase"].params[
+        "action_rate_reward_weights"
+    ] == [0.0, -0.025, -0.05, -0.075, -0.10]
     forbidden = ("sprint", "distance", "lane", "road", "recovery", "reposition")
     assert not any(token in name for name in cfg.rewards for token in forbidden)
     assert cfg.events["set_grounded_backroll_state"].func is mdp.reset_grounded_backroll_state
@@ -648,6 +652,41 @@ def test_repeated_curriculum_cannot_advance_from_phase_successes_alone():
 
     assert actual.item() == 0.0
     assert env._backroll_curriculum_stage == 0
+
+
+def test_backroll_curriculum_enables_action_smoothness_only_after_mastery():
+    env, _asset = _fake_env()
+    event_cfg = SimpleNamespace(params={})
+    action_rate_cfg = SimpleNamespace(weight=-1.0)
+    env.event_manager = SimpleNamespace(get_term_cfg=lambda _name: event_cfg)
+    env.reward_manager = SimpleNamespace(
+        get_term_cfg=lambda name: action_rate_cfg if name == "action_rate_l2" else None
+    )
+    stages = [{"params": {}}, {"params": {}}]
+
+    mdp.grounded_backroll_curriculum(
+        env,
+        torch.tensor([0]),
+        event_name="set_grounded_backroll_state",
+        stages=stages,
+        action_rate_reward_name="action_rate_l2",
+        action_rate_reward_weights=[0.0, -0.025],
+    )
+    assert action_rate_cfg.weight == pytest.approx(0.0)
+
+    env._backroll_window_episodes.fill_(4096)
+    env._backroll_window_successes.fill_(4096)
+    env.common_step_counter += 50
+    mdp.grounded_backroll_curriculum(
+        env,
+        torch.tensor([0]),
+        event_name="set_grounded_backroll_state",
+        stages=stages,
+        action_rate_reward_name="action_rate_l2",
+        action_rate_reward_weights=[0.0, -0.025],
+    )
+    assert env._backroll_curriculum_stage == 1
+    assert action_rate_cfg.weight == pytest.approx(-0.025)
 
 
 def test_repeated_strict_roll_stage_terminates_failure_before_recovery(monkeypatch):

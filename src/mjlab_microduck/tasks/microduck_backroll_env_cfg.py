@@ -370,7 +370,12 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     )
     cfg.rewards["action_rate_l2"] = RewardTermCfg(
         func=mdp.action_rate_l2,
-        weight=-0.1,
+        # Dynamic discovery needs the robot to commit to a tuck.  A117's
+        # un-gated action-rate cost was several times larger than all positive
+        # task shaping and converged to a static crouch.  Reintroduce only a
+        # small smoothness tax after the strict grounded stage has earned its
+        # own advancement; see the phase curriculum below.
+        weight=0.0,
     )
     cfg.rewards["gentle_landing"] = RewardTermCfg(
         func=microduck_mdp.trunk_vertical_accel_penalty,
@@ -420,6 +425,14 @@ def make_microduck_backroll_env_cfg(play: bool = False):
                 "stages": BACKROLL_CURRICULUM_STAGES,
                 "window_episodes": 4096,
                 "success_threshold": 0.70,
+                "action_rate_reward_name": "action_rate_l2",
+                "action_rate_reward_weights": [
+                    0.0,
+                    -0.025,
+                    -0.05,
+                    -0.075,
+                    -0.10,
+                ],
             },
         )
 

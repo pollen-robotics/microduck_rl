@@ -12609,6 +12609,8 @@ def grounded_backroll_curriculum(
     speed_reward_weights: Optional[list[float]] = None,
     invalid_reward_name: Optional[str] = None,
     invalid_reward_weights: Optional[list[float]] = None,
+    action_rate_reward_name: Optional[str] = None,
+    action_rate_reward_weights: Optional[list[float]] = None,
 ) -> torch.Tensor:
     """Advance phase initialization after enough consecutive clean windows."""
     del env_ids
@@ -12668,6 +12670,17 @@ def grounded_backroll_curriculum(
             raise ValueError("invalid_reward_weights must match the curriculum stages")
         env.reward_manager.get_term_cfg(invalid_reward_name).weight = (
             invalid_reward_weights[stage]
+        )
+    if action_rate_reward_name is not None:
+        if (
+            action_rate_reward_weights is None
+            or len(action_rate_reward_weights) != len(stages)
+        ):
+            raise ValueError(
+                "action_rate_reward_weights must match the curriculum stages"
+            )
+        env.reward_manager.get_term_cfg(action_rate_reward_name).weight = (
+            action_rate_reward_weights[stage]
         )
     return torch.tensor(float(stage), device=env.device)
 
