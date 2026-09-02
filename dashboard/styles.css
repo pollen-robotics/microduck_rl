@@ -133,6 +133,11 @@ h2 { margin-bottom: 0; font-size: 1.22rem; letter-spacing: -.035em; }
 .media-meta { justify-content: space-between; gap: .7rem; padding: .7rem .8rem .8rem; }
 .media-name { min-width: 0; color: #cbd4d9; font-size: .72rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .media-source { flex: none; color: var(--muted); font-size: .65rem; }
+.media-pagination { display: flex; align-items: center; justify-content: center; gap: .8rem; margin-top: 1rem; }
+.media-pagination[hidden] { display: none; }
+.media-pagination .button { min-width: 5.5rem; }
+.media-pagination .button:disabled { cursor: default; opacity: .4; }
+.media-page-status { min-width: 7rem; color: var(--muted); font-size: .75rem; text-align: center; }
 .empty-state { padding: 2rem 1rem; color: var(--muted); font-size: .8rem; text-align: center; }
 .notice { margin-top: 1rem; padding: .8rem 1rem; border: 1px solid rgba(241, 132, 132, .35); border-radius: .6rem; color: var(--danger); background: rgba(241, 132, 132, .08); font-size: .8rem; }
 .footer { justify-content: space-between; max-width: 1440px; margin: 0 auto; padding: 1.5rem 3.5rem 2.5rem; color: var(--muted); font-size: .7rem; }

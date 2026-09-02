@@ -209,6 +209,27 @@ def test_dashboard_pins_exact_retained_champion_above_latest_videos(
     assert "champion.videoIsFeatured" in app
 
 
+def test_dashboard_shows_backroll_sampler_media_in_fifteen_video_pages() -> None:
+    dashboard_root = Path(__file__).resolve().parents[1] / "dashboard"
+    config = json.loads(
+        (dashboard_root / "featured_media.json").read_text(encoding="utf-8")
+    )
+    assert (
+        "artifacts/training/backroll-skill-samples/"
+        in config["featuredVideoPrefixes"]
+    )
+
+    html = (dashboard_root / "index.html").read_text(encoding="utf-8")
+    app = (dashboard_root / "app.js").read_text(encoding="utf-8")
+    styles = (dashboard_root / "styles.css").read_text(encoding="utf-8")
+    assert 'id="media-pagination"' in html
+    assert 'id="media-page-previous"' in html
+    assert 'id="media-page-next"' in html
+    assert "const MEDIA_PAGE_SIZE = 15;" in app
+    assert "media.slice(pageStart, pageStart + MEDIA_PAGE_SIZE)" in app
+    assert ".media-pagination[hidden]" in styles
+
+
 def test_dashboard_normalizes_latest_self_righting_evaluation(tmp_path, monkeypatch) -> None:
     evaluation_root = tmp_path / "evaluations"
     evaluation_root.mkdir()

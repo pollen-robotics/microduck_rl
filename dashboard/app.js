@@ -1,7 +1,8 @@
 (() => {
   "use strict";
 
-  const state = { mediaObserver: null, data: null, collectionId: null };
+  const MEDIA_PAGE_SIZE = 15;
+  const state = { mediaObserver: null, data: null, collectionId: null, mediaPage: 1 };
   const $ = (selector) => document.querySelector(selector);
 
   function text(value) {
@@ -209,12 +210,21 @@
     const media = (data.media || [])
       .filter((item) => item.kind === "video" && item.collection === collectionId)
       .sort((left, right) => String(right.modified || "").localeCompare(String(left.modified || "")));
+    const pageCount = Math.max(1, Math.ceil(media.length / MEDIA_PAGE_SIZE));
+    state.mediaPage = Math.min(Math.max(state.mediaPage, 1), pageCount);
+    const pageStart = (state.mediaPage - 1) * MEDIA_PAGE_SIZE;
+    const pageMedia = media.slice(pageStart, pageStart + MEDIA_PAGE_SIZE);
     const grid = $("#media-grid");
     grid.replaceChildren();
     if (state.mediaObserver) state.mediaObserver.disconnect();
     state.mediaObserver = null;
     $("#media-empty").hidden = media.length !== 0;
     $("#video-count").textContent = `${media.length} ${media.length === 1 ? "video" : "videos"}`;
+    const pagination = $("#media-pagination");
+    pagination.hidden = media.length <= MEDIA_PAGE_SIZE;
+    $("#media-page-status").textContent = `Page ${state.mediaPage} of ${pageCount}`;
+    $("#media-page-previous").disabled = state.mediaPage <= 1;
+    $("#media-page-next").disabled = state.mediaPage >= pageCount;
 
     const loadVideo = (video) => {
       if (video.src || !video.dataset.src) return;
@@ -231,7 +241,7 @@
       }, { rootMargin: "360px 0px" });
     }
 
-    for (const item of media) {
+    for (const item of pageMedia) {
       const card = el("article", "media-card");
       const preview = el("div", "media-preview");
       const video = document.createElement("video");
@@ -276,6 +286,7 @@
 
   $("#video-collection").addEventListener("change", (event) => {
     state.collectionId = event.target.value;
+    state.mediaPage = 1;
     const collection = (state.data?.videoCollections || []).find(
       (item) => item.id === state.collectionId,
     );
@@ -283,6 +294,19 @@
     renderChampion(state.data || {});
     renderRollAudit(state.data || {});
     renderMedia(state.data || {}, state.collectionId);
+  });
+
+  $("#media-page-previous").addEventListener("click", () => {
+    if (state.mediaPage <= 1) return;
+    state.mediaPage -= 1;
+    renderMedia(state.data || {}, state.collectionId);
+    $("#media-title").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+
+  $("#media-page-next").addEventListener("click", () => {
+    state.mediaPage += 1;
+    renderMedia(state.data || {}, state.collectionId);
+    $("#media-title").scrollIntoView({ behavior: "smooth", block: "start" });
   });
 
   loadGallery();
