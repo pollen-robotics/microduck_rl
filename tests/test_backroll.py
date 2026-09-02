@@ -828,6 +828,32 @@ def test_repeated_strict_roll_stage_terminates_failure_before_recovery(monkeypat
     assert mdp.grounded_backroll_invalid_termination(env).item()
 
 
+def test_stationary_head_wobble_cannot_accumulate_a_side_roll_rejection(monkeypatch):
+    """Cross-axis jitter only counts while the backroll still advances."""
+    env, asset = _fake_env()
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+    env._roulade_accum[:] = math.radians(120.0)
+    env._roulade_max[:] = math.radians(120.0)
+    env._roulade_paid[:] = math.radians(120.0)
+    env._backroll_previous_frontier[:] = math.radians(120.0)
+    # This is an otherwise-sagittal stationary head hold with controller
+    # jitter, not an active side roll. The former A222 accounting integrated
+    # this x-axis noise for five seconds and tripped the 90-degree escape.
+    asset.data.root_link_ang_vel_b[:] = torch.tensor([[1.0, 0.0, 0.0]])
+
+    for step in range(100):
+        env.common_step_counter = step
+        mdp.grounded_backroll_progress(env)
+
+    assert env._backroll_cycle_offaxis_rotation.item() == pytest.approx(0.0)
+    assert not env._backroll_invalid.item()
+
+
 def test_negative_body_y_advances_but_forward_rocking_cannot_farm(monkeypatch):
     env, asset = _fake_env()
     monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))

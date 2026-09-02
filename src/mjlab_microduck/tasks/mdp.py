@@ -11642,6 +11642,11 @@ _BACKROLL_REPEAT_MAX_LANDING_ANG_VEL = 4.5
 _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX = math.sin(math.radians(20.0))
 _BACKROLL_REPEAT_SIDE_INVALID_Z = math.sin(math.radians(30.0))
 _BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION = math.radians(90.0)
+# Only integrate cross-axis rotation while the robot is still advancing through
+# the maneuver.  A stationary, otherwise sagittal head contact has small
+# controller wobble that must not eventually be reclassified as a side roll.
+# The immediate lateral-axis escape gate remains active at every step.
+_BACKROLL_OFFAXIS_MIN_BACKWARD_RATE = 0.5
 _BACKROLL_RECOVERY_UPRIGHT_COS = math.cos(math.radians(35.0))
 _BACKROLL_RECOVERY_MIN_HEIGHT = 0.10
 _BACKROLL_RECOVERY_MAX_LIN_SPEED = 0.15
@@ -11948,7 +11953,13 @@ def _update_grounded_backroll_state(
     )
     offaxis_rate = torch.sqrt(ang_vel_b[:, 0].pow(2) + ang_vel_b[:, 2].pow(2))
     env._backroll_cycle_offaxis_rotation += (
-        offaxis_rate * env.step_dt * cycle_active.float()
+        offaxis_rate
+        * env.step_dt
+        * cycle_active.float()
+        * (
+            torch.clamp(-ang_vel_b[:, 1], min=0.0)
+            >= _BACKROLL_OFFAXIS_MIN_BACKWARD_RATE
+        ).float()
     )
     env._backroll_episode_max_lateral_axis_z = torch.maximum(
         env._backroll_episode_max_lateral_axis_z,
