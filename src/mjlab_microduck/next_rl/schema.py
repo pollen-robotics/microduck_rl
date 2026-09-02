@@ -92,7 +92,7 @@ def _metadata(value: Any) -> Mapping[str, Any]:
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
         return MappingProxyType({key: _freeze(item) for key, item in _mapping(value, "metadata").items()})
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+    if isinstance(value, (list, tuple)):
         return tuple(_freeze(item) for item in value)
     if value is None or isinstance(value, (bool, str, int)):
         return value
@@ -312,7 +312,15 @@ class EvaluationRef:
 
     @classmethod
     def from_dict(cls, raw: Any) -> EvaluationRef:
-        value = _mapping(raw, "evaluation")
+        value = _fields(
+            raw,
+            {"kind"},
+            {
+                "policy_sha256", "report_path", "passed", "metric_results", "runtime_repository",
+                "runtime_commit", "approval_provenance", "metadata",
+            },
+            "evaluation",
+        )
         kind = value["kind"]
         if kind not in cls.KINDS:
             raise SchemaError(f"evaluation kind must be one of {cls.KINDS}")

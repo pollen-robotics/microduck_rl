@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 
 import pytest
 
@@ -21,6 +22,14 @@ from mjlab_microduck.next_rl.schema import (
     SchemaError,
     SkillSpec,
 )
+
+
+class NonJsonSequence(Sequence[str]):
+    def __getitem__(self, index: int) -> str:
+        return ("not", "json")[index]
+
+    def __len__(self) -> int:
+        return 2
 
 
 def metric(name: str) -> dict[str, object]:
@@ -194,10 +203,24 @@ def test_normal_evaluation_rejects_legacy_only_fields():
         EvaluationRef.from_dict(raw)
 
 
-@pytest.mark.parametrize("metadata", [{"tags": {"unsafe"}}, {"limit": float("nan")}, {"value": object()}])
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"tags": {"unsafe"}},
+        {"limit": float("nan")},
+        {"value": object()},
+        {"values": range(2)},
+        {"values": NonJsonSequence()},
+    ],
+)
 def test_metadata_rejects_non_json_values(metadata):
     with pytest.raises(SchemaError, match="metadata"):
         SkillSpec.from_dict(skill_dict(metadata=metadata))
+
+
+def test_evaluation_requires_a_kind_field():
+    with pytest.raises(SchemaError, match="kind"):
+        EvaluationRef.from_dict({"policy_sha256": "a" * 64})
 
 
 @pytest.mark.parametrize("field", ["created_at", "output_dir"])
