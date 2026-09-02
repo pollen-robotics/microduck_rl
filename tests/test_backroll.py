@@ -185,6 +185,7 @@ def test_backroll_play_is_deterministic_standing_start():
     assert reset["midroll_prob"] == 0.0
     assert reset["yaw_range"] == (0.0, 0.0)
     assert reset["joint_noise_std"] == 0.0
+    assert reset["sagittal_tolerance_deg"] == pytest.approx(20.0)
     assert "backroll_phase" not in cfg.curriculum
 
 
@@ -474,24 +475,24 @@ def test_landing_potential_starts_after_flat_head_pivot_not_before():
 
 def test_backroll_curriculum_matches_mastery_stages():
     assert [stage["params"]["standing_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.30,
+        0.20,
         0.30,
         0.40,
         0.60,
         0.85,
     ]
     assert [stage["params"]["midroll_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.70,
+        0.80,
         0.70,
         0.60,
         0.40,
         0.15,
     ]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_pitch_min"] == pytest.approx(
-        math.radians(150.0)
+        math.radians(90.0)
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_pitch_max"] == pytest.approx(
-        math.radians(340.0)
+        math.radians(300.0)
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_omega_range"] == (
         1.5,
@@ -501,22 +502,29 @@ def test_backroll_curriculum_matches_mastery_stages():
         0.0
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_state_prob"] == pytest.approx(
-        0.40
+        1.0
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_state_path"]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_phase_range_deg"] == (
         90.0,
-        270.0,
+        300.0,
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_phase_buckets_deg"] == (
         (90.0, 110.0),
         (130.0, 150.0),
+        (170.0, 190.0),
+        (210.0, 230.0),
         (250.0, 270.0),
+        (280.0, 300.0),
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_strict_sagittal"]
-    assert BACKROLL_CURRICULUM_STAGES[0]["params"]["synthesize_contact_latches"]
+    assert not BACKROLL_CURRICULUM_STAGES[0]["params"]["synthesize_contact_latches"]
+    assert [
+        stage["params"]["sagittal_tolerance_deg"]
+        for stage in BACKROLL_CURRICULUM_STAGES
+    ] == [29.0, 27.0, 25.0, 22.0, 20.0]
     assert [stage["params"]["reference_state_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.40,
+        1.0,
         0.50,
         0.50,
         0.25,
@@ -529,6 +537,39 @@ def test_backroll_curriculum_matches_mastery_stages():
     assert params["window_episodes"] == 4096
     assert params["success_threshold"] == pytest.approx(0.70)
     assert params["standing_only_mastery"] is True
+
+
+def test_backroll_discovery_envelope_admits_bridge_but_rejects_side_roll():
+    def quat_for_lateral_tilt(degrees: float) -> torch.Tensor:
+        half = math.radians(degrees) / 2.0
+        return torch.tensor([math.cos(half), math.sin(half), 0.0, 0.0])
+
+    qpos = torch.zeros(3, 21)
+    qpos[:, 3:7] = torch.stack(
+        (
+            quat_for_lateral_tilt(20.0),
+            quat_for_lateral_tilt(28.5),
+            quat_for_lateral_tilt(60.0),
+        )
+    )
+    bank = {
+        "qpos": qpos,
+        "frontier": torch.full((3,), math.radians(220.0)),
+        "trunk_latch": torch.ones(3, dtype=torch.bool),
+        "head_latch": torch.ones(3, dtype=torch.bool),
+    }
+
+    final_mask = mdp._grounded_backroll_reference_consistent_rows(
+        bank,
+        max_lateral_axis_z=math.sin(math.radians(20.0)),
+    )
+    discovery_mask = mdp._grounded_backroll_reference_consistent_rows(
+        bank,
+        max_lateral_axis_z=math.sin(math.radians(29.0)),
+    )
+
+    assert final_mask.tolist() == [True, False, False]
+    assert discovery_mask.tolist() == [True, True, False]
 
 
 def test_reverse_phase_reset_uses_negative_pitch_rate_and_contact_prerequisites(

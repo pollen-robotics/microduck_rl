@@ -11712,6 +11712,10 @@ def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
     env._backroll_start_is_standing = b.clone()
     env._backroll_cycle_max_lateral_axis_z = z.clone()
     env._backroll_cycle_offaxis_rotation = z.clone()
+    env._backroll_cycle_sagittal_limit = torch.full_like(
+        z,
+        _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX,
+    )
     env._backroll_relaxed_first_cycle = b.clone()
     env._backroll_episode_max_lateral_axis_z = z.clone()
     env._backroll_episode_max_offaxis_rotation = z.clone()
@@ -11750,7 +11754,7 @@ def _grounded_backroll_cycle_is_sagittal(env: ManagerBasedRlEnv) -> torch.Tensor
     """Whether the whole current cycle has remained inside the sagittal gate."""
     return (
         (env._backroll_cycle_max_lateral_axis_z
-         <= _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX)
+         <= env._backroll_cycle_sagittal_limit)
         & (env._backroll_cycle_offaxis_rotation
            <= _BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION)
     )
@@ -12420,16 +12424,17 @@ def _grounded_backroll_reference_bank(
 
 def _grounded_backroll_reference_consistent_rows(
     bank: dict[str, torch.Tensor],
+    max_lateral_axis_z: float = _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX,
 ) -> torch.Tensor:
     """Return reset rows that already meet the live sagittal/latch contract.
 
     Reference-state initialization may carry contact history only when that
-    history belongs to the captured physical state.  The same 20-degree
-    sagittal envelope and ordered trunk/head prerequisites used at runtime
-    reject legacy shoulder-biased rows before PPO can see them.
+    history belongs to the captured physical state.  The active curriculum's
+    sagittal envelope and ordered trunk/head prerequisites reject shoulder-
+    biased rows before PPO can see them.
     """
     lateral_axis_z = _lateral_axis_z(bank["qpos"][:, 3:7]).abs()
-    sagittal = lateral_axis_z <= _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX
+    sagittal = lateral_axis_z <= max_lateral_axis_z
     trunk_ordered = (
         ~bank["trunk_latch"]
         | (bank["frontier"] >= _BACKROLL_TRUNK_LATCH_LO)
@@ -12451,6 +12456,7 @@ def _reset_grounded_backroll_reference_states(
     source_seed: int | None,
     yaw_range: tuple,
     strict_sagittal: bool,
+    max_lateral_axis_z: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Place environments in real, champion-generated sagittal pivot states."""
     bank = _grounded_backroll_reference_bank(env, reference_state_path)
@@ -12460,7 +12466,10 @@ def _reset_grounded_backroll_reference_states(
     if source_seed is not None:
         eligible_mask &= bank["source_seed"] == source_seed
     if strict_sagittal:
-        eligible_mask &= _grounded_backroll_reference_consistent_rows(bank)
+        eligible_mask &= _grounded_backroll_reference_consistent_rows(
+            bank,
+            max_lateral_axis_z=max_lateral_axis_z,
+        )
     if phase_buckets_deg is None:
         eligible_rows = torch.nonzero(eligible_mask, as_tuple=False).squeeze(-1)
         if len(eligible_rows) == 0:
@@ -12558,6 +12567,7 @@ def reset_grounded_backroll_state(
     reference_phase_buckets_deg: tuple[tuple[float, float], ...] | None = None,
     reference_source_seed: int | None = None,
     reference_strict_sagittal: bool = False,
+    sagittal_tolerance_deg: float = 20.0,
     repeat_mode: bool = False,
     relaxed_first_cycle: bool = False,
     recovery_enabled: bool = True,
@@ -12604,6 +12614,10 @@ def reset_grounded_backroll_state(
         raise ValueError("reference_state_prob must be in [0, 1]")
     if reference_state_prob > 0.0 and not reference_state_path:
         raise ValueError("reference_state_path is required when reference states are enabled")
+    if not 0.0 < sagittal_tolerance_deg < 30.0:
+        raise ValueError("sagittal_tolerance_deg must be between 0 and 30 degrees")
+    sagittal_limit = math.sin(math.radians(sagittal_tolerance_deg))
+    env._backroll_cycle_sagittal_limit[env_ids] = sagittal_limit
     if (
         len(reference_phase_range_deg) != 2
         or reference_phase_range_deg[1] < reference_phase_range_deg[0]
@@ -12672,6 +12686,7 @@ def reset_grounded_backroll_state(
             source_seed=reference_source_seed,
             yaw_range=yaw_range,
             strict_sagittal=reference_strict_sagittal,
+            max_lateral_axis_z=sagittal_limit,
         )
         spawn_angle[reference_mask] = env._roulade_max[reference_ids]
         reference_trunk_latch[reference_mask] = reference_trunk

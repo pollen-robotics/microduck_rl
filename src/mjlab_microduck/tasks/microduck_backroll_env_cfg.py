@@ -56,29 +56,34 @@ BACKROLL_TUCK_OVERRIDES = {
 BACKROLL_CURRICULUM_STAGES = [
     {
         "params": {
-            # A232 learned the 300-degree feet/landing bridge in its late-start
-            # population, but deterministic standing stayed at 146--160
-            # degrees. The reset distribution had no procedural states between
-            # the measured 140-degree reference and the 260-degree suffix.
-            # Fill that on-policy gap continuously while retaining real
-            # 100/140/260-degree references, late suffix starts, and enough
-            # standing launches to transfer the connected skill.
-            "standing_prob": 0.30,
-            "midroll_prob": 0.70,
-            "midroll_pitch_min": math.radians(150.0),
-            "midroll_pitch_max": math.radians(340.0),
+            # A233 proved that synthetic 150--340-degree resets improve their
+            # own suffix metrics but do not transfer to standing. The captured
+            # successful physical trajectory instead crosses a brief 28.5
+            # degree lateral-axis tilt at 180--220 degrees, just outside the
+            # final 20-degree gate. Expose all six real trajectory phases under
+            # a 29-degree discovery envelope, retain the 30-degree hard side
+            # rejection plus continuous straightness pressure, and tighten the
+            # envelope only after standing success.
+            "standing_prob": 0.20,
+            "midroll_prob": 0.80,
+            "midroll_pitch_min": math.radians(90.0),
+            "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (1.5, 4.0),
             "joint_noise_std": 0.0,
-            "reference_state_prob": 0.40,
+            "reference_state_prob": 1.0,
             "reference_state_path": BACKROLL_REFERENCE_STATE_PATH,
-            "reference_phase_range_deg": (90.0, 270.0),
+            "reference_phase_range_deg": (90.0, 300.0),
             "reference_phase_buckets_deg": (
                 (90.0, 110.0),
                 (130.0, 150.0),
+                (170.0, 190.0),
+                (210.0, 230.0),
                 (250.0, 270.0),
+                (280.0, 300.0),
             ),
             "reference_strict_sagittal": True,
-            "synthesize_contact_latches": True,
+            "synthesize_contact_latches": False,
+            "sagittal_tolerance_deg": 29.0,
             "reference_source_seed": None,
             "yaw_range": (0.0, 0.0),
         }
@@ -99,6 +104,7 @@ BACKROLL_CURRICULUM_STAGES = [
             ),
             "reference_strict_sagittal": True,
             "synthesize_contact_latches": True,
+            "sagittal_tolerance_deg": 27.0,
         }
     },
     {
@@ -117,6 +123,7 @@ BACKROLL_CURRICULUM_STAGES = [
             ),
             "reference_strict_sagittal": True,
             "synthesize_contact_latches": True,
+            "sagittal_tolerance_deg": 25.0,
         }
     },
     {
@@ -135,6 +142,7 @@ BACKROLL_CURRICULUM_STAGES = [
             ),
             "reference_strict_sagittal": True,
             "synthesize_contact_latches": True,
+            "sagittal_tolerance_deg": 22.0,
         }
     },
     {
@@ -153,6 +161,7 @@ BACKROLL_CURRICULUM_STAGES = [
             ),
             "reference_strict_sagittal": True,
             "synthesize_contact_latches": True,
+            "sagittal_tolerance_deg": 20.0,
         }
     },
 ]
@@ -503,6 +512,7 @@ def make_microduck_backroll_env_cfg(play: bool = False):
         cfg.events["set_grounded_backroll_state"].params.update(
             standing_prob=1.0,
             midroll_prob=0.0,
+            sagittal_tolerance_deg=20.0,
         )
 
     cfg.curriculum.clear()
