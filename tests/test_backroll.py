@@ -356,8 +356,8 @@ def test_backroll_curriculum_matches_mastery_stages():
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_state_path"]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_phase_range_deg"] == (
-        260.0,
-        290.0,
+        255.0,
+        265.0,
     )
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["reference_source_seed"] is None
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["yaw_range"] == (0.0, 0.0)

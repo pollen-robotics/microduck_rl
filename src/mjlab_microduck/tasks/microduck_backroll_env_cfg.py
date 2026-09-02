@@ -63,7 +63,11 @@ BACKROLL_CURRICULUM_STAGES = [
             # landing gate or inventing a scripted action sequence.
             "reference_state_prob": 1.0,
             "reference_state_path": BACKROLL_REFERENCE_STATE_PATH,
-            "reference_phase_range_deg": (260.0, 290.0),
+            # The 260-degree reference rows are the only late bank examples
+            # verified inside the strict 20-degree sagittal envelope.  The
+            # stored 290-degree rows carry the old side-roll bias and must not
+            # re-enter the new objective through reset initialization.
+            "reference_phase_range_deg": (255.0, 265.0),
             "reference_source_seed": None,
             "yaw_range": (0.0, 0.0),
         }
