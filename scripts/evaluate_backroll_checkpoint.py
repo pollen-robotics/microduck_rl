@@ -130,6 +130,12 @@ def _case_rows(
                 "head_top_contact_latched": bool(
                     base_env._backroll_head_latch[index].item()
                 ),
+                "feet_recontact_latched": bool(
+                    base_env._backroll_feet_recontact_latch[index].item()
+                ),
+                "max_landing_readiness": float(
+                    base_env._backroll_landing_readiness_paid[index].item()
+                ),
                 "max_grounded_support_gap_s": float(
                     base_env._backroll_max_air_steps[index].item() * base_env.step_dt
                 ),
@@ -244,9 +250,10 @@ def evaluate_checkpoint(
         env.close()
 
     successes = sum(bool(row["grounded_backroll_success"]) for row in rows)
+    feet_recontacts = sum(bool(row["feet_recontact_latched"]) for row in rows)
     eligible = [row for row in rows if row["grounded_backroll_success"]]
     report: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "task": TASK_ID,
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": _sha256(checkpoint),
@@ -257,6 +264,12 @@ def evaluate_checkpoint(
         "variant_batch_size": len(seeds),
         "grounded_backroll_success_count": successes,
         "grounded_backroll_success_rate": successes / len(rows),
+        "feet_recontact_count": feet_recontacts,
+        "feet_recontact_rate": feet_recontacts / len(rows),
+        "mean_max_landing_readiness": sum(
+            float(row["max_landing_readiness"]) for row in rows
+        )
+        / len(rows),
         "acceptance_12_of_16": len(rows) == 16 and successes >= 12,
         "zero_nan_oob": not any(
             bool(row["nan"] or row["out_of_bounds"]) for row in rows

@@ -98,9 +98,8 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
         "backroll_head_pivot",
         "backroll_completion_progress",
         "backroll_speed_progress",
-        "backroll_upright_progress",
-        "backroll_height_progress",
         "backroll_feet_recontact",
+        "backroll_landing_readiness",
         "backroll_success",
         "backroll_invalid",
         "backroll_overspeed",
@@ -137,15 +136,18 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
         "target_rate": 4.5,
         "target_angle": 2.0 * math.pi,
     }
-    assert cfg.rewards["backroll_upright_progress"].weight == pytest.approx(2.0)
-    assert cfg.rewards["backroll_height_progress"].weight == pytest.approx(2.0)
     assert cfg.rewards["backroll_feet_recontact"].weight == pytest.approx(5.0)
     assert (
         cfg.rewards["backroll_feet_recontact"].func
         is mdp.grounded_backroll_feet_recontact_rate
     )
+    assert cfg.rewards["backroll_landing_readiness"].weight == pytest.approx(8.0)
+    assert (
+        cfg.rewards["backroll_landing_readiness"].func
+        is mdp.grounded_backroll_landing_readiness_progress
+    )
     assert cfg.rewards["backroll_success"].weight == pytest.approx(20.0)
-    assert cfg.rewards["backroll_invalid"].weight == pytest.approx(-1.0)
+    assert cfg.rewards["backroll_invalid"].weight == pytest.approx(-5.0)
     assert cfg.rewards["backroll_sagittal"].weight == pytest.approx(-0.10)
     assert cfg.rewards["backroll_flatness"].weight == pytest.approx(-1.0)
     assert cfg.rewards["backroll_sagittal"].func is mdp.grounded_backroll_sagittal_penalty
@@ -156,22 +158,14 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     ] == [0.0, -0.025, -0.05, -0.075, -0.10]
     assert cfg.curriculum["backroll_phase"].params[
         "invalid_reward_weights"
-    ] == [-1.0, -2.0, -3.0, -4.0, -4.0]
+    ] == [-5.0, -6.0, -8.0, -10.0, -10.0]
     assert cfg.curriculum["backroll_sagittal_weight"].func is mdp.reward_weight
     assert cfg.curriculum["backroll_sagittal_weight"].params["weight_stages"] == [
         {"step": 0, "weight": -0.10},
         {"step": 600 * 24, "weight": -0.25},
     ]
-    assert cfg.curriculum["backroll_upright_weight"].params["weight_stages"] == [
-        {"step": 0, "weight": 2.0},
-        {"step": 100 * 24, "weight": 3.0},
-        {"step": 300 * 24, "weight": 5.0},
-    ]
-    assert cfg.curriculum["backroll_height_weight"].params["weight_stages"] == [
-        {"step": 0, "weight": 2.0},
-        {"step": 100 * 24, "weight": 3.0},
-        {"step": 300 * 24, "weight": 4.0},
-    ]
+    assert "backroll_upright_weight" not in cfg.curriculum
+    assert "backroll_height_weight" not in cfg.curriculum
     forbidden = ("sprint", "distance", "lane", "road", "recovery", "reposition")
     assert not any(token in name for name in cfg.rewards for token in forbidden)
     assert cfg.events["set_grounded_backroll_state"].func is mdp.reset_grounded_backroll_state
@@ -1553,6 +1547,53 @@ def test_feet_recontact_bridge_requires_head_release_and_pays_once(monkeypatch):
     second = mdp.grounded_backroll_feet_recontact_rate(env)
     assert first.item() == pytest.approx(1.0 / env.step_dt)
     assert second.item() == 0.0
+
+
+def test_landing_readiness_pays_only_new_post_recontact_progress(monkeypatch):
+    env, _asset = _fake_env()
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+    env._roulade_accum[:] = math.radians(305.0)
+    env._roulade_max[:] = math.radians(305.0)
+    env._roulade_paid[:] = math.radians(305.0)
+    env._backroll_previous_frontier[:] = math.radians(305.0)
+    env._backroll_trunk_latch[:] = True
+    env._backroll_head_latch[:] = True
+
+    # The physical feet-recontact step is snapshotted, not double-paid.
+    assert mdp.grounded_backroll_landing_readiness_progress(env).item() == 0.0
+    assert env._backroll_feet_recontact_latch.item()
+    initial = env._backroll_landing_readiness_paid.item()
+    assert initial > 0.0
+
+    env.common_step_counter += 1
+    assert mdp.grounded_backroll_landing_readiness_progress(env).item() == 0.0
+
+    # More valid backward phase while remaining upright, slow, and on both
+    # feet extends the max-so-far readiness frontier exactly once.
+    env._roulade_max[:] = math.radians(340.0)
+    env.common_step_counter += 1
+    assert mdp.grounded_backroll_landing_readiness_progress(env).item() > 0.0
+    reached = env._backroll_landing_readiness_paid.item()
+    assert reached > initial
+
+    env.common_step_counter += 1
+    assert mdp.grounded_backroll_landing_readiness_progress(env).item() == 0.0
+    assert env._backroll_landing_readiness_paid.item() == pytest.approx(reached)
+
+    # A head contact cannot extend readiness. Releasing it later may pay only
+    # the genuinely new portion, never the missed interval twice.
+    env.scene.sensors["head_ground_contact"].data.found[:] = 1.0
+    env._roulade_max[:] = math.radians(345.0)
+    env.common_step_counter += 1
+    assert mdp.grounded_backroll_landing_readiness_progress(env).item() == 0.0
+    env.scene.sensors["head_ground_contact"].data.found[:] = 0.0
+    env.common_step_counter += 1
+    assert mdp.grounded_backroll_landing_readiness_progress(env).item() > 0.0
 
 
 def test_repeated_backroll_rejects_side_landing(monkeypatch):

@@ -408,16 +408,6 @@ def make_microduck_backroll_env_cfg(play: bool = False):
             "target_angle": 2.0 * math.pi,
         },
     )
-    cfg.rewards["backroll_upright_progress"] = RewardTermCfg(
-        func=microduck_mdp.grounded_backroll_upright_progress,
-        # The mixed late suffix now supplies states where this signed potential
-        # is learnable without paying a standing annuity.
-        weight=2.0,
-    )
-    cfg.rewards["backroll_height_progress"] = RewardTermCfg(
-        func=microduck_mdp.grounded_backroll_height_progress,
-        weight=2.0,
-    )
     cfg.rewards["backroll_feet_recontact"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_feet_recontact_rate,
         # One bounded bridge into the true landing gate. It requires 300
@@ -425,16 +415,26 @@ def make_microduck_backroll_env_cfg(play: bool = False):
         # and the same strict sagittal history as final success.
         weight=5.0,
     )
+    cfg.rewards["backroll_landing_readiness"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_landing_readiness_progress,
+        # A231 reached both feet from late starts in 44% of training episodes,
+        # yet never converted one into a landing hold. Pay only a new
+        # max-so-far composite after that real recontact: more backward phase,
+        # upright height, and braking. The inverted approach is never charged.
+        weight=8.0,
+    )
     cfg.rewards["backroll_success"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_success_rate,
         weight=20.0,
     )
     cfg.rewards["backroll_invalid"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_invalid_rate,
-        # A220 model 50 held still from every deterministic standing start.
-        # The launch bridge needs its exploratory motion before invalid-roll
-        # rejection can tighten through the phase curriculum.
-        weight=-1.0,
+        # A231's weak -1 event let the policy keep all partial progress and
+        # terminate through a side exit in 10/16 deterministic standing trials.
+        # A one-shot invalid cost is not a motion blocker: valid sagittal
+        # exploration pays nothing here, while the rejected shortcut is now
+        # worse than its one-shot feet-recontact bridge.
+        weight=-5.0,
     )
     cfg.rewards["backroll_overspeed"] = RewardTermCfg(
         func=microduck_mdp.roulade_overspeed_penalty,
@@ -517,7 +517,7 @@ def make_microduck_backroll_env_cfg(play: bool = False):
                 "success_threshold": 0.70,
                 "standing_only_mastery": True,
                 "invalid_reward_name": "backroll_invalid",
-                "invalid_reward_weights": [-1.0, -2.0, -3.0, -4.0, -4.0],
+                "invalid_reward_weights": [-5.0, -6.0, -8.0, -10.0, -10.0],
                 "action_rate_reward_name": "action_rate_l2",
                 "action_rate_reward_weights": [
                     0.0,
@@ -538,35 +538,6 @@ def make_microduck_backroll_env_cfg(play: bool = False):
                 ],
             },
         )
-        # The 110-degree exit frontier in A224 establishes ordered head
-        # contact from standing, while enabling landing potentials from the
-        # first batch in A225 erased that bridge.  Turn on the existing,
-        # latch-gated delta potentials only after this initial discovery
-        # window; they then guide the real head-over exit before the later
-        # side-spin regime can take over.
-        cfg.curriculum["backroll_upright_weight"] = CurriculumTermCfg(
-            func=microduck_mdp.reward_weight,
-            params={
-                "reward_name": "backroll_upright_progress",
-                "weight_stages": [
-                    {"step": 0, "weight": 2.0},
-                    {"step": 100 * 24, "weight": 3.0},
-                    {"step": 300 * 24, "weight": 5.0},
-                ],
-            },
-        )
-        cfg.curriculum["backroll_height_weight"] = CurriculumTermCfg(
-            func=microduck_mdp.reward_weight,
-            params={
-                "reward_name": "backroll_height_progress",
-                "weight_stages": [
-                    {"step": 0, "weight": 2.0},
-                    {"step": 100 * 24, "weight": 3.0},
-                    {"step": 300 * 24, "weight": 4.0},
-                ],
-            },
-        )
-
     cfg.terminations["backroll_success"] = TerminationTermCfg(
         func=microduck_mdp.grounded_backroll_success_termination,
         time_out=False,
@@ -597,6 +568,9 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     )
     cfg.metrics["backroll_feet_recontact"] = MetricsTermCfg(
         func=microduck_mdp.grounded_backroll_feet_recontact_fraction,
+    )
+    cfg.metrics["backroll_landing_readiness"] = MetricsTermCfg(
+        func=microduck_mdp.grounded_backroll_landing_readiness,
     )
     return cfg
 
@@ -668,8 +642,17 @@ def make_microduck_repeated_backroll_env_cfg(play: bool = False):
         params={"max_paid_rate": 1.5},
     )
     cfg.rewards["backroll_completion_progress"].weight = 18.0
-    cfg.rewards["backroll_upright_progress"].weight = 5.0
-    cfg.rewards["backroll_height_progress"].weight = 4.0
+    # The repeated policy retains the broader recovery shaping it already
+    # uses. The one-shot discovery task deliberately replaces these signed
+    # terms with the post-recontact max-so-far landing bridge above.
+    cfg.rewards["backroll_upright_progress"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_upright_progress,
+        weight=5.0,
+    )
+    cfg.rewards["backroll_height_progress"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_height_progress,
+        weight=4.0,
+    )
     cfg.rewards["backroll_rise_velocity"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_rise_velocity,
         weight=0.75,

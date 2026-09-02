@@ -11679,6 +11679,8 @@ def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
     env._backroll_head_latch_now = b.clone()
     env._backroll_feet_recontact_latch = b.clone()
     env._backroll_feet_recontact_now = b.clone()
+    env._backroll_landing_readiness_paid = z.clone()
+    env._backroll_landing_readiness_delta = z.clone()
     env._backroll_success = b.clone()
     env._backroll_success_now = b.clone()
     env._backroll_invalid = b.clone()
@@ -11805,6 +11807,8 @@ def _reset_grounded_backroll_cycle_buffers(
     env._backroll_head_latch_now[reset] = False
     env._backroll_feet_recontact_latch[reset] = False
     env._backroll_feet_recontact_now[reset] = False
+    env._backroll_landing_readiness_paid[reset] = 0.0
+    env._backroll_landing_readiness_delta[reset] = 0.0
     env._backroll_success[reset] = False
     env._backroll_air_steps[reset] = 0
     env._backroll_max_air_steps[reset] = 0
@@ -12012,6 +12016,63 @@ def _update_grounded_backroll_state(
     env._backroll_feet_recontact_latch |= feet_recontact_candidate
     env._backroll_feet_recontact_now = (
         env._backroll_feet_recontact_latch & ~previous_feet_recontact
+    )
+    # A231 showed that a discontinuous feet-recontact pulse is reachable from
+    # late reverse-curriculum starts, but supplies no gradient for converting
+    # that instant into the final upright, slow, feet-supported landing. Use a
+    # max-so-far composite after the physical recontact latch. The angular
+    # phase factor keeps the target moving toward 350 degrees; the remaining
+    # factors favor rising, braking, and retaining both feet after head release.
+    # Snapshot the value on latch entry so the recontact event is not paid
+    # twice. Losing the pose never charges a negative reward, and revisiting an
+    # already reached readiness cannot be farmed.
+    readiness_angle = torch.clamp(
+        (frontier - _BACKROLL_FEET_RECONTACT_ANGLE)
+        / (_BACKROLL_LANDING_ANGLE - _BACKROLL_FEET_RECONTACT_ANGLE),
+        min=0.0,
+        max=1.0,
+    )
+    readiness_upright = torch.clamp(
+        (upright - _BACKROLL_FEET_RECONTACT_UPRIGHT_COS)
+        / (_BACKROLL_UPRIGHT_COS - _BACKROLL_FEET_RECONTACT_UPRIGHT_COS),
+        min=0.0,
+        max=1.0,
+    )
+    readiness_height = torch.clamp(
+        (height - _BACKROLL_FEET_RECONTACT_MIN_HEIGHT)
+        / (_BACKROLL_MIN_LANDING_HEIGHT - _BACKROLL_FEET_RECONTACT_MIN_HEIGHT),
+        min=0.0,
+        max=1.0,
+    )
+    readiness_braking = torch.clamp(
+        (6.0 - ang_speed) / (6.0 - _BACKROLL_MAX_LANDING_ANG_VEL),
+        min=0.0,
+        max=1.0,
+    )
+    landing_readiness = readiness_angle * (
+        0.35 * readiness_upright
+        + 0.35 * readiness_height
+        + 0.30 * readiness_braking
+    )
+    readiness_valid = (
+        env._backroll_feet_recontact_latch
+        & left_foot
+        & right_foot
+        & ~head
+        & sagittal_landing
+        & ~env._backroll_invalid
+        & ~recovery_before
+    )
+    previous_readiness = env._backroll_landing_readiness_paid
+    env._backroll_landing_readiness_delta = torch.where(
+        readiness_valid & ~env._backroll_feet_recontact_now,
+        torch.clamp(landing_readiness - previous_readiness, min=0.0),
+        torch.zeros_like(landing_readiness),
+    )
+    env._backroll_landing_readiness_paid = torch.where(
+        readiness_valid,
+        torch.maximum(previous_readiness, landing_readiness),
+        previous_readiness,
     )
     landing_ang_vel_ok = torch.where(
         env._backroll_repeat_mode,
@@ -12637,6 +12698,8 @@ def reset_grounded_backroll_state(
     env._backroll_head_latch_now[env_ids] = False
     env._backroll_feet_recontact_latch[env_ids] = False
     env._backroll_feet_recontact_now[env_ids] = False
+    env._backroll_landing_readiness_paid[env_ids] = 0.0
+    env._backroll_landing_readiness_delta[env_ids] = 0.0
     env._backroll_success[env_ids] = False
     env._backroll_success_now[env_ids] = False
     env._backroll_invalid[env_ids] = False
@@ -13141,6 +13204,16 @@ def grounded_backroll_feet_recontact_rate(
     return env._backroll_feet_recontact_now.float() / env.step_dt
 
 
+def grounded_backroll_landing_readiness_progress(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay only a new post-recontact landing-readiness frontier."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_landing_readiness_delta / env.step_dt
+
+
 def grounded_backroll_success_rate(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -13303,6 +13376,16 @@ def grounded_backroll_feet_recontact_fraction(
     asset: Entity = env.scene[asset_cfg.name]
     _update_grounded_backroll_state(env, asset)
     return env._backroll_feet_recontact_latch.float()
+
+
+def grounded_backroll_landing_readiness(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Highest post-recontact landing readiness reached this cycle."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_landing_readiness_paid
 
 
 def grounded_backroll_cycle_count(
