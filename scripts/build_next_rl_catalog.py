@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import subprocess
+import sys
 from pathlib import Path
 
-from mjlab_microduck.next_rl.artifacts import atomic_write_json, canonical_json, sha256_file
+from mjlab_microduck.next_rl.artifacts import atomic_write_json, canonical_json
 from mjlab_microduck.next_rl.schema import PolicyContract
 
 
@@ -45,6 +47,17 @@ def _git(runtime_repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def _git_bytes(runtime_repo: Path, *args: str) -> bytes:
+    result = subprocess.run(
+        ["git", "-C", str(runtime_repo), *args],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        raise ValueError(result.stderr.decode(errors="replace").strip() or f"git {' '.join(args)} failed")
+    return result.stdout
+
+
 def _runtime_repository(runtime_repo: Path) -> str:
     for remote in ("upstream", "origin"):
         result = subprocess.run(
@@ -63,14 +76,12 @@ def build_catalog(runtime_repo: Path) -> dict[str, object]:
     runtime_repo = runtime_repo.resolve()
     runtime_commit = _git(runtime_repo, "rev-parse", "HEAD")
     repository = _runtime_repository(runtime_repo)
+    readme = _git_bytes(runtime_repo, "show", "HEAD:policies/README.md")
+    approval_sha256 = hashlib.sha256(readme).hexdigest()
     records: list[dict[str, object]] = []
     for capability_id, filename in SHIPPED.items():
         relative_path = f"policies/{filename}"
-        _git(runtime_repo, "ls-files", "--error-unmatch", "--", relative_path)
-        policy_path = runtime_repo / relative_path
-        if not policy_path.is_file():
-            raise ValueError(f"tracked runtime policy is missing: {policy_path}")
-        digest = sha256_file(policy_path)
+        digest = hashlib.sha256(_git_bytes(runtime_repo, "show", f"HEAD:{relative_path}")).hexdigest()
         records.append(
             {
                 "id": capability_id,
@@ -86,7 +97,10 @@ def build_catalog(runtime_repo: Path) -> dict[str, object]:
                     "runtime_repository": repository,
                     "runtime_commit": runtime_commit,
                     "approval_provenance": "policies/README.md",
-                    "metadata": {"evidence_scope": "named_capability_only"},
+                    "metadata": {
+                        "approval_sha256": approval_sha256,
+                        "evidence_scope": "named_capability_only",
+                    },
                 },
             }
         )
@@ -105,7 +119,11 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="Fail when the committed catalog differs")
     args = parser.parse_args()
 
-    generated = build_catalog(args.runtime_repo)
+    try:
+        generated = build_catalog(args.runtime_repo)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 1
     if args.check:
         try:
             committed = args.output.read_text(encoding="utf-8")

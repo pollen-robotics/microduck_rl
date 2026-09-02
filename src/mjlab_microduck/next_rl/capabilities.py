@@ -150,6 +150,40 @@ def _select_parent(spec: SkillSpec, inventory: CapabilityInventory) -> PlanDecis
     return None
 
 
+def _resolve_requested_skill(spec: SkillSpec, inventory: CapabilityInventory) -> PlanDecision:
+    direct = inventory.resolve(spec.id)
+    if direct.disposition == Disposition.BLOCKED:
+        return direct
+
+    matches: dict[str, Capability] = {}
+    if direct.capability is not None:
+        matches[normalize_identifier(direct.capability.id)] = direct.capability
+    alias_match = False
+    for alias in spec.aliases:
+        resolution = inventory.resolve(alias)
+        if resolution.disposition == Disposition.BLOCKED:
+            return resolution
+        if resolution.capability is not None:
+            alias_match = True
+            matches[normalize_identifier(resolution.capability.id)] = resolution.capability
+
+    if len(matches) > 1:
+        return PlanDecision(
+            Disposition.BLOCKED,
+            "Requested ID and aliases match multiple existing capabilities; evaluate existing policy before reuse or retraining.",
+        )
+    if alias_match and direct.capability is None:
+        capability = next(iter(matches.values()))
+        return PlanDecision(
+            Disposition.BLOCKED,
+            "Requested alias matches an existing capability; evaluate existing policy before reuse or retraining.",
+            capability,
+        )
+    if direct.capability is not None:
+        return direct
+    return PlanDecision(Disposition.TRAIN_NEW, "No matching existing capability was found.")
+
+
 def plan_skill(
     spec: SkillSpec,
     inventory: CapabilityInventory,
@@ -159,7 +193,7 @@ def plan_skill(
     if improve_reason is not None and (not isinstance(improve_reason, str) or not improve_reason.strip()):
         raise ValueError("improve_reason must be a non-empty string when provided")
 
-    direct = inventory.resolve(spec.id)
+    direct = _resolve_requested_skill(spec, inventory)
     if direct.disposition == Disposition.BLOCKED:
         return direct
     if direct.capability is not None:
@@ -172,6 +206,12 @@ def plan_skill(
             )
         if capability.status == "available":
             return direct
+        if capability.version != spec.version:
+            return PlanDecision(
+                Disposition.BLOCKED,
+                "Matching learned capability version differs from the requested spec; evaluate existing policy first.",
+                capability,
+            )
         if not _has_requested_metric_evidence(spec, capability):
             return PlanDecision(
                 Disposition.BLOCKED,
