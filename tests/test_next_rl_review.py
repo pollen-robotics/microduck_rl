@@ -95,6 +95,34 @@ def test_bundle_recomputes_mandatory_threshold_semantics(passing_report, clip_fi
         replace(bundle, evaluation_json=forged, evaluation_digest=hashlib.sha256(forged.encode()).hexdigest()).verify()
 
 
+def test_bundle_requires_complete_nonempty_threshold_contracts(passing_report, clip_files):
+    bundle = ReviewBundle.build(passing_report, clip_files)
+    evidence = json.loads(bundle.evaluation_json)
+    for scenario in evidence["scenarios"]:
+        scenario["metrics"]["style"] = 0.0
+        scenario["threshold_results"].append({
+            "scenario_id": scenario["scenario_id"], "metric_name": "style", "unit": "score",
+            "direction": "minimum", "limit": 1.0, "value": 0.0, "mandatory": False,
+            "passed": False, "normalized_violation": 1.0,
+        })
+    complete = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+    valid = replace(bundle, evaluation_json=complete, evaluation_digest=hashlib.sha256(complete.encode()).hexdigest(), metric_summary={"falls": 0.0, "style": 0.0})
+    valid.verify()
+
+    selective = json.loads(complete)
+    selective["scenarios"][0]["metrics"].pop("style")
+    selective["scenarios"][0]["threshold_results"].pop()
+    selective_json = json.dumps(selective, sort_keys=True, separators=(",", ":"))
+    with pytest.raises(ReviewError, match="threshold contract"):
+        replace(valid, evaluation_json=selective_json, evaluation_digest=hashlib.sha256(selective_json.encode()).hexdigest()).verify()
+
+    empty = json.loads(bundle.evaluation_json)
+    empty["scenarios"][0]["threshold_results"] = []
+    empty_json = json.dumps(empty, sort_keys=True, separators=(",", ":"))
+    with pytest.raises(ReviewError, match="threshold"):
+        replace(bundle, evaluation_json=empty_json, evaluation_digest=hashlib.sha256(empty_json.encode()).hexdigest()).verify()
+
+
 def test_bundle_records_canonical_evaluation_and_clip_evidence(passing_report, clip_files):
     bundle = ReviewBundle.build(passing_report, clip_files)
     assert bundle.policy_digest == passing_report.policy.sha256
@@ -125,6 +153,23 @@ def test_bundle_reverifies_retained_baseline_evidence(passing_report, clip_files
     baseline_policy.unlink()
     with pytest.raises(ReviewError, match="baseline policy"):
         bundle.verify()
+
+
+def test_failed_baseline_is_allowed_only_when_its_thresholds_agree(passing_report, clip_files):
+    failed_scenarios = tuple(
+        replace(
+            scenario,
+            metrics={"falls": 1.0},
+            threshold_results=(replace(scenario.threshold_results[0], value=1.0, passed=False, normalized_violation=1.0),),
+        )
+        for scenario in passing_report.scenarios
+    )
+    failed = replace(passing_report, scenarios=failed_scenarios, passed=False)
+    assert ReviewBundle.build(passing_report, clip_files, baseline=failed).baseline is not None
+
+    inconsistent = replace(failed, passed=True)
+    with pytest.raises(ReviewError, match="threshold"):
+        ReviewBundle.build(passing_report, clip_files, baseline=inconsistent)
 
 
 def test_multi_seed_family_clips_choose_the_stable_lowest_seed(passing_report, clip_files):

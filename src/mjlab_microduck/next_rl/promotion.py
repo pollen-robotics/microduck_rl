@@ -7,6 +7,7 @@ import os
 import tempfile
 import time
 import uuid
+import fcntl
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -19,7 +20,6 @@ from .schema import ArtifactRef, Capability, EvaluationRef
 
 
 _LOCK_TIMEOUT_SECONDS = 10.0
-_STALE_LOCK_SECONDS = 300.0
 
 
 class PromotionError(ValueError):
@@ -97,54 +97,23 @@ class PromotionStore:
     @contextmanager
     def _lock(self):
         self.root.mkdir(parents=True, exist_ok=True)
-        owner = uuid.uuid4().hex
-        identity = f"{os.getpid()}:{owner}"
         deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
-        while True:
-            try:
-                descriptor = os.open(self._lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-                    output.write(canonical_json({"owner": owner, "pid": os.getpid(), "identity": identity}))
-                    output.flush()
-                    os.fsync(output.fileno())
-                break
-            except FileExistsError:
-                if self._discard_abandoned_lock():
-                    continue
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("timed out waiting for promotion lock")
-                time.sleep(0.01)
+        descriptor = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("timed out waiting for promotion lock")
+                    time.sleep(0.01)
             yield
         finally:
             try:
-                held = json.loads(self._lock_path.read_text(encoding="utf-8"))
-            except (FileNotFoundError, json.JSONDecodeError):
-                held = {}
-            if held.get("owner") == owner and held.get("identity") == identity:
-                try:
-                    self._lock_path.unlink()
-                except FileNotFoundError:
-                    pass
-
-    def _discard_abandoned_lock(self) -> bool:
-        try:
-            if time.time() - self._lock_path.stat().st_mtime <= _STALE_LOCK_SECONDS:
-                return False
-            held = json.loads(self._lock_path.read_text(encoding="utf-8"))
-            pid = held.get("pid")
-            if not isinstance(pid, int) or not isinstance(held.get("identity"), str):
-                return False
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                self._lock_path.unlink()
-                return True
-            except PermissionError:
-                return False
-        except (FileNotFoundError, json.JSONDecodeError):
-            return True
-        return False
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
 
     def _load(self) -> dict[str, Any]:
         if not self._state_path.exists():
@@ -277,10 +246,22 @@ class PromotionStore:
             raise PromotionError(f"unknown promotion record {record_id!r}") from error
         if record.status != "review_pending":
             raise PromotionError(f"cannot review a candidate in {record.status!r} state")
-        self._assert_binding(Capability.from_dict(next(raw for raw in state["capabilities"] if raw["id"] == record.skill_id and raw["version"] == record.spec_version)), bundle)
+        source = Capability.from_dict(next(raw for raw in state["capabilities"] if raw["id"] == record.skill_id and raw["version"] == record.spec_version))
+        self._assert_persisted_report(source, bundle)
+        self._assert_binding(source, bundle)
         if bundle.digest != record.review_bundle_digest:
             raise PromotionError("approval must use the exact review bundle requested")
         return record, bundle
+
+    @staticmethod
+    def _assert_persisted_report(capability: Capability, bundle: ReviewBundle) -> None:
+        if capability.evaluation is None or capability.evaluation.report_path is None:
+            raise PromotionError("validated evaluation report is missing")
+        path = Path(capability.evaluation.report_path)
+        if not path.is_file() or path.stat().st_size == 0:
+            raise PromotionError("validated evaluation report is missing")
+        if path.read_text(encoding="utf-8") != bundle.evaluation_json:
+            raise PromotionError("validated evaluation report does not match review bundle")
 
     def approve(self, record_id: str, *, reviewer: str) -> PromotionRecord:
         reviewer = _text(reviewer, "reviewer")

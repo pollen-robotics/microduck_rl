@@ -157,3 +157,49 @@ uv run --with pytest pytest tests/ -q
 - Promotion locks record owner, PID, and identity, recover only aged locks from
   a dead PID, and leave an aged live-PID lock untouched. The module was also
   reformatted into conventional readable control flow.
+
+## Fix round 3 — complete threshold contracts and advisory locking
+
+### RED evidence
+
+The additional regressions demonstrated that an empty or selectively omitted
+threshold result could still be accepted, an approval proceeded after its
+persisted evaluation file was deleted, and the previous exclusive-create lock
+remained unusable after a descriptor owner released it:
+
+```text
+FAILED test_bundle_requires_complete_nonempty_threshold_contracts
+FAILED test_missing_or_mutated_persisted_evaluation_blocks_approval_and_rejection
+TimeoutError: timed out waiting for promotion lock
+```
+
+### GREEN evidence
+
+```text
+uv run --with pytest pytest tests/test_next_rl_review.py tests/test_next_rl_promotion.py -q
+29 passed in 0.15s
+
+uv run --with pytest pytest tests/test_next_rl_*.py -q
+107 passed in 1.58s
+
+uv run --with pytest pytest tests/ -q
+303 passed, 1 skipped in 7.03s
+```
+
+### Fixes
+
+- Every scenario now requires non-empty threshold results; result keys are
+  unique, cover the scenario metrics, bind the containing scenario, and share
+  an identical metric/unit/direction/limit/mandatory contract across all
+  scenarios. Aggregate pass status remains independently recomputed.
+- Failed baselines are valid comparison context only when their threshold
+  results and top-level pass value agree; an inconsistent failed baseline is
+  rejected.
+- Pending approval/rejection re-reads the `EvaluationRef.report_path` and
+  requires a non-empty regular file whose canonical bytes exactly match the
+  review bundle before changing any capability state.
+- The lockfile is now a persistent advisory `fcntl.flock` target with bounded
+  nonblocking retry. Closing or crashing its descriptor releases the lock
+  automatically, eliminating stale-file unlink races. Distinct pending versions
+  are also covered by a serialized-approval test that leaves one learned policy
+  per skill.

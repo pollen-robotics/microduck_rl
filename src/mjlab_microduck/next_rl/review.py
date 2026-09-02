@@ -91,6 +91,7 @@ def _report(value: str, label: str, *, require_passing: bool = True) -> dict[str
         raise ReviewError(f"{label} evaluation scenarios are required")
     seen: set[str] = set()
     mandatory_passed = True
+    threshold_contract: set[tuple[str, str, str, float, bool]] | None = None
     for scenario in raw["scenarios"]:
         if not isinstance(scenario, dict) or not {"scenario_id", "family", "seed", "policy_sha256", "metrics", "threshold_results"} <= set(scenario):
             raise ReviewError(f"{label} evaluation scenario is invalid")
@@ -104,6 +105,9 @@ def _report(value: str, label: str, *, require_passing: bool = True) -> dict[str
         metrics = scenario["metrics"]
         if not isinstance(metrics, dict):
             raise ReviewError(f"{label} scenario metrics are invalid")
+        if not scenario["threshold_results"]:
+            raise ReviewError(f"{label} threshold results are required")
+        signatures: set[tuple[str, str, str, float, bool]] = set()
         for result in scenario["threshold_results"]:
             fields = {"scenario_id", "metric_name", "unit", "direction", "limit", "value", "mandatory", "passed", "normalized_violation"}
             if not isinstance(result, dict) or set(result) != fields:
@@ -121,7 +125,17 @@ def _report(value: str, label: str, *, require_passing: bool = True) -> dict[str
             violation = max(0.0, (result["limit"] - result["value"]) if result["direction"] == "minimum" else (result["value"] - result["limit"])) / max(1.0, abs(result["limit"]))
             if result["passed"] is not passed or result["normalized_violation"] != violation:
                 raise ReviewError(f"{label} threshold result is inconsistent")
+            signature = (result["metric_name"], result["unit"], result["direction"], float(result["limit"]), result["mandatory"])
+            if signature in signatures:
+                raise ReviewError(f"{label} threshold result keys are not unique")
+            signatures.add(signature)
             mandatory_passed = mandatory_passed and (passed or not result["mandatory"])
+        if set(metrics) != {signature[0] for signature in signatures}:
+            raise ReviewError(f"{label} threshold results do not cover scenario metrics")
+        if threshold_contract is None:
+            threshold_contract = signatures
+        elif threshold_contract != signatures:
+            raise ReviewError(f"{label} threshold contract differs across scenarios")
     if raw["passed"] is not mandatory_passed:
         raise ReviewError(f"{label} evaluation threshold pass status is inconsistent")
     if require_passing and raw["passed"] is not True:

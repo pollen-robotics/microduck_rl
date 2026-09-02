@@ -169,14 +169,47 @@ def test_validation_persists_an_immutable_exact_evaluation_report(store, capabil
         store._write_report_once(bundle.digest, "{}")
 
 
-def test_abandoned_lock_is_recovered_but_a_live_lock_is_not_removed(store, capability, bundle, monkeypatch):
-    store.root.mkdir(parents=True)
-    store._lock_path.write_text(json.dumps({"owner": "dead", "pid": 999999, "identity": "dead"}))
-    os.utime(store._lock_path, (0, 0))
-    store.validate(capability, bundle)
+def test_missing_or_mutated_persisted_evaluation_blocks_approval_and_rejection(store, capability, bundle):
+    review = pending(store, capability, bundle)
+    report_path = store.inventory().resolve("hello").capability.evaluation.report_path
+    os.unlink(report_path)
+    with pytest.raises(PromotionError, match="evaluation report"):
+        store.approve(review.id, reviewer="rakesh")
 
-    store._lock_path.write_text(json.dumps({"owner": "live", "pid": os.getpid(), "identity": "live"}))
-    os.utime(store._lock_path, (0, 0))
+    store = PromotionStore(store.root.parent / "mutated-state")
+    review = pending(store, capability, bundle)
+    report_path = store.inventory().resolve("hello").capability.evaluation.report_path
+    open(report_path, "w", encoding="utf-8").write("{}")
+    with pytest.raises(PromotionError, match="evaluation report"):
+        store.reject(review.id, reviewer="rakesh", reason="leans")
+
+
+def test_advisory_lock_releases_with_descriptor_and_does_not_break_live_owner(store, capability, bundle, monkeypatch):
+    import fcntl
+
+    store.root.mkdir(parents=True)
+    descriptor = open(store._lock_path, "a+", encoding="utf-8")
+    fcntl.flock(descriptor.fileno(), fcntl.LOCK_EX)
     monkeypatch.setattr("mjlab_microduck.next_rl.promotion._LOCK_TIMEOUT_SECONDS", 0)
     with pytest.raises(TimeoutError):
-        store.request_review(capability, bundle)
+        store.validate(capability, bundle)
+    fcntl.flock(descriptor.fileno(), fcntl.LOCK_UN)
+    descriptor.close()
+    store.validate(capability, bundle)
+
+
+def test_distinct_pending_versions_serialize_to_one_learned_policy(store, capability, bundle):
+    evidence = json.loads(bundle.evaluation_json)
+    evidence["spec_version"] = "1.0.1"
+    text = canonical_json(evidence)
+    candidate = replace(bundle, evaluation_json=text, evaluation_digest=hashlib.sha256(text.encode()).hexdigest())
+    pending_a = pending(store, capability, bundle)
+    pending_b = pending(store, replace(capability, version="1.0.1"), candidate)
+
+    first = store.approve(pending_a.id, reviewer="a")
+    second = store.approve(pending_b.id, reviewer="b")
+    records = store._load()["records"].values()
+
+    assert first.status == "learned"
+    assert second.status == "learned"
+    assert sum(record["status"] == "learned" for record in records) == 1
