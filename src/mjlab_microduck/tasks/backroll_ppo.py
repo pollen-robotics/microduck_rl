@@ -13,7 +13,7 @@ class AnchoredPpoCfg(PpoWithSymmetryCfg):
     """PPO config with an iteration-level proximal pull to a loaded actor."""
 
     class_name: str = "mjlab_microduck.tasks.backroll_ppo.AnchoredPPO"
-    anchor_retention: float = 0.50
+    anchor_retention: float = 0.70
 
 
 class AnchoredPPO(PPO):
@@ -25,7 +25,7 @@ class AnchoredPPO(PPO):
     the former, while PPO remains free to tune exploration independently.
     """
 
-    def __init__(self, *args, anchor_retention: float = 0.50, **kwargs):
+    def __init__(self, *args, anchor_retention: float = 0.70, **kwargs):
         if not 0.0 <= anchor_retention <= 1.0:
             raise ValueError("anchor_retention must be between zero and one")
         self.anchor_retention = float(anchor_retention)

@@ -735,11 +735,12 @@ _backroll_algorithm_params.update(
 )
 MicroduckBackrollRlCfg.algorithm = AnchoredPpoCfg(
     **_backroll_algorithm_params,
-    # A239 retained 90% of each PPO displacement, but a measured 0.78% actor
-    # drift still collapsed ordered standing contacts from 14/16 to 2/16 in
-    # only 50 updates. Retain half of each update so useful residual learning
-    # remains possible while the standing launch stays inside its narrow basin.
-    anchor_retention=0.50,
+    # A239's 90% retention allowed 0.78% actor drift and collapsed ordered
+    # contacts to 2/16. A240's 50% retention held drift near 0.14% and preserved
+    # 12--13/16 contacts through 150 updates, but could not move beyond the
+    # parent's 175-degree frontier. Use the measured midpoint for enough
+    # residual freedom to learn the landing without reopening A239's collapse.
+    anchor_retention=0.70,
 )
 MicroduckBackrollRlCfg.actor.distribution_cfg["init_std"] = 1.0
 
