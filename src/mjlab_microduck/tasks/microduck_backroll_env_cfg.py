@@ -74,10 +74,14 @@ BACKROLL_CURRICULUM_STAGES = [
             # rejection plus continuous straightness pressure, and tighten the
             # envelope only after standing success. A234 additionally moved
             # the actor normalizer by L2 0.63 in 50 updates and erased every
-            # standing contact latch, so half of every discovery batch now
-            # rehearses standing while the actor normalizer stays frozen.
-            "standing_prob": 0.50,
-            "midroll_prob": 0.50,
+            # standing contact latch. Freezing it in A235/A236 proved that a
+            # 50/50 reset batch still overwrites the fragile standing launch:
+            # ordered standing contacts fell from 14/16 to 9/16 at the normal
+            # learning rate and to 1/16 even at one-sixth rate. Preserve the
+            # parent with a standing-dominant batch. Ten percent still gives
+            # about 819 physical late-phase trajectories per 8192-env rollout.
+            "standing_prob": 0.90,
+            "midroll_prob": 0.10,
             "midroll_pitch_min": math.radians(90.0),
             "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (1.5, 4.0),
@@ -95,8 +99,8 @@ BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.60,
-            "midroll_prob": 0.40,
+            "standing_prob": 0.925,
+            "midroll_prob": 0.075,
             "midroll_pitch_min": math.radians(90.0),
             "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (1.0, 4.0),
@@ -110,8 +114,8 @@ BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.70,
-            "midroll_prob": 0.30,
+            "standing_prob": 0.95,
+            "midroll_prob": 0.05,
             "midroll_pitch_min": math.radians(90.0),
             "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (2.0, 5.0),
@@ -125,8 +129,8 @@ BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.80,
-            "midroll_prob": 0.20,
+            "standing_prob": 0.975,
+            "midroll_prob": 0.025,
             "midroll_pitch_min": math.radians(90.0),
             "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (0.0, 4.0),
@@ -140,8 +144,8 @@ BACKROLL_CURRICULUM_STAGES = [
     },
     {
         "params": {
-            "standing_prob": 0.90,
-            "midroll_prob": 0.10,
+            "standing_prob": 0.99,
+            "midroll_prob": 0.01,
             "midroll_pitch_min": math.radians(90.0),
             "midroll_pitch_max": math.radians(300.0),
             "midroll_omega_range": (0.0, 3.0),

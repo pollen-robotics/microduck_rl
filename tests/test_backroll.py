@@ -477,18 +477,18 @@ def test_landing_potential_starts_after_flat_head_pivot_not_before():
 
 def test_backroll_curriculum_matches_mastery_stages():
     assert [stage["params"]["standing_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.50,
-        0.60,
-        0.70,
-        0.80,
         0.90,
+        0.925,
+        0.95,
+        0.975,
+        0.99,
     ]
     assert [stage["params"]["midroll_prob"] for stage in BACKROLL_CURRICULUM_STAGES] == [
-        0.50,
-        0.40,
-        0.30,
-        0.20,
         0.10,
+        0.075,
+        0.05,
+        0.025,
+        0.01,
     ]
     assert BACKROLL_CURRICULUM_STAGES[0]["params"]["midroll_pitch_min"] == pytest.approx(
         math.radians(90.0)
