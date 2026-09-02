@@ -4,6 +4,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "record_backroll_policy.py"
 SPEC = importlib.util.spec_from_file_location("record_backroll_policy", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
@@ -114,3 +116,23 @@ def test_completed_cycle_rearms_frontier_tracking_for_retry() -> None:
         angular_speed=0.0,
         vertical_speed=0.0,
     )
+
+
+def test_full_duration_diagnostic_requires_incomplete_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "record_backroll_policy.py",
+            "checkpoint.pt",
+            "output.mp4",
+            "--full-duration-diagnostic",
+        ],
+    )
+    args = RECORD._parse_args()
+    assert args.full_duration_diagnostic
+    assert not args.allow_incomplete_diagnostic
+    with pytest.raises(SystemExit, match="requires --allow-incomplete-diagnostic"):
+        RECORD._validate_args(args)

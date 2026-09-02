@@ -119,6 +119,15 @@ def _parse_args() -> argparse.Namespace:
             "gate is not reached. Proof recordings still require success by default."
         ),
     )
+    parser.add_argument(
+        "--full-duration-diagnostic",
+        action="store_true",
+        help=(
+            "Keep an incomplete diagnostic running for --duration instead of "
+            "cutting it once the robot is dormant. Requires "
+            "--allow-incomplete-diagnostic."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -128,6 +137,21 @@ def _as_rgb8(frame: np.ndarray) -> np.ndarray:
     if frame.dtype != np.uint8:
         frame = (np.clip(frame, 0.0, 1.0) * 255).astype(np.uint8)
     return np.ascontiguousarray(frame[:, :, :3])
+
+
+def _validate_args(args: argparse.Namespace) -> None:
+    if args.duration <= 0.0 or args.width < 2 or args.height < 2:
+        raise SystemExit("--duration, --width, and --height must be positive")
+    if args.batch_size < 1:
+        raise SystemExit("--batch-size must be at least 1")
+    if args.env_index < 0 or args.env_index >= args.batch_size:
+        raise SystemExit("--env-index must be within [0, --batch-size)")
+    if args.required_cycles < 1:
+        raise SystemExit("--required-cycles must be at least 1")
+    if args.full_duration_diagnostic and not args.allow_incomplete_diagnostic:
+        raise SystemExit(
+            "--full-duration-diagnostic requires --allow-incomplete-diagnostic"
+        )
 
 
 def _ffmpeg_writer(
@@ -201,14 +225,7 @@ def main() -> int:
     output = args.output.expanduser().resolve()
     if not checkpoint.is_file():
         raise SystemExit(f"Checkpoint not found: {checkpoint}")
-    if args.duration <= 0.0 or args.width < 2 or args.height < 2:
-        raise SystemExit("--duration, --width, and --height must be positive")
-    if args.batch_size < 1:
-        raise SystemExit("--batch-size must be at least 1")
-    if args.env_index < 0 or args.env_index >= args.batch_size:
-        raise SystemExit("--env-index must be within [0, --batch-size)")
-    if args.required_cycles < 1:
-        raise SystemExit("--required-cycles must be at least 1")
+    _validate_args(args)
 
     temporary_dir = REPO_ROOT / ".tmp" / "codex"
     temporary_dir.mkdir(parents=True, exist_ok=True)
@@ -304,7 +321,7 @@ def main() -> int:
             if success:
                 success = True
                 break
-            if args.allow_incomplete_diagnostic:
+            if args.allow_incomplete_diagnostic and not args.full_duration_diagnostic:
                 robot = base_env.scene["robot"]
                 env_index = args.env_index
                 frontier_rad = float(base_env._roulade_max[env_index].item())
