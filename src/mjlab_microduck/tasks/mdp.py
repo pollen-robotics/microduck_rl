@@ -11564,23 +11564,25 @@ def _grounded_backroll_late_phase_ramp(
 
 def grounded_backroll_sagittal_penalty(
     env: ManagerBasedRlEnv,
+    max_offaxis_rate: float = 3.0,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Bounded off-axis tax throughout a started backroll.
+    """Continuously price transverse angular motion during a backroll.
 
-    It begins only after signed backward rotation crosses 10 degrees, so
-    standing does not pay.  Pure body-y backroll velocity is free; only the
-    transverse component is charged.
+    The strict maneuver gate rejects a cycle after 90 degrees of accumulated
+    off-axis rotation.  A prior 1 rad/s dead zone let a small but persistent
+    body-x/body-z twist reach that hard boundary with nearly no learning
+    signal.  This returns the bounded *rate* from the first meaningful roll
+    phase onward, so the integral tracks the physical off-axis budget.  Pure
+    backward body-y rotation remains exactly free and standing remains zero.
     """
+    if max_offaxis_rate <= 0.0:
+        raise ValueError("max_offaxis_rate must be positive")
     asset: Entity = env.scene[asset_cfg.name]
     omega_b = torch.nan_to_num(asset.data.root_link_ang_vel_b, nan=0.0)
-    # The previous raw squared-rate tax was unbounded: the A204 learner found
-    # that the cheapest way to avoid a large off-axis update was to stop the
-    # roll entirely.  Charge only excess transverse rate and cap the signal so
-    # the signed rotation objective remains the dominant gradient.
     off_axis_rate = torch.sqrt(omega_b[:, 0].square() + omega_b[:, 2].square())
-    excess = torch.clamp((off_axis_rate - 1.0) / 3.0, min=0.0, max=1.0)
-    return excess.square() * _grounded_backroll_late_phase_ramp(env)
+    bounded_rate = torch.clamp(off_axis_rate, max=max_offaxis_rate)
+    return bounded_rate * _grounded_backroll_late_phase_ramp(env)
 
 
 def grounded_backroll_flatness_penalty(

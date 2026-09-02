@@ -127,8 +127,8 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert cfg.rewards["backroll_upright_progress"].weight == pytest.approx(5.0)
     assert cfg.rewards["backroll_height_progress"].weight == pytest.approx(4.0)
     assert cfg.rewards["backroll_success"].weight == pytest.approx(20.0)
-    assert cfg.rewards["backroll_invalid"].weight == pytest.approx(-1.0)
-    assert cfg.rewards["backroll_sagittal"].weight == pytest.approx(-0.5)
+    assert cfg.rewards["backroll_invalid"].weight == pytest.approx(-2.0)
+    assert cfg.rewards["backroll_sagittal"].weight == pytest.approx(-2.0)
     assert cfg.rewards["backroll_flatness"].weight == pytest.approx(-1.0)
     assert cfg.rewards["backroll_sagittal"].func is mdp.grounded_backroll_sagittal_penalty
     assert cfg.rewards["backroll_flatness"].func is mdp.grounded_backroll_flatness_penalty
@@ -138,7 +138,7 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     ] == [0.0, -0.025, -0.05, -0.075, -0.10]
     assert cfg.curriculum["backroll_phase"].params[
         "invalid_reward_weights"
-    ] == [-1.0, -2.0, -3.0, -4.0, -4.0]
+    ] == [-2.0, -3.0, -4.0, -4.0, -4.0]
     forbidden = ("sprint", "distance", "lane", "road", "recovery", "reposition")
     assert not any(token in name for name in cfg.rewards for token in forbidden)
     assert cfg.events["set_grounded_backroll_state"].func is mdp.reset_grounded_backroll_state
@@ -210,6 +210,29 @@ def test_launch_tuck_bootstrap_is_one_shot_and_closes_when_rolling(monkeypatch):
         ).item()
         == pytest.approx(0.0)
     )
+
+
+def test_sagittal_penalty_prices_small_persistent_twist_but_not_pitch(monkeypatch):
+    env, asset = _fake_env()
+    monkeypatch.setattr(
+        mdp,
+        "_update_grounded_backroll_state",
+        lambda _env, _asset: None,
+    )
+    # The alignment ramp is fully open after a real roll has begun. Pure
+    # backwards body-y rotation is the desired maneuver and remains free.
+    env._roulade_max[:] = math.radians(90.0)
+    asset.data.root_link_ang_vel_b[:] = torch.tensor([[0.0, -4.0, 0.0]])
+    assert mdp.grounded_backroll_sagittal_penalty(env).item() == pytest.approx(0.0)
+
+    # A 0.25 rad/s transverse twist used to sit below the old 1 rad/s dead
+    # zone, yet it can accumulate past the 90-degree physical gate. It must
+    # now receive a continuous signal, bounded independently of body-y speed.
+    asset.data.root_link_ang_vel_b[:] = torch.tensor([[0.25, -4.0, 0.0]])
+    assert mdp.grounded_backroll_sagittal_penalty(env).item() == pytest.approx(0.25)
+
+    asset.data.root_link_ang_vel_b[:] = torch.tensor([[5.0, -4.0, 0.0]])
+    assert mdp.grounded_backroll_sagittal_penalty(env).item() == pytest.approx(3.0)
 
 
 def test_repeated_backroll_rearms_without_adding_course_objectives():

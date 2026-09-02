@@ -357,10 +357,10 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     )
     cfg.rewards["backroll_invalid"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_invalid_rate,
-        # Keep invalid physical solutions terminal, but at stage 0 a single
-        # exploratory tuck/roll must not be worse than holding HOME forever.
-        # The curriculum restores the full rejection cost after discovery.
-        weight=-1.0,
+        # A219 escaped HOME but every deterministic standing rollout violated
+        # the hard sagittal gate. The launch bridge now supplies a safe first
+        # action, so restore a meaningful one-shot rejection of invalid rolls.
+        weight=-2.0,
     )
     cfg.rewards["backroll_overspeed"] = RewardTermCfg(
         func=microduck_mdp.roulade_overspeed_penalty,
@@ -369,12 +369,10 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     )
     cfg.rewards["backroll_sagittal"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_sagittal_penalty,
-        # A202 model 50 reached the feet/upright envelope but accumulated
-        # 220--330 degrees of off-axis rotation.  Increase only this
-        # task-specific drift tax so the near-landing parent is steered over
-        # the head instead of the shoulder; it remains bounded and does not
-        # cap the required backward angular rate.
-        weight=-0.5,
+        # A219 model 300 first failed through accumulated off-axis rotation in
+        # 15/16 audited standing trials. Charge that budget continuously; this
+        # leaves the required backward body-y rotation entirely unrestricted.
+        weight=-2.0,
     )
     cfg.rewards["backroll_lateral_velocity"] = RewardTermCfg(
         func=microduck_mdp.roulade_lateral_velocity_penalty,
@@ -442,7 +440,7 @@ def make_microduck_backroll_env_cfg(play: bool = False):
                 "window_episodes": 4096,
                 "success_threshold": 0.70,
                 "invalid_reward_name": "backroll_invalid",
-                "invalid_reward_weights": [-1.0, -2.0, -3.0, -4.0, -4.0],
+                "invalid_reward_weights": [-2.0, -3.0, -4.0, -4.0, -4.0],
                 "action_rate_reward_name": "action_rate_l2",
                 "action_rate_reward_weights": [
                     0.0,
