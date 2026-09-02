@@ -11537,6 +11537,55 @@ def roulade_lateral_velocity_penalty(
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
 
 
+def _grounded_backroll_late_phase_ramp(
+    env: ManagerBasedRlEnv,
+    start_angle: float = math.radians(120.0),
+    full_angle: float = math.radians(300.0),
+) -> torch.Tensor:
+    """Fade alignment pressure in only after launch momentum is established."""
+    if full_angle <= start_angle:
+        raise ValueError("full_angle must be greater than start_angle")
+    frontier = torch.nan_to_num(env._roulade_max, nan=0.0)
+    phase = torch.clamp(
+        (frontier - start_angle) / (full_angle - start_angle),
+        min=0.0,
+        max=1.0,
+    )
+    return phase.square() * (3.0 - 2.0 * phase)
+
+
+def grounded_backroll_sagittal_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Late-phase off-axis tax for preserving launch momentum.
+
+    Early A203 fine-tuning showed that an always-on large sagittal tax makes
+    a near-complete parent abandon the roll before it reaches the contact
+    bridge.  Delaying the same physical penalty until the 120--300 degree
+    completion window keeps launch exploration open while steering the final
+    pivot over the head rather than a shoulder.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    omega_b = torch.nan_to_num(asset.data.root_link_ang_vel_b, nan=0.0)
+    return (
+        (omega_b[:, 0].square() + omega_b[:, 2].square())
+        * _grounded_backroll_late_phase_ramp(env)
+    )
+
+
+def grounded_backroll_flatness_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Late-phase lateral-axis tilt tax, zero during the launch window."""
+    asset: Entity = env.scene[asset_cfg.name]
+    lateral_axis_z = torch.nan_to_num(
+        _lateral_axis_z(asset.data.root_link_quat_w), nan=0.0
+    ).abs()
+    return lateral_axis_z.square() * _grounded_backroll_late_phase_ramp(env)
+
+
 # ============================================================================
 # Grounded backroll task: one supported reverse roulade and feet landing
 # ============================================================================

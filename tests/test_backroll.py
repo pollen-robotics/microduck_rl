@@ -117,6 +117,8 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert cfg.rewards["backroll_completion_progress"].weight == pytest.approx(8.0)
     assert cfg.rewards["backroll_sagittal"].weight == pytest.approx(-0.5)
     assert cfg.rewards["backroll_flatness"].weight == pytest.approx(-1.0)
+    assert cfg.rewards["backroll_sagittal"].func is mdp.grounded_backroll_sagittal_penalty
+    assert cfg.rewards["backroll_flatness"].func is mdp.grounded_backroll_flatness_penalty
     forbidden = ("sprint", "distance", "lane", "road", "recovery", "reposition")
     assert not any(token in name for name in cfg.rewards for token in forbidden)
     assert cfg.events["set_grounded_backroll_state"].func is mdp.reset_grounded_backroll_state
@@ -979,6 +981,29 @@ def test_backward_purity_fades_before_the_robot_can_side_roll():
     assert clean.item() == pytest.approx(1.0)
     assert 0.0 < fading.item() < 1.0
     assert escaped.item() == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_alignment_penalties_ramp_only_during_completion_window():
+    env, asset = _fake_env()
+    asset.data.root_link_ang_vel_b[:] = torch.tensor([[1.0, -6.0, 2.0]])
+    half = math.radians(45.0) * 0.5
+    asset.data.root_link_quat_w[:] = torch.tensor(
+        [[math.cos(half), math.sin(half), 0.0, 0.0]]
+    )
+    frontiers = [0.0, math.radians(120.0), math.radians(210.0), math.radians(300.0)]
+    sagittal = []
+    flatness = []
+    for frontier in frontiers:
+        env._roulade_max[:] = frontier
+        sagittal.append(mdp.grounded_backroll_sagittal_penalty(env).item())
+        flatness.append(mdp.grounded_backroll_flatness_penalty(env).item())
+
+    assert sagittal[0] == pytest.approx(0.0)
+    assert flatness[0] == pytest.approx(0.0)
+    assert sagittal[1] == pytest.approx(0.0)
+    assert flatness[1] == pytest.approx(0.0)
+    assert 0.0 < sagittal[2] < sagittal[3]
+    assert 0.0 < flatness[2] < flatness[3]
 
 
 def test_ordered_contact_rewards_are_one_shot_latches(monkeypatch):
