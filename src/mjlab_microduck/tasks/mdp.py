@@ -13,6 +13,7 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.reward_manager import RewardManager as _RewardManager
 from mjlab.entity import Entity
 from mjlab.tasks.velocity.mdp.velocity_command import UniformVelocityCommand, UniformVelocityCommandCfg
+from mjlab.tasks.velocity.mdp import rewards as _velocity_rewards
 from mjlab.tasks.velocity.mdp import observations as _velocity_obs
 from mjlab.managers.command_manager import CommandTerm
 from mjlab.managers import CommandTermCfg
@@ -599,6 +600,4064 @@ def height_progress(
     delta = pot - env._height_potential_prev
     env._height_potential_prev = pot.clone()
     return delta
+
+
+def _stair_local_state(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return root x/z and upright score in the local terrain frame."""
+    asset: Entity = env.scene[asset_cfg.name]
+    terrain = env.scene.terrain
+    x = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 0] - terrain.env_origins[:, 0], nan=0.0
+    )
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - terrain.env_origins[:, 2], nan=0.0
+    )
+    quat = asset.data.root_link_quat_w
+    upright = torch.clamp(
+        torch.nan_to_num(
+            1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2), nan=0.0
+        ),
+        min=0.0,
+        max=1.0,
+    )
+    return x, z, upright
+
+
+def _stair_approach_gate(
+    env: ManagerBasedRlEnv,
+    stair_start_distance: float,
+    fade_distance: float,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    x, _, _ = _stair_local_state(env, asset_cfg)
+    return torch.sigmoid(
+        (stair_start_distance - x) / max(fade_distance, 1e-6)
+    )
+
+
+def _stair_corridor_gate(
+    env: ManagerBasedRlEnv,
+    corridor_half_width: float | None,
+    corridor_fade: float,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    if corridor_half_width is None:
+        return torch.ones(env.num_envs, device=env.device)
+    asset: Entity = env.scene[asset_cfg.name]
+    y = torch.abs(
+        torch.nan_to_num(
+            asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1],
+            nan=0.0,
+        )
+    )
+    return torch.sigmoid(
+        (corridor_half_width - y) / max(corridor_fade, 1e-6)
+    )
+
+
+def stair_approach_upright(
+    env: ManagerBasedRlEnv,
+    std: float,
+    stair_start_distance: float,
+    fade_distance: float = 0.20,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Preserve the transferred walk posture only on the flat runway."""
+    _, _, upright = _stair_local_state(env, asset_cfg)
+    sin_tilt_squared = torch.clamp(1.0 - upright.square(), min=0.0, max=1.0)
+    score = torch.exp(-sin_tilt_squared / max(std**2, 1e-6))
+    return score * _stair_approach_gate(
+        env, stair_start_distance, fade_distance, asset_cfg
+    )
+
+
+def stair_approach_linear_tracking(
+    env: ManagerBasedRlEnv,
+    std: float,
+    command_name: str,
+    stair_start_distance: float,
+    fade_distance: float = 0.20,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Track the normal walking command until the first stair, then fade it."""
+    tracking = _velocity_rewards.track_linear_velocity(
+        env, std=std, command_name=command_name, asset_cfg=asset_cfg
+    )
+    return tracking * _stair_approach_gate(
+        env, stair_start_distance, fade_distance, asset_cfg
+    )
+
+
+def stair_approach_angular_tracking(
+    env: ManagerBasedRlEnv,
+    std: float,
+    command_name: str,
+    stair_start_distance: float,
+    fade_distance: float = 0.20,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Fade turn tracking at the first riser so the climb can self-organize."""
+    tracking = _velocity_rewards.track_angular_velocity(
+        env, std=std, command_name=command_name, asset_cfg=asset_cfg
+    )
+    return tracking * _stair_approach_gate(
+        env, stair_start_distance, fade_distance, asset_cfg
+    )
+
+
+def configure_stair_viewer_grid(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None = None,
+    terrain_levels: tuple[int, ...] = (0, 1, 0, 1),
+    terrain_types: tuple[int, ...] = (0, 0, 1, 1),
+) -> None:
+    """Place four play environments on four distinct 2x2 stair patches."""
+    del env_ids
+    terrain = env.scene.terrain
+    if terrain.terrain_origins is None:
+        return
+    if env.num_envs < len(terrain_levels) or len(terrain_levels) != len(terrain_types):
+        raise ValueError("The stair viewer grid requires four matching environment origins.")
+    levels = torch.tensor(terrain_levels, device=env.device, dtype=torch.long)
+    types = torch.tensor(terrain_types, device=env.device, dtype=torch.long)
+    rows, cols = terrain.terrain_origins.shape[:2]
+    if int(levels.max()) >= rows or int(types.max()) >= cols:
+        raise ValueError("Stair viewer grid indices exceed the generated terrain grid.")
+    terrain.terrain_levels[: len(levels)] = levels
+    terrain.terrain_types[: len(types)] = types
+    terrain.env_origins[: len(levels)] = terrain.terrain_origins[levels, types]
+
+
+def force_stair_terrain_level(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None = None,
+    terrain_level: int = 2,
+    terrain_type: int = 0,
+) -> None:
+    """Place every vectorized environment on one exact stair geometry."""
+
+    del env_ids
+    terrain = env.scene.terrain
+    if terrain.terrain_origins is None:
+        return
+    rows, cols = terrain.terrain_origins.shape[:2]
+    if not 0 <= terrain_level < rows or not 0 <= terrain_type < cols:
+        raise ValueError("Forced stair terrain index exceeds the generated grid")
+    terrain.terrain_levels[:] = terrain_level
+    terrain.terrain_types[:] = terrain_type
+    terrain.env_origins[:] = terrain.terrain_origins[terrain_level, terrain_type]
+
+
+def seed_route_challenge_levels(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    standard_fraction: float = 0.125,
+) -> None:
+    """Keep part of each batch on the full-height stair from the beginning."""
+    terrain = env.scene.terrain
+    if terrain.terrain_origins is None or len(env_ids) == 0:
+        return
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    if not hasattr(env, "_route_challenge_mask"):
+        env._route_challenge_mask = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    env._route_challenge_mask[env_ids] = False
+    if len(env_ids) == env.num_envs:
+        challenge_count = min(
+            len(env_ids), max(1, int(round(len(env_ids) * standard_fraction)))
+        )
+        selected_ids = env_ids[
+            torch.randperm(len(env_ids), device=env.device)[:challenge_count]
+        ]
+    else:
+        selected_ids = env_ids[
+            torch.rand(len(env_ids), device=env.device) < standard_fraction
+        ]
+    if len(selected_ids) == 0:
+        return
+    env._route_challenge_mask[selected_ids] = True
+    max_level = terrain.terrain_origins.shape[0] - 1
+    terrain.terrain_levels[selected_ids] = max_level
+    terrain.env_origins[selected_ids] = terrain.terrain_origins[
+        terrain.terrain_levels[selected_ids], terrain.terrain_types[selected_ids]
+    ]
+
+
+def stair_route_cues(
+    env: ManagerBasedRlEnv,
+    stair_start_distance: float,
+    goal_distance: float,
+    min_riser_height: float,
+    max_riser_height: float,
+    num_terrain_levels: int,
+    tread_depth: float,
+    num_steps: int,
+    head_sensor_name: str = "head_ground_contact",
+    trunk_sensor_name: str = "trunk_ground_contact",
+    cue_distance: float = 0.18,
+    cue_width: float = 0.025,
+    include_time_to_go: bool = False,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Six real-sensor-compatible route cues in the dormant body-command slot.
+
+    The physical robot can derive the first-riser distance and obstacle height
+    from its head ToF/camera. Spatial cues stay near zero on the runway to
+    preserve the manufacturer gait. Finite-horizon specialists may replace the
+    redundant route-progress slot with a raw time-to-go countdown.
+    """
+    x, _, _ = _stair_local_state(env, asset_cfg)
+    passed_faces = torch.where(
+        x >= stair_start_distance,
+        torch.floor((x - stair_start_distance) / max(tread_depth, 1e-6)).long()
+        + 1,
+        torch.zeros_like(x, dtype=torch.long),
+    )
+    next_face_index = torch.clamp(passed_faces, min=0, max=max(num_steps - 1, 0))
+    next_face = stair_start_distance + next_face_index.to(x.dtype) * tread_depth
+    distance = next_face - x
+    mode = torch.sigmoid((cue_distance - distance) / max(cue_width, 1e-6))
+    signed_distance = torch.clamp(
+        distance / max(cue_distance, 1e-6), min=-1.0, max=1.0
+    )
+    route_progress = torch.clamp(x / max(goal_distance, 1e-6), 0.0, 1.0)
+    if include_time_to_go:
+        route_or_time = torch.clamp(
+            (env.max_episode_length - env.episode_length_buf.to(x.dtype))
+            / max(env.max_episode_length, 1),
+            min=0.0,
+            max=1.0,
+        )
+    else:
+        route_or_time = route_progress
+    levels = env.scene.terrain.terrain_levels.to(dtype=x.dtype)
+    level_fraction = torch.clamp(
+        levels / max(num_terrain_levels - 1, 1), 0.0, 1.0
+    )
+    riser_height = min_riser_height + level_fraction * (
+        max_riser_height - min_riser_height
+    )
+    height_fraction = riser_height / max(max_riser_height, 1e-6)
+    def contact_bit(sensor_name: str) -> torch.Tensor:
+        if sensor_name not in env.scene.sensors:
+            return torch.zeros_like(x)
+        found = env.scene.sensors[sensor_name].data.found
+        return (found.view(found.shape[0], -1) > 0).any(dim=-1).to(x.dtype)
+
+    return torch.stack(
+        (
+            mode,
+            mode * signed_distance,
+            mode * height_fraction,
+            route_or_time if include_time_to_go else mode * route_or_time,
+            contact_bit(head_sensor_name),
+            contact_bit(trunk_sensor_name),
+        ),
+        dim=-1,
+    )
+
+
+def stair_first_riser_clearance(
+    env: ManagerBasedRlEnv,
+    stair_start_distance: float,
+    min_riser_height: float,
+    max_riser_height: float,
+    num_terrain_levels: int,
+    corridor_half_width: float,
+    riser_height: float | None = None,
+    x_margin: float = 0.04,
+    z_margin: float = 0.025,
+    max_vertical_speed: float = 0.35,
+    hold_time_s: float = 0.15,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay once for durable physical clearance of the first riser.
+
+    No posture or contact type is prescribed. A jump, roll, shell mantle, or
+    head-supported lever all qualify if the root crosses the lip, stays above
+    it with bounded vertical speed, and remains inside the stair corridor.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    if riser_height is None:
+        levels = env.scene.terrain.terrain_levels.to(dtype=x.dtype)
+        level_fraction = torch.clamp(
+            levels / max(num_terrain_levels - 1, 1), min=0.0, max=1.0
+        )
+        riser = min_riser_height + level_fraction * (
+            max_riser_height - min_riser_height
+        )
+    else:
+        riser = torch.full_like(x, riser_height)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    vertical_speed = torch.abs(
+        torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=torch.inf)
+    )
+    candidate = (
+        (x >= stair_start_distance + x_margin)
+        & (z >= riser + z_margin)
+        & (y <= corridor_half_width)
+        & (vertical_speed <= max_vertical_speed)
+    )
+    skip_clearance = getattr(env, "_stair_skip_first_clearance", None)
+    if skip_clearance is not None:
+        candidate &= ~skip_clearance
+    if not hasattr(env, "_stair_first_riser_hold_steps"):
+        env._stair_first_riser_hold_steps = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+    if not hasattr(env, "_stair_first_riser_latched"):
+        env._stair_first_riser_latched = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    fresh = env.episode_length_buf <= 1
+    env._stair_first_riser_hold_steps[fresh] = 0
+    env._stair_first_riser_latched[fresh] = False
+    env._stair_first_riser_hold_steps = torch.where(
+        candidate,
+        env._stair_first_riser_hold_steps + 1,
+        torch.zeros_like(env._stair_first_riser_hold_steps),
+    )
+    required_steps = max(1, int(round(hold_time_s / env.step_dt)))
+    newly_cleared = (
+        env._stair_first_riser_hold_steps >= required_steps
+    ) & ~env._stair_first_riser_latched
+    env._stair_first_riser_latched |= newly_cleared
+    return newly_cleared.float()
+
+
+def stair_first_riser_frontier(
+    env: ManagerBasedRlEnv,
+    stair_start_distance: float,
+    standing_root_height: float,
+    riser_height: float,
+    approach_distance: float = 0.18,
+    preload_distance: float = 0.08,
+    x_margin: float = 0.04,
+    z_margin: float = 0.025,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward only new episode-best progress through the first 170 mm riser.
+
+    The three equal phases are reaching the face, lifting above the lip, and
+    crossing the face while elevated. Holding or repeating an already reached
+    state pays zero, so the dense discovery signal cannot be farmed.
+    """
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    approach = torch.clamp(
+        (x - (stair_start_distance - approach_distance))
+        / max(approach_distance - 0.02, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    preload_gate = torch.sigmoid(
+        (x - (stair_start_distance - preload_distance)) / 0.02
+    )
+    lip_height = riser_height + z_margin
+    lift = torch.clamp(
+        (z - standing_root_height)
+        / max(lip_height - standing_root_height, 1e-6),
+        min=0.0,
+        max=1.0,
+    ) * preload_gate
+    crossing = torch.clamp(
+        (x - (stair_start_distance - 0.02)) / max(x_margin + 0.02, 1e-6),
+        min=0.0,
+        max=1.0,
+    ) * lift
+    frontier = (approach + lift + crossing) / 3.0
+    if not hasattr(env, "_stair_first_riser_frontier"):
+        env._stair_first_riser_frontier = frontier.clone()
+    fresh = env.episode_length_buf <= 1
+    env._stair_first_riser_frontier[fresh] = frontier[fresh]
+    new_best = torch.maximum(env._stair_first_riser_frontier, frontier)
+    delta = new_best - env._stair_first_riser_frontier
+    env._stair_first_riser_frontier = new_best
+    return delta / env.step_dt
+
+
+def stair_curriculum_mantle_frontier(
+    env: ManagerBasedRlEnv,
+    stair_start_distance: float,
+    min_riser_height: float,
+    max_riser_height: float,
+    num_terrain_levels: int,
+    standing_root_height: float,
+    approach_distance: float = 0.18,
+    preload_distance: float = 0.08,
+    x_margin: float = 0.04,
+    z_margin: float = 0.025,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Mechanism-agnostic first-riser frontier for a height curriculum."""
+
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    levels = env.scene.terrain.terrain_levels.to(dtype=x.dtype)
+    level_fraction = torch.clamp(
+        levels / max(num_terrain_levels - 1, 1), min=0.0, max=1.0
+    )
+    riser_height = min_riser_height + level_fraction * (
+        max_riser_height - min_riser_height
+    )
+    approach = torch.clamp(
+        (x - (stair_start_distance - approach_distance))
+        / max(approach_distance - 0.02, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    preload_gate = torch.sigmoid(
+        (x - (stair_start_distance - preload_distance)) / 0.02
+    )
+    lip_height = riser_height + z_margin
+    lift = torch.clamp(
+        (z - standing_root_height)
+        / torch.clamp(lip_height - standing_root_height, min=1e-6),
+        min=0.0,
+        max=1.0,
+    ) * preload_gate
+    crossing = torch.clamp(
+        (x - (stair_start_distance - 0.02)) / max(x_margin + 0.02, 1e-6),
+        min=0.0,
+        max=1.0,
+    ) * lift
+    frontier = (approach + lift + crossing) / 3.0
+    return _new_frontier_delta(env, frontier, "_stair_curriculum_mantle_frontier")
+
+
+def stair_curriculum_contact_mantle_frontier(
+    env: ManagerBasedRlEnv,
+    stair_start_distance: float,
+    min_riser_height: float,
+    max_riser_height: float,
+    num_terrain_levels: int,
+    tread_depth: float,
+    corridor_half_width: float,
+    x_start_margin: float = 0.005,
+    x_target_margin: float = 0.040,
+    z_start_margin: float = 0.005,
+    z_target_margin: float = 0.025,
+    support_sensor_name: str = "robot_ground_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay only new last-mile center progress after real stair contact.
+
+    A first-riser face or tread contact arms the potential for the remainder of
+    the episode. The potential then concentrates all of its gradient in the
+    final centimeters needed to put the root over the lip. Repeated bumps and
+    holding an already reached pose pay zero because only a new episode-best
+    potential is rewarded.
+    """
+
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    levels = env.scene.terrain.terrain_levels.to(dtype=x.dtype)
+    level_fraction = torch.clamp(
+        levels / max(num_terrain_levels - 1, 1), min=0.0, max=1.0
+    )
+    riser_height = min_riser_height + level_fraction * (
+        max_riser_height - min_riser_height
+    )
+
+    if support_sensor_name not in env.scene.sensors:
+        raise RuntimeError(f"Missing required contact sensor: {support_sensor_name}")
+    contact_data = env.scene.sensors[support_sensor_name].data
+    if (
+        contact_data.found is None
+        or contact_data.pos is None
+        or contact_data.normal is None
+    ):
+        raise RuntimeError(
+            f"{support_sensor_name} must provide found, pos, and normal"
+        )
+    face, tread = classify_curriculum_stair_contacts(
+        contact_data.found,
+        contact_data.pos,
+        contact_data.normal,
+        env.scene.terrain.env_origins,
+        stair_face_x=stair_start_distance,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    contact = (face | tread).any(dim=-1)
+
+    armed = getattr(env, "_stair_curriculum_contact_mantle_armed", None)
+    if armed is None:
+        armed = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._stair_curriculum_contact_mantle_armed = armed
+    fresh = env.episode_length_buf <= 1
+    armed[fresh] = False
+    cleared = getattr(env, "_stair_first_riser_latched", None)
+    if cleared is None:
+        cleared = torch.zeros_like(armed)
+    newly_eligible = (
+        (env.episode_length_buf >= 3)
+        & (y <= corridor_half_width)
+        & contact
+        & ~cleared
+    )
+    armed |= newly_eligible
+
+    x_progress = torch.clamp(
+        (x - (stair_start_distance + x_start_margin))
+        / max(x_target_margin - x_start_margin, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    z_progress = torch.clamp(
+        (z - (riser_height + z_start_margin))
+        / max(z_target_margin - z_start_margin, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    potential = 0.55 * x_progress + 0.45 * z_progress
+    potential = torch.where(
+        armed & (y <= corridor_half_width), potential, torch.zeros_like(potential)
+    )
+    return _new_frontier_delta(
+        env, potential, "_stair_curriculum_contact_mantle_frontier"
+    )
+
+
+def stair_critic_privileged_state(
+    env: ManagerBasedRlEnv,
+    stair_start_distance: float,
+    min_riser_height: float,
+    max_riser_height: float,
+    num_terrain_levels: int,
+    source_episode_step_range: tuple[int, int] = (15, 60),
+    corridor_half_width: float = 0.36,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Critic-only obstacle, contact, and reference-phase information."""
+
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, upright = _stair_local_state(env, asset_cfg)
+    y = asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    levels = env.scene.terrain.terrain_levels.to(dtype=x.dtype)
+    level_fraction = torch.clamp(
+        levels / max(num_terrain_levels - 1, 1), min=0.0, max=1.0
+    )
+    riser_height = min_riser_height + level_fraction * (
+        max_riser_height - min_riser_height
+    )
+    linear_velocity = torch.nan_to_num(asset.data.root_link_lin_vel_w, nan=0.0)
+    angular_velocity = torch.nan_to_num(asset.data.root_link_ang_vel_w, nan=0.0)
+    source_step = getattr(env, "_stair_walker_bank_source_step", None)
+    if source_step is None:
+        phase = torch.zeros_like(x)
+    else:
+        step_low, step_high = source_episode_step_range
+        phase = torch.clamp(
+            (source_step.to(x.dtype) - step_low) / max(step_high - step_low, 1),
+            min=0.0,
+            max=1.0,
+        )
+
+    def contact_bit(sensor_name: str) -> torch.Tensor:
+        if sensor_name not in env.scene.sensors:
+            return torch.zeros_like(x)
+        found = env.scene.sensors[sensor_name].data.found
+        return (found.view(found.shape[0], -1) > 0).any(dim=-1).to(x.dtype)
+
+    clearance = getattr(env, "_stair_first_riser_latched", None)
+    if clearance is None:
+        clearance_bit = torch.zeros_like(x)
+    else:
+        clearance_bit = clearance.to(x.dtype)
+    return torch.stack(
+        (
+            torch.clamp((stair_start_distance - x) / 0.25, -1.0, 1.0),
+            torch.clamp(y / max(corridor_half_width, 1e-6), -1.0, 1.0),
+            torch.clamp((z - riser_height) / max_riser_height, -1.0, 1.0),
+            upright,
+            torch.clamp(linear_velocity[:, 0], -2.0, 2.0),
+            torch.clamp(linear_velocity[:, 2], -2.0, 2.0),
+            torch.clamp(angular_velocity[:, 1] / 8.0, -2.0, 2.0),
+            level_fraction,
+            phase,
+            contact_bit("head_ground_contact"),
+            contact_bit("trunk_ground_contact"),
+            contact_bit("legs_ground_contact"),
+            contact_bit("feet_stair_contact"),
+            clearance_bit,
+        ),
+        dim=-1,
+    )
+
+
+def reset_route_learning_states(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    stair_start_distance: float,
+    min_riser_height: float,
+    max_riser_height: float,
+    num_terrain_levels: int,
+    tread_depth: float,
+    num_steps: int,
+    standing_root_height: float,
+    near_face_fraction: float = 0.25,
+    partial_mantle_fraction: float = 0.25,
+    on_tread_fraction: float = 0.15,
+    min_tread_step: int = 1,
+    max_tread_step: int | None = None,
+) -> None:
+    """Reverse curriculum for discovering contact and recovery subskills.
+
+    Normal runway starts remain the majority. Other episodes begin immediately
+    before the face or upright on a random tread, allowing PPO to learn the
+    obstacle reaction and later landing/recovery phases before it can execute
+    the entire sequence from the approach.
+    """
+    if env_ids is None or len(env_ids) == 0:
+        return
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    if not hasattr(env, "_stair_skip_first_clearance"):
+        env._stair_skip_first_clearance = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    env._stair_skip_first_clearance[env_ids] = False
+    terrain = env.scene.terrain
+    levels = terrain.terrain_levels[env_ids].to(dtype=torch.float32)
+    level_fraction = torch.clamp(
+        levels / max(num_terrain_levels - 1, 1), 0.0, 1.0
+    )
+    riser = min_riser_height + level_fraction * (
+        max_riser_height - min_riser_height
+    )
+    draw = torch.rand(len(env_ids), device=env.device)
+    near_mask = draw < near_face_fraction
+    mantle_mask = (draw >= near_face_fraction) & (
+        draw < near_face_fraction + partial_mantle_fraction
+    )
+    tread_mask = (draw >= near_face_fraction + partial_mantle_fraction) & (
+        draw
+        < near_face_fraction + partial_mantle_fraction + on_tread_fraction
+    )
+
+    near_ids = env_ids[near_mask]
+    if len(near_ids) > 0:
+        jitter = (torch.rand(len(near_ids), device=env.device) - 0.5) * 0.04
+        env.sim.data.qpos[near_ids, 0] = (
+            terrain.env_origins[near_ids, 0]
+            + stair_start_distance
+            - 0.07
+            + jitter
+        )
+        env.sim.data.qpos[near_ids, 1] = terrain.env_origins[near_ids, 1]
+        env.sim.data.qvel[near_ids, :6] = 0.0
+        env.sim.data.qvel[near_ids, 0] = 0.10 + 0.20 * torch.rand(
+            len(near_ids), device=env.device
+        )
+        pitch = torch.deg2rad(
+            10.0 + 15.0 * torch.rand(len(near_ids), device=env.device)
+        )
+        env.sim.data.qpos[near_ids, 3] = torch.cos(0.5 * pitch)
+        env.sim.data.qpos[near_ids, 4] = 0.0
+        env.sim.data.qpos[near_ids, 5] = torch.sin(0.5 * pitch)
+        env.sim.data.qpos[near_ids, 6] = 0.0
+
+    mantle_ids = env_ids[mantle_mask]
+    if len(mantle_ids) > 0:
+        # Begin just before the clearance boundary, pitched so head or shell
+        # contact can finish the transition. The policy must still move the
+        # root forward and hold above the lip, so reset itself earns nothing.
+        env.sim.data.qpos[mantle_ids, 0] = (
+            terrain.env_origins[mantle_ids, 0]
+            + stair_start_distance
+            - 0.015
+            + (torch.rand(len(mantle_ids), device=env.device) - 0.5) * 0.02
+        )
+        env.sim.data.qpos[mantle_ids, 1] = terrain.env_origins[mantle_ids, 1]
+        env.sim.data.qpos[mantle_ids, 2] = (
+            terrain.env_origins[mantle_ids, 2]
+            + riser[mantle_mask]
+            + 0.060
+        )
+        pitch = torch.deg2rad(
+            55.0 + 25.0 * torch.rand(len(mantle_ids), device=env.device)
+        )
+        env.sim.data.qpos[mantle_ids, 3] = torch.cos(0.5 * pitch)
+        env.sim.data.qpos[mantle_ids, 4] = 0.0
+        env.sim.data.qpos[mantle_ids, 5] = torch.sin(0.5 * pitch)
+        env.sim.data.qpos[mantle_ids, 6] = 0.0
+        env.sim.data.qvel[mantle_ids, :6] = 0.0
+        env.sim.data.qvel[mantle_ids, 0] = 0.08 * torch.rand(
+            len(mantle_ids), device=env.device
+        )
+
+    tread_ids = env_ids[tread_mask]
+    if len(tread_ids) > 0:
+        # These episodes teach tread recovery, not first-riser traversal. They
+        # must never claim the clearance latch merely because reset placed the
+        # robot beyond the first face.
+        env._stair_skip_first_clearance[tread_ids] = True
+        upper_tread_step = num_steps if max_tread_step is None else max_tread_step
+        if not 1 <= min_tread_step <= upper_tread_step <= num_steps:
+            raise ValueError("Tread reset range must stay within the staircase.")
+        step_index = torch.randint(
+            min_tread_step,
+            upper_tread_step + 1,
+            (len(tread_ids),),
+            device=env.device,
+        )
+        tread_center = stair_start_distance + (step_index.float() - 0.5) * tread_depth
+        env.sim.data.qpos[tread_ids, 0] = (
+            terrain.env_origins[tread_ids, 0] + tread_center
+        )
+        env.sim.data.qpos[tread_ids, 1] = terrain.env_origins[tread_ids, 1]
+        env.sim.data.qpos[tread_ids, 2] = (
+            terrain.env_origins[tread_ids, 2]
+            + standing_root_height
+            + step_index.float() * riser[tread_mask]
+        )
+        env.sim.data.qvel[tread_ids, :6] = 0.0
+
+
+def _seed_action_history_from_joint_pose(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Keep the 61D previous-action observation consistent with a reset pose."""
+    if len(env_ids) == 0:
+        return
+    asset: Entity = env.scene[asset_cfg.name]
+    action_term = env.action_manager.get_term("joint_pos")
+    joint_pos = asset.data.joint_pos[env_ids][:, action_term.target_ids]
+    offset = action_term.offset
+    scale = action_term.scale
+    offset_value = offset[env_ids] if isinstance(offset, torch.Tensor) else offset
+    scale_value = scale[env_ids] if isinstance(scale, torch.Tensor) else scale
+    raw_action = (joint_pos - offset_value) / scale_value
+    manager = env.action_manager
+    if not hasattr(env, "_stair_reset_action_history"):
+        env._stair_reset_action_history = {
+            "current": torch.zeros_like(manager._action),
+            "previous": torch.zeros_like(manager._prev_action),
+            "previous_previous": torch.zeros_like(manager._prev_prev_action),
+        }
+    history = env._stair_reset_action_history
+    history["current"][env_ids] = raw_action
+    history["previous"][env_ids] = raw_action
+    history["previous_previous"][env_ids] = raw_action
+
+    # These writes make the state immediately coherent inside the reset event.
+    # StairHistoryJointPositionAction repeats them after ActionManager.reset,
+    # which otherwise zeros all three buffers later in mjlab's reset sequence.
+    manager._action[env_ids] = raw_action
+    manager._prev_action[env_ids] = raw_action
+    manager._prev_prev_action[env_ids] = raw_action
+    action_term._raw_actions[env_ids] = raw_action
+    action_term._processed_actions[env_ids] = joint_pos
+
+
+def reset_assisted_stair_states(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    stair_start_distance: float,
+    standing_root_height: float,
+    lip_release_fraction: float = 0.50,
+    shell_brace_fraction: float = 0.25,
+    tread_recovery_fraction: float = 0.15,
+    real_handoff_fraction: float = 0.10,
+    lip_local_x_range: tuple[float, float] | None = None,
+    lip_root_height_range: tuple[float, float] | None = None,
+    lip_pitch_deg_range: tuple[float, float] | None = None,
+    lip_forward_speed_range: tuple[float, float] | None = None,
+    lip_vertical_speed_range: tuple[float, float] | None = None,
+    lip_pitch_rate_range: tuple[float, float] | None = None,
+    shell_local_x_range: tuple[float, float] | None = None,
+    shell_root_height_range: tuple[float, float] | None = None,
+    shell_pitch_deg_range: tuple[float, float] | None = None,
+    shell_forward_speed_range: tuple[float, float] | None = None,
+    shell_vertical_speed_range: tuple[float, float] | None = None,
+    shell_pitch_rate_range: tuple[float, float] | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Stage-A reverse curriculum on one fixed 170 mm home stair.
+
+    These are physically demanding full-height contact states, not shorter
+    geometry. Action history is reconstructed from the reset joint pose so the
+    actor does not receive the all-zero history mismatch from the stalled run.
+    """
+    if env_ids is None or len(env_ids) == 0:
+        return
+    fractions = (
+        lip_release_fraction,
+        shell_brace_fraction,
+        tread_recovery_fraction,
+        real_handoff_fraction,
+    )
+    if any(fraction < 0.0 for fraction in fractions) or not math.isclose(
+        sum(fractions), 1.0, abs_tol=1e-6
+    ):
+        raise ValueError(
+            "Assisted stair reset fractions must be nonnegative and sum to 1."
+        )
+
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    terrain = env.scene.terrain
+    origins = terrain.env_origins
+    draw = torch.rand(len(env_ids), device=env.device)
+    lip_end = lip_release_fraction
+    shell_end = lip_end + shell_brace_fraction
+    tread_end = shell_end + tread_recovery_fraction
+    lip_ids = env_ids[draw < lip_end]
+    shell_ids = env_ids[(draw >= lip_end) & (draw < shell_end)]
+    tread_ids = env_ids[(draw >= shell_end) & (draw < tread_end)]
+    handoff_ids = env_ids[draw >= tread_end]
+
+    # Keep the sampled reset family available to evaluators.  Aggregate
+    # clearance rates are otherwise misleading because tread-recovery starts
+    # are intentionally ineligible for the first-riser clearance latch.
+    if not hasattr(env, "_stair_assisted_reset_mode"):
+        env._stair_assisted_reset_mode = torch.full(
+            (env.num_envs,), -1, dtype=torch.long, device=env.device
+        )
+    env._stair_assisted_reset_mode[lip_ids] = 0
+    env._stair_assisted_reset_mode[shell_ids] = 1
+    env._stair_assisted_reset_mode[tread_ids] = 2
+    env._stair_assisted_reset_mode[handoff_ids] = 3
+
+    if not hasattr(env, "_stair_skip_first_clearance"):
+        env._stair_skip_first_clearance = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    env._stair_skip_first_clearance[env_ids] = False
+    env._stair_skip_first_clearance[tread_ids] = True
+
+    def sample(count: int, low: float, high: float) -> torch.Tensor:
+        return low + (high - low) * torch.rand(count, device=env.device)
+
+    def resolved_range(
+        value: tuple[float, float] | None, default: tuple[float, float]
+    ) -> tuple[float, float]:
+        result = default if value is None else value
+        if result[0] > result[1]:
+            raise ValueError(f"Invalid assisted stair reset range: {result}")
+        return result
+
+    def set_pitch(ids: torch.Tensor, low_deg: float, high_deg: float) -> None:
+        pitch = torch.deg2rad(sample(len(ids), low_deg, high_deg))
+        env.sim.data.qpos[ids, 3] = torch.cos(0.5 * pitch)
+        env.sim.data.qpos[ids, 4] = 0.0
+        env.sim.data.qpos[ids, 5] = torch.sin(0.5 * pitch)
+        env.sim.data.qpos[ids, 6] = 0.0
+
+    if len(lip_ids) > 0:
+        local_x = resolved_range(
+            lip_local_x_range,
+            (stair_start_distance + 0.020, stair_start_distance + 0.037),
+        )
+        root_height = resolved_range(lip_root_height_range, (0.198, 0.225))
+        pitch = resolved_range(lip_pitch_deg_range, (30.0, 55.0))
+        forward_speed = resolved_range(lip_forward_speed_range, (0.18, 0.30))
+        vertical_speed = resolved_range(lip_vertical_speed_range, (-0.03, 0.08))
+        pitch_rate = resolved_range(lip_pitch_rate_range, (-1.5, -0.3))
+        env.sim.data.qpos[lip_ids, 0] = origins[lip_ids, 0] + sample(
+            len(lip_ids), *local_x
+        )
+        env.sim.data.qpos[lip_ids, 1] = origins[lip_ids, 1]
+        env.sim.data.qpos[lip_ids, 2] = origins[lip_ids, 2] + sample(
+            len(lip_ids), *root_height
+        )
+        set_pitch(lip_ids, *pitch)
+        env.sim.data.qvel[lip_ids, :6] = 0.0
+        env.sim.data.qvel[lip_ids, 0] = sample(len(lip_ids), *forward_speed)
+        env.sim.data.qvel[lip_ids, 2] = sample(len(lip_ids), *vertical_speed)
+        env.sim.data.qvel[lip_ids, 4] = sample(len(lip_ids), *pitch_rate)
+
+    if len(shell_ids) > 0:
+        local_x = resolved_range(
+            shell_local_x_range,
+            (stair_start_distance - 0.020, stair_start_distance + 0.015),
+        )
+        root_height = resolved_range(shell_root_height_range, (0.165, 0.205))
+        pitch = resolved_range(shell_pitch_deg_range, (45.0, 70.0))
+        forward_speed = resolved_range(shell_forward_speed_range, (0.10, 0.22))
+        vertical_speed = resolved_range(shell_vertical_speed_range, (0.08, 0.20))
+        pitch_rate = resolved_range(shell_pitch_rate_range, (0.5, 2.0))
+        env.sim.data.qpos[shell_ids, 0] = origins[shell_ids, 0] + sample(
+            len(shell_ids), *local_x
+        )
+        env.sim.data.qpos[shell_ids, 1] = origins[shell_ids, 1]
+        env.sim.data.qpos[shell_ids, 2] = origins[shell_ids, 2] + sample(
+            len(shell_ids), *root_height
+        )
+        set_pitch(shell_ids, *pitch)
+        env.sim.data.qvel[shell_ids, :6] = 0.0
+        env.sim.data.qvel[shell_ids, 0] = sample(len(shell_ids), *forward_speed)
+        env.sim.data.qvel[shell_ids, 2] = sample(len(shell_ids), *vertical_speed)
+        env.sim.data.qvel[shell_ids, 4] = sample(len(shell_ids), *pitch_rate)
+
+    if len(tread_ids) > 0:
+        env.sim.data.qpos[tread_ids, 0] = origins[tread_ids, 0] + sample(
+            len(tread_ids), stair_start_distance + 0.080, stair_start_distance + 0.200
+        )
+        env.sim.data.qpos[tread_ids, 1] = origins[tread_ids, 1]
+        env.sim.data.qpos[tread_ids, 2] = origins[tread_ids, 2] + sample(
+            len(tread_ids), 0.260, 0.310
+        )
+        set_pitch(tread_ids, 35.0, 55.0)
+        env.sim.data.qvel[tread_ids, :6] = 0.0
+        env.sim.data.qvel[tread_ids, 0] = sample(len(tread_ids), 0.03, 0.12)
+        env.sim.data.qvel[tread_ids, 2] = sample(len(tread_ids), -0.08, 0.02)
+        env.sim.data.qvel[tread_ids, 4] = sample(len(tread_ids), -1.2, -0.2)
+
+    if len(handoff_ids) > 0:
+        env.sim.data.qpos[handoff_ids, 0] = origins[handoff_ids, 0] + sample(
+            len(handoff_ids), stair_start_distance - 0.120, stair_start_distance - 0.080
+        )
+        env.sim.data.qpos[handoff_ids, 1] = origins[handoff_ids, 1]
+        env.sim.data.qpos[handoff_ids, 2] = (
+            origins[handoff_ids, 2] + standing_root_height
+        )
+        set_pitch(handoff_ids, -12.0, 12.0)
+        env.sim.data.qvel[handoff_ids, :6] = 0.0
+        env.sim.data.qvel[handoff_ids, 0] = sample(len(handoff_ids), 0.14, 0.30)
+        env.sim.data.qvel[handoff_ids, 2] = sample(len(handoff_ids), -0.10, 0.10)
+        env.sim.data.qvel[handoff_ids, 4] = sample(len(handoff_ids), -2.0, 2.0)
+
+    _seed_action_history_from_joint_pose(env, env_ids, asset_cfg)
+
+
+def _new_frontier_delta(
+    env: ManagerBasedRlEnv, value: torch.Tensor, state_name: str
+) -> torch.Tensor:
+    state = getattr(env, state_name, None)
+    if state is None:
+        state = value.clone()
+        setattr(env, state_name, state)
+    fresh = env.episode_length_buf <= 1
+    state[fresh] = value[fresh]
+    new_best = torch.maximum(state, value)
+    delta = new_best - state
+    setattr(env, state_name, new_best)
+    return delta / env.step_dt
+
+
+def assign_stair_state_bank_family(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    family_weights: tuple[int, ...] = (2, 1, 1),
+    forced_family: int | None = None,
+) -> None:
+    """Assign one mutually exclusive replay family to every resetting env.
+
+    Full reset batches receive exact integer quotas. Smaller asynchronous
+    batches use the same largest-remainder allocation with randomized ties, so
+    no state-bank event can overwrite a state written by another family.
+    """
+
+    if env_ids is None or len(env_ids) == 0:
+        return
+    if len(family_weights) == 0 or any(weight <= 0 for weight in family_weights):
+        raise ValueError("State-bank family weights must be positive")
+    if forced_family is not None and not 0 <= forced_family < len(family_weights):
+        raise ValueError("Forced state-bank family is outside the configured range")
+    env_ids = env_ids.to(device=env.device, dtype=torch.long)
+    if not hasattr(env, "_stair_state_bank_family"):
+        env._stair_state_bank_family = torch.full(
+            (env.num_envs,), -1, dtype=torch.long, device=env.device
+        )
+    if forced_family is not None:
+        env._stair_state_bank_family[env_ids] = forced_family
+        return
+    weights = torch.tensor(family_weights, device=env.device, dtype=torch.float32)
+    exact = weights * (len(env_ids) / float(sum(family_weights)))
+    counts = torch.floor(exact).to(torch.long)
+    remainder = len(env_ids) - int(counts.sum().item())
+    if remainder > 0:
+        fractions = exact - counts.to(exact.dtype)
+        positive = fractions > 0
+        if not torch.any(positive):
+            fractions = weights / weights.sum()
+        else:
+            fractions = torch.where(positive, fractions, torch.zeros_like(fractions))
+        extra = torch.multinomial(fractions, remainder, replacement=False)
+        counts[extra] += 1
+
+    permutation = env_ids[torch.randperm(len(env_ids), device=env.device)]
+    start = 0
+    for family, count in enumerate(counts.tolist()):
+        stop = start + count
+        env._stair_state_bank_family[permutation[start:stop]] = family
+        start = stop
+
+
+def seed_stair_contact_transfer_reverse_context(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    reverse_family: int = 1,
+    stage15_families: tuple[int, ...] | None = None,
+    stage2_family: int | None = None,
+    stage2_families: tuple[int, ...] | None = None,
+) -> None:
+    """Mark policy-generated replay rows as proven contact prefixes.
+
+    The reset itself never pays a stage reward. Reward terms use this marker
+    only to prequalify already-observed history so PPO can learn the next
+    missing transition from that exact state.
+    """
+
+    if env_ids is None or len(env_ids) == 0:
+        return
+    family = getattr(env, "_stair_state_bank_family", None)
+    if family is None:
+        raise RuntimeError(
+            "Reverse contact context requires preceding state-bank assignment"
+        )
+    env_ids = env_ids.to(device=env.device, dtype=torch.long)
+    if not hasattr(env, "_stair_contact_transfer_reverse_stage15_seed"):
+        env._stair_contact_transfer_reverse_stage15_seed = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    if not hasattr(env, "_stair_contact_transfer_reverse_stage2_seed"):
+        env._stair_contact_transfer_reverse_stage2_seed = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    if stage15_families is None:
+        stage15_families = (reverse_family,)
+    if len(stage15_families) == 0:
+        raise ValueError("At least one Stage 1.5 reverse family is required")
+    if stage2_family is not None and stage2_families is not None:
+        raise ValueError("Use either stage2_family or stage2_families, not both")
+    if stage2_families is None:
+        stage2_families = () if stage2_family is None else (stage2_family,)
+    stage15_seed = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
+    for family_id in stage15_families:
+        stage15_seed |= family[env_ids] == family_id
+    stage2_seed = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
+    for family_id in stage2_families:
+        stage2_seed |= family[env_ids] == family_id
+    env._stair_contact_transfer_reverse_stage15_seed[env_ids] = stage15_seed
+    env._stair_contact_transfer_reverse_stage2_seed[env_ids] = stage2_seed
+
+
+def stair_preload_frontier(
+    env: ManagerBasedRlEnv,
+    start_x: float = 0.42,
+    end_x: float = 0.62,
+    standing_root_height: float = 0.115,
+    target_root_height: float = 0.095,
+    upright_floor: float = 0.55,
+    corridor_half_width: float = 0.36,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward one episode-best crouch while approaching the first riser.
+
+    The preload is deliberately a frontier instead of a per-step pose reward:
+    reaching a deeper crouch can pay once, but camping there cannot. The route,
+    corridor, and upright gates prevent lying down away from the stair from
+    becoming a substitute for loading the legs.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, upright = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    approach_gate = torch.clamp(
+        (x - start_x) / max(end_x - start_x, 1e-6), min=0.0, max=1.0
+    )
+    crouch = torch.clamp(
+        (standing_root_height - z)
+        / max(standing_root_height - target_root_height, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    upright_gate = torch.clamp(
+        (upright - upright_floor) / max(1.0 - upright_floor, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    value = approach_gate * crouch * upright_gate
+    value = torch.where(y <= corridor_half_width, value, torch.zeros_like(value))
+    return _new_frontier_delta(env, value, "_stair_preload_frontier")
+
+
+def stair_launch_sequence(
+    env: ManagerBasedRlEnv,
+    min_x: float = 0.46,
+    max_x: float = 0.68,
+    preload_root_height: float = 0.098,
+    min_upward_speed: float = 0.30,
+    min_forward_speed: float = 0.05,
+    preload_max_vertical_speed: float = 0.30,
+    upright_threshold: float = 0.55,
+    corridor_half_width: float = 0.36,
+    preload_hold_time_s: float = 0.04,
+    launch_bonus: float = 4.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay once for a grounded preload followed by a forward/upward launch.
+
+    This is a minimal phase variable, not a prescribed jump trajectory. After
+    the compression gate is reached, the actor remains free to jump, roll,
+    shell-mantle, or plant its head. The later physical clearance and support
+    latches still decide whether the attempt actually climbed the stair.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, upright = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    velocity = torch.nan_to_num(asset.data.root_link_lin_vel_w, nan=0.0)
+    if not hasattr(env, "_stair_launch_phase"):
+        env._stair_launch_phase = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+        env._stair_preload_hold_steps = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+    fresh = env.episode_length_buf <= 1
+    env._stair_launch_phase[fresh] = 0
+    env._stair_preload_hold_steps[fresh] = 0
+
+    in_launch_zone = (
+        (x >= min_x) & (x <= max_x) & (y <= corridor_half_width)
+    )
+    preload_candidate = (
+        (env._stair_launch_phase == 0)
+        & in_launch_zone
+        & (z <= preload_root_height)
+        & (upright >= upright_threshold)
+        & (torch.abs(velocity[:, 2]) <= preload_max_vertical_speed)
+    )
+    env._stair_preload_hold_steps = torch.where(
+        preload_candidate,
+        env._stair_preload_hold_steps + 1,
+        torch.zeros_like(env._stair_preload_hold_steps),
+    )
+    required_steps = max(1, int(round(preload_hold_time_s / env.step_dt)))
+    newly_preloaded = (
+        (env._stair_launch_phase == 0)
+        & (env._stair_preload_hold_steps >= required_steps)
+    )
+    env._stair_launch_phase[newly_preloaded] = 1
+
+    newly_launched = (
+        (env._stair_launch_phase == 1)
+        & in_launch_zone
+        & (velocity[:, 0] >= min_forward_speed)
+        & (velocity[:, 2] >= min_upward_speed)
+    )
+    env._stair_launch_phase[newly_launched] = 2
+    return newly_preloaded.float() + launch_bonus * newly_launched.float()
+
+
+def stair_takeoff_frontier(
+    env: ManagerBasedRlEnv,
+    min_x: float = 0.46,
+    max_x: float = 0.68,
+    target_vertical_speed: float = 1.20,
+    corridor_half_width: float = 0.36,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward new upward-speed records only after the preload gate."""
+    asset: Entity = env.scene[asset_cfg.name]
+    x, _, _ = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    phase = getattr(env, "_stair_launch_phase", None)
+    if phase is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    upward_speed = torch.clamp(
+        torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0)
+        / max(target_vertical_speed, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    eligible = (
+        (phase >= 1)
+        & (x >= min_x)
+        & (x <= max_x)
+        & (y <= corridor_half_width)
+    )
+    value = torch.where(eligible, upward_speed, torch.zeros_like(upward_speed))
+    return _new_frontier_delta(env, value, "_stair_takeoff_frontier")
+
+
+def classify_standard_stair_contacts(
+    found: torch.Tensor,
+    positions_w: torch.Tensor,
+    normals_w: torch.Tensor,
+    terrain_origins_w: torch.Tensor,
+    *,
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.36,
+    position_tolerance: float = 0.018,
+    normal_alignment: float = 0.70,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Classify contact slots on the first riser face and first tread top."""
+
+    if found.ndim != 2 or positions_w.shape != normals_w.shape:
+        raise ValueError("Stair contact tensors have incompatible shapes")
+    if positions_w.shape[:2] != found.shape or positions_w.shape[-1] != 3:
+        raise ValueError("Stair contact positions must have shape [B, N, 3]")
+    local_pos = positions_w - terrain_origins_w[:, None, :]
+    active = found > 0
+    in_corridor = torch.abs(local_pos[..., 1]) <= corridor_half_width
+    normal = torch.abs(torch.nan_to_num(normals_w, nan=0.0))
+    face = (
+        active
+        & in_corridor
+        & (torch.abs(local_pos[..., 0] - stair_face_x) <= position_tolerance)
+        & (local_pos[..., 2] >= -position_tolerance)
+        & (local_pos[..., 2] <= riser_height + position_tolerance)
+        & (normal[..., 0] >= normal_alignment)
+    )
+    tread = (
+        active
+        & in_corridor
+        & (local_pos[..., 0] >= stair_face_x - position_tolerance)
+        & (
+            local_pos[..., 0]
+            <= stair_face_x + tread_depth + position_tolerance
+        )
+        & (torch.abs(local_pos[..., 2] - riser_height) <= position_tolerance)
+        & (normal[..., 2] >= normal_alignment)
+    )
+    return face, tread
+
+
+def classify_virtual_lip_stair_contacts(
+    found: torch.Tensor,
+    positions_w: torch.Tensor,
+    normals_w: torch.Tensor,
+    terrain_origins_w: torch.Tensor,
+    physical_face_x: torch.Tensor,
+    *,
+    nominal_stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.36,
+    position_tolerance: float = 0.018,
+    normal_alignment: float = 0.70,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Classify a recessed physical face and the nominal horizontal tread."""
+
+    if found.ndim != 2 or positions_w.shape != normals_w.shape:
+        raise ValueError("Stair contact tensors have incompatible shapes")
+    if positions_w.shape[:2] != found.shape or positions_w.shape[-1] != 3:
+        raise ValueError("Stair contact positions must have shape [B, N, 3]")
+    if physical_face_x.shape != (found.shape[0],):
+        raise ValueError("physical_face_x must have shape [B]")
+    local_pos = positions_w - terrain_origins_w[:, None, :]
+    active = found > 0
+    in_corridor = torch.abs(local_pos[..., 1]) <= corridor_half_width
+    normal = torch.abs(torch.nan_to_num(normals_w, nan=0.0))
+    face = (
+        active
+        & in_corridor
+        & (
+            torch.abs(local_pos[..., 0] - physical_face_x[:, None])
+            <= position_tolerance
+        )
+        & (local_pos[..., 2] >= -position_tolerance)
+        & (local_pos[..., 2] <= riser_height + position_tolerance)
+        & (normal[..., 0] >= normal_alignment)
+    )
+    tread = (
+        active
+        & in_corridor
+        & (local_pos[..., 0] >= nominal_stair_face_x - position_tolerance)
+        & (
+            local_pos[..., 0]
+            <= nominal_stair_face_x + tread_depth + position_tolerance
+        )
+        & (torch.abs(local_pos[..., 2] - riser_height) <= position_tolerance)
+        & (normal[..., 2] >= normal_alignment)
+    )
+    return face, tread
+
+
+def classify_curriculum_stair_contacts(
+    found: torch.Tensor,
+    positions_w: torch.Tensor,
+    normals_w: torch.Tensor,
+    terrain_origins_w: torch.Tensor,
+    *,
+    stair_face_x: float,
+    riser_height: torch.Tensor,
+    tread_depth: float,
+    corridor_half_width: float,
+    position_tolerance: float = 0.018,
+    normal_alignment: float = 0.70,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Classify first-riser contacts with a per-environment riser height."""
+
+    if found.ndim != 2 or positions_w.shape != normals_w.shape:
+        raise ValueError("Stair contact tensors have incompatible shapes")
+    if positions_w.shape[:2] != found.shape or positions_w.shape[-1] != 3:
+        raise ValueError("Stair contact positions must have shape [B, N, 3]")
+    if riser_height.shape != (found.shape[0],):
+        raise ValueError("riser_height must have shape [B]")
+    local_pos = positions_w - terrain_origins_w[:, None, :]
+    active = found > 0
+    in_corridor = torch.abs(local_pos[..., 1]) <= corridor_half_width
+    normal = torch.abs(torch.nan_to_num(normals_w, nan=0.0))
+    riser = riser_height[:, None]
+    face = (
+        active
+        & in_corridor
+        & (torch.abs(local_pos[..., 0] - stair_face_x) <= position_tolerance)
+        & (local_pos[..., 2] >= -position_tolerance)
+        & (local_pos[..., 2] <= riser + position_tolerance)
+        & (normal[..., 0] >= normal_alignment)
+    )
+    tread = (
+        active
+        & in_corridor
+        & (local_pos[..., 0] >= stair_face_x - position_tolerance)
+        & (local_pos[..., 0] <= stair_face_x + tread_depth + position_tolerance)
+        & (torch.abs(local_pos[..., 2] - riser) <= position_tolerance)
+        & (normal[..., 2] >= normal_alignment)
+    )
+    return face, tread
+
+
+def _standard_stair_contact_masks(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    *,
+    stair_face_x: float,
+    riser_height: float,
+    tread_depth: float,
+    corridor_half_width: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if sensor_name not in env.scene.sensors:
+        empty = torch.zeros((env.num_envs, 1), dtype=torch.bool, device=env.device)
+        positions = torch.zeros((env.num_envs, 1, 3), device=env.device)
+        return empty, empty, positions
+    data = env.scene.sensors[sensor_name].data
+    if data.found is None or data.pos is None or data.normal is None:
+        raise RuntimeError(
+            f"{sensor_name} must provide found, pos, and normal contact fields"
+        )
+    face, tread = classify_standard_stair_contacts(
+        data.found,
+        data.pos,
+        data.normal,
+        env.scene.terrain.env_origins,
+        stair_face_x=stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    local_positions = data.pos - env.scene.terrain.env_origins[:, None, :]
+    return face, tread, local_positions
+
+
+def _virtual_lip_physical_face_x(
+    env: ManagerBasedRlEnv,
+    *,
+    nominal_stair_face_x: float,
+    max_face_offset: float,
+    num_terrain_levels: int,
+) -> torch.Tensor:
+    levels = env.scene.terrain.terrain_levels.to(dtype=torch.float32)
+    fraction = torch.clamp(
+        levels / max(num_terrain_levels - 1, 1), min=0.0, max=1.0
+    )
+    return nominal_stair_face_x + max_face_offset * (1.0 - fraction)
+
+
+def _virtual_lip_stair_contact_masks(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    *,
+    nominal_stair_face_x: float,
+    max_face_offset: float,
+    num_terrain_levels: int,
+    riser_height: float,
+    tread_depth: float,
+    corridor_half_width: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if sensor_name not in env.scene.sensors:
+        empty = torch.zeros((env.num_envs, 1), dtype=torch.bool, device=env.device)
+        positions = torch.zeros((env.num_envs, 1, 3), device=env.device)
+        return empty, empty, positions
+    data = env.scene.sensors[sensor_name].data
+    if data.found is None or data.pos is None or data.normal is None:
+        raise RuntimeError(
+            f"{sensor_name} must provide found, pos, and normal contact fields"
+        )
+    physical_face_x = _virtual_lip_physical_face_x(
+        env,
+        nominal_stair_face_x=nominal_stair_face_x,
+        max_face_offset=max_face_offset,
+        num_terrain_levels=num_terrain_levels,
+    )
+    face, tread = classify_virtual_lip_stair_contacts(
+        data.found,
+        data.pos,
+        data.normal,
+        env.scene.terrain.env_origins,
+        physical_face_x,
+        nominal_stair_face_x=nominal_stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    local_positions = data.pos - env.scene.terrain.env_origins[:, None, :]
+    return face, tread, local_positions
+
+
+def _virtual_lip_union_contact_state(
+    env: ManagerBasedRlEnv,
+    sensor_names: tuple[str, ...],
+    *,
+    nominal_stair_face_x: float,
+    max_face_offset: float,
+    num_terrain_levels: int,
+    riser_height: float,
+    tread_depth: float,
+    corridor_half_width: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Union dedicated body sensors without losing weaker tread contacts."""
+
+    face_contact = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    tread_contact = torch.zeros_like(face_contact)
+    strongest_tread_force = torch.zeros(
+        env.num_envs, dtype=torch.float32, device=env.device
+    )
+    for sensor_name in sensor_names:
+        if sensor_name not in env.scene.sensors:
+            raise RuntimeError(f"Missing required contact sensor: {sensor_name}")
+        face, tread, _ = _virtual_lip_stair_contact_masks(
+            env,
+            sensor_name,
+            nominal_stair_face_x=nominal_stair_face_x,
+            max_face_offset=max_face_offset,
+            num_terrain_levels=num_terrain_levels,
+            riser_height=riser_height,
+            tread_depth=tread_depth,
+            corridor_half_width=corridor_half_width,
+        )
+        face_contact |= face.any(dim=-1)
+        tread_contact |= tread.any(dim=-1)
+        data = env.scene.sensors[sensor_name].data
+        if data.force is not None:
+            normal_force = torch.abs(
+                torch.sum(data.force * data.normal, dim=-1)
+            )
+            normal_force = torch.where(
+                tread, normal_force, torch.zeros_like(normal_force)
+            )
+            strongest_tread_force = torch.maximum(
+                strongest_tread_force,
+                normal_force.max(dim=-1).values,
+            )
+    return face_contact, tread_contact, strongest_tread_force
+
+
+def _stair_contact_event(
+    env: ManagerBasedRlEnv, contact: torch.Tensor, latch_name: str
+) -> torch.Tensor:
+    current = contact.any(dim=-1)
+    latch = getattr(env, latch_name, None)
+    if latch is None:
+        latch = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        setattr(env, latch_name, latch)
+    fresh = env.episode_length_buf <= 1
+    latch[fresh] = False
+    newly_contacted = current & ~latch
+    latch |= current
+    return newly_contacted.to(torch.float32)
+
+
+def stair_riser_face_contact(
+    env: ManagerBasedRlEnv,
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.36,
+    sensor_name: str = "robot_ground_contact",
+) -> torch.Tensor:
+    """Reward progressively higher physical contact on the first riser face."""
+
+    face, _, positions = _standard_stair_contact_masks(
+        env,
+        sensor_name,
+        stair_face_x=stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    _stair_contact_event(env, face, "_stair_riser_face_contact_latched")
+    face_height = torch.where(
+        face,
+        positions[..., 2],
+        torch.zeros_like(positions[..., 2]),
+    ).max(dim=-1).values
+    value = torch.clamp(face_height / max(riser_height, 1e-6), 0.0, 1.0)
+    return _new_frontier_delta(env, value, "_stair_riser_face_contact_frontier")
+
+
+def stair_first_tread_contact(
+    env: ManagerBasedRlEnv,
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.36,
+    sensor_name: str = "robot_ground_contact",
+) -> torch.Tensor:
+    """Pay once for actual robot contact with the horizontal first tread."""
+
+    _, tread, _ = _standard_stair_contact_masks(
+        env,
+        sensor_name,
+        stair_face_x=stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    return _stair_contact_event(env, tread, "_stair_first_tread_contact_latched")
+
+
+def stair_new_tread_contact_after_reset(
+    env: ManagerBasedRlEnv,
+    nominal_stair_face_x: float = 0.66,
+    max_face_offset: float = 0.04,
+    num_terrain_levels: int = 3,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.36,
+    min_policy_steps: int = 3,
+    sensor_names: tuple[str, ...] = (
+        "head_ground_contact",
+        "trunk_ground_contact",
+        "legs_ground_contact",
+        "feet_stair_contact",
+    ),
+) -> torch.Tensor:
+    """Pay once for tread contact created after the replayed reset state."""
+
+    if min_policy_steps < 1:
+        raise ValueError("min_policy_steps must be positive")
+    _, current, _ = _virtual_lip_union_contact_state(
+        env,
+        sensor_names,
+        nominal_stair_face_x=nominal_stair_face_x,
+        max_face_offset=max_face_offset,
+        num_terrain_levels=num_terrain_levels,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    if not hasattr(env, "_stair_contact_transfer_stage1_latched"):
+        env._stair_contact_transfer_stage1_latched = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._stair_contact_transfer_stage1_previous = torch.zeros_like(
+            env._stair_contact_transfer_stage1_latched
+        )
+        env._stair_contact_transfer_stage1_policy_achieved = torch.zeros_like(
+            env._stair_contact_transfer_stage1_latched
+        )
+    fresh = env.episode_length_buf <= 1
+    reverse_seed = getattr(
+        env,
+        "_stair_contact_transfer_reverse_stage15_seed",
+        torch.zeros_like(current),
+    )
+    # Existing replay-bank contact is a baseline, never an achievement. Track
+    # the live contact edge separately so a baseline contact that releases and
+    # is later re-created by the policy can still count exactly once.
+    env._stair_contact_transfer_stage1_latched[fresh] = reverse_seed[fresh]
+    env._stair_contact_transfer_stage1_previous[fresh] = current[fresh]
+    env._stair_contact_transfer_stage1_policy_achieved[fresh] = reverse_seed[
+        fresh
+    ]
+    armed = env.episode_length_buf >= min_policy_steps
+    newly_contacted = (
+        armed
+        & current
+        & ~env._stair_contact_transfer_stage1_previous
+        & ~env._stair_contact_transfer_stage1_latched
+    )
+    env._stair_contact_transfer_stage1_latched |= newly_contacted
+    env._stair_contact_transfer_stage1_policy_achieved |= newly_contacted
+    env._stair_contact_transfer_stage1_previous.copy_(current)
+    return newly_contacted.to(torch.float32)
+
+
+def stair_loaded_tread_no_face_first_frame(
+    env: ManagerBasedRlEnv,
+    nominal_stair_face_x: float = 0.66,
+    max_face_offset: float = 0.04,
+    num_terrain_levels: int = 3,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.36,
+    min_policy_steps: int = 3,
+    min_normal_force: float = 0.40,
+    sensor_names: tuple[str, ...] = (
+        "head_ground_contact",
+        "trunk_ground_contact",
+        "legs_ground_contact",
+        "feet_stair_contact",
+    ),
+) -> torch.Tensor:
+    """Pay once for the first loaded tread frame after releasing the face.
+
+    This is the dense contact-stage bridge between the one-frame Stage 1 tread
+    edge and the two-frame Stage 2 hold. Reset-born states are recorded as a
+    baseline and never pay, and the separate latch prevents one-frame contact
+    oscillations from farming the reward.
+    """
+
+    if min_policy_steps < 1 or min_normal_force <= 0.0:
+        raise ValueError("Policy steps and tread normal force must be positive")
+    face_contact, tread_contact, tread_force = _virtual_lip_union_contact_state(
+        env,
+        sensor_names,
+        nominal_stair_face_x=nominal_stair_face_x,
+        max_face_offset=max_face_offset,
+        num_terrain_levels=num_terrain_levels,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    stage1 = getattr(env, "_stair_contact_transfer_stage1_policy_achieved", None)
+    prior_face = getattr(env, "_stair_contact_transfer_face_seen", None)
+    if stage1 is None:
+        stage1 = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    if prior_face is None:
+        prior_face = torch.zeros_like(stage1)
+    candidate = (
+        (env.episode_length_buf >= min_policy_steps)
+        & stage1
+        & prior_face
+        & tread_contact
+        & (tread_force >= min_normal_force)
+        & ~face_contact
+    )
+    if not hasattr(env, "_stair_contact_transfer_stage15_latched"):
+        env._stair_contact_transfer_stage15_reset_baseline = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._stair_contact_transfer_stage15_latched = torch.zeros_like(
+            env._stair_contact_transfer_stage15_reset_baseline
+        )
+        env._stair_contact_transfer_stage15_policy_achieved = torch.zeros_like(
+            env._stair_contact_transfer_stage15_reset_baseline
+        )
+    fresh = env.episode_length_buf <= 1
+    reverse_seed = getattr(
+        env,
+        "_stair_contact_transfer_reverse_stage15_seed",
+        torch.zeros_like(candidate),
+    )
+    env._stair_contact_transfer_stage15_reset_baseline[fresh] = candidate[fresh]
+    env._stair_contact_transfer_stage15_latched[fresh] = (
+        candidate[fresh] | reverse_seed[fresh]
+    )
+    env._stair_contact_transfer_stage15_policy_achieved[fresh] = reverse_seed[
+        fresh
+    ]
+    newly_reached = candidate & ~env._stair_contact_transfer_stage15_latched
+    env._stair_contact_transfer_stage15_latched |= candidate
+    env._stair_contact_transfer_stage15_policy_achieved |= newly_reached
+    return newly_reached.to(torch.float32)
+
+
+def stair_loaded_tread_face_release(
+    env: ManagerBasedRlEnv,
+    nominal_stair_face_x: float = 0.66,
+    max_face_offset: float = 0.04,
+    num_terrain_levels: int = 3,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.36,
+    hold_steps: int = 2,
+    min_policy_steps: int = 3,
+    min_normal_force: float = 0.40,
+    require_stage15: bool = False,
+    sensor_names: tuple[str, ...] = (
+        "head_ground_contact",
+        "trunk_ground_contact",
+        "legs_ground_contact",
+        "feet_stair_contact",
+    ),
+) -> torch.Tensor:
+    """Pay once when newly created tread support persists without face contact."""
+
+    if hold_steps < 1 or min_policy_steps < 1 or min_normal_force <= 0.0:
+        raise ValueError(
+            "hold_steps, min_policy_steps, and min_normal_force must be positive"
+        )
+    face_contact, tread_contact, tread_force = _virtual_lip_union_contact_state(
+        env,
+        sensor_names,
+        nominal_stair_face_x=nominal_stair_face_x,
+        max_face_offset=max_face_offset,
+        num_terrain_levels=num_terrain_levels,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    if not hasattr(env, "_stair_contact_transfer_hold"):
+        env._stair_contact_transfer_hold = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+        env._stair_contact_transfer_stage2_latched = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._stair_contact_transfer_stage2_policy_achieved = torch.zeros_like(
+            env._stair_contact_transfer_stage2_latched
+        )
+        env._stair_contact_transfer_face_seen = torch.zeros_like(
+            env._stair_contact_transfer_stage2_latched
+        )
+    fresh = env.episode_length_buf <= 1
+    reverse_seed = getattr(
+        env,
+        "_stair_contact_transfer_reverse_stage15_seed",
+        torch.zeros_like(tread_contact),
+    )
+    stage2_seed = getattr(
+        env,
+        "_stair_contact_transfer_reverse_stage2_seed",
+        torch.zeros_like(tread_contact),
+    )
+    env._stair_contact_transfer_hold[fresh] = 0
+    # A tread-contact bank state is useful for downstream clearance but cannot
+    # claim discovery of the transfer that already existed at reset.
+    env._stair_contact_transfer_stage2_latched[fresh] = (
+        (tread_contact[fresh] & ~reverse_seed[fresh]) | stage2_seed[fresh]
+    )
+    env._stair_contact_transfer_stage2_policy_achieved[fresh] = stage2_seed[fresh]
+    reset_family = getattr(env, "_stair_state_bank_family", None)
+    validated_face_source = (
+        torch.zeros_like(face_contact)
+        if reset_family is None
+        else reset_family == 0
+    )
+    # Family 0 is collected only from same-frame hard-stair face-contact,
+    # no-tread states. The recessed level deliberately removes that contact,
+    # so retain the validated source fact as the prior-face condition.
+    env._stair_contact_transfer_face_seen[fresh] = (
+        face_contact[fresh]
+        | validated_face_source[fresh]
+        | reverse_seed[fresh]
+        | stage2_seed[fresh]
+    )
+    env._stair_contact_transfer_face_seen |= face_contact
+    stage1 = getattr(env, "_stair_contact_transfer_stage1_policy_achieved", None)
+    if stage1 is None:
+        stage1 = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    if require_stage15:
+        stage15 = getattr(
+            env,
+            "_stair_contact_transfer_stage15_policy_achieved",
+            None,
+        )
+        if stage15 is None:
+            stage15 = torch.zeros_like(stage1)
+    else:
+        stage15 = torch.ones_like(stage1)
+    candidate = (
+        (env.episode_length_buf >= min_policy_steps)
+        & stage1
+        & stage15
+        & env._stair_contact_transfer_face_seen
+        & tread_contact
+        & (tread_force >= min_normal_force)
+        & ~face_contact
+        & ~env._stair_contact_transfer_stage2_latched
+    )
+    env._stair_contact_transfer_hold = torch.where(
+        candidate,
+        env._stair_contact_transfer_hold + 1,
+        torch.zeros_like(env._stair_contact_transfer_hold),
+    )
+    released = (
+        env._stair_contact_transfer_hold >= hold_steps
+    ) & ~env._stair_contact_transfer_stage2_latched
+    env._stair_contact_transfer_stage2_latched |= released
+    env._stair_contact_transfer_stage2_policy_achieved |= released
+    return released.to(torch.float32)
+
+
+def stair_riser_face_contact_after_tread(
+    env: ManagerBasedRlEnv,
+    nominal_stair_face_x: float = 0.66,
+    max_face_offset: float = 0.04,
+    num_terrain_levels: int = 3,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.36,
+    sensor_names: tuple[str, ...] = (
+        "head_ground_contact",
+        "trunk_ground_contact",
+        "legs_ground_contact",
+        "feet_stair_contact",
+    ),
+) -> torch.Tensor:
+    """Return a face-contact cost only after the policy found the tread."""
+
+    face, _, _ = _virtual_lip_union_contact_state(
+        env,
+        sensor_names,
+        nominal_stair_face_x=nominal_stair_face_x,
+        max_face_offset=max_face_offset,
+        num_terrain_levels=num_terrain_levels,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    stage1 = getattr(env, "_stair_contact_transfer_stage1_policy_achieved", None)
+    if stage1 is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return (stage1 & face).to(torch.float32)
+
+
+def stair_virtual_lip_penetration_cost(
+    env: ManagerBasedRlEnv,
+    nominal_stair_face_x: float = 0.66,
+    max_face_offset: float = 0.04,
+    num_terrain_levels: int = 3,
+    riser_height: float = 0.17,
+    corridor_half_width: float = 0.36,
+    speed_scale: float = 0.40,
+    min_policy_steps: int = 3,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize fast collision-support penetration into the virtual riser."""
+
+    if speed_scale <= 0.0 or min_policy_steps < 1:
+        raise ValueError("speed_scale and min_policy_steps must be positive")
+    asset: Entity = env.scene[asset_cfg.name]
+    geom_ids = asset.indexing.geom_ids
+    centers = asset.data.geom_pos_w
+    linear_velocity = torch.nan_to_num(asset.data.geom_lin_vel_w, nan=0.0)
+    angular_velocity = torch.nan_to_num(asset.data.geom_ang_vel_w, nan=0.0)
+    rbound = asset.data.model.geom_rbound
+    if rbound.ndim == 1:
+        radii = rbound[geom_ids][None, :].expand(env.num_envs, -1)
+    else:
+        radii = rbound[:, geom_ids]
+    directions = torch.tensor(
+        (
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (-1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, -1.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (0.0, 0.0, -1.0),
+        ),
+        dtype=centers.dtype,
+        device=centers.device,
+    )
+    point_offsets = radii[..., None, None] * directions[None, None, :, :]
+    positions = (
+        centers[..., None, :]
+        + point_offsets
+        - env.scene.terrain.env_origins[:, None, None, :]
+    )
+    velocities = linear_velocity[..., None, :] + torch.cross(
+        angular_velocity[..., None, :].expand_as(point_offsets),
+        point_offsets,
+        dim=-1,
+    )
+    contype = asset.data.model.geom_contype[geom_ids]
+    collision_geom = contype > 0
+    physical_face_x = _virtual_lip_physical_face_x(
+        env,
+        nominal_stair_face_x=nominal_stair_face_x,
+        max_face_offset=max_face_offset,
+        num_terrain_levels=num_terrain_levels,
+    )
+    offset = physical_face_x - nominal_stair_face_x
+    inside = (
+        (offset[:, None, None] > 1.0e-6)
+        & collision_geom[None, :, None]
+        & (positions[..., 0] >= nominal_stair_face_x)
+        & (positions[..., 0] <= physical_face_x[:, None, None])
+        & (positions[..., 2] >= 0.0)
+        & (positions[..., 2] <= riser_height)
+        & (positions[..., 1].abs() <= corridor_half_width)
+    )
+    depth = torch.clamp(
+        (positions[..., 0] - nominal_stair_face_x)
+        / torch.clamp(offset[:, None, None], min=1.0e-6),
+        min=0.0,
+        max=1.0,
+    )
+    speed = torch.clamp(
+        torch.linalg.vector_norm(velocities, dim=-1) / speed_scale,
+        min=0.0,
+        max=2.0,
+    )
+    cost = torch.where(inside, depth * speed, torch.zeros_like(depth))
+    cost = cost.flatten(start_dim=1).max(dim=-1).values
+    return torch.where(
+        env.episode_length_buf >= min_policy_steps,
+        cost,
+        torch.zeros_like(cost),
+    )
+
+
+def _stair_shell_corner_state(
+    env: ManagerBasedRlEnv,
+    shell_half_extents: tuple[float, float, float],
+    asset_cfg: SceneEntityCfg,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return trunk-shell box corners in terrain-local coordinates and root y."""
+
+    if min(shell_half_extents) <= 0.0:
+        raise ValueError("Shell half extents must be positive")
+    asset: Entity = env.scene[asset_cfg.name]
+    centers = asset.data.geom_pos_w[:, asset_cfg.geom_ids]
+    quaternions = asset.data.geom_quat_w[:, asset_cfg.geom_ids]
+    if centers.shape[1] != 1:
+        raise ValueError("True shell clearance requires exactly one shell geom")
+    signs = torch.tensor(
+        (
+            (-1.0, -1.0, -1.0),
+            (-1.0, -1.0, 1.0),
+            (-1.0, 1.0, -1.0),
+            (-1.0, 1.0, 1.0),
+            (1.0, -1.0, -1.0),
+            (1.0, -1.0, 1.0),
+            (1.0, 1.0, -1.0),
+            (1.0, 1.0, 1.0),
+        ),
+        dtype=centers.dtype,
+        device=centers.device,
+    )
+    half_extents = torch.tensor(
+        shell_half_extents, dtype=centers.dtype, device=centers.device
+    )
+    local_corners = signs * half_extents
+    corner_count = local_corners.shape[0]
+    rotated = quat_apply(
+        quaternions[:, :, None, :].expand(-1, -1, corner_count, -1),
+        local_corners[None, None, :, :].expand(env.num_envs, 1, -1, -1),
+    )
+    corners = (
+        centers[:, :, None, :]
+        + rotated
+        - env.scene.terrain.env_origins[:, None, None, :]
+    )
+    root_y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    return corners, root_y
+
+
+def stair_true_shell_clearance_candidate(
+    env: ManagerBasedRlEnv,
+    nominal_stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    corridor_half_width: float = 0.36,
+    shell_half_extents: tuple[float, float, float] = (0.034, 0.031, 0.022),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Return the instantaneous eight-corner hard-shell geometry gate."""
+
+    corners, root_y = _stair_shell_corner_state(
+        env, shell_half_extents, asset_cfg
+    )
+    return (
+        torch.isfinite(corners).all(dim=(-1, -2, -3))
+        & (corners[..., 0] >= nominal_stair_face_x).all(dim=(-1, -2))
+        & (corners[..., 2] >= riser_height).all(dim=(-1, -2))
+        & (root_y <= corridor_half_width)
+    )
+
+
+def stair_true_shell_clearance_frontier_value(
+    env: ManagerBasedRlEnv,
+    start_x: float = 0.625,
+    target_x: float = 0.660,
+    start_height: float = 0.150,
+    target_height: float = 0.170,
+    corridor_half_width: float = 0.20,
+    required_latch_name: str | None = (
+        "_stair_contact_transfer_stage15_policy_achieved"
+    ),
+    shell_half_extents: tuple[float, float, float] = (0.034, 0.031, 0.022),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Return bounded worst-corner progress toward true shell clearance."""
+
+    if target_x <= start_x or target_height <= start_height:
+        raise ValueError("Shell frontier targets must exceed their starts")
+    corners, root_y = _stair_shell_corner_state(
+        env, shell_half_extents, asset_cfg
+    )
+    min_x = corners[..., 0].amin(dim=(-1, -2))
+    min_z = corners[..., 2].amin(dim=(-1, -2))
+    x_progress = torch.clamp(
+        (min_x - start_x) / (target_x - start_x), min=0.0, max=1.0
+    )
+    z_progress = torch.clamp(
+        (min_z - start_height) / (target_height - start_height),
+        min=0.0,
+        max=1.0,
+    )
+    value = torch.minimum(x_progress, z_progress)
+    required = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    if required_latch_name is not None:
+        required = getattr(env, required_latch_name, None)
+        if required is None:
+            required = torch.zeros(
+                env.num_envs, dtype=torch.bool, device=env.device
+            )
+    finite = torch.isfinite(corners).all(dim=(-1, -2, -3))
+    eligible = required & finite & (root_y <= corridor_half_width)
+    return torch.where(eligible, value, torch.zeros_like(value))
+
+
+def stair_true_shell_clearance_frontier(
+    env: ManagerBasedRlEnv,
+    start_x: float = 0.625,
+    target_x: float = 0.660,
+    start_height: float = 0.150,
+    target_height: float = 0.170,
+    corridor_half_width: float = 0.20,
+    required_latch_name: str = "_stair_contact_transfer_stage15_policy_achieved",
+    shell_half_extents: tuple[float, float, float] = (0.034, 0.031, 0.022),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay bounded episode-best progress of the worst trunk-shell corner.
+
+    The minimum of normalized x and z margins makes both dimensions necessary.
+    Reset states establish the baseline, so replayed progress pays nothing.
+    Holding or oscillating around a previously reached margin cannot be farmed.
+    """
+
+    value = stair_true_shell_clearance_frontier_value(
+        env=env,
+        start_x=start_x,
+        target_x=target_x,
+        start_height=start_height,
+        target_height=target_height,
+        corridor_half_width=corridor_half_width,
+        required_latch_name=required_latch_name,
+        shell_half_extents=shell_half_extents,
+        asset_cfg=asset_cfg,
+    )
+    state_name = "_stair_true_shell_clearance_frontier_best"
+    previous_best = getattr(env, state_name, None)
+    if previous_best is None:
+        previous_best = value.clone()
+        setattr(env, state_name, previous_best)
+    fresh = env.episode_length_buf <= 1
+    previous_best[fresh] = value[fresh]
+    new_best = torch.maximum(previous_best, value)
+    delta = new_best - previous_best
+    setattr(env, state_name, new_best)
+    return delta
+
+
+def stair_true_shell_clearance(
+    env: ManagerBasedRlEnv,
+    nominal_stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    corridor_half_width: float = 0.36,
+    hold_steps: int = 4,
+    required_latch_name: str | None = None,
+    shell_half_extents: tuple[float, float, float] = (0.034, 0.031, 0.022),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay once when every trunk-shell box corner clears the nominal lip."""
+
+    if hold_steps < 1:
+        raise ValueError("Shell hold must be positive")
+    required = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    if required_latch_name is not None:
+        required = getattr(env, required_latch_name, None)
+        if required is None:
+            required = torch.zeros(
+                env.num_envs, dtype=torch.bool, device=env.device
+            )
+    candidate = stair_true_shell_clearance_candidate(
+        env=env,
+        nominal_stair_face_x=nominal_stair_face_x,
+        riser_height=riser_height,
+        corridor_half_width=corridor_half_width,
+        shell_half_extents=shell_half_extents,
+        asset_cfg=asset_cfg,
+    )
+    candidate &= required
+    if not hasattr(env, "_stair_true_shell_clearance_hold"):
+        env._stair_true_shell_clearance_hold = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+        env._stair_true_shell_clearance_latched = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._stair_true_shell_clearance_policy_achieved = torch.zeros_like(
+            env._stair_true_shell_clearance_latched
+        )
+    fresh = env.episode_length_buf <= 1
+    env._stair_true_shell_clearance_hold[fresh] = 0
+    env._stair_true_shell_clearance_latched[fresh] = candidate[fresh]
+    env._stair_true_shell_clearance_policy_achieved[fresh] = False
+    eligible = candidate & ~env._stair_true_shell_clearance_latched
+    env._stair_true_shell_clearance_hold = torch.where(
+        eligible,
+        env._stair_true_shell_clearance_hold + 1,
+        torch.zeros_like(env._stair_true_shell_clearance_hold),
+    )
+    newly_cleared = (
+        env._stair_true_shell_clearance_hold >= hold_steps
+    ) & ~env._stair_true_shell_clearance_latched
+    env._stair_true_shell_clearance_latched |= newly_cleared
+    env._stair_true_shell_clearance_policy_achieved |= newly_cleared
+    return newly_cleared.to(torch.float32)
+
+
+def stair_contact_loaded_release(
+    env: ManagerBasedRlEnv,
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.20,
+    arm_hold_steps: int = 2,
+    release_window_steps: int = 8,
+    min_forward_speed: float = 0.05,
+    min_vertical_speed: float = 0.08,
+    target_forward_delta: float = 0.040,
+    target_vertical_delta: float = 0.025,
+    sensor_names: tuple[str, ...] = (
+        "robot_ground_contact",
+        "head_ground_contact",
+        "legs_ground_contact",
+        "trunk_ground_contact",
+    ),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay once for an upward-forward release after stable stair contact.
+
+    Contact itself pays nothing. Two consecutive classified face or tread
+    contact frames arm a short release window and snapshot the root pose. A
+    payout is possible only after the contact releases, or a face contact
+    shifts onto the tread, while the root has positive forward and vertical
+    velocity. Progress is measured from the arm snapshot, so reset placement,
+    persistent bracing, and repeated bumps cannot create a jackpot.
+    """
+
+    if arm_hold_steps < 1 or release_window_steps < 1:
+        raise ValueError("arm_hold_steps and release_window_steps must be positive")
+
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    face_contact = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    tread_contact = torch.zeros_like(face_contact)
+    for sensor_name in sensor_names:
+        if sensor_name not in env.scene.sensors:
+            raise RuntimeError(f"Missing required contact sensor: {sensor_name}")
+        face, tread, _ = _standard_stair_contact_masks(
+            env,
+            sensor_name,
+            stair_face_x=stair_face_x,
+            riser_height=riser_height,
+            tread_depth=tread_depth,
+            corridor_half_width=corridor_half_width,
+        )
+        face_contact |= face.any(dim=-1)
+        tread_contact |= tread.any(dim=-1)
+    contact = face_contact | tread_contact
+
+    state_names = (
+        "_stair_contact_release_streak",
+        "_stair_contact_release_armed",
+        "_stair_contact_release_paid",
+        "_stair_contact_release_window",
+        "_stair_contact_release_arm_x",
+        "_stair_contact_release_arm_z",
+        "_stair_contact_release_arm_face",
+        "_stair_contact_loaded_release_latched",
+    )
+    if not hasattr(env, state_names[0]):
+        env._stair_contact_release_streak = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+        env._stair_contact_release_armed = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._stair_contact_release_paid = torch.zeros_like(
+            env._stair_contact_release_armed
+        )
+        env._stair_contact_release_window = torch.zeros_like(
+            env._stair_contact_release_streak
+        )
+        env._stair_contact_release_arm_x = torch.zeros_like(x)
+        env._stair_contact_release_arm_z = torch.zeros_like(z)
+        env._stair_contact_release_arm_face = torch.zeros_like(
+            env._stair_contact_release_armed
+        )
+        env._stair_contact_loaded_release_latched = torch.zeros_like(
+            env._stair_contact_release_armed
+        )
+
+    fresh = env.episode_length_buf <= 1
+    env._stair_contact_release_streak[fresh] = 0
+    env._stair_contact_release_armed[fresh] = False
+    env._stair_contact_release_paid[fresh] = False
+    env._stair_contact_release_window[fresh] = 0
+    env._stair_contact_release_arm_x[fresh] = 0.0
+    env._stair_contact_release_arm_z[fresh] = 0.0
+    env._stair_contact_release_arm_face[fresh] = False
+    env._stair_contact_loaded_release_latched[fresh] = False
+
+    cleared = getattr(env, "_stair_first_riser_latched", None)
+    if cleared is None:
+        cleared = torch.zeros_like(env._stair_contact_release_armed)
+    arm_candidate = (
+        (env.episode_length_buf >= 3)
+        & (y <= corridor_half_width)
+        & contact
+        & ~cleared
+        & ((x < 0.665) | (z < 0.175))
+        & ~env._stair_contact_release_armed
+    )
+    env._stair_contact_release_streak = torch.where(
+        arm_candidate,
+        env._stair_contact_release_streak + 1,
+        torch.zeros_like(env._stair_contact_release_streak),
+    )
+    newly_armed = (
+        env._stair_contact_release_streak >= arm_hold_steps
+    ) & ~env._stair_contact_release_armed
+    env._stair_contact_release_armed |= newly_armed
+    env._stair_contact_release_arm_x[newly_armed] = x[newly_armed]
+    env._stair_contact_release_arm_z[newly_armed] = z[newly_armed]
+    env._stair_contact_release_arm_face[newly_armed] = face_contact[newly_armed]
+    env._stair_contact_release_window = torch.where(
+        newly_armed,
+        torch.full_like(
+            env._stair_contact_release_window, release_window_steps
+        ),
+        torch.clamp(env._stair_contact_release_window - 1, min=0),
+    )
+
+    linear_velocity = torch.nan_to_num(asset.data.root_link_lin_vel_w, nan=0.0)
+    contact_transition = (~contact) | (
+        env._stair_contact_release_arm_face & tread_contact
+    )
+    release = (
+        env._stair_contact_release_armed
+        & ~newly_armed
+        & ~env._stair_contact_release_paid
+        & (env._stair_contact_release_window > 0)
+        & contact_transition
+        & (linear_velocity[:, 0] > min_forward_speed)
+        & (linear_velocity[:, 2] > min_vertical_speed)
+        & (y <= corridor_half_width)
+    )
+    forward_progress = torch.clamp(
+        (x - env._stair_contact_release_arm_x)
+        / max(target_forward_delta, 1e-6),
+        0.0,
+        1.0,
+    )
+    vertical_progress = torch.clamp(
+        (z - env._stair_contact_release_arm_z)
+        / max(target_vertical_delta, 1e-6),
+        0.0,
+        1.0,
+    )
+    progress = 0.60 * forward_progress + 0.40 * vertical_progress
+    payout = torch.where(release, progress, torch.zeros_like(progress))
+    env._stair_contact_release_paid |= release
+    env._stair_contact_loaded_release_latched |= release
+    return payout
+
+
+def stair_contact_lip_commitment(
+    env: ManagerBasedRlEnv,
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.20,
+    arm_hold_steps: int = 2,
+    impulse_window_steps: int = 12,
+    min_forward_velocity_gain: float = 0.05,
+    min_vertical_velocity_gain: float = 0.08,
+    commitment_delay_steps: int = 4,
+    commitment_hold_steps: int = 2,
+    commitment_x: float = 0.645,
+    commitment_z: float = 0.175,
+    root_over_lip_x: float = 0.665,
+    target_forward_delta: float = 0.040,
+    target_vertical_delta: float = 0.025,
+    sensor_names: tuple[str, ...] = (
+        "robot_ground_contact",
+        "head_ground_contact",
+        "legs_ground_contact",
+        "trunk_ground_contact",
+    ),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay once when a contact-created impulse commits the root to the lip.
+
+    Stable face or tread contact snapshots root pose and velocity. A later
+    impulse must increase both forward and vertical velocity relative to that
+    snapshot. Four control steps later, the root must occupy the lip-height
+    corridor for two consecutive frames. Instantaneous collision bounces and
+    contact duration therefore pay nothing.
+    """
+
+    if min(
+        arm_hold_steps,
+        impulse_window_steps,
+        commitment_delay_steps,
+        commitment_hold_steps,
+    ) < 1:
+        raise ValueError("Lip-commitment step counts must be positive")
+
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    local_y = (
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    abs_y = torch.abs(local_y)
+    linear_velocity = torch.nan_to_num(asset.data.root_link_lin_vel_w, nan=0.0)
+    vx = linear_velocity[:, 0]
+    vz = linear_velocity[:, 2]
+    finite = torch.isfinite(torch.stack((x, z, abs_y, vx, vz), dim=-1)).all(
+        dim=-1
+    )
+
+    face_contact = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    tread_contact = torch.zeros_like(face_contact)
+    for sensor_name in sensor_names:
+        if sensor_name not in env.scene.sensors:
+            raise RuntimeError(f"Missing required contact sensor: {sensor_name}")
+        face, tread, _ = _standard_stair_contact_masks(
+            env,
+            sensor_name,
+            stair_face_x=stair_face_x,
+            riser_height=riser_height,
+            tread_depth=tread_depth,
+            corridor_half_width=corridor_half_width,
+        )
+        face_contact |= face.any(dim=-1)
+        tread_contact |= tread.any(dim=-1)
+    contact = face_contact | tread_contact
+
+    if not hasattr(env, "_stair_lip_commitment_load_streak"):
+        env._stair_lip_commitment_load_streak = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+        env._stair_lip_commitment_armed = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._stair_lip_commitment_paid = torch.zeros_like(
+            env._stair_lip_commitment_armed
+        )
+        env._stair_lip_commitment_impulse_seen = torch.zeros_like(
+            env._stair_lip_commitment_armed
+        )
+        env._stair_lip_commitment_impulse_window = torch.zeros_like(
+            env._stair_lip_commitment_load_streak
+        )
+        env._stair_lip_commitment_delay = torch.zeros_like(
+            env._stair_lip_commitment_load_streak
+        )
+        env._stair_lip_commitment_check_remaining = torch.zeros_like(
+            env._stair_lip_commitment_load_streak
+        )
+        env._stair_lip_commitment_hold_streak = torch.zeros_like(
+            env._stair_lip_commitment_load_streak
+        )
+        env._stair_lip_commitment_arm_x = torch.zeros_like(x)
+        env._stair_lip_commitment_arm_z = torch.zeros_like(z)
+        env._stair_lip_commitment_arm_vx = torch.zeros_like(vx)
+        env._stair_lip_commitment_arm_vz = torch.zeros_like(vz)
+        env._stair_lip_commitment_impulse_latched = torch.zeros_like(
+            env._stair_lip_commitment_armed
+        )
+        env._stair_lip_commitment_latched = torch.zeros_like(
+            env._stair_lip_commitment_armed
+        )
+
+    fresh = env.episode_length_buf <= 1
+    env._stair_lip_commitment_load_streak[fresh] = 0
+    env._stair_lip_commitment_armed[fresh] = False
+    env._stair_lip_commitment_paid[fresh] = False
+    env._stair_lip_commitment_impulse_seen[fresh] = False
+    env._stair_lip_commitment_impulse_window[fresh] = 0
+    env._stair_lip_commitment_delay[fresh] = 0
+    env._stair_lip_commitment_check_remaining[fresh] = 0
+    env._stair_lip_commitment_hold_streak[fresh] = 0
+    env._stair_lip_commitment_arm_x[fresh] = 0.0
+    env._stair_lip_commitment_arm_z[fresh] = 0.0
+    env._stair_lip_commitment_arm_vx[fresh] = 0.0
+    env._stair_lip_commitment_arm_vz[fresh] = 0.0
+    env._stair_lip_commitment_impulse_latched[fresh] = False
+    env._stair_lip_commitment_latched[fresh] = False
+
+    cleared = getattr(env, "_stair_first_riser_latched", None)
+    if cleared is None:
+        cleared = torch.zeros_like(env._stair_lip_commitment_armed)
+    arm_candidate = (
+        (env.episode_length_buf >= 3)
+        & finite
+        & (abs_y <= corridor_half_width)
+        & contact
+        & ~cleared
+        & ((x < root_over_lip_x) | (z < commitment_z))
+        & ~env._stair_lip_commitment_armed
+    )
+    env._stair_lip_commitment_load_streak = torch.where(
+        arm_candidate,
+        env._stair_lip_commitment_load_streak + 1,
+        torch.zeros_like(env._stair_lip_commitment_load_streak),
+    )
+    newly_armed = (
+        env._stair_lip_commitment_load_streak >= arm_hold_steps
+    ) & ~env._stair_lip_commitment_armed
+    env._stair_lip_commitment_armed |= newly_armed
+    env._stair_lip_commitment_arm_x[newly_armed] = x[newly_armed]
+    env._stair_lip_commitment_arm_z[newly_armed] = z[newly_armed]
+    env._stair_lip_commitment_arm_vx[newly_armed] = vx[newly_armed]
+    env._stair_lip_commitment_arm_vz[newly_armed] = vz[newly_armed]
+    env._stair_lip_commitment_impulse_window = torch.where(
+        newly_armed,
+        torch.full_like(
+            env._stair_lip_commitment_impulse_window, impulse_window_steps
+        ),
+        env._stair_lip_commitment_impulse_window,
+    )
+
+    impulse = (
+        env._stair_lip_commitment_armed
+        & ~newly_armed
+        & ~env._stair_lip_commitment_impulse_seen
+        & (env._stair_lip_commitment_impulse_window > 0)
+        & finite
+        & ((vx - env._stair_lip_commitment_arm_vx) >= min_forward_velocity_gain)
+        & ((vz - env._stair_lip_commitment_arm_vz) >= min_vertical_velocity_gain)
+        & (vx > 0.0)
+        & (vz > 0.0)
+        & (abs_y <= corridor_half_width)
+    )
+    env._stair_lip_commitment_impulse_seen |= impulse
+    env._stair_lip_commitment_impulse_latched |= impulse
+    decay_window = (
+        env._stair_lip_commitment_armed
+        & ~newly_armed
+        & ~env._stair_lip_commitment_impulse_seen
+    )
+    env._stair_lip_commitment_impulse_window = torch.where(
+        decay_window,
+        torch.clamp(env._stair_lip_commitment_impulse_window - 1, min=0),
+        env._stair_lip_commitment_impulse_window,
+    )
+
+    previous_delay = env._stair_lip_commitment_delay.clone()
+    env._stair_lip_commitment_delay = torch.where(
+        impulse,
+        torch.full_like(
+            env._stair_lip_commitment_delay, commitment_delay_steps
+        ),
+        env._stair_lip_commitment_delay,
+    )
+    delay_active = (
+        env._stair_lip_commitment_impulse_seen
+        & ~impulse
+        & (env._stair_lip_commitment_delay > 0)
+    )
+    start_commitment_check = delay_active & (previous_delay == 1)
+    env._stair_lip_commitment_delay = torch.where(
+        delay_active,
+        torch.clamp(env._stair_lip_commitment_delay - 1, min=0),
+        env._stair_lip_commitment_delay,
+    )
+    env._stair_lip_commitment_check_remaining = torch.where(
+        start_commitment_check,
+        torch.full_like(
+            env._stair_lip_commitment_check_remaining, commitment_hold_steps
+        ),
+        env._stair_lip_commitment_check_remaining,
+    )
+
+    check_active = (
+        env._stair_lip_commitment_impulse_seen
+        & ~env._stair_lip_commitment_paid
+        & (env._stair_lip_commitment_check_remaining > 0)
+    )
+    commitment_candidate = (
+        check_active
+        & finite
+        & (x >= commitment_x)
+        & (z >= commitment_z)
+        & (abs_y <= corridor_half_width)
+    )
+    env._stair_lip_commitment_hold_streak = torch.where(
+        commitment_candidate,
+        env._stair_lip_commitment_hold_streak + 1,
+        torch.where(
+            check_active,
+            torch.zeros_like(env._stair_lip_commitment_hold_streak),
+            env._stair_lip_commitment_hold_streak,
+        ),
+    )
+    commitment = (
+        env._stair_lip_commitment_hold_streak >= commitment_hold_steps
+    ) & ~env._stair_lip_commitment_paid
+    env._stair_lip_commitment_check_remaining = torch.where(
+        check_active,
+        torch.clamp(env._stair_lip_commitment_check_remaining - 1, min=0),
+        env._stair_lip_commitment_check_remaining,
+    )
+
+    forward_progress = torch.clamp(
+        (x - env._stair_lip_commitment_arm_x) / max(target_forward_delta, 1e-6),
+        0.0,
+        1.0,
+    )
+    vertical_progress = torch.clamp(
+        (z - env._stair_lip_commitment_arm_z) / max(target_vertical_delta, 1e-6),
+        0.0,
+        1.0,
+    )
+    progress = 0.70 * forward_progress + 0.30 * vertical_progress
+    payout = torch.where(commitment, progress, torch.zeros_like(progress))
+    env._stair_lip_commitment_paid |= commitment
+    env._stair_lip_commitment_latched |= commitment
+    return payout
+
+
+def stair_contact_lip_checkpoint_potential(
+    env: ManagerBasedRlEnv,
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.20,
+    bypass_half_width: float = 0.36,
+    arm_hold_steps: int = 2,
+    target_hold_steps: int = 2,
+    x_start: float = 0.540,
+    x_target: float = 0.665,
+    x_softness: float = 0.010,
+    z_start: float = 0.100,
+    z_target: float = 0.175,
+    z_softness: float = 0.005,
+    sensor_names: tuple[str, ...] = (
+        "robot_ground_contact",
+        "head_ground_contact",
+        "legs_ground_contact",
+        "trunk_ground_contact",
+    ),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward signed simultaneous x/z progress toward the first stair lip.
+
+    Two classified stair-contact frames arm a mentor-style center-of-mass
+    checkpoint.  Its geometric-mean potential stays informative before the
+    exact goal but collapses when either forward or vertical progress is poor.
+    Only the signed change is paid, so holding and oscillating cannot create a
+    jackpot.  The shaping stops at a held root-over-lip state or side bypass.
+    """
+
+    if min(arm_hold_steps, target_hold_steps) < 1:
+        raise ValueError("Lip-checkpoint hold steps must be positive")
+    if min(x_softness, z_softness) <= 0.0:
+        raise ValueError("Lip-checkpoint softness must be positive")
+    if x_target <= x_start or z_target <= z_start:
+        raise ValueError("Lip-checkpoint targets must exceed their starts")
+
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    abs_y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    finite = torch.isfinite(torch.stack((x, z, abs_y), dim=-1)).all(dim=-1)
+
+    face_contact = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    tread_contact = torch.zeros_like(face_contact)
+    for sensor_name in sensor_names:
+        if sensor_name not in env.scene.sensors:
+            raise RuntimeError(f"Missing required contact sensor: {sensor_name}")
+        face, tread, _ = _standard_stair_contact_masks(
+            env,
+            sensor_name,
+            stair_face_x=stair_face_x,
+            riser_height=riser_height,
+            tread_depth=tread_depth,
+            corridor_half_width=corridor_half_width,
+        )
+        face_contact |= face.any(dim=-1)
+        tread_contact |= tread.any(dim=-1)
+    contact = face_contact | tread_contact
+
+    def soft_progress(
+        value: torch.Tensor, start: float, target: float, softness: float
+    ) -> torch.Tensor:
+        numerator = torch.nn.functional.softplus((value - start) / softness)
+        denominator = torch.nn.functional.softplus(
+            torch.as_tensor(
+                (target - start) / softness,
+                dtype=value.dtype,
+                device=value.device,
+            )
+        )
+        return torch.clamp(numerator / denominator, min=0.0, max=1.0)
+
+    px = soft_progress(x, x_start, x_target, x_softness)
+    pz = soft_progress(z, z_start, z_target, z_softness)
+    potential = torch.sqrt(torch.clamp(px * pz, min=0.0))
+
+    if not hasattr(env, "_stair_lip_checkpoint_load_streak"):
+        env._stair_lip_checkpoint_load_streak = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+        env._stair_lip_checkpoint_armed = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._stair_lip_checkpoint_contact_qualified = torch.zeros_like(
+            env._stair_lip_checkpoint_armed
+        )
+        env._stair_lip_checkpoint_previous = torch.zeros_like(x)
+        env._stair_lip_checkpoint_target_hold = torch.zeros_like(
+            env._stair_lip_checkpoint_load_streak
+        )
+        env._stair_lip_checkpoint_progress_latched = torch.zeros_like(
+            env._stair_lip_checkpoint_armed
+        )
+        env._stair_lip_checkpoint_target_latched = torch.zeros_like(
+            env._stair_lip_checkpoint_armed
+        )
+        env._stair_lip_checkpoint_bypass_latched = torch.zeros_like(
+            env._stair_lip_checkpoint_armed
+        )
+
+    fresh = env.episode_length_buf <= 1
+    env._stair_lip_checkpoint_load_streak[fresh] = 0
+    env._stair_lip_checkpoint_armed[fresh] = False
+    env._stair_lip_checkpoint_contact_qualified[fresh] = False
+    env._stair_lip_checkpoint_previous[fresh] = 0.0
+    env._stair_lip_checkpoint_target_hold[fresh] = 0
+    env._stair_lip_checkpoint_progress_latched[fresh] = False
+    env._stair_lip_checkpoint_target_latched[fresh] = False
+    env._stair_lip_checkpoint_bypass_latched[fresh] = False
+
+    already_target = (x >= x_target) & (z >= z_target)
+    contact_candidate = (
+        (env.episode_length_buf >= 3)
+        & finite
+        & (abs_y <= corridor_half_width)
+        & contact
+        & ~already_target
+        & ~env._stair_lip_checkpoint_contact_qualified
+    )
+    env._stair_lip_checkpoint_load_streak = torch.where(
+        contact_candidate,
+        env._stair_lip_checkpoint_load_streak + 1,
+        torch.zeros_like(env._stair_lip_checkpoint_load_streak),
+    )
+    newly_contact_qualified = (
+        env._stair_lip_checkpoint_load_streak >= arm_hold_steps
+    ) & ~env._stair_lip_checkpoint_contact_qualified
+    env._stair_lip_checkpoint_contact_qualified |= newly_contact_qualified
+    impulse_latched = getattr(env, "_stair_lip_commitment_impulse_latched", None)
+    if impulse_latched is None:
+        impulse_latched = torch.zeros_like(env._stair_lip_checkpoint_armed)
+    newly_armed = (
+        env._stair_lip_checkpoint_contact_qualified
+        & impulse_latched
+        & finite
+        & (abs_y <= corridor_half_width)
+        & ~already_target
+        & ~env._stair_lip_checkpoint_armed
+    )
+    env._stair_lip_checkpoint_armed |= newly_armed
+    env._stair_lip_checkpoint_previous[newly_armed] = potential[newly_armed]
+
+    bypass_candidate = (
+        env._stair_lip_checkpoint_armed
+        & (x >= stair_face_x)
+        & (abs_y > bypass_half_width)
+    )
+    active = (
+        env._stair_lip_checkpoint_armed
+        & ~env._stair_lip_checkpoint_target_latched
+        & ~env._stair_lip_checkpoint_bypass_latched
+        & finite
+    )
+    effective_potential = torch.where(
+        abs_y <= corridor_half_width, potential, torch.zeros_like(potential)
+    )
+    signed_delta = torch.where(
+        active & ~newly_armed,
+        effective_potential - env._stair_lip_checkpoint_previous,
+        torch.zeros_like(potential),
+    )
+    positive_progress = signed_delta > 1.0e-6
+    env._stair_lip_checkpoint_progress_latched |= positive_progress
+    env._stair_lip_checkpoint_previous = torch.where(
+        active, effective_potential, env._stair_lip_checkpoint_previous
+    )
+    # Calculate the corridor-collapse repayment before making a bypass terminal.
+    env._stair_lip_checkpoint_bypass_latched |= bypass_candidate
+
+    target_candidate = (
+        active
+        & ~bypass_candidate
+        & (x >= x_target)
+        & (z >= z_target)
+        & (abs_y <= corridor_half_width)
+    )
+    env._stair_lip_checkpoint_target_hold = torch.where(
+        target_candidate,
+        env._stair_lip_checkpoint_target_hold + 1,
+        torch.zeros_like(env._stair_lip_checkpoint_target_hold),
+    )
+    reached_target = (
+        env._stair_lip_checkpoint_target_hold >= target_hold_steps
+    ) & ~env._stair_lip_checkpoint_target_latched
+    env._stair_lip_checkpoint_target_latched |= reached_target
+    return signed_delta / env.step_dt
+
+
+def stair_coupled_frontier_collocation(
+    env: ManagerBasedRlEnv,
+    stair_face_x: float = 0.66,
+    corridor_half_width: float = 0.20,
+    bypass_half_width: float = 0.36,
+    arm_after_control_steps: int = 2,
+    target_hold_steps: int = 2,
+    x_start: float = 0.540,
+    x_target: float = 0.665,
+    z_start: float = 0.100,
+    z_target: float = 0.175,
+    target_bonus: float = 4.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay finite new coupled x/z frontier; gate only completion on impulse.
+
+    This continuation is paired with elevated manufacturer roll phases placed
+    immediately before the first lip.  The minimum of normalized forward and
+    vertical progress prevents either axis from compensating for the other.
+    A running maximum makes dense progress finite and non-farmable. Progress
+    starts from the maximum seen before arming, so lowering progress during the
+    first policy actions cannot create a profitable rebound. The held target
+    bonus still requires the physical A24 two-contact impulse. This keeps an
+    attainable mentor signal without paying reset state or accepting a target
+    reached by unrelated motion.
+    """
+
+    if min(arm_after_control_steps, target_hold_steps) < 1:
+        raise ValueError("Coupled-frontier hold steps must be positive")
+    if x_target <= x_start or z_target <= z_start:
+        raise ValueError("Coupled-frontier targets must exceed their starts")
+    if target_bonus < 0.0:
+        raise ValueError("Coupled-frontier target bonus must be nonnegative")
+
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    abs_y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    finite = torch.isfinite(torch.stack((x, z, abs_y), dim=-1)).all(dim=-1)
+
+    x_progress = torch.clamp(
+        (x - x_start) / (x_target - x_start), min=0.0, max=1.0
+    )
+    z_progress = torch.clamp(
+        (z - z_start) / (z_target - z_start), min=0.0, max=1.0
+    )
+    coupled = torch.minimum(x_progress, z_progress)
+
+    if not hasattr(env, "_stair_coupled_frontier_armed"):
+        env._stair_coupled_frontier_armed = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._stair_coupled_frontier_prearm_peak = torch.zeros_like(x)
+        env._stair_coupled_frontier_arm_value = torch.zeros_like(x)
+        env._stair_coupled_frontier_max_value = torch.zeros_like(x)
+        env._stair_coupled_frontier_paid_gain = torch.zeros_like(x)
+        env._stair_coupled_frontier_target_hold = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+        env._stair_coupled_frontier_gain10_latched = torch.zeros_like(
+            env._stair_coupled_frontier_armed
+        )
+        env._stair_coupled_frontier_gain25_latched = torch.zeros_like(
+            env._stair_coupled_frontier_armed
+        )
+        env._stair_coupled_frontier_raw_gain10_latched = torch.zeros_like(
+            env._stair_coupled_frontier_armed
+        )
+        env._stair_coupled_frontier_raw_gain25_latched = torch.zeros_like(
+            env._stair_coupled_frontier_armed
+        )
+        env._stair_coupled_frontier_target_latched = torch.zeros_like(
+            env._stair_coupled_frontier_armed
+        )
+        env._stair_coupled_frontier_bypass_latched = torch.zeros_like(
+            env._stair_coupled_frontier_armed
+        )
+
+    fresh = env.episode_length_buf <= 1
+    env._stair_coupled_frontier_armed[fresh] = False
+    env._stair_coupled_frontier_prearm_peak[fresh] = 0.0
+    env._stair_coupled_frontier_arm_value[fresh] = 0.0
+    env._stair_coupled_frontier_max_value[fresh] = 0.0
+    env._stair_coupled_frontier_paid_gain[fresh] = 0.0
+    env._stair_coupled_frontier_target_hold[fresh] = 0
+    env._stair_coupled_frontier_gain10_latched[fresh] = False
+    env._stair_coupled_frontier_gain25_latched[fresh] = False
+    env._stair_coupled_frontier_raw_gain10_latched[fresh] = False
+    env._stair_coupled_frontier_raw_gain25_latched[fresh] = False
+    env._stair_coupled_frontier_target_latched[fresh] = False
+    env._stair_coupled_frontier_bypass_latched[fresh] = False
+
+    already_target = (x >= x_target) & (z >= z_target)
+    prearm_eligible = (
+        ~env._stair_coupled_frontier_armed
+        & finite
+        & (abs_y <= corridor_half_width)
+        & ~already_target
+    )
+    env._stair_coupled_frontier_prearm_peak = torch.where(
+        prearm_eligible,
+        torch.maximum(env._stair_coupled_frontier_prearm_peak, coupled),
+        env._stair_coupled_frontier_prearm_peak,
+    )
+    newly_armed = (
+        (env.episode_length_buf >= arm_after_control_steps)
+        & finite
+        & (abs_y <= corridor_half_width)
+        & ~already_target
+        & ~env._stair_coupled_frontier_armed
+    )
+    env._stair_coupled_frontier_armed |= newly_armed
+    env._stair_coupled_frontier_arm_value[newly_armed] = (
+        env._stair_coupled_frontier_prearm_peak[newly_armed]
+    )
+    env._stair_coupled_frontier_max_value[newly_armed] = (
+        env._stair_coupled_frontier_prearm_peak[newly_armed]
+    )
+    env._stair_coupled_frontier_paid_gain[newly_armed] = 0.0
+
+    active = (
+        env._stair_coupled_frontier_armed
+        & ~env._stair_coupled_frontier_target_latched
+        & ~env._stair_coupled_frontier_bypass_latched
+        & finite
+    )
+    new_maximum = torch.where(
+        active & (abs_y <= corridor_half_width),
+        torch.maximum(env._stair_coupled_frontier_max_value, coupled),
+        env._stair_coupled_frontier_max_value,
+    )
+    env._stair_coupled_frontier_max_value = new_maximum
+    total_gain = torch.clamp(
+        env._stair_coupled_frontier_max_value
+        - env._stair_coupled_frontier_arm_value,
+        min=0.0,
+    )
+    impulse_latched = getattr(env, "_stair_lip_commitment_impulse_latched", None)
+    if impulse_latched is None:
+        impulse_latched = torch.zeros_like(env._stair_coupled_frontier_armed)
+    positive_gain = torch.clamp(
+        total_gain - env._stair_coupled_frontier_paid_gain, min=0.0
+    )
+    paid_after_step = env._stair_coupled_frontier_paid_gain + positive_gain
+    env._stair_coupled_frontier_paid_gain = torch.where(
+        active, paid_after_step, env._stair_coupled_frontier_paid_gain
+    )
+    env._stair_coupled_frontier_raw_gain10_latched |= active & (
+        total_gain >= 0.10
+    )
+    env._stair_coupled_frontier_raw_gain25_latched |= active & (
+        total_gain >= 0.25
+    )
+    env._stair_coupled_frontier_gain10_latched |= (
+        active & impulse_latched & (total_gain >= 0.10)
+    )
+    env._stair_coupled_frontier_gain25_latched |= (
+        active & impulse_latched & (total_gain >= 0.25)
+    )
+
+    bypass_candidate = (
+        active & (x >= stair_face_x) & (abs_y > bypass_half_width)
+    )
+    newly_bypassed = bypass_candidate & ~env._stair_coupled_frontier_bypass_latched
+
+    target_candidate = (
+        active
+        & impulse_latched
+        & ~bypass_candidate
+        & (x >= x_target)
+        & (z >= z_target)
+        & (abs_y <= corridor_half_width)
+    )
+    env._stair_coupled_frontier_target_hold = torch.where(
+        target_candidate,
+        env._stair_coupled_frontier_target_hold + 1,
+        torch.zeros_like(env._stair_coupled_frontier_target_hold),
+    )
+    reached_target = (
+        env._stair_coupled_frontier_target_hold >= target_hold_steps
+    ) & ~env._stair_coupled_frontier_target_latched
+
+    payout = positive_gain + target_bonus * reached_target.to(positive_gain.dtype)
+    # A lateral escape cannot retain progress collected in the strict corridor.
+    payout -= paid_after_step * newly_bypassed.to(paid_after_step.dtype)
+    env._stair_coupled_frontier_target_latched |= reached_target
+    env._stair_coupled_frontier_bypass_latched |= newly_bypassed
+    return payout / env.step_dt
+
+
+def stair_terminal_position_objective(
+    env: ManagerBasedRlEnv,
+    target_x: float = 0.720,
+    target_y: float = 0.0,
+    target_z: float = 0.205,
+    reward_window_s: float = 0.50,
+    x_scale: float = 0.08,
+    y_scale: float = 0.12,
+    z_scale: float = 0.06,
+    max_abs_y: float = 0.20,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward absolute goal arrival only during the terminal time window.
+
+    This is a robot-scale version of the final-position objective from Rudin
+    et al. (IROS 2022). The policy is free to jump, roll, or use its shell
+    before the final window. A reciprocal distance score remains visible from
+    the measured near-lip frontier, while the fixed target prevents partial
+    progress followed by a crash from becoming the objective.
+    """
+
+    if reward_window_s <= 0.0:
+        raise ValueError("Terminal-position reward window must be positive")
+    if min(x_scale, y_scale, z_scale) <= 0.0:
+        raise ValueError("Terminal-position scales must be positive")
+    if max_abs_y <= 0.0:
+        raise ValueError("Terminal-position lateral corridor must be positive")
+
+    asset: Entity = env.scene[asset_cfg.name]
+    local = asset.data.root_link_pos_w - env.scene.terrain.env_origins
+    finite = torch.isfinite(local).all(dim=-1)
+    dx = (local[:, 0] - target_x) / x_scale
+    dy = (local[:, 1] - target_y) / y_scale
+    dz = (local[:, 2] - target_z) / z_scale
+    score = 1.0 / (1.0 + dx.square() + dy.square() + dz.square())
+
+    reward_window_steps = max(1, int(round(reward_window_s / env.step_dt)))
+    remaining_steps = env.max_episode_length - env.episode_length_buf
+    terminal_window = (remaining_steps >= 1) & (
+        remaining_steps <= reward_window_steps
+    )
+    lateral_corridor = local[:, 1].abs() <= max_abs_y
+    return torch.where(
+        terminal_window & lateral_corridor & finite,
+        score / reward_window_s,
+        torch.zeros_like(score),
+    )
+
+
+def stair_delayed_frontier_tiers(
+    env: ManagerBasedRlEnv,
+    x_thresholds: tuple[float, ...] = (0.650, 0.660, 0.665),
+    tier_rewards: tuple[float, ...] = (25.0, 75.0, 150.0),
+    min_height: float = 0.175,
+    min_height_thresholds: tuple[float, ...] | None = None,
+    corridor_half_width: float = 0.20,
+    hold_steps: int = 2,
+    min_policy_steps: int = 3,
+    bypass_x: float = 0.660,
+    bypass_half_width: float = 0.36,
+    prelatch_reset_satisfied: bool = False,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay once for held, post-control progress beyond a replay frontier.
+
+    Frontier replay rows are deliberately below the first threshold. The
+    control-step delay and per-tier latches prevent PPO from collecting a
+    reset jackpot, while cumulative tiers preserve credit for a motion that
+    crosses more than one threshold in a single control interval. A lateral
+    bypass permanently disables every unpaid tier for that episode.
+    """
+
+    if len(x_thresholds) == 0 or len(x_thresholds) != len(tier_rewards):
+        raise ValueError(
+            "Frontier thresholds and rewards must be non-empty and aligned"
+        )
+    if tuple(sorted(x_thresholds)) != x_thresholds:
+        raise ValueError("Frontier x thresholds must be ascending")
+    if any(reward <= 0.0 for reward in tier_rewards):
+        raise ValueError("Frontier tier rewards must be positive")
+    if min_height_thresholds is not None and len(min_height_thresholds) != len(
+        x_thresholds
+    ):
+        raise ValueError("Frontier height thresholds must align with x thresholds")
+    if hold_steps < 1 or min_policy_steps < 1:
+        raise ValueError("Frontier hold and policy-step delays must be positive")
+    if min(corridor_half_width, bypass_half_width) <= 0.0:
+        raise ValueError("Frontier lateral widths must be positive")
+
+    asset: Entity = env.scene[asset_cfg.name]
+    local = asset.data.root_link_pos_w - env.scene.terrain.env_origins
+    x = local[:, 0]
+    z = local[:, 2]
+    abs_y = local[:, 1].abs()
+    finite = torch.isfinite(local).all(dim=-1)
+    tier_count = len(x_thresholds)
+
+    if not hasattr(env, "_stair_delayed_frontier_tier_hold"):
+        env._stair_delayed_frontier_tier_hold = torch.zeros(
+            (env.num_envs, tier_count), dtype=torch.long, device=env.device
+        )
+        env._stair_delayed_frontier_tier_paid = torch.zeros(
+            (env.num_envs, tier_count), dtype=torch.bool, device=env.device
+        )
+        env._stair_delayed_frontier_bypassed = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+
+    fresh = env.episode_length_buf <= 1
+    env._stair_delayed_frontier_tier_hold[fresh] = 0
+    env._stair_delayed_frontier_tier_paid[fresh] = False
+    if prelatch_reset_satisfied:
+        reset_satisfied = getattr(
+            env, "_stair_reset_frontier_tiers_satisfied", None
+        )
+        expected_shape = (env.num_envs, tier_count)
+        if reset_satisfied is None or reset_satisfied.shape != expected_shape:
+            raise RuntimeError(
+                "Reset-safe frontier tiers require a matching reset snapshot event"
+            )
+        env._stair_delayed_frontier_tier_paid[fresh] = reset_satisfied[fresh]
+    env._stair_delayed_frontier_bypassed[fresh] = False
+
+    bypass = finite & (x >= bypass_x) & (abs_y > bypass_half_width)
+    env._stair_delayed_frontier_bypassed |= bypass
+    armed = (
+        finite
+        & (env.episode_length_buf >= min_policy_steps)
+        & ~env._stair_delayed_frontier_bypassed
+    )
+    thresholds = torch.tensor(x_thresholds, dtype=x.dtype, device=x.device)
+    height_thresholds = torch.tensor(
+        (
+            (min_height,) * tier_count
+            if min_height_thresholds is None
+            else min_height_thresholds
+        ),
+        dtype=z.dtype,
+        device=z.device,
+    )
+    candidates = (
+        armed[:, None]
+        & (x[:, None] >= thresholds[None, :])
+        & (z[:, None] >= height_thresholds[None, :])
+        & (abs_y[:, None] <= corridor_half_width)
+    )
+    env._stair_delayed_frontier_tier_hold = torch.where(
+        candidates,
+        env._stair_delayed_frontier_tier_hold + 1,
+        torch.zeros_like(env._stair_delayed_frontier_tier_hold),
+    )
+    newly_reached = (
+        env._stair_delayed_frontier_tier_hold >= hold_steps
+    ) & ~env._stair_delayed_frontier_tier_paid
+    env._stair_delayed_frontier_tier_paid |= newly_reached
+    rewards = torch.tensor(tier_rewards, dtype=x.dtype, device=x.device)
+    return torch.sum(newly_reached.to(x.dtype) * rewards[None, :], dim=-1)
+
+
+def snapshot_stair_frontier_tier_baseline(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    x_thresholds: tuple[float, ...] = (0.625, 0.640, 0.650, 0.660, 0.665),
+    min_height_thresholds: tuple[float, ...] = (
+        0.160,
+        0.170,
+        0.175,
+        0.175,
+        0.175,
+    ),
+    corridor_half_width: float = 0.20,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Snapshot milestone tiers already satisfied by an exact reset state."""
+
+    if len(x_thresholds) == 0 or len(x_thresholds) != len(
+        min_height_thresholds
+    ):
+        raise ValueError("Reset milestone thresholds must be non-empty and aligned")
+    if corridor_half_width <= 0.0:
+        raise ValueError("Reset milestone corridor must be positive")
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    env_ids = env_ids.to(device=env.device, dtype=torch.long)
+    asset: Entity = env.scene[asset_cfg.name]
+    # Reset events run before MuJoCo forward kinematics refresh derived xpos.
+    # State-bank events immediately preceding this one write the free-joint
+    # qpos directly, so qpos is the only authoritative reset pose here.
+    root_qpos = env.sim.data.qpos[env_ids][
+        :, asset.indexing.free_joint_q_adr
+    ]
+    local = root_qpos[:, :3] - env.scene.terrain.env_origins[env_ids]
+    x_threshold = torch.tensor(
+        x_thresholds, dtype=local.dtype, device=local.device
+    )
+    z_threshold = torch.tensor(
+        min_height_thresholds, dtype=local.dtype, device=local.device
+    )
+    satisfied = (
+        torch.isfinite(local).all(dim=-1)[:, None]
+        & (local[:, 0, None] >= x_threshold[None, :])
+        & (local[:, 2, None] >= z_threshold[None, :])
+        & (local[:, 1].abs()[:, None] <= corridor_half_width)
+    )
+    expected_shape = (env.num_envs, len(x_thresholds))
+    current = getattr(env, "_stair_reset_frontier_tiers_satisfied", None)
+    if current is None or current.shape != expected_shape:
+        env._stair_reset_frontier_tiers_satisfied = torch.zeros(
+            expected_shape, dtype=torch.bool, device=env.device
+        )
+    env._stair_reset_frontier_tiers_satisfied[env_ids] = satisfied
+
+
+def stair_apex_or_mantle_frontier(
+    env: ManagerBasedRlEnv,
+    approach_start_x: float = 0.40,
+    stair_face_x: float = 0.66,
+    crossing_end_x: float = 0.70,
+    standing_root_height: float = 0.115,
+    clearance_root_height: float = 0.195,
+    max_vertical_speed: float = 1.50,
+    corridor_half_width: float = 0.36,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    support_sensor_name: str = "robot_ground_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward new ballistic-clearance or contact-mantle frontiers.
+
+    The actor is free to jump directly or exploit the head and shell as a
+    temporary support. Ballistic height is predicted at the riser face, rather
+    than at an unconstrained apex that could occur before or after the stair.
+    The mantle branch pays only for a classified face or tread contact.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    vertical_speed = torch.clamp(
+        torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0),
+        min=0.0,
+        max=max_vertical_speed,
+    )
+    forward_speed = torch.nan_to_num(
+        asset.data.root_link_lin_vel_w[:, 0], nan=0.0
+    )
+    time_to_face = torch.clamp(
+        (stair_face_x - x) / torch.clamp(forward_speed, min=0.05),
+        min=0.0,
+        max=0.60,
+    )
+    predicted_face_height = (
+        z + vertical_speed * time_to_face - 0.5 * 9.81 * time_to_face.square()
+    )
+    predicted_face_height = torch.where(
+        (x < stair_face_x) & (forward_speed > 0.05),
+        predicted_face_height,
+        z,
+    )
+    approach_gate = torch.clamp(
+        (x - approach_start_x) / max(stair_face_x - approach_start_x, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    height_progress = torch.clamp(
+        (predicted_face_height - standing_root_height)
+        / max(clearance_root_height - standing_root_height, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    ballistic = approach_gate * height_progress
+
+    face_contact, tread_contact, _ = _standard_stair_contact_masks(
+        env,
+        support_sensor_name,
+        stair_face_x=stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    contact = face_contact.any(dim=-1) | tread_contact.any(dim=-1)
+    crossing_progress = torch.clamp(
+        (x - stair_face_x) / max(crossing_end_x - stair_face_x, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    current_height_progress = torch.clamp(
+        (z - standing_root_height)
+        / max(clearance_root_height - standing_root_height, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    mantle = contact.to(x.dtype) * 0.5 * (
+        current_height_progress + crossing_progress
+    )
+    value = torch.maximum(ballistic, mantle)
+    value = torch.where(y <= corridor_half_width, value, torch.zeros_like(value))
+    return _new_frontier_delta(env, value, "_stair_apex_or_mantle_frontier")
+
+
+def stair_assisted_approach_frontier(
+    env: ManagerBasedRlEnv,
+    start_x: float = 0.54,
+    end_x: float = 0.64,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    x, _, _ = _stair_local_state(env, asset_cfg)
+    value = torch.clamp((x - start_x) / max(end_x - start_x, 1e-6), 0.0, 1.0)
+    return _new_frontier_delta(env, value, "_stair_assisted_approach")
+
+
+def stair_assisted_lift_frontier(
+    env: ManagerBasedRlEnv,
+    start_height: float = 0.115,
+    clearance_height: float = 0.195,
+    x_gate: float = 0.60,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    value = torch.clamp(
+        (z - start_height) / max(clearance_height - start_height, 1e-6), 0.0, 1.0
+    ) * torch.sigmoid((x - x_gate) / 0.015)
+    return _new_frontier_delta(env, value, "_stair_assisted_lift")
+
+
+def stair_assisted_crossing_frontier(
+    env: ManagerBasedRlEnv,
+    start_x: float = 0.64,
+    end_x: float = 0.72,
+    clearance_height: float = 0.190,
+    corridor_half_width: float | None = None,
+    hard_height_gate: bool = False,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    height_gate = (
+        (z >= clearance_height).to(z.dtype)
+        if hard_height_gate
+        else torch.sigmoid((z - clearance_height) / 0.008)
+    )
+    value = torch.clamp((x - start_x) / max(end_x - start_x, 1e-6), 0.0, 1.0)
+    value *= height_gate
+    if corridor_half_width is not None:
+        asset: Entity = env.scene[asset_cfg.name]
+        y = torch.abs(
+            asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+        )
+        value = torch.where(
+            y <= corridor_half_width, value, torch.zeros_like(value)
+        )
+    return _new_frontier_delta(env, value, "_stair_assisted_crossing")
+
+
+def stair_tread_support_frontier(
+    env: ManagerBasedRlEnv,
+    stair_face_x: float = 0.66,
+    target_x: float = 0.74,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    target_root_height: float = 0.205,
+    corridor_half_width: float = 0.36,
+    support_sensor_name: str = "robot_ground_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward new contact-supported progress onto the first real tread.
+
+    Forward translation alone is insufficient. The robot must remain inside
+    the stair corridor, place its root beyond the vertical face and above the
+    170 mm lip, and have actual robot-terrain contact. This makes a foot plant,
+    shell mantle, or head-assisted lever valid while rejecting a sideways fall
+    that merely produces a large global x coordinate.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    _, tread_contact, contact_positions = _standard_stair_contact_masks(
+        env,
+        support_sensor_name,
+        stair_face_x=stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    support = tread_contact.any(dim=-1)
+    contact_x = torch.where(
+        tread_contact,
+        contact_positions[..., 0],
+        torch.full_like(contact_positions[..., 0], stair_face_x),
+    ).max(dim=-1).values
+
+    x_progress = torch.clamp(
+        (contact_x - stair_face_x) / max(target_x - stair_face_x, 1e-6),
+        0.0,
+        1.0,
+    )
+    z_progress = torch.clamp(
+        (z - riser_height)
+        / max(target_root_height - riser_height, 1e-6),
+        0.0,
+        1.0,
+    )
+    value = 0.40 + 0.30 * x_progress + 0.30 * z_progress
+    eligible = (
+        support
+        & (y <= corridor_half_width)
+    )
+    value = torch.where(eligible, value, torch.zeros_like(value))
+    return _new_frontier_delta(env, value, "_stair_tread_support_frontier")
+
+
+def stair_tread_pullup_frontier(
+    env: ManagerBasedRlEnv,
+    start_x: float = 0.56,
+    target_x: float = 0.72,
+    start_height: float = 0.10,
+    target_height: float = 0.205,
+    corridor_half_width: float = 0.36,
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    support_sensor_name: str = "robot_ground_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward new root lift and advance after a real first-tread contact.
+
+    This is the continuation objective for contact-state reverse curriculum.
+    A limb, shell, or head may release the tread after creating leverage, but
+    progress is eligible only after the classified tread-contact latch fired.
+    """
+
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    _, tread_contact, _ = _standard_stair_contact_masks(
+        env,
+        support_sensor_name,
+        stair_face_x=stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    current_contact = tread_contact.any(dim=-1)
+    contacted = getattr(env, "_stair_tread_pullup_contact_latched", None)
+    if contacted is None:
+        contacted = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._stair_tread_pullup_contact_latched = contacted
+    fresh = env.episode_length_buf <= 1
+    contacted[fresh] = False
+    contacted |= current_contact
+    x_progress = torch.clamp(
+        (x - start_x) / max(target_x - start_x, 1e-6), 0.0, 1.0
+    )
+    height_progress = torch.clamp(
+        (z - start_height) / max(target_height - start_height, 1e-6),
+        0.0,
+        1.0,
+    )
+    value = 0.65 * x_progress + 0.35 * height_progress
+    eligible = contacted & (y <= corridor_half_width)
+    value = torch.where(eligible, value, torch.zeros_like(value))
+    return _new_frontier_delta(env, value, "_stair_tread_pullup_frontier")
+
+
+def stair_foot_anchor_vault_frontier(
+    env: ManagerBasedRlEnv,
+    start_x: float = 0.60,
+    target_x: float = 0.72,
+    start_height: float = 0.12,
+    target_height: float = 0.205,
+    min_normal_force: float = 0.40,
+    min_positive_power: float = 0.01,
+    target_positive_power: float = 0.25,
+    release_window_s: float = 0.25,
+    corridor_half_width: float = 0.36,
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    support_sensor_name: str = "feet_stair_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward a loaded foot plant that performs positive vault work.
+
+    The A9 geometry audit showed that almost every real first-tread contact is
+    a foot, not a head or shell. This continuation therefore treats the foot
+    as a temporary anchor. Root progress is eligible only after a loaded tread
+    contact produces positive sagittal mechanical power, with a short release
+    window so the foot can leave the tread during the vault.
+    """
+
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    if support_sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+    sensor_data = env.scene.sensors[support_sensor_name].data
+    if (
+        sensor_data.found is None
+        or sensor_data.force is None
+        or sensor_data.pos is None
+        or sensor_data.normal is None
+    ):
+        raise RuntimeError(
+            f"{support_sensor_name} must provide found, force, pos, and normal"
+        )
+    _, tread_contact, _ = _standard_stair_contact_masks(
+        env,
+        support_sensor_name,
+        stair_face_x=stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    normal_force = torch.abs(
+        torch.sum(sensor_data.force * sensor_data.normal, dim=-1)
+    )
+    normal_force = torch.where(
+        tread_contact, normal_force, torch.zeros_like(normal_force)
+    )
+    strongest_slot = normal_force.argmax(dim=-1, keepdim=True)
+    strongest_force = normal_force.gather(1, strongest_slot).squeeze(1)
+    slot_index = strongest_slot.unsqueeze(-1).expand(-1, -1, 3)
+    contact_pos = sensor_data.pos.gather(1, slot_index).squeeze(1)
+    contact_force = sensor_data.force.gather(1, slot_index).squeeze(1)
+    lever = contact_pos - asset.data.root_link_pos_w
+    pitch_torque = torch.cross(lever, contact_force, dim=-1)[:, 1]
+    positive_power = torch.clamp(
+        pitch_torque * asset.data.root_link_ang_vel_w[:, 1], min=0.0
+    )
+    loaded = tread_contact.any(dim=-1) & (strongest_force >= min_normal_force)
+
+    if not hasattr(env, "_stair_foot_anchor_release_steps"):
+        env._stair_foot_anchor_release_steps = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+    fresh = env.episode_length_buf <= 1
+    env._stair_foot_anchor_release_steps[fresh] = 0
+    work = loaded & (positive_power >= min_positive_power)
+    release_steps = max(1, int(round(release_window_s / env.step_dt)))
+    env._stair_foot_anchor_release_steps = torch.where(
+        work,
+        torch.full_like(env._stair_foot_anchor_release_steps, release_steps),
+        torch.clamp(env._stair_foot_anchor_release_steps - 1, min=0),
+    )
+    active_vault = env._stair_foot_anchor_release_steps > 0
+
+    power_progress = torch.clamp(
+        positive_power / max(target_positive_power, 1e-6), 0.0, 1.0
+    )
+    x_progress = torch.clamp(
+        (x - start_x) / max(target_x - start_x, 1e-6), 0.0, 1.0
+    )
+    height_progress = torch.clamp(
+        (z - start_height) / max(target_height - start_height, 1e-6),
+        0.0,
+        1.0,
+    )
+    root_progress = 0.60 * x_progress + 0.40 * height_progress
+    value = 0.25 * power_progress + 0.75 * root_progress
+    eligible = active_vault & (y <= corridor_half_width)
+    value = torch.where(eligible, value, torch.zeros_like(value))
+    return _new_frontier_delta(env, value, "_stair_foot_anchor_vault_frontier")
+
+
+def stair_ordered_foot_vault_frontier(
+    env: ManagerBasedRlEnv,
+    target_x: float = 0.72,
+    target_height: float = 0.205,
+    required_lift: float = 0.04,
+    lip_gate_height: float = 0.165,
+    min_normal_force: float = 0.40,
+    min_positive_power: float = 0.02,
+    min_positive_work_j: float = 0.004,
+    min_control_steps: int = 3,
+    corridor_half_width: float = 0.20,
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    support_sensor_name: str = "feet_stair_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward an ordered loaded-work, lift, then lip-crossing sequence.
+
+    A11 could earn its frontier while oscillating around a static foot anchor.
+    This stage uses contact power only as an eligibility event, never as direct
+    reward. The root baseline is captured after the policy has controlled the
+    robot for several steps and accumulated real positive pitch work. Only
+    subsequent lift earns the first half of the frontier; forward crossing is
+    multiplied by an absolute lip-height gate.
+    """
+
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    if support_sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+    sensor_data = env.scene.sensors[support_sensor_name].data
+    if (
+        sensor_data.found is None
+        or sensor_data.force is None
+        or sensor_data.pos is None
+        or sensor_data.normal is None
+    ):
+        raise RuntimeError(
+            f"{support_sensor_name} must provide found, force, pos, and normal"
+        )
+    _, tread_contact, _ = _standard_stair_contact_masks(
+        env,
+        support_sensor_name,
+        stair_face_x=stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    normal_force = torch.abs(
+        torch.sum(sensor_data.force * sensor_data.normal, dim=-1)
+    )
+    normal_force = torch.where(
+        tread_contact, normal_force, torch.zeros_like(normal_force)
+    )
+    strongest_slot = normal_force.argmax(dim=-1, keepdim=True)
+    strongest_force = normal_force.gather(1, strongest_slot).squeeze(1)
+    slot_index = strongest_slot.unsqueeze(-1).expand(-1, -1, 3)
+    contact_pos = sensor_data.pos.gather(1, slot_index).squeeze(1)
+    contact_force = sensor_data.force.gather(1, slot_index).squeeze(1)
+    lever = contact_pos - asset.data.root_link_pos_w
+    pitch_torque = torch.cross(lever, contact_force, dim=-1)[:, 1]
+    positive_power = torch.clamp(
+        pitch_torque * asset.data.root_link_ang_vel_w[:, 1], min=0.0
+    )
+    loaded = tread_contact.any(dim=-1) & (strongest_force >= min_normal_force)
+
+    if not hasattr(env, "_stair_ordered_vault_armed"):
+        env._stair_ordered_vault_armed = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._stair_ordered_vault_work_j = torch.zeros(
+            env.num_envs, device=env.device
+        )
+        env._stair_ordered_vault_start_x = x.clone()
+        env._stair_ordered_vault_start_z = z.clone()
+    fresh = env.episode_length_buf <= 1
+    env._stair_ordered_vault_armed[fresh] = False
+    env._stair_ordered_vault_work_j[fresh] = 0.0
+    env._stair_ordered_vault_start_x[fresh] = x[fresh]
+    env._stair_ordered_vault_start_z[fresh] = z[fresh]
+
+    controlled = env.episode_length_buf >= max(1, int(min_control_steps))
+    positive_work_step = torch.where(
+        controlled & loaded & (positive_power >= min_positive_power),
+        positive_power * env.step_dt,
+        torch.zeros_like(positive_power),
+    )
+    not_armed = ~env._stair_ordered_vault_armed
+    env._stair_ordered_vault_work_j += positive_work_step * not_armed
+    newly_armed = not_armed & (
+        env._stair_ordered_vault_work_j >= min_positive_work_j
+    )
+    env._stair_ordered_vault_start_x[newly_armed] = x[newly_armed]
+    env._stair_ordered_vault_start_z[newly_armed] = z[newly_armed]
+    env._stair_ordered_vault_armed |= newly_armed
+
+    lift_progress = torch.clamp(
+        (z - env._stair_ordered_vault_start_z) / max(required_lift, 1e-6),
+        0.0,
+        1.0,
+    )
+    cross_span = torch.clamp(
+        torch.full_like(x, target_x) - env._stair_ordered_vault_start_x,
+        min=0.03,
+    )
+    cross_progress = torch.clamp(
+        (x - env._stair_ordered_vault_start_x) / cross_span, 0.0, 1.0
+    )
+    lip_gate = torch.clamp(
+        (z - lip_gate_height) / max(target_height - lip_gate_height, 1e-6),
+        0.0,
+        1.0,
+    )
+    value = 0.55 * lift_progress + 0.45 * cross_progress * lip_gate
+    eligible = env._stair_ordered_vault_armed & (y <= corridor_half_width)
+    value = torch.where(eligible, value, torch.zeros_like(value))
+    return _new_frontier_delta(env, value, "_stair_ordered_foot_vault_frontier")
+
+
+def stair_first_tread_stable(
+    env: ManagerBasedRlEnv,
+    min_x: float = 0.72,
+    max_x: float = 0.94,
+    min_height: float = 0.235,
+    upright_threshold: float = 0.82,
+    max_vertical_speed: float = 0.15,
+    max_angular_speed: float = 1.0,
+    hold_time_s: float = 0.20,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, upright = _stair_local_state(env, asset_cfg)
+    vertical_speed = torch.abs(asset.data.root_link_lin_vel_w[:, 2])
+    angular_speed = torch.linalg.vector_norm(asset.data.root_link_ang_vel_w, dim=-1)
+    candidate = (
+        (x >= min_x)
+        & (x <= max_x)
+        & (z >= min_height)
+        & (upright >= upright_threshold)
+        & (vertical_speed <= max_vertical_speed)
+        & (angular_speed <= max_angular_speed)
+    )
+    if not hasattr(env, "_stair_first_tread_hold_steps"):
+        env._stair_first_tread_hold_steps = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+        env._stair_first_tread_latched = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    fresh = env.episode_length_buf <= 1
+    env._stair_first_tread_hold_steps[fresh] = 0
+    env._stair_first_tread_latched[fresh] = False
+    env._stair_first_tread_hold_steps = torch.where(
+        candidate,
+        env._stair_first_tread_hold_steps + 1,
+        torch.zeros_like(env._stair_first_tread_hold_steps),
+    )
+    required_steps = max(1, int(round(hold_time_s / env.step_dt)))
+    newly_stable = (
+        env._stair_first_tread_hold_steps >= required_steps
+    ) & ~env._stair_first_tread_latched
+    env._stair_first_tread_latched |= newly_stable
+    return newly_stable.float()
+
+
+def stair_first_tread_secured(
+    env: ManagerBasedRlEnv,
+    min_x: float = 0.70,
+    max_x: float = 0.94,
+    min_height: float = 0.195,
+    max_linear_speed: float = 0.40,
+    max_angular_speed: float = 2.5,
+    hold_time_s: float = 0.12,
+    support_sensor_name: str = "robot_ground_contact",
+    stair_face_x: float = 0.66,
+    riser_height: float = 0.17,
+    tread_depth: float = 0.28,
+    corridor_half_width: float = 0.36,
+    required_latch_name: str | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay once when any mechanically settled pose is secured on tread one.
+
+    Unlike ``stair_first_tread_stable``, this bridge milestone deliberately has
+    no upright requirement.  A shell landing or head-supported brace is valid
+    if the robot is fully beyond the 170 mm lip and has stopped tumbling.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    linear_speed = torch.linalg.vector_norm(asset.data.root_link_lin_vel_w, dim=-1)
+    angular_speed = torch.linalg.vector_norm(asset.data.root_link_ang_vel_w, dim=-1)
+    _, tread_contact, _ = _standard_stair_contact_masks(
+        env,
+        support_sensor_name,
+        stair_face_x=stair_face_x,
+        riser_height=riser_height,
+        tread_depth=tread_depth,
+        corridor_half_width=corridor_half_width,
+    )
+    support = tread_contact.any(dim=-1)
+    ordered_gate = torch.ones_like(support)
+    if required_latch_name is not None:
+        required_latch = getattr(env, required_latch_name, None)
+        if required_latch is None:
+            ordered_gate = torch.zeros_like(support)
+        else:
+            ordered_gate = required_latch
+    candidate = (
+        (x >= min_x)
+        & (x <= max_x)
+        & (z >= min_height)
+        & (linear_speed <= max_linear_speed)
+        & (angular_speed <= max_angular_speed)
+        & support
+        & ordered_gate
+    )
+    if not hasattr(env, "_stair_first_tread_secured_steps"):
+        env._stair_first_tread_secured_steps = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+        env._stair_first_tread_secured_latched = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    fresh = env.episode_length_buf <= 1
+    env._stair_first_tread_secured_steps[fresh] = 0
+    env._stair_first_tread_secured_latched[fresh] = False
+    env._stair_first_tread_secured_steps = torch.where(
+        candidate,
+        env._stair_first_tread_secured_steps + 1,
+        torch.zeros_like(env._stair_first_tread_secured_steps),
+    )
+    required_steps = max(1, int(round(hold_time_s / env.step_dt)))
+    newly_secured = (
+        env._stair_first_tread_secured_steps >= required_steps
+    ) & ~env._stair_first_tread_secured_latched
+    env._stair_first_tread_secured_latched |= newly_secured
+    return newly_secured.float()
+
+
+def stair_secured_tread_success(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Terminate only after the strict secured-tread hold has completed."""
+
+    secured = getattr(env, "_stair_first_tread_secured_latched", None)
+    if secured is None:
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    return secured
+
+
+def stair_progress_stalled(
+    env: ManagerBasedRlEnv,
+    start_x: float = 0.50,
+    target_x: float = 0.70,
+    start_height: float = 0.09,
+    target_height: float = 0.198,
+    warmup_s: float = 0.50,
+    max_stall_s: float = 1.10,
+    min_progress_delta: float = 0.01,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Recycle attempts that stop improving before they secure the tread.
+
+    The timer observes a monotonic physical potential plus ordered contact
+    milestones. It does not require upright posture, so head levers and rolls
+    remain valid. Reaching a new milestone resets the full settling window.
+    """
+
+    if target_x <= start_x or target_height <= start_height:
+        raise ValueError("Stair stall targets must exceed their start values")
+    if warmup_s < 0.0 or max_stall_s <= 0.0 or min_progress_delta <= 0.0:
+        raise ValueError("Stair stall timing and progress delta must be positive")
+
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    x_progress = torch.clamp((x - start_x) / (target_x - start_x), 0.0, 1.0)
+    z_progress = torch.clamp(
+        (z - start_height) / (target_height - start_height), 0.0, 1.0
+    )
+
+    def latch(name: str) -> torch.Tensor:
+        value = getattr(env, name, None)
+        if value is None:
+            return torch.zeros(env.num_envs, device=env.device)
+        return value.float()
+
+    progress = (
+        0.35 * x_progress
+        + 0.25 * z_progress
+        + 0.10 * latch("_stair_contact_transfer_stage15_policy_achieved")
+        + 0.15 * latch("_stair_contact_transfer_stage2_policy_achieved")
+        + 0.15 * latch("_stair_true_shell_clearance_policy_achieved")
+    )
+    if not hasattr(env, "_stair_stall_best_progress"):
+        env._stair_stall_best_progress = torch.zeros(
+            env.num_envs, device=env.device
+        )
+        env._stair_stall_timer_s = torch.zeros(env.num_envs, device=env.device)
+
+    fresh = env.episode_length_buf <= 1
+    env._stair_stall_best_progress[fresh] = progress[fresh]
+    env._stair_stall_timer_s[fresh] = 0.0
+    improved = progress >= env._stair_stall_best_progress + min_progress_delta
+    improved &= ~fresh
+    env._stair_stall_best_progress = torch.maximum(
+        env._stair_stall_best_progress, progress
+    )
+    env._stair_stall_timer_s = torch.where(
+        improved,
+        torch.zeros_like(env._stair_stall_timer_s),
+        env._stair_stall_timer_s + env.step_dt,
+    )
+    env._stair_stall_timer_s[fresh] = 0.0
+
+    secured = getattr(env, "_stair_first_tread_secured_latched", None)
+    if secured is None:
+        secured = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    age_s = env.episode_length_buf.float() * env.step_dt
+    return (
+        (age_s >= warmup_s)
+        & (env._stair_stall_timer_s >= max_stall_s)
+        & ~secured
+    )
+
+
+def stair_first_tread_settle_quality(
+    env: ManagerBasedRlEnv,
+    min_x: float = 0.70,
+    max_x: float = 0.94,
+    min_height: float = 0.195,
+    linear_speed_scale: float = 0.35,
+    angular_speed_scale: float = 2.5,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Dense bridge shaping for slowing down after a full-height mantle."""
+    asset: Entity = env.scene[asset_cfg.name]
+    x, z, _ = _stair_local_state(env, asset_cfg)
+    x_gate = torch.sigmoid((x - min_x) / 0.015) * torch.sigmoid(
+        (max_x - x) / 0.020
+    )
+    z_gate = torch.sigmoid((z - min_height) / 0.010)
+    linear_speed = torch.linalg.vector_norm(asset.data.root_link_lin_vel_w, dim=-1)
+    angular_speed = torch.linalg.vector_norm(asset.data.root_link_ang_vel_w, dim=-1)
+    settle = 0.6 * torch.exp(-((linear_speed / linear_speed_scale) ** 2))
+    settle += 0.4 * torch.exp(-((angular_speed / angular_speed_scale) ** 2))
+    return x_gate * z_gate * settle
+
+
+def stair_goal_progress(
+    env: ManagerBasedRlEnv,
+    goal_distance: float,
+    corridor_half_width: float | None = None,
+    corridor_fade: float = 0.08,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Potential-based forward progress toward the stair top.
+
+    The robot receives the change in clamped route progress, not a per-step
+    reward for merely remaining near the destination.  Backward motion is
+    charged, holding position is zero, and episode resets clear the potential.
+    This gives the policy a useful walking signal while avoiding a goal-state
+    jackpot that could reward thrashing in place.
+    """
+    x, _, _ = _stair_local_state(env, asset_cfg)
+    progress = torch.clamp(x / max(goal_distance, 1e-6), min=0.0, max=1.0)
+    progress = progress * _stair_corridor_gate(
+        env, corridor_half_width, corridor_fade, asset_cfg
+    )
+    if not hasattr(env, "_stair_progress_prev"):
+        env._stair_progress_prev = progress.clone()
+    fresh = env.episode_length_buf <= 1
+    env._stair_progress_prev[fresh] = progress[fresh]
+    delta = progress - env._stair_progress_prev
+    env._stair_progress_prev = progress.clone()
+    return torch.clamp(delta / env.step_dt, min=-5.0, max=5.0)
+
+
+def stair_top_approach(
+    env: ManagerBasedRlEnv,
+    goal_distance: float,
+    goal_height: float | None = None,
+    goal_height_range: tuple[float, float] | None = None,
+    num_terrain_levels: int | None = None,
+    start_height: float = 0.115,
+    route_gate_start: float = 0.20,
+    route_gate_width: float = 0.08,
+    upright_power: float = 1.0,
+    corridor_half_width: float | None = None,
+    corridor_fade: float = 0.08,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Potential-based shaping for climbing after entering the staircase.
+
+    Progress along the route gates a normalized height potential.  This gives
+    the robot a learnable signal for getting onto higher treads, while the
+    separate one-shot goal term below remains the definition of success.
+    """
+    x, z, upright = _stair_local_state(env, asset_cfg)
+    progress = torch.clamp(x / max(goal_distance, 1e-6), min=0.0, max=1.0)
+    route_gate = torch.sigmoid((progress - route_gate_start) / route_gate_width)
+    target_height = _stair_target_height(
+        env, goal_height, goal_height_range, num_terrain_levels, z
+    )
+    height = torch.clamp(
+        (z - start_height) / torch.clamp(target_height - start_height, min=1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    posture_gate = (
+        torch.ones_like(upright)
+        if upright_power == 0.0
+        else torch.pow(upright, upright_power)
+    )
+    corridor_gate = _stair_corridor_gate(
+        env, corridor_half_width, corridor_fade, asset_cfg
+    )
+    potential = route_gate * height * posture_gate * corridor_gate
+    if not hasattr(env, "_stair_top_potential_prev"):
+        env._stair_top_potential_prev = potential.clone()
+    fresh = env.episode_length_buf <= 1
+    env._stair_top_potential_prev[fresh] = potential[fresh]
+    delta = potential - env._stair_top_potential_prev
+    env._stair_top_potential_prev = potential.clone()
+    return torch.clamp(delta / env.step_dt, min=-5.0, max=5.0)
+
+
+def stair_top_goal(
+    env: ManagerBasedRlEnv,
+    goal_distance: float,
+    goal_height: float | None = None,
+    goal_height_range: tuple[float, float] | None = None,
+    num_terrain_levels: int | None = None,
+    x_tolerance: float = 0.20,
+    z_tolerance: float = 0.13,
+    upright_threshold: float = 0.78,
+    corridor_half_width: float | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """One-shot success signal for arriving upright on the top landing.
+
+    The success state requires the route endpoint, the expected top-level
+    height, and a non-inverted trunk.  A per-episode latch makes the reward
+    one-shot, so standing on the landing cannot be farmed indefinitely.
+    """
+    x, z, upright = _stair_local_state(env, asset_cfg)
+    # The goal is the top landing, not one exact pixel on its far edge.  Once
+    # the robot has crossed the near goal boundary, any further position on
+    # the landing remains valid.
+    x_ok = x >= goal_distance - x_tolerance
+    target_height = _stair_target_height(
+        env, goal_height, goal_height_range, num_terrain_levels, z
+    )
+    z_ok = torch.abs(z - target_height) <= z_tolerance
+    asset: Entity = env.scene[asset_cfg.name]
+    y = torch.abs(
+        asset.data.root_link_pos_w[:, 1] - env.scene.terrain.env_origins[:, 1]
+    )
+    y_ok = (
+        torch.ones_like(x_ok)
+        if corridor_half_width is None
+        else y <= corridor_half_width
+    )
+    success = (x >= goal_distance - x_tolerance) & x_ok & y_ok & z_ok & (
+        upright >= upright_threshold
+    )
+    if not hasattr(env, "_stair_goal_latched"):
+        env._stair_goal_latched = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    fresh = env.episode_length_buf <= 1
+    env._stair_goal_latched[fresh] = False
+    newly_reached = success & ~env._stair_goal_latched
+    env._stair_goal_latched |= success
+    return newly_reached.float()
+
+
+def _stair_target_height(
+    env: ManagerBasedRlEnv,
+    goal_height: float | None,
+    goal_height_range: tuple[float, float] | None,
+    num_terrain_levels: int | None,
+    reference: torch.Tensor,
+) -> torch.Tensor:
+    """Resolve fixed or terrain-level-dependent stair landing height."""
+    if goal_height_range is None:
+        if goal_height is None:
+            raise ValueError("A fixed goal_height or goal_height_range is required.")
+        return torch.full_like(reference, goal_height)
+    low, high = goal_height_range
+    terrain = env.scene.terrain
+    levels = terrain.terrain_levels.to(dtype=reference.dtype)
+    level_count = num_terrain_levels
+    if level_count is None and terrain.terrain_origins is not None:
+        level_count = terrain.terrain_origins.shape[0]
+    denominator = max((level_count or 1) - 1, 1)
+    fraction = torch.clamp(levels / denominator, min=0.0, max=1.0)
+    return low + fraction * (high - low)
+
+
+def route_terrain_levels(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Promote only after latched top-landing success, never mere distance."""
+    terrain = env.scene.terrain
+    if terrain.terrain_origins is None:
+        zero = torch.tensor(0.0, device=env.device)
+        return {"mean": zero, "max": zero}
+    goal_latched = getattr(env, "_stair_goal_latched", None)
+    first_riser_latched = getattr(env, "_stair_first_riser_latched", None)
+    if goal_latched is None and first_riser_latched is None:
+        success = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
+    else:
+        success = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
+        if goal_latched is not None:
+            success |= goal_latched[env_ids]
+        if first_riser_latched is not None:
+            success |= first_riser_latched[env_ids]
+    challenge_mask = getattr(env, "_route_challenge_mask", None)
+    protected = (
+        torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
+        if challenge_mask is None
+        else challenge_mask[env_ids]
+    )
+    move_down = ~success & ~protected & (terrain.terrain_levels[env_ids] > 0)
+    terrain.update_env_origins(env_ids, success, move_down)
+    levels = terrain.terrain_levels.float()
+    return {
+        "mean": torch.mean(levels),
+        "max": torch.max(levels),
+        "route_stairs": torch.mean(levels),
+    }
+
+
+def stair_contact_transfer_terrain_levels(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Advance virtual-lip hardness only after a new support transfer."""
+
+    terrain = env.scene.terrain
+    if terrain.terrain_origins is None:
+        zero = torch.tensor(0.0, device=env.device)
+        return {"mean": zero, "max": zero, "contact_transfer": zero}
+    transferred = getattr(
+        env, "_stair_contact_transfer_stage2_policy_achieved", None
+    )
+    success = (
+        torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
+        if transferred is None
+        else transferred[env_ids]
+    )
+    # Failure holds the current level. A discovered transfer must consolidate
+    # before the physical face moves toward the exact hard stair.
+    move_down = torch.zeros_like(success)
+    terrain.update_env_origins(env_ids, success, move_down)
+    levels = terrain.terrain_levels.float()
+    return {
+        "mean": torch.mean(levels),
+        "max": torch.max(levels),
+        "contact_transfer": torch.mean(levels),
+    }
 
 
 def fallen_state_penalty(
@@ -6684,8 +10743,8 @@ def _lateral_axis_z(quat: torch.Tensor) -> torch.Tensor:
     return 2.0 * (quat[:, 2] * quat[:, 3] + quat[:, 0] * quat[:, 1])
 
 
-def _head_top_down(env: ManagerBasedRlEnv, asset: Entity) -> torch.Tensor:
-    """True where the head-top axis points at the floor (dot with -z > min)."""
+def _head_top_axis_world_z(env: ManagerBasedRlEnv, asset: Entity) -> torch.Tensor:
+    """World-z component of the jaw's flat-top axis (negative is down)."""
     if not hasattr(env, "_roulade_head_body_id"):
         ids, _ = asset.find_bodies("jaw_soft")
         env._roulade_head_body_id = ids[0]
@@ -6696,7 +10755,252 @@ def _head_top_down(env: ManagerBasedRlEnv, asset: Entity) -> torch.Tensor:
     axis_world_z = (
         2.0 * (x * z - w * y) * a + 2.0 * (y * z + w * x) * b + (1.0 - 2.0 * (x * x + y * y)) * c
     )
-    return axis_world_z < -_HEAD_TOP_DOWN_MIN
+    return axis_world_z
+
+
+def _head_top_down(env: ManagerBasedRlEnv, asset: Entity) -> torch.Tensor:
+    """True where the head-top axis points at the floor (dot with -z > min)."""
+    return _head_top_axis_world_z(env, asset) < -_HEAD_TOP_DOWN_MIN
+
+
+def _head_top_alignment(env: ManagerBasedRlEnv, asset: Entity) -> torch.Tensor:
+    """Continuous 0..1 alignment potential for rotating onto the flat head top.
+
+    The binary latch remains the physical acceptance gate.  This scalar is
+    only a bounded shaping potential, so the policy gets a gradient while it
+    is actively pivoting from a rounded shell toward the flat top without a
+    static head-contact annuity.  The fallback keeps lightweight unit-test
+    fakes compatible with the existing binary head-top monkeypatches.
+    """
+    if not hasattr(asset, "find_bodies"):
+        return _head_top_down(env, asset).float()
+    axis_world_z = _head_top_axis_world_z(env, asset)
+    return torch.clamp(
+        (0.3 - axis_world_z) / 1.3,
+        min=0.0,
+        max=1.0,
+    )
+
+
+def headstand_contact(
+    env: ManagerBasedRlEnv,
+    head_sensor_name: str = "head_ground_contact",
+    feet_sensor_name: str = "feet_ground_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Return a binary head-supported pose gate.
+
+    A valid MicroDuck headstand is intentionally defined as a controlled
+    head-supported freeze: the flat top of ``jaw_soft`` points down, the head
+    touches the terrain, and neither foot is touching.  Keeping this contact
+    definition explicit prevents the policy from collecting credit for a
+    face-plant or a three-point crouch.
+    """
+    asset = env.scene[asset_cfg.name]
+    head_contact = _sensor_any_contact(env, head_sensor_name)
+    feet_contact = _sensor_any_contact(env, feet_sensor_name)
+    if head_contact is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    if feet_contact is None:
+        feet_contact = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    return (
+        head_contact
+        & ~feet_contact
+        & _head_top_down(env, asset)
+    ).float()
+
+
+def headstand_hold(
+    env: ManagerBasedRlEnv,
+    head_sensor_name: str = "head_ground_contact",
+    feet_sensor_name: str = "feet_ground_contact",
+    lin_vel_std: float = 0.04,
+    ang_vel_std: float = 0.45,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward quiet head-supported balance, not merely making contact."""
+    asset = env.scene[asset_cfg.name]
+    gate = headstand_contact(
+        env,
+        head_sensor_name=head_sensor_name,
+        feet_sensor_name=feet_sensor_name,
+        asset_cfg=asset_cfg,
+    )
+    lin_vel = torch.nan_to_num(asset.data.root_link_lin_vel_w, nan=0.0).norm(dim=-1)
+    ang_vel = torch.nan_to_num(asset.data.root_link_ang_vel_b, nan=0.0).norm(dim=-1)
+    still = torch.exp(-((lin_vel / lin_vel_std) ** 2) - ((ang_vel / ang_vel_std) ** 2))
+    return gate * still
+
+
+def headstand_height(
+    env: ManagerBasedRlEnv,
+    target_height: float,
+    std: float = 0.02,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Shape the head-supported pose toward its measured root height."""
+    asset = env.scene[asset_cfg.name]
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    return headstand_contact(env, asset_cfg=asset_cfg) * torch.exp(-((z - target_height) / std) ** 2)
+
+
+def _backflip_state(env: ManagerBasedRlEnv) -> tuple:
+    if not hasattr(env, "_backflip_accum"):
+        z = torch.zeros(env.num_envs, device=env.device)
+        env._backflip_accum = z.clone()
+        env._backflip_max = z.clone()
+        env._backflip_paid = z.clone()
+        env._backflip_foot_latch = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._backflip_last_update_step = -1
+    return env._backflip_accum, env._backflip_max, env._backflip_paid
+
+
+def _update_backflip_accum(env: ManagerBasedRlEnv, asset: Entity) -> None:
+    """Integrate backward body rotation during the aerial part of a flip."""
+    accum, max_accum, _ = _backflip_state(env)
+    step = int(env.common_step_counter)
+    if step == env._backflip_last_update_step:
+        return
+
+    # Backward rotation is -body-y for the MicroDuck convention. Allow feet to
+    # remain in contact during takeoff/landing, but never count a head/trunk
+    # supported roll as aerial rotation.
+    omega_back = torch.nan_to_num(-asset.data.root_link_ang_vel_b[:, 1], nan=0.0)
+    support = _sensor_any_contact(env, "robot_ground_contact")
+    feet = _sensor_any_contact(env, "feet_ground_contact")
+    if support is None or feet is None:
+        aerial_or_feet = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    else:
+        aerial_or_feet = ~support | feet
+    delta = torch.clamp(omega_back, min=0.0) * env.step_dt * aerial_or_feet.float()
+    env._backflip_accum = accum + delta
+    env._backflip_max = torch.maximum(max_accum, env._backflip_accum)
+
+    if feet is not None:
+        completion = env._backflip_max > math.radians(300.0)
+        env._backflip_foot_latch = env._backflip_foot_latch | (feet & completion)
+    env._backflip_last_update_step = step
+
+
+def reset_backflip_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    late_spawn_prob: float = 0.25,
+    late_angle_range: tuple = (math.radians(25.0), math.radians(320.0)),
+    late_height_range: tuple = (0.10, 0.18),
+    late_omega_range: tuple = (0.0, 4.0),
+    standing_height_range: tuple = (0.11, 0.12),
+    tuck_overrides: Optional[dict] = None,
+    joint_noise_std: float = 0.02,
+) -> None:
+    """Reset standing or late-phase backward-flip states.
+
+    The late-phase bucket is a reverse curriculum, not a claim that a pure
+    from-stand PPO run will discover an aerial 360-degree flip immediately.
+    It gives the landing controller on-policy data while the takeoff policy is
+    still being learned.
+    """
+    if env_ids is None or len(env_ids) == 0:
+        return
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    asset = env.scene[asset_cfg.name]
+    accum, max_accum, paid = _backflip_state(env)
+    num = len(env_ids)
+    late = torch.rand(num, device=env.device) < late_spawn_prob
+
+    yaw = torch.rand(num, device=env.device) * 2 * np.pi - np.pi
+    angle = torch.rand(num, device=env.device) * (late_angle_range[1] - late_angle_range[0]) + late_angle_range[0]
+    angle = torch.where(late, angle, torch.zeros_like(angle))
+    pitch = -angle
+    roll = (torch.rand(num, device=env.device) * 2 - 1) * math.radians(3.0)
+    cy, sy = torch.cos(yaw * 0.5), torch.sin(yaw * 0.5)
+    cp, sp = torch.cos(pitch * 0.5), torch.sin(pitch * 0.5)
+    cr, sr = torch.cos(roll * 0.5), torch.sin(roll * 0.5)
+    quat = torch.stack(
+        [
+            cr * cp * cy + sr * sp * sy,
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
+        ],
+        dim=1,
+    )
+
+    standing_z = torch.rand(num, device=env.device) * (standing_height_range[1] - standing_height_range[0]) + standing_height_range[0]
+    late_z = torch.rand(num, device=env.device) * (late_height_range[1] - late_height_range[0]) + late_height_range[0]
+    env.sim.data.qpos[env_ids, 2] = torch.where(late, late_z, standing_z)
+    env.sim.data.qpos[env_ids, 3:7] = quat
+    env.sim.data.qvel[env_ids, :6] = 0.0
+
+    servo_ids = _servo_joint_ids(env, asset)
+    late_ids = env_ids[late]
+    if len(late_ids) > 0 and tuck_overrides:
+        for joint_index, target in tuck_overrides.items():
+            col = 7 + servo_ids[joint_index]
+            env.sim.data.qpos[late_ids, col] = target
+    if len(late_ids) > 0 and joint_noise_std > 0.0:
+        cols = torch.tensor([7 + j for j in servo_ids], device=env.device, dtype=torch.long)
+        noise = torch.randn(len(late_ids), len(cols), device=env.device) * joint_noise_std
+        env.sim.data.qpos[late_ids.unsqueeze(1), cols.unsqueeze(0)] += noise
+    if len(late_ids) > 0:
+        omega = torch.rand(len(late_ids), device=env.device) * (late_omega_range[1] - late_omega_range[0]) + late_omega_range[0]
+        env.sim.data.qvel[late_ids, 4] = -omega
+
+    accum[env_ids] = angle
+    max_accum[env_ids] = angle
+    paid[env_ids] = angle
+    env._backflip_foot_latch[env_ids] = False
+
+
+def backflip_progress(
+    env: ManagerBasedRlEnv,
+    target_angle: float = 2 * math.pi,
+    max_paid_rate: float = 10.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay only new backward-rotation frontier, with an aerial support gate."""
+    asset = env.scene[asset_cfg.name]
+    _update_backflip_accum(env, asset)
+    _, max_accum, paid = _backflip_state(env)
+    new_paid = torch.clamp(max_accum, max=target_angle)
+    delta = torch.clamp(new_paid - torch.clamp(paid, max=target_angle), min=0.0)
+    delta = torch.clamp(delta, max=max_paid_rate * env.step_dt)
+    env._backflip_paid = torch.maximum(paid, new_paid)
+    return delta / (env.step_dt * target_angle)
+
+
+def backflip_landing(
+    env: ManagerBasedRlEnv,
+    target_height: float,
+    height_std: float = 0.04,
+    upright_std: float = 0.4,
+    pose_std: float = 0.4,
+    joint_indices: list = None,
+    gate_lo: float = math.radians(300.0),
+    gate_hi: float = math.radians(355.0),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward a real feet-first landing after a near-complete backflip."""
+    asset = env.scene[asset_cfg.name]
+    _update_backflip_accum(env, asset)
+    _, max_accum, _ = _backflip_state(env)
+    t = torch.clamp((max_accum - gate_lo) / max(gate_hi - gate_lo, 1e-6), 0.0, 1.0)
+    gate = t * t * (3.0 - 2.0 * t) * env._backflip_foot_latch.float()
+    score = standing_composite_score(
+        env,
+        target_height=target_height,
+        height_std=height_std,
+        upright_std=upright_std,
+        pose_std=pose_std,
+        joint_indices=joint_indices or list(range(14)),
+        asset_cfg=asset_cfg,
+    )
+    return score * gate
 
 
 def _sensor_any_contact(env: ManagerBasedRlEnv, name: str) -> torch.Tensor | None:
@@ -6712,8 +11016,11 @@ def _roulade_state(env: ManagerBasedRlEnv) -> tuple:
         env._roulade_accum = z.clone()
         env._roulade_max = z.clone()
         env._roulade_paid = z.clone()
+        env._roulade_roll_direction = torch.ones(env.num_envs, device=env.device)
         env._roulade_head_latch = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         env._roulade_last_update_step = -1
+    elif not hasattr(env, "_roulade_roll_direction"):
+        env._roulade_roll_direction = torch.ones(env.num_envs, device=env.device)
     return env._roulade_accum, env._roulade_max, env._roulade_paid
 
 
@@ -6735,7 +11042,11 @@ def _update_roulade_accum(env: ManagerBasedRlEnv, asset: Entity) -> None:
     _roulade_state(env)
     step = int(env.common_step_counter)
     if step != env._roulade_last_update_step:
-        omega_fwd = _ROULADE_FWD_SIGN * asset.data.root_link_ang_vel_b[:, 1]
+        omega_fwd = (
+            _ROULADE_FWD_SIGN
+            * env._roulade_roll_direction
+            * asset.data.root_link_ang_vel_b[:, 1]
+        )
         delta = torch.nan_to_num(omega_fwd, nan=0.0) * env.step_dt
         supported = _sensor_any_contact(env, _ROULADE_SUPPORT_SENSOR)
         if supported is not None:
@@ -6791,19 +11102,22 @@ def reset_roulade_state(
     standing_z_min: float = 0.11,
     standing_z_max: float = 0.12,
     standing_tilt_max: float = 0.0,
+    yaw_range: tuple = (-math.pi, math.pi),
     forward_vel_range: tuple = (0.0, 0.0),
     midroll_pitch_min: float = math.radians(50.0),
     midroll_pitch_max: float = math.radians(185.0),
     midroll_z_min: float = 0.05,
     midroll_z_max: float = 0.10,
     midroll_omega_range: tuple = (0.0, 0.0),
+    midroll_forward_vel_range: tuple = (0.0, 0.0),
     tuck_overrides: Optional[dict] = None,
     tuck_factor_range: tuple = (0.3, 1.0),
     joint_noise_std: float = 0.0,
+    roll_direction: float = 1.0,
 ):
     """Reset to a standing start or a mid-roll state (reverse curriculum).
 
-    Standing bucket: upright (±standing_tilt_max pitch/roll noise), random yaw,
+    Standing bucket: upright (±standing_tilt_max pitch/roll noise), sampled yaw,
     HOME joints (left from reset_robot_joints), z in [standing_z_min, _max].
     ``forward_vel_range`` is the élan hook: a per-env forward base velocity
     (body x, mapped to world through the spawn yaw) sampled uniformly — 0 for
@@ -6812,13 +11126,16 @@ def reset_roulade_state(
     Mid-roll bucket: pitched ``midroll_pitch_min..max`` into the roll (90° =
     on the head, 180° = on the back), random yaw, legs lerped HOME→tuck by a
     per-env factor in ``tuck_factor_range``, z in [midroll_z_min, _max],
-    optional forward angular momentum from ``midroll_omega_range``. The
+    optional forward angular momentum from ``midroll_omega_range`` and
+    direction-matched translation from ``midroll_forward_vel_range``. The
     rotation accumulator is initialized to the spawn pitch so progress
     accounting (and the completion gates) stay consistent: a 170° spawn only
     gets paid for the remaining ~190°.
     """
     if env_ids is None or len(env_ids) == 0:
         return
+    if roll_direction not in (-1.0, 1.0):
+        raise ValueError("roll_direction must be -1.0 or 1.0")
     env_ids = env_ids.to(env.device, dtype=torch.long)
     num = len(env_ids)
     asset: Entity = env.scene[asset_cfg.name]
@@ -6827,7 +11144,10 @@ def reset_roulade_state(
     total = standing_prob + midroll_prob
     is_mid = torch.rand(num, device=env.device) < (midroll_prob / max(total, 1e-6))
 
-    yaw = torch.rand(num, device=env.device) * 2 * np.pi - np.pi
+    yaw = (
+        torch.rand(num, device=env.device) * (yaw_range[1] - yaw_range[0])
+        + yaw_range[0]
+    )
     cy = torch.cos(yaw * 0.5)
     sy = torch.sin(yaw * 0.5)
 
@@ -6837,7 +11157,7 @@ def reset_roulade_state(
         torch.rand(num, device=env.device) * (midroll_pitch_max - midroll_pitch_min)
         + midroll_pitch_min
     )
-    pitch = torch.where(is_mid, mid_pitch, pitch)
+    pitch = torch.where(is_mid, roll_direction * mid_pitch, pitch)
     roll = (torch.rand(num, device=env.device) * 2 - 1) * max(standing_tilt_max, math.radians(5.0))
 
     cp = torch.cos(pitch * 0.5); sp = torch.sin(pitch * 0.5)
@@ -6888,7 +11208,27 @@ def reset_roulade_state(
             * (midroll_omega_range[1] - midroll_omega_range[0])
             + midroll_omega_range[0]
         )
-        env.sim.data.qvel[mid_env_ids, 4] = _ROULADE_FWD_SIGN * omega
+        env.sim.data.qvel[mid_env_ids, 4] = (
+            roll_direction * _ROULADE_FWD_SIGN * omega
+        )
+
+    # Reverse-skill discovery needs examples where opposite signed rotation
+    # and opposite-body translation occur together. This is world velocity
+    # opposite body +x for a backroll, which moves canonical racers toward
+    # their fixed +x finish while they face -x.
+    if len(mid_env_ids) > 0 and midroll_forward_vel_range[1] > 0.0:
+        mid_vx = (
+            torch.rand(len(mid_env_ids), device=env.device)
+            * (midroll_forward_vel_range[1] - midroll_forward_vel_range[0])
+            + midroll_forward_vel_range[0]
+        )
+        yaw_m = yaw[is_mid]
+        env.sim.data.qvel[mid_env_ids, 0] = (
+            roll_direction * mid_vx * torch.cos(yaw_m)
+        )
+        env.sim.data.qvel[mid_env_ids, 1] = (
+            roll_direction * mid_vx * torch.sin(yaw_m)
+        )
 
     # Élan hook: forward base velocity for STANDING spawns, body x → world xy
     # through the spawn yaw. (0, 0) = standstill start, disabled.
@@ -6900,14 +11240,19 @@ def reset_roulade_state(
             + forward_vel_range[0]
         )
         yaw_s = yaw[~is_mid]
-        env.sim.data.qvel[stand_env_ids, 0] = vx * torch.cos(yaw_s)
-        env.sim.data.qvel[stand_env_ids, 1] = vx * torch.sin(yaw_s)
+        env.sim.data.qvel[stand_env_ids, 0] = (
+            roll_direction * vx * torch.cos(yaw_s)
+        )
+        env.sim.data.qvel[stand_env_ids, 1] = (
+            roll_direction * vx * torch.sin(yaw_s)
+        )
 
     # Progress accounting: standing starts at 0, mid-roll at the spawn pitch.
     spawn_angle = torch.where(is_mid, mid_pitch, torch.zeros_like(mid_pitch))
     accum[env_ids] = spawn_angle
     max_accum[env_ids] = spawn_angle
     paid[env_ids] = spawn_angle
+    env._roulade_roll_direction[env_ids] = roll_direction
     # Head latch: mid-roll spawns are considered already past the head phase
     # (the reverse curriculum teaches roll COMPLETION; requiring a latch they
     # never had the chance to earn would keep their landing gate shut forever).
@@ -6972,7 +11317,11 @@ def roulade_head_pivot(
     contact = (found.view(found.shape[0], -1) > 0).any(dim=-1).float()
 
     in_window = ((accum > angle_lo) & (accum < angle_hi)).float()
-    omega_fwd = _ROULADE_FWD_SIGN * asset.data.root_link_ang_vel_b[:, 1]
+    omega_fwd = (
+        _ROULADE_FWD_SIGN
+        * env._roulade_roll_direction
+        * asset.data.root_link_ang_vel_b[:, 1]
+    )
     rate = torch.clamp(torch.nan_to_num(omega_fwd, nan=0.0) / rate_norm, 0.0, 1.0)
     top = 0.3 + 0.7 * _head_top_down(env, asset).float()
     return contact * in_window * rate * top
@@ -7186,3 +11535,4225 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+def _grounded_backroll_late_phase_ramp(
+    env: ManagerBasedRlEnv,
+    start_angle: float = math.radians(10.0),
+    full_angle: float = math.radians(90.0),
+) -> torch.Tensor:
+    """Smoothly price alignment once a backward roll has actually begun.
+
+    The maneuver gate rejects a shoulder escape at 20--30 degrees.  Leaving
+    the alignment terms off until 120 degrees made that early rejection a
+    cliff: a fresh policy could discover that it was invalid, but received no
+    continuous signal to keep its pitch rotation in the sagittal plane.  This
+    ramp is still exactly zero for a stationary standing robot, reaches its
+    bounded value by 90 degrees, and never taxes the required body-y rotation.
+    """
+    if full_angle <= start_angle:
+        raise ValueError("full_angle must be greater than start_angle")
+    frontier = torch.nan_to_num(env._roulade_max, nan=0.0)
+    phase = torch.clamp(
+        (frontier - start_angle) / (full_angle - start_angle),
+        min=0.0,
+        max=1.0,
+    )
+    return phase.square() * (3.0 - 2.0 * phase)
+
+
+def grounded_backroll_sagittal_penalty(
+    env: ManagerBasedRlEnv,
+    max_offaxis_rate: float = 3.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Continuously price transverse angular motion during a backroll.
+
+    The strict maneuver gate rejects a cycle after 90 degrees of accumulated
+    off-axis rotation.  A prior 1 rad/s dead zone let a small but persistent
+    body-x/body-z twist reach that hard boundary with nearly no learning
+    signal.  This returns the bounded *rate* after the ordered trunk contact,
+    when the policy has committed to the physical roll, so the integral tracks
+    the off-axis budget without taxing the exploratory standing tuck. Pure
+    backward body-y rotation remains exactly free and standing remains zero.
+    """
+    if max_offaxis_rate <= 0.0:
+        raise ValueError("max_offaxis_rate must be positive")
+    asset: Entity = env.scene[asset_cfg.name]
+    omega_b = torch.nan_to_num(asset.data.root_link_ang_vel_b, nan=0.0)
+    off_axis_rate = torch.sqrt(omega_b[:, 0].square() + omega_b[:, 2].square())
+    bounded_rate = torch.clamp(off_axis_rate, max=max_offaxis_rate)
+    return (
+        bounded_rate
+        * _grounded_backroll_late_phase_ramp(env)
+        * env._backroll_trunk_latch.float()
+    )
+
+
+def grounded_backroll_flatness_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Bounded early lateral-axis tilt tax for a sagittal backroll entry."""
+    asset: Entity = env.scene[asset_cfg.name]
+    lateral_axis_z = torch.nan_to_num(
+        _lateral_axis_z(asset.data.root_link_quat_w), nan=0.0
+    ).abs()
+    # A squared, capped axis term provides a gradient *before* the strict
+    # 20-degree cycle gate closes.  It is zero for a pure pitch roll and the
+    # smooth ramp keeps it inactive while the robot is simply standing.
+    return lateral_axis_z.square() * _grounded_backroll_late_phase_ramp(env)
+
+
+# ============================================================================
+# Grounded backroll task: one supported reverse roulade and feet landing
+# ============================================================================
+_BACKROLL_TRUNK_SENSOR = "trunk_ground_contact"
+_BACKROLL_LEFT_FOOT_SENSOR = "left_foot_ground_contact"
+_BACKROLL_RIGHT_FOOT_SENSOR = "right_foot_ground_contact"
+_BACKROLL_TRUNK_LATCH_LO = math.radians(30.0)
+_BACKROLL_TRUNK_LATCH_HI = math.radians(260.0)
+_BACKROLL_HEAD_LATCH_LO = math.radians(100.0)
+_BACKROLL_HEAD_LATCH_HI = math.radians(300.0)
+# Once a repeat-mode roll reaches the measured head-transition window, the
+# policy has a short grace window to rotate onto the flat head top.  Keep the
+# phase qualification so early tuck contact is not mistaken for a stalled pivot.
+_BACKROLL_NON_TOP_HEAD_LO = math.radians(150.0)
+_BACKROLL_NON_TOP_HEAD_HI = math.radians(240.0)
+_BACKROLL_FEET_RECONTACT_ANGLE = math.radians(300.0)
+_BACKROLL_FEET_RECONTACT_UPRIGHT_COS = math.cos(math.radians(60.0))
+_BACKROLL_FEET_RECONTACT_MIN_HEIGHT = 0.075
+_BACKROLL_LANDING_ANGLE = math.radians(350.0)
+# A224's corrected continuation frontier gets standing starts through the
+# ordered trunk/head pivot (158--218 degrees), but the original 300-degree
+# release withheld the only upright/height gradient until after the policy had
+# already chosen a side spin.  Begin these *delta-only*, sagittal-gated landing
+# potentials just after a genuine flat-head pivot can exist.  The reward
+# function additionally requires the head latch, so an early crouch or an
+# unlatched fall cannot receive this bridge.
+_BACKROLL_POTENTIAL_ANGLE = math.radians(170.0)
+_BACKROLL_UPRIGHT_COS = math.cos(math.radians(20.0))
+_BACKROLL_STALL_TILT_COS = math.cos(math.radians(60.0))
+_BACKROLL_MIN_LANDING_HEIGHT = 0.10
+_BACKROLL_MAX_LANDING_ANG_VEL = 2.0
+_BACKROLL_MAX_AIR_SECONDS = 0.08
+_BACKROLL_LANDING_HOLD_SECONDS = 0.25
+_BACKROLL_INVALID_STALL_SECONDS = 0.50
+_BACKROLL_REPEAT_LANDING_HOLD_SECONDS = 0.10
+_BACKROLL_REPEAT_PRE_EXIT_STALL_SECONDS = 0.30
+_BACKROLL_REPEAT_STALLED_FALL_MAX_RATE = 1.0
+_BACKROLL_REPEAT_LANDING_TIMEOUT_SECONDS = 2.00
+_BACKROLL_REPEAT_MAX_LANDING_ANG_VEL = 4.5
+# A real backroll stays in the sagittal plane.  The previous 35-degree
+# completion envelope and 55-degree one-shot escape let a shoulder/side motion
+# collect enough dense rotation credit to become the PPO attractor.  Keep a
+# small tolerance for modelling noise, but reject the visible side-roll before
+# it can collect another transition reward.
+_BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX = math.sin(math.radians(20.0))
+_BACKROLL_REPEAT_SIDE_INVALID_Z = math.sin(math.radians(30.0))
+_BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION = math.radians(90.0)
+# Only integrate cross-axis rotation while the robot is still advancing through
+# the maneuver.  A stationary, otherwise sagittal head contact has small
+# controller wobble that must not eventually be reclassified as a side roll.
+# The immediate lateral-axis escape gate remains active at every step.
+_BACKROLL_OFFAXIS_MIN_BACKWARD_RATE = 0.5
+_BACKROLL_RECOVERY_UPRIGHT_COS = math.cos(math.radians(35.0))
+_BACKROLL_RECOVERY_MIN_HEIGHT = 0.10
+_BACKROLL_RECOVERY_MAX_LIN_SPEED = 0.15
+_BACKROLL_RECOVERY_MAX_ANG_SPEED = 2.0
+_BACKROLL_RECOVERY_HOLD_SECONDS = 0.10
+_BACKROLL_RECOVERY_TIMEOUT_SECONDS = 3.0
+
+
+def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
+    """Create grounded-backroll buffers lazily."""
+    _roulade_state(env)
+    if hasattr(env, "_backroll_trunk_latch"):
+        return
+    z = torch.zeros(env.num_envs, device=env.device)
+    b = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    i = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+    env._backroll_trunk_latch = b.clone()
+    env._backroll_head_latch = b.clone()
+    env._backroll_trunk_latch_now = b.clone()
+    env._backroll_head_latch_now = b.clone()
+    env._backroll_feet_recontact_latch = b.clone()
+    env._backroll_feet_recontact_now = b.clone()
+    env._backroll_landing_readiness_paid = z.clone()
+    env._backroll_landing_readiness_delta = z.clone()
+    env._backroll_success = b.clone()
+    env._backroll_success_now = b.clone()
+    env._backroll_invalid = b.clone()
+    env._backroll_invalid_now = b.clone()
+    env._backroll_started = b.clone()
+    env._backroll_repeat_mode = b.clone()
+    env._backroll_air_steps = i.clone()
+    env._backroll_max_air_steps = i.clone()
+    env._backroll_landing_hold_steps = i.clone()
+    env._backroll_invalid_stall_steps = i.clone()
+    env._backroll_landing_timeout_steps = i.clone()
+    env._backroll_non_top_head_steps = i.clone()
+    env._backroll_episode_max_non_top_head_steps = i.clone()
+    env._backroll_head_alignment_previous = z.clone()
+    env._backroll_head_alignment_delta = z.clone()
+    env._backroll_head_alignment_active = b.clone()
+    env._backroll_previous_frontier = env._roulade_max.clone()
+    env._backroll_completion_paid = env._roulade_max.clone()
+    env._backroll_upright_previous = z.clone()
+    env._backroll_height_previous = z.clone()
+    env._backroll_upright_delta = z.clone()
+    env._backroll_height_delta = z.clone()
+    env._backroll_potential_ready = b.clone()
+    env._backroll_frontier_delta = z.clone()
+    # Bounded, one-shot physical tuck progress for the standing bootstrap.
+    env._backroll_launch_tuck_paid = z.clone()
+    env._backroll_cycle_count = i.clone()
+    env._backroll_mastery_cycles = torch.ones_like(i)
+    env._backroll_start_is_standing = b.clone()
+    env._backroll_cycle_max_lateral_axis_z = z.clone()
+    env._backroll_cycle_offaxis_rotation = z.clone()
+    env._backroll_cycle_sagittal_limit = torch.full_like(
+        z,
+        _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX,
+    )
+    env._backroll_relaxed_first_cycle = b.clone()
+    env._backroll_episode_max_lateral_axis_z = z.clone()
+    env._backroll_episode_max_offaxis_rotation = z.clone()
+    env._backroll_recovery_active = b.clone()
+    env._backroll_recovery_enabled = b.clone()
+    env._backroll_recovery_used = b.clone()
+    env._backroll_recovery_success_now = b.clone()
+    env._backroll_recovery_failed = b.clone()
+    env._backroll_recovery_steps = i.clone()
+    env._backroll_recovery_hold_steps = i.clone()
+    env._backroll_recovery_potential_previous = z.clone()
+    env._backroll_recovery_potential_ready = b.clone()
+    env._backroll_recovery_progress_delta = z.clone()
+    env._backroll_recovery_attempt_count = z.clone()
+    env._backroll_recovery_success_count = z.clone()
+    env._backroll_recovery_latency_total_steps = z.clone()
+    env._backroll_recovery_rearm_count = i.clone()
+    env._backroll_recovered_cycle_armed = b.clone()
+    env._backroll_recovered_and_rerolled = z.clone()
+    env._backroll_recovered_rerolled_now = b.clone()
+    env._backroll_last_update_step = -1
+    env._backroll_curriculum_stage = 0
+    env._backroll_window_episodes = torch.zeros((), dtype=torch.long, device=env.device)
+    env._backroll_window_successes = torch.zeros((), dtype=torch.long, device=env.device)
+    env._backroll_window_bad_states = torch.zeros((), dtype=torch.long, device=env.device)
+    env._backroll_window_standing_episodes = torch.zeros(
+        (), dtype=torch.long, device=env.device
+    )
+    env._backroll_window_standing_successes = torch.zeros(
+        (), dtype=torch.long, device=env.device
+    )
+    env._backroll_consecutive_mastery_windows = 0
+
+
+def _grounded_backroll_cycle_is_sagittal(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Whether the whole current cycle has remained inside the sagittal gate."""
+    return (
+        (env._backroll_cycle_max_lateral_axis_z
+         <= env._backroll_cycle_sagittal_limit)
+        & (env._backroll_cycle_offaxis_rotation
+           <= _BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION)
+    )
+
+
+def _grounded_backroll_first_cycle_relaxed(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Read the legacy reset flag; it never grants a geometry exemption."""
+    return (
+        env._backroll_repeat_mode
+        & env._backroll_relaxed_first_cycle
+        & (env._backroll_cycle_count == 0)
+    )
+
+
+def _grounded_backroll_positive_reward_valid(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Require the sagittal physical gate for every positive skill reward.
+
+    A warm-start may retain its action mean, never a relaxed geometry rule:
+    a partial shoulder roll is not an admissible precursor to a backroll in
+    either the one-shot or repeated curriculum.
+    """
+    return (
+        _grounded_backroll_cycle_is_sagittal(env)
+        & ~env._backroll_invalid
+        & ~env._backroll_recovery_active
+    )
+
+
+def _grounded_backroll_potential_reward_valid(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Pay late landing potentials only inside the real backroll envelope."""
+    return (
+        (env._roulade_max >= _BACKROLL_POTENTIAL_ANGLE)
+        & env._backroll_head_latch
+        & _grounded_backroll_cycle_is_sagittal(env)
+        & ~env._backroll_invalid
+        & ~env._backroll_recovery_active
+    )
+
+
+def _reset_grounded_backroll_cycle_buffers(
+    env: ManagerBasedRlEnv,
+    reset: torch.Tensor,
+) -> None:
+    """Clear interrupted/completed cycle state without touching episode totals."""
+    if not reset.any():
+        return
+    env._roulade_accum[reset] = 0.0
+    env._roulade_max[reset] = 0.0
+    env._roulade_paid[reset] = 0.0
+    env._roulade_head_latch[reset] = False
+    env._backroll_trunk_latch[reset] = False
+    env._backroll_head_latch[reset] = False
+    env._backroll_trunk_latch_now[reset] = False
+    env._backroll_head_latch_now[reset] = False
+    env._backroll_feet_recontact_latch[reset] = False
+    env._backroll_feet_recontact_now[reset] = False
+    env._backroll_landing_readiness_paid[reset] = 0.0
+    env._backroll_landing_readiness_delta[reset] = 0.0
+    env._backroll_success[reset] = False
+    env._backroll_air_steps[reset] = 0
+    env._backroll_max_air_steps[reset] = 0
+    env._backroll_landing_hold_steps[reset] = 0
+    env._backroll_invalid_stall_steps[reset] = 0
+    env._backroll_landing_timeout_steps[reset] = 0
+    env._backroll_non_top_head_steps[reset] = 0
+    env._backroll_head_alignment_previous[reset] = 0.0
+    env._backroll_head_alignment_delta[reset] = 0.0
+    env._backroll_head_alignment_active[reset] = False
+    env._backroll_previous_frontier[reset] = 0.0
+    env._backroll_completion_paid[reset] = 0.0
+    env._backroll_upright_previous[reset] = 0.0
+    env._backroll_height_previous[reset] = 0.0
+    env._backroll_upright_delta[reset] = 0.0
+    env._backroll_height_delta[reset] = 0.0
+    env._backroll_potential_ready[reset] = False
+    env._backroll_frontier_delta[reset] = 0.0
+    env._backroll_launch_tuck_paid[reset] = 0.0
+    env._backroll_cycle_max_lateral_axis_z[reset] = 0.0
+    env._backroll_cycle_offaxis_rotation[reset] = 0.0
+
+
+def _grounded_backroll_sagittal_purity(asset: Entity) -> torch.Tensor:
+    """Backward body-y rotation that also stays in the world sagittal plane."""
+    omega = torch.nan_to_num(asset.data.root_link_ang_vel_b, nan=0.0)
+    omega_back = torch.clamp(-omega[:, 1], min=0.0)
+    angular_purity = omega_back.pow(2) / torch.clamp(
+        omega.pow(2).sum(dim=-1), min=1.0e-6
+    )
+
+    # Body-frame axis purity alone is insufficient: after tipping onto a
+    # shoulder, body-y approaches world vertical and a geometrically wrong
+    # side-spin can still look like pure body-y rotation. Preserve ordinary
+    # ordinary corrective launch motion through 10 degrees, then smoothly
+    # remove positive shaping before the 30-degree lateral tilt where the
+    # maneuver is visibly leaving the sagittal plane.
+    lateral_axis_z = torch.nan_to_num(
+        _lateral_axis_z(asset.data.root_link_quat_w), nan=1.0
+    ).abs()
+    full = math.sin(math.radians(10.0))
+    zero = math.sin(math.radians(30.0))
+    t = torch.clamp((zero - lateral_axis_z) / (zero - full), 0.0, 1.0)
+    world_flatness = t * t * (3.0 - 2.0 * t)
+    return angular_purity * world_flatness
+
+
+def _update_grounded_backroll_state(
+    env: ManagerBasedRlEnv,
+    asset: Entity,
+) -> None:
+    """Update ordered contacts, grounding, landing hold, and invalid state."""
+    _grounded_backroll_state(env)
+    step = int(env.common_step_counter)
+    if step == env._backroll_last_update_step:
+        return
+    recovery_before = env._backroll_recovery_active.clone()
+    if not recovery_before.all():
+        _update_roulade_accum(env, asset)
+    if recovery_before.any():
+        env._roulade_accum[recovery_before] = 0.0
+        env._roulade_max[recovery_before] = 0.0
+        env._roulade_paid[recovery_before] = 0.0
+    env._backroll_recovery_success_now.zero_()
+    env._backroll_recovered_rerolled_now.zero_()
+    env._backroll_feet_recontact_now.zero_()
+
+    accum, frontier, _ = _roulade_state(env)
+    support = _sensor_any_contact(env, _ROULADE_SUPPORT_SENSOR)
+    trunk = _sensor_any_contact(env, _BACKROLL_TRUNK_SENSOR)
+    head = _sensor_any_contact(env, _ROULADE_HEAD_SENSOR)
+    left_foot = _sensor_any_contact(env, _BACKROLL_LEFT_FOOT_SENSOR)
+    right_foot = _sensor_any_contact(env, _BACKROLL_RIGHT_FOOT_SENSOR)
+    false = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    support = false if support is None else support
+    trunk = false if trunk is None else trunk
+    head = false if head is None else head
+    left_foot = false if left_foot is None else left_foot
+    right_foot = false if right_foot is None else right_foot
+
+    env._backroll_air_steps = torch.where(
+        support,
+        torch.zeros_like(env._backroll_air_steps),
+        env._backroll_air_steps + 1,
+    )
+    env._backroll_max_air_steps = torch.maximum(
+        env._backroll_max_air_steps,
+        env._backroll_air_steps,
+    )
+
+    trunk_phase = ~recovery_before & (frontier >= _BACKROLL_TRUNK_LATCH_LO) & (
+        frontier <= _BACKROLL_TRUNK_LATCH_HI
+    )
+    previous_trunk_latch = env._backroll_trunk_latch.clone()
+    # The physical order is back/trunk support followed by a later head-top
+    # pivot. A simultaneous trunk/head crash must not fabricate that history.
+    env._backroll_trunk_latch |= trunk & ~head & trunk_phase
+    env._backroll_trunk_latch_now = (
+        env._backroll_trunk_latch & ~previous_trunk_latch
+    )
+    head_phase = ~recovery_before & (frontier >= _BACKROLL_HEAD_LATCH_LO) & (
+        frontier <= _BACKROLL_HEAD_LATCH_HI
+    )
+    previous_head_latch = env._backroll_head_latch.clone()
+    head_top_down = (
+        torch.zeros_like(recovery_before)
+        if recovery_before.all()
+        else _head_top_down(env, asset)
+    )
+    head_alignment = (
+        torch.zeros_like(frontier)
+        if recovery_before.all()
+        else _head_top_alignment(env, asset)
+    )
+    env._backroll_head_latch |= (
+        previous_trunk_latch
+        & head
+        & head_phase
+        & head_top_down
+    )
+    env._backroll_head_latch_now = env._backroll_head_latch & ~previous_head_latch
+    non_top_head_phase = (
+        (frontier >= _BACKROLL_NON_TOP_HEAD_LO)
+        & (frontier <= _BACKROLL_NON_TOP_HEAD_HI)
+    )
+    non_top_head_contact = (
+        ~recovery_before
+        & head
+        & non_top_head_phase
+        & ~head_top_down
+    )
+    env._backroll_non_top_head_steps = torch.where(
+        non_top_head_contact,
+        env._backroll_non_top_head_steps + 1,
+        torch.zeros_like(env._backroll_non_top_head_steps),
+    )
+    env._backroll_episode_max_non_top_head_steps = torch.maximum(
+        env._backroll_episode_max_non_top_head_steps,
+        env._backroll_non_top_head_steps,
+    )
+
+    quat = asset.data.root_link_quat_w
+    upright = torch.nan_to_num(
+        1.0 - 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2)),
+        nan=-1.0,
+    )
+    height = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2],
+        nan=0.0,
+    )
+    ang_vel_b = torch.nan_to_num(asset.data.root_link_ang_vel_b, nan=0.0)
+    ang_speed = ang_vel_b.norm(dim=-1)
+    lateral_axis_z = torch.nan_to_num(_lateral_axis_z(quat), nan=1.0).abs()
+    cycle_active = (
+        (frontier >= math.radians(10.0))
+        | env._backroll_trunk_latch
+        | env._backroll_head_latch
+    ) & ~recovery_before
+    env._backroll_cycle_max_lateral_axis_z = torch.where(
+        cycle_active,
+        torch.maximum(env._backroll_cycle_max_lateral_axis_z, lateral_axis_z),
+        env._backroll_cycle_max_lateral_axis_z,
+    )
+    offaxis_rate = torch.sqrt(ang_vel_b[:, 0].pow(2) + ang_vel_b[:, 2].pow(2))
+    env._backroll_cycle_offaxis_rotation += (
+        offaxis_rate
+        * env.step_dt
+        * cycle_active.float()
+        * (
+            torch.clamp(-ang_vel_b[:, 1], min=0.0)
+            >= _BACKROLL_OFFAXIS_MIN_BACKWARD_RATE
+        ).float()
+    )
+    env._backroll_episode_max_lateral_axis_z = torch.maximum(
+        env._backroll_episode_max_lateral_axis_z,
+        env._backroll_cycle_max_lateral_axis_z,
+    )
+    env._backroll_episode_max_offaxis_rotation = torch.maximum(
+        env._backroll_episode_max_offaxis_rotation,
+        env._backroll_cycle_offaxis_rotation,
+    )
+    repeated_sagittal = _grounded_backroll_cycle_is_sagittal(env)
+    # Every counted landing must satisfy the same narrow sagittal physical
+    # gate.  A checkpoint warm-start never relaxes this maneuver definition.
+    sagittal_landing = repeated_sagittal
+    # A landing jackpot alone supplied no gradient for the discontinuous
+    # head-release -> feet-support transition. Latch the first physically
+    # plausible feet reacquisition after the robot has actually passed over
+    # the ordered flat head-top. This is deliberately one-shot and stricter
+    # than a head/feet tripod: the head must be released, the trunk must be on
+    # its rising side, and the whole cycle must still be sagittal.
+    feet_recontact_candidate = (
+        ~recovery_before
+        & (frontier >= _BACKROLL_FEET_RECONTACT_ANGLE)
+        & ~env._backroll_invalid
+        & env._backroll_trunk_latch
+        & env._backroll_head_latch
+        & left_foot
+        & right_foot
+        & ~head
+        & ~trunk
+        & (height >= _BACKROLL_FEET_RECONTACT_MIN_HEIGHT)
+        & (upright >= _BACKROLL_FEET_RECONTACT_UPRIGHT_COS)
+        & sagittal_landing
+    )
+    previous_feet_recontact = env._backroll_feet_recontact_latch.clone()
+    env._backroll_feet_recontact_latch |= feet_recontact_candidate
+    env._backroll_feet_recontact_now = (
+        env._backroll_feet_recontact_latch & ~previous_feet_recontact
+    )
+    # A231 showed that a discontinuous feet-recontact pulse is reachable from
+    # late reverse-curriculum starts, but supplies no gradient for converting
+    # that instant into the final upright, slow, feet-supported landing. Use a
+    # max-so-far composite after the physical recontact latch. The angular
+    # phase factor keeps the target moving toward 350 degrees; the remaining
+    # factors favor rising, braking, and retaining both feet after head release.
+    # Snapshot the value on latch entry so the recontact event is not paid
+    # twice. Losing the pose never charges a negative reward, and revisiting an
+    # already reached readiness cannot be farmed.
+    readiness_angle = torch.clamp(
+        (frontier - _BACKROLL_FEET_RECONTACT_ANGLE)
+        / (_BACKROLL_LANDING_ANGLE - _BACKROLL_FEET_RECONTACT_ANGLE),
+        min=0.0,
+        max=1.0,
+    )
+    readiness_upright = torch.clamp(
+        (upright - _BACKROLL_FEET_RECONTACT_UPRIGHT_COS)
+        / (_BACKROLL_UPRIGHT_COS - _BACKROLL_FEET_RECONTACT_UPRIGHT_COS),
+        min=0.0,
+        max=1.0,
+    )
+    readiness_height = torch.clamp(
+        (height - _BACKROLL_FEET_RECONTACT_MIN_HEIGHT)
+        / (_BACKROLL_MIN_LANDING_HEIGHT - _BACKROLL_FEET_RECONTACT_MIN_HEIGHT),
+        min=0.0,
+        max=1.0,
+    )
+    readiness_braking = torch.clamp(
+        (6.0 - ang_speed) / (6.0 - _BACKROLL_MAX_LANDING_ANG_VEL),
+        min=0.0,
+        max=1.0,
+    )
+    landing_readiness = readiness_angle * (
+        0.35 * readiness_upright
+        + 0.35 * readiness_height
+        + 0.30 * readiness_braking
+    )
+    readiness_valid = (
+        env._backroll_feet_recontact_latch
+        & left_foot
+        & right_foot
+        & ~head
+        & ~trunk
+        & sagittal_landing
+        & ~env._backroll_invalid
+        & ~recovery_before
+    )
+    previous_readiness = env._backroll_landing_readiness_paid
+    env._backroll_landing_readiness_delta = torch.where(
+        readiness_valid & ~env._backroll_feet_recontact_now,
+        torch.clamp(landing_readiness - previous_readiness, min=0.0),
+        torch.zeros_like(landing_readiness),
+    )
+    env._backroll_landing_readiness_paid = torch.where(
+        readiness_valid,
+        torch.maximum(previous_readiness, landing_readiness),
+        previous_readiness,
+    )
+    landing_ang_vel_ok = torch.where(
+        env._backroll_repeat_mode,
+        ang_speed <= _BACKROLL_REPEAT_MAX_LANDING_ANG_VEL,
+        ang_speed <= _BACKROLL_MAX_LANDING_ANG_VEL,
+    )
+    landing_candidate = (
+        ~recovery_before
+        & (frontier >= _BACKROLL_LANDING_ANGLE)
+        & ~env._backroll_invalid
+        & env._backroll_trunk_latch
+        & env._backroll_head_latch
+        & env._backroll_feet_recontact_latch
+        & left_foot
+        & right_foot
+        & ~head
+        & ~trunk
+        & (height >= _BACKROLL_MIN_LANDING_HEIGHT)
+        & (upright >= _BACKROLL_UPRIGHT_COS)
+        & landing_ang_vel_ok
+        & sagittal_landing
+    )
+    env._backroll_landing_hold_steps = torch.where(
+        landing_candidate,
+        env._backroll_landing_hold_steps + 1,
+        torch.zeros_like(env._backroll_landing_hold_steps),
+    )
+    one_shot_hold_steps = max(
+        1,
+        math.ceil(_BACKROLL_LANDING_HOLD_SECONDS / env.step_dt),
+    )
+    repeat_hold_steps = max(
+        1,
+        math.ceil(_BACKROLL_REPEAT_LANDING_HOLD_SECONDS / env.step_dt),
+    )
+    hold_complete = torch.where(
+        env._backroll_repeat_mode,
+        env._backroll_landing_hold_steps >= repeat_hold_steps,
+        env._backroll_landing_hold_steps >= one_shot_hold_steps,
+    )
+    env._backroll_success_now = (
+        hold_complete
+        & ~env._backroll_success
+    )
+    env._backroll_success |= env._backroll_success_now
+    env._backroll_cycle_count += (
+        env._backroll_success_now & env._backroll_repeat_mode
+    ).long()
+    env._backroll_recovered_rerolled_now = (
+        env._backroll_success_now
+        & env._backroll_repeat_mode
+        & env._backroll_recovered_cycle_armed
+    )
+    env._backroll_recovered_and_rerolled += (
+        env._backroll_recovered_rerolled_now.float()
+    )
+    env._backroll_recovered_cycle_armed &= ~env._backroll_success_now
+
+    progress = frontier - env._backroll_previous_frontier
+    env._backroll_frontier_delta = torch.clamp(progress, min=0.0)
+    progressed = progress > 1.0e-4
+    invalid_pose = (lateral_axis_z > _FLAT_ZERO) | (
+        (upright < _BACKROLL_STALL_TILT_COS) & ~trunk & ~head & ~left_foot & ~right_foot
+    )
+    repeat_stalled_fall = (
+        env._backroll_repeat_mode
+        & cycle_active
+        & (frontier < _BACKROLL_LANDING_ANGLE)
+        & support
+        & (upright <= _BACKROLL_STALL_TILT_COS)
+        & (torch.clamp(-asset.data.root_link_ang_vel_b[:, 1], min=0.0)
+           < _BACKROLL_REPEAT_STALLED_FALL_MAX_RATE)
+    )
+    one_shot_invalid_pose = (
+        ~env._backroll_repeat_mode
+        & (frontier < _BACKROLL_LANDING_ANGLE)
+        & invalid_pose
+    )
+    stalled_invalid = (
+        ~env._backroll_success
+        & ~progressed
+        & (one_shot_invalid_pose | repeat_stalled_fall)
+    )
+    env._backroll_invalid_stall_steps = torch.where(
+        stalled_invalid,
+        env._backroll_invalid_stall_steps + 1,
+        torch.zeros_like(env._backroll_invalid_stall_steps),
+    )
+    max_air_steps = math.ceil(_BACKROLL_MAX_AIR_SECONDS / env.step_dt)
+    one_shot_stall_steps = math.ceil(_BACKROLL_INVALID_STALL_SECONDS / env.step_dt)
+    repeat_stall_steps = math.ceil(
+        _BACKROLL_REPEAT_PRE_EXIT_STALL_SECONDS / env.step_dt
+    )
+    stalled_too_long = torch.where(
+        env._backroll_repeat_mode,
+        env._backroll_invalid_stall_steps >= repeat_stall_steps,
+        env._backroll_invalid_stall_steps >= one_shot_stall_steps,
+    )
+    repeat_landing_wait = (
+        env._backroll_repeat_mode
+        & (frontier >= _BACKROLL_LANDING_ANGLE)
+        & ~env._backroll_success
+    )
+    env._backroll_landing_timeout_steps = torch.where(
+        repeat_landing_wait,
+        env._backroll_landing_timeout_steps + 1,
+        torch.zeros_like(env._backroll_landing_timeout_steps),
+    )
+    landing_timeout_steps = math.ceil(
+        _BACKROLL_REPEAT_LANDING_TIMEOUT_SECONDS / env.step_dt
+    )
+    landing_timed_out = (
+        env._backroll_repeat_mode
+        & (env._backroll_landing_timeout_steps >= landing_timeout_steps)
+    )
+    wrong_way = accum < -math.radians(90.0)
+    side_escape = (
+        cycle_active
+        & (frontier >= math.radians(30.0))
+        & (lateral_axis_z > _BACKROLL_REPEAT_SIDE_INVALID_Z)
+    )
+    offaxis_escape = (
+        cycle_active
+        & (env._backroll_cycle_offaxis_rotation
+            > _BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION)
+    )
+    cycle_invalid_now = (
+        (env._backroll_max_air_steps > max_air_steps)
+        | stalled_too_long
+        | landing_timed_out
+        | wrong_way
+        | side_escape
+        | offaxis_escape
+    ) & ~recovery_before
+    start_recovery = (
+        env._backroll_repeat_mode
+        & env._backroll_recovery_enabled
+        & cycle_invalid_now
+        & ~env._backroll_recovery_used
+    )
+
+    recovery_upright = torch.clamp(
+        (upright - math.cos(math.radians(60.0)))
+        / (1.0 - math.cos(math.radians(60.0))),
+        min=0.0,
+        max=1.0,
+    )
+    recovery_height = torch.clamp(
+        (height - 0.05) / (0.115 - 0.05),
+        min=0.0,
+        max=1.0,
+    )
+    recovery_potential = 0.5 * recovery_upright + 0.5 * recovery_height
+    recovery_progress = (
+        recovery_potential - env._backroll_recovery_potential_previous
+    ) / env.step_dt
+    env._backroll_recovery_progress_delta = torch.where(
+        recovery_before & env._backroll_recovery_potential_ready,
+        recovery_progress,
+        torch.zeros_like(recovery_progress),
+    )
+
+    recovery_candidate = (
+        recovery_before
+        & left_foot
+        & right_foot
+        & ~head
+        & (height >= _BACKROLL_RECOVERY_MIN_HEIGHT)
+        & (upright >= _BACKROLL_RECOVERY_UPRIGHT_COS)
+        & (
+            torch.linalg.vector_norm(asset.data.root_link_lin_vel_w, dim=-1)
+            <= _BACKROLL_RECOVERY_MAX_LIN_SPEED
+        )
+        & (ang_speed <= _BACKROLL_RECOVERY_MAX_ANG_SPEED)
+    )
+    recovery_hold = torch.where(
+        recovery_candidate,
+        env._backroll_recovery_hold_steps + 1,
+        torch.zeros_like(env._backroll_recovery_hold_steps),
+    )
+    recovery_hold_steps = max(
+        1,
+        math.ceil(_BACKROLL_RECOVERY_HOLD_SECONDS / env.step_dt),
+    )
+    recovery_success_now = (
+        recovery_candidate
+        & (env._backroll_recovery_hold_steps < recovery_hold_steps)
+        & (recovery_hold >= recovery_hold_steps)
+    )
+    recovery_steps = torch.where(
+        recovery_before,
+        env._backroll_recovery_steps + 1,
+        env._backroll_recovery_steps,
+    )
+    recovery_timeout_steps = math.ceil(
+        _BACKROLL_RECOVERY_TIMEOUT_SECONDS / env.step_dt
+    )
+    recovery_timed_out = (
+        recovery_before
+        & ~recovery_success_now
+        & (recovery_steps >= recovery_timeout_steps)
+    )
+
+    env._backroll_invalid_now = cycle_invalid_now & ~env._backroll_invalid
+    env._backroll_invalid |= cycle_invalid_now
+    env._backroll_invalid[recovery_success_now] = False
+    env._backroll_recovery_active = (
+        (recovery_before | start_recovery)
+        & ~recovery_success_now
+        & ~recovery_timed_out
+    )
+    env._backroll_recovery_used |= start_recovery
+    env._backroll_recovery_failed |= recovery_timed_out
+    env._backroll_recovery_success_now = recovery_success_now
+    env._backroll_recovery_attempt_count += start_recovery.float()
+    env._backroll_recovery_success_count += recovery_success_now.float()
+    env._backroll_recovery_latency_total_steps += torch.where(
+        recovery_success_now,
+        recovery_steps.float(),
+        torch.zeros_like(env._backroll_recovery_latency_total_steps),
+    )
+    env._backroll_recovery_steps = torch.where(
+        start_recovery | recovery_success_now | recovery_timed_out,
+        torch.zeros_like(recovery_steps),
+        recovery_steps,
+    )
+    env._backroll_recovery_hold_steps = torch.where(
+        start_recovery | recovery_success_now | recovery_timed_out,
+        torch.zeros_like(recovery_hold),
+        recovery_hold,
+    )
+    env._backroll_recovery_potential_previous = torch.where(
+        recovery_before | start_recovery,
+        recovery_potential,
+        env._backroll_recovery_potential_previous,
+    )
+    env._backroll_recovery_potential_ready = torch.where(
+        recovery_success_now | recovery_timed_out,
+        torch.zeros_like(env._backroll_recovery_potential_ready),
+        env._backroll_recovery_potential_ready | recovery_before | start_recovery,
+    )
+    env._backroll_recovery_rearm_count += recovery_success_now.long()
+    env._backroll_recovered_cycle_armed |= recovery_success_now
+
+    potential_gate = (frontier >= _BACKROLL_POTENTIAL_ANGLE) & ~recovery_before
+    upright_component = torch.clamp(upright, min=0.0, max=1.0)
+    # The pitch/roll upright cosine alone is blind to a robot that has
+    # rotated onto its side.  Bias the bounded potential toward lateral-axis
+    # flatness so the final 300--350 degree arc teaches the robot to come back
+    # into the sagittal plane, rather than merely becoming tall while still
+    # sideways.  Only the delta is paid below; holding a side pose has no
+    # annuity and cannot farm reward.
+    flatness_component = torch.clamp(1.0 - lateral_axis_z, min=0.0, max=1.0)
+    upright_potential = 0.25 * upright_component + 0.75 * flatness_component
+    height_potential = torch.clamp(height / 0.115, min=0.0, max=1.0)
+    env._backroll_upright_delta = torch.where(
+        potential_gate & env._backroll_potential_ready,
+        upright_potential - env._backroll_upright_previous,
+        torch.zeros_like(upright_potential),
+    )
+    env._backroll_height_delta = torch.where(
+        potential_gate & env._backroll_potential_ready,
+        height_potential - env._backroll_height_previous,
+        torch.zeros_like(height_potential),
+    )
+    env._backroll_upright_previous = upright_potential
+    env._backroll_height_previous = height_potential
+    env._backroll_potential_ready = potential_gate
+    env._backroll_previous_frontier = frontier.clone()
+
+    # Continuous, bounded guidance for the rounded-shell -> flat-top
+    # transition.  Snapshot the potential on gate entry, then pay only its
+    # signed change while the robot is actively pivoting.  This supplies a
+    # transition gradient while making a head-rocking loop net zero.
+    head_alignment_active = (
+        ~recovery_before
+        & ~env._backroll_invalid
+        & head
+        & (frontier >= _BACKROLL_NON_TOP_HEAD_LO)
+        & (frontier <= _BACKROLL_NON_TOP_HEAD_HI)
+        & (torch.clamp(-ang_vel_b[:, 1], min=0.0) >= 1.0)
+        & (lateral_axis_z <= _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX)
+        & _grounded_backroll_cycle_is_sagittal(env)
+    )
+    head_alignment_gate_entry = head_alignment_active & (
+        ~env._backroll_head_alignment_active
+    )
+    head_alignment_delta = head_alignment - env._backroll_head_alignment_previous
+    env._backroll_head_alignment_delta = torch.where(
+        head_alignment_active & ~head_alignment_gate_entry,
+        head_alignment_delta,
+        torch.zeros_like(head_alignment),
+    )
+    env._backroll_head_alignment_previous = head_alignment
+    env._backroll_head_alignment_active = head_alignment_active
+
+    # A valid cycle, a newly failed attempt, and a completed self-right all
+    # clear only cycle-local state. Recovery preserves completed-cycle totals,
+    # earns no roll credit, and rearms exactly one retry after the physical
+    # feet/head/upright hold.
+    rearm = env._backroll_success_now & env._backroll_repeat_mode
+    _reset_grounded_backroll_cycle_buffers(
+        env,
+        rearm | start_recovery | recovery_success_now,
+    )
+    env._backroll_last_update_step = step
+
+
+def _grounded_backroll_reference_bank(
+    env: ManagerBasedRlEnv,
+    reference_state_path: str,
+) -> dict[str, torch.Tensor]:
+    """Load and validate the small champion-derived physical state bank once."""
+    cached_path = getattr(env, "_backroll_reference_bank_path", None)
+    if cached_path == reference_state_path:
+        return env._backroll_reference_bank
+    payload = torch.load(reference_state_path, map_location="cpu", weights_only=True)
+    rows = payload.get("rows") if isinstance(payload, dict) else None
+    if not rows:
+        raise ValueError("backroll reference state bank has no rows")
+    schema_version = int(payload.get("schema_version", 1))
+    bank = {
+        "qpos": torch.stack([row["qpos"] for row in rows]).to(env.device),
+        "qvel": torch.stack([row["qvel"] for row in rows]).to(env.device),
+        "accum": torch.stack([row["accum"] for row in rows]).to(env.device),
+        "frontier": torch.stack([row["frontier"] for row in rows]).to(env.device),
+        "phase_center_deg": torch.tensor(
+            [float(row["phase_center_deg"]) for row in rows], device=env.device
+        ),
+        "source_seed": torch.tensor(
+            [int(row["seed"]) for row in rows], device=env.device, dtype=torch.long
+        ),
+        "trunk_latch": torch.stack([row["trunk_latch"] for row in rows])
+        .to(env.device)
+        .bool(),
+        "head_latch": torch.stack([row["head_latch"] for row in rows])
+        .to(env.device)
+        .bool(),
+        "schema_version": torch.tensor(
+            schema_version,
+            device=env.device,
+            dtype=torch.long,
+        ),
+    }
+    if schema_version >= 2:
+        try:
+            bank.update(
+                cycle_max_lateral_axis_z=torch.stack(
+                    [row["cycle_max_lateral_axis_z"] for row in rows]
+                ).to(env.device),
+                cycle_offaxis_rotation=torch.stack(
+                    [row["cycle_offaxis_rotation"] for row in rows]
+                ).to(env.device),
+                max_air_steps=torch.stack(
+                    [row["max_air_steps"] for row in rows]
+                )
+                .to(env.device)
+                .long(),
+            )
+        except KeyError as exc:
+            raise ValueError(
+                "backroll reference schema 2 is missing strict cycle history"
+            ) from exc
+    if bank["qpos"].shape[1] != env.sim.data.qpos.shape[1]:
+        raise ValueError("backroll reference qpos width does not match the active model")
+    if bank["qvel"].shape[1] != env.sim.data.qvel.shape[1]:
+        raise ValueError("backroll reference qvel width does not match the active model")
+    env._backroll_reference_bank_path = reference_state_path
+    env._backroll_reference_bank = bank
+    return bank
+
+
+def _grounded_backroll_reference_consistent_rows(
+    bank: dict[str, torch.Tensor],
+    max_lateral_axis_z: float = _BACKROLL_REPEAT_SAGITTAL_LATERAL_AXIS_MAX,
+    max_air_steps: int | None = None,
+) -> torch.Tensor:
+    """Return reset rows that already meet the live sagittal/latch contract.
+
+    Reference-state initialization may carry contact history only when that
+    history belongs to the captured physical state.  The active curriculum's
+    sagittal envelope and ordered trunk/head prerequisites reject shoulder-
+    biased rows before PPO can see them.
+    """
+    required_history = {
+        "cycle_max_lateral_axis_z",
+        "cycle_offaxis_rotation",
+        "max_air_steps",
+    }
+    missing_history = required_history.difference(bank)
+    if missing_history:
+        missing = ", ".join(sorted(missing_history))
+        raise ValueError(f"strict backroll reference bank is missing: {missing}")
+    lateral_axis_z = _lateral_axis_z(bank["qpos"][:, 3:7]).abs()
+    sagittal = (
+        (lateral_axis_z <= max_lateral_axis_z)
+        & (bank["cycle_max_lateral_axis_z"] <= max_lateral_axis_z)
+        & (
+            bank["cycle_offaxis_rotation"]
+            <= _BACKROLL_REPEAT_MAX_OFFAXIS_ROTATION
+        )
+    )
+    if max_air_steps is not None:
+        sagittal &= bank["max_air_steps"] <= max_air_steps
+    trunk_ordered = (
+        ~bank["trunk_latch"]
+        | (bank["frontier"] >= _BACKROLL_TRUNK_LATCH_LO)
+    )
+    head_ordered = (
+        (~bank["head_latch"] | bank["trunk_latch"])
+        & (~bank["head_latch"] | (bank["frontier"] >= _BACKROLL_HEAD_LATCH_LO))
+    )
+    return sagittal & trunk_ordered & head_ordered
+
+
+def _reset_grounded_backroll_reference_states(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    *,
+    reference_state_path: str,
+    phase_range_deg: tuple,
+    phase_buckets_deg: tuple[tuple[float, float], ...] | None,
+    source_seed: int | None,
+    yaw_range: tuple,
+    strict_sagittal: bool,
+    max_lateral_axis_z: float,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Place environments in real, champion-generated sagittal pivot states."""
+    bank = _grounded_backroll_reference_bank(env, reference_state_path)
+    eligible_mask = (bank["phase_center_deg"] >= phase_range_deg[0]) & (
+        bank["phase_center_deg"] <= phase_range_deg[1]
+    )
+    if source_seed is not None:
+        eligible_mask &= bank["source_seed"] == source_seed
+    if strict_sagittal:
+        schema_version = int(bank["schema_version"].item())
+        if schema_version < 2:
+            raise ValueError(
+                "strict backroll reference reset requires schema version 2"
+            )
+        eligible_mask &= _grounded_backroll_reference_consistent_rows(
+            bank,
+            max_lateral_axis_z=max_lateral_axis_z,
+            max_air_steps=math.ceil(_BACKROLL_MAX_AIR_SECONDS / env.step_dt),
+        )
+    if phase_buckets_deg is None:
+        eligible_rows = torch.nonzero(eligible_mask, as_tuple=False).squeeze(-1)
+        if len(eligible_rows) == 0:
+            raise ValueError("backroll reference state bank has no rows in phase range")
+        row_ids = eligible_rows[
+            torch.randint(len(eligible_rows), (len(env_ids),), device=env.device)
+        ]
+    else:
+        bucket_rows = []
+        for lo, hi in phase_buckets_deg:
+            rows = torch.nonzero(
+                eligible_mask
+                & (bank["phase_center_deg"] >= lo)
+                & (bank["phase_center_deg"] <= hi),
+                as_tuple=False,
+            ).squeeze(-1)
+            if len(rows) > 0:
+                bucket_rows.append(rows)
+        if not bucket_rows:
+            raise ValueError("backroll reference state bank has no rows in phase buckets")
+        bucket_ids = torch.randint(
+            len(bucket_rows), (len(env_ids),), device=env.device
+        )
+        row_ids = torch.empty(len(env_ids), dtype=torch.long, device=env.device)
+        for bucket_index, rows in enumerate(bucket_rows):
+            selected = bucket_ids == bucket_index
+            if selected.any():
+                row_ids[selected] = rows[
+                    torch.randint(
+                        len(rows),
+                        (int(selected.sum().item()),),
+                        device=env.device,
+                    )
+                ]
+    if len(row_ids) == 0:
+        raise ValueError("backroll reference state bank has no rows in phase range")
+    qpos = bank["qpos"][row_ids].clone()
+    qvel = bank["qvel"][row_ids].clone()
+    yaw = (
+        torch.rand(len(env_ids), device=env.device) * (yaw_range[1] - yaw_range[0])
+        + yaw_range[0]
+    )
+    cy = torch.cos(yaw)
+    sy = torch.sin(yaw)
+
+    local_x = qpos[:, 0].clone()
+    local_y = qpos[:, 1].clone()
+    qpos[:, 0] = cy * local_x - sy * local_y
+    qpos[:, 1] = sy * local_x + cy * local_y
+    velocity_x = qvel[:, 0].clone()
+    velocity_y = qvel[:, 1].clone()
+    qvel[:, 0] = cy * velocity_x - sy * velocity_y
+    qvel[:, 1] = sy * velocity_x + cy * velocity_y
+
+    half_yaw = 0.5 * yaw
+    yaw_w = torch.cos(half_yaw)
+    yaw_z = torch.sin(half_yaw)
+    qw, qx, qy, qz = qpos[:, 3:7].clone().unbind(dim=1)
+    qpos[:, 3] = yaw_w * qw - yaw_z * qz
+    qpos[:, 4] = yaw_w * qx - yaw_z * qy
+    qpos[:, 5] = yaw_w * qy + yaw_z * qx
+    qpos[:, 6] = yaw_w * qz + yaw_z * qw
+    qpos[:, :2] += env.scene.terrain.env_origins[env_ids, :2]
+
+    env.sim.data.qpos[env_ids] = qpos
+    env.sim.data.qvel[env_ids] = qvel
+    env._roulade_accum[env_ids] = bank["accum"][row_ids]
+    env._roulade_max[env_ids] = bank["frontier"][row_ids]
+    env._roulade_paid[env_ids] = bank["frontier"][row_ids]
+    env._roulade_roll_direction[env_ids] = -1.0
+    return (
+        bank["trunk_latch"][row_ids],
+        bank["head_latch"][row_ids],
+        bank.get("cycle_max_lateral_axis_z", torch.zeros_like(bank["frontier"]))[
+            row_ids
+        ],
+        bank.get("cycle_offaxis_rotation", torch.zeros_like(bank["frontier"]))[
+            row_ids
+        ],
+        bank.get(
+            "max_air_steps",
+            torch.zeros_like(bank["source_seed"]),
+        )[row_ids],
+    )
+
+
+def reset_grounded_backroll_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    standing_prob: float = 0.20,
+    midroll_prob: float = 0.80,
+    midroll_pitch_min: float = math.radians(260.0),
+    midroll_pitch_max: float = math.radians(340.0),
+    midroll_omega_range: tuple = (0.0, 2.0),
+    standing_z_min: float = 0.11,
+    standing_z_max: float = 0.12,
+    standing_tilt_max: float = math.radians(3.0),
+    yaw_range: tuple = (-math.pi, math.pi),
+    midroll_z_min: float = 0.05,
+    midroll_z_max: float = 0.11,
+    tuck_overrides: Optional[dict] = None,
+    tuck_factor_range: tuple = (0.5, 1.0),
+    joint_noise_std: float = 0.04,
+    reference_state_prob: float = 0.0,
+    reference_state_path: str | None = None,
+    reference_phase_range_deg: tuple = (0.0, 360.0),
+    reference_phase_buckets_deg: tuple[tuple[float, float], ...] | None = None,
+    reference_source_seed: int | None = None,
+    reference_strict_sagittal: bool = False,
+    sagittal_tolerance_deg: float = 20.0,
+    repeat_mode: bool = False,
+    relaxed_first_cycle: bool = False,
+    recovery_enabled: bool = True,
+    mastery_cycles: int = 1,
+    synthesize_contact_latches: bool = True,
+    ground_recovery_prob: float = 0.0,
+    ground_face_down_prob: float = 0.25,
+    ground_face_up_prob: float = 0.25,
+    ground_left_prob: float = 0.25,
+    ground_right_prob: float = 0.25,
+    ground_z_range: tuple = (0.04, 0.05),
+) -> None:
+    """Reset a grounded backroll and account for the previous episode."""
+    if env_ids is None or len(env_ids) == 0:
+        return
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    asset: Entity = env.scene[asset_cfg.name]
+    _grounded_backroll_state(env)
+
+    previous_started = env._backroll_started[env_ids]
+    if previous_started.any():
+        previous_ids = env_ids[previous_started]
+        env._backroll_window_episodes += previous_started.sum()
+        previous_success = torch.where(
+            env._backroll_repeat_mode[previous_ids],
+            env._backroll_cycle_count[previous_ids]
+            >= env._backroll_mastery_cycles[previous_ids],
+            env._backroll_success[previous_ids],
+        )
+        env._backroll_window_successes += previous_success.sum()
+        previous_standing = env._backroll_start_is_standing[previous_ids]
+        env._backroll_window_standing_episodes += previous_standing.sum()
+        env._backroll_window_standing_successes += (
+            previous_success & previous_standing
+        ).sum()
+        finite = torch.isfinite(env.sim.data.qpos[previous_ids]).all(dim=1) & torch.isfinite(
+            env.sim.data.qvel[previous_ids]
+        ).all(dim=1)
+        env._backroll_window_bad_states += (~finite).sum()
+
+    if not 0.0 <= ground_recovery_prob <= 1.0:
+        raise ValueError("ground_recovery_prob must be in [0, 1]")
+    if not 0.0 <= reference_state_prob <= 1.0:
+        raise ValueError("reference_state_prob must be in [0, 1]")
+    if reference_state_prob > 0.0 and not reference_state_path:
+        raise ValueError("reference_state_path is required when reference states are enabled")
+    if not 0.0 < sagittal_tolerance_deg < 30.0:
+        raise ValueError("sagittal_tolerance_deg must be between 0 and 30 degrees")
+    sagittal_limit = math.sin(math.radians(sagittal_tolerance_deg))
+    env._backroll_cycle_sagittal_limit[env_ids] = sagittal_limit
+    if (
+        len(reference_phase_range_deg) != 2
+        or reference_phase_range_deg[1] < reference_phase_range_deg[0]
+    ):
+        raise ValueError("reference_phase_range_deg must be an ordered pair")
+    if reference_phase_buckets_deg is not None:
+        if not reference_phase_buckets_deg:
+            raise ValueError("reference_phase_buckets_deg must not be empty")
+        for bucket in reference_phase_buckets_deg:
+            if len(bucket) != 2 or bucket[1] < bucket[0]:
+                raise ValueError("reference phase buckets must be ordered pairs")
+    if (
+        len(ground_z_range) != 2
+        or ground_z_range[0] <= 0.0
+        or ground_z_range[1] < ground_z_range[0]
+    ):
+        raise ValueError("ground_z_range must be a positive ordered pair")
+    ground_mask = (
+        repeat_mode
+        & recovery_enabled
+        & (torch.rand(len(env_ids), device=env.device) < ground_recovery_prob)
+    )
+    regular_ids = env_ids[~ground_mask]
+
+    reset_roulade_state(
+        env,
+        regular_ids,
+        asset_cfg=asset_cfg,
+        standing_prob=standing_prob,
+        midroll_prob=midroll_prob,
+        standing_z_min=standing_z_min,
+        standing_z_max=standing_z_max,
+        standing_tilt_max=standing_tilt_max,
+        yaw_range=yaw_range,
+        forward_vel_range=(0.0, 0.0),
+        midroll_pitch_min=midroll_pitch_min,
+        midroll_pitch_max=midroll_pitch_max,
+        midroll_z_min=midroll_z_min,
+        midroll_z_max=midroll_z_max,
+        midroll_omega_range=midroll_omega_range,
+        midroll_forward_vel_range=(0.0, 0.0),
+        tuck_overrides=tuck_overrides,
+        tuck_factor_range=tuck_factor_range,
+        joint_noise_std=joint_noise_std,
+        roll_direction=-1.0,
+    )
+    spawn_angle = torch.zeros(len(env_ids), device=env.device)
+    spawn_angle[~ground_mask] = env._roulade_accum[regular_ids]
+    is_midroll = spawn_angle > 0.0
+    reference_mask = (
+        is_midroll
+        & (torch.rand(len(env_ids), device=env.device) < reference_state_prob)
+    )
+    reference_trunk_latch = torch.zeros(
+        len(env_ids), dtype=torch.bool, device=env.device
+    )
+    reference_head_latch = torch.zeros_like(reference_trunk_latch)
+    reference_cycle_max_lateral = torch.zeros(
+        len(env_ids), device=env.device
+    )
+    reference_cycle_offaxis = torch.zeros_like(reference_cycle_max_lateral)
+    reference_max_air_steps = torch.zeros(
+        len(env_ids), dtype=torch.long, device=env.device
+    )
+    reference_ids = env_ids[reference_mask]
+    if len(reference_ids) > 0:
+        (
+            reference_trunk,
+            reference_head,
+            reference_lateral,
+            reference_offaxis,
+            reference_air_steps,
+        ) = _reset_grounded_backroll_reference_states(
+            env,
+            reference_ids,
+            reference_state_path=reference_state_path,
+            phase_range_deg=reference_phase_range_deg,
+            phase_buckets_deg=reference_phase_buckets_deg,
+            source_seed=reference_source_seed,
+            yaw_range=yaw_range,
+            strict_sagittal=reference_strict_sagittal,
+            max_lateral_axis_z=sagittal_limit,
+        )
+        spawn_angle[reference_mask] = env._roulade_max[reference_ids]
+        reference_trunk_latch[reference_mask] = reference_trunk
+        reference_head_latch[reference_mask] = reference_head
+        reference_cycle_max_lateral[reference_mask] = reference_lateral
+        reference_cycle_offaxis[reference_mask] = reference_offaxis
+        reference_max_air_steps[reference_mask] = reference_air_steps
+    env._backroll_start_is_standing[env_ids] = ~ground_mask & ~is_midroll
+    if synthesize_contact_latches:
+        env._backroll_trunk_latch[env_ids] = is_midroll & (
+            spawn_angle >= _BACKROLL_TRUNK_LATCH_LO
+        )
+        env._backroll_head_latch[env_ids] = is_midroll & (
+            spawn_angle >= _BACKROLL_HEAD_LATCH_LO
+        )
+    else:
+        env._backroll_trunk_latch[env_ids] = False
+        env._backroll_head_latch[env_ids] = False
+    env._backroll_trunk_latch[env_ids[reference_mask]] = reference_trunk_latch[
+        reference_mask
+    ]
+    env._backroll_head_latch[env_ids[reference_mask]] = reference_head_latch[
+        reference_mask
+    ]
+    env._roulade_head_latch[env_ids] = env._backroll_head_latch[env_ids]
+    env._backroll_trunk_latch_now[env_ids] = False
+    env._backroll_head_latch_now[env_ids] = False
+    env._backroll_feet_recontact_latch[env_ids] = False
+    env._backroll_feet_recontact_now[env_ids] = False
+    env._backroll_landing_readiness_paid[env_ids] = 0.0
+    env._backroll_landing_readiness_delta[env_ids] = 0.0
+    env._backroll_success[env_ids] = False
+    env._backroll_success_now[env_ids] = False
+    env._backroll_invalid[env_ids] = False
+    env._backroll_invalid_now[env_ids] = False
+    env._backroll_started[env_ids] = True
+    env._backroll_repeat_mode[env_ids] = repeat_mode
+    env._backroll_relaxed_first_cycle[env_ids] = bool(
+        repeat_mode and relaxed_first_cycle
+    )
+    env._backroll_recovery_enabled[env_ids] = repeat_mode and recovery_enabled
+    env._backroll_air_steps[env_ids] = 0
+    env._backroll_max_air_steps[env_ids] = 0
+    env._backroll_landing_hold_steps[env_ids] = 0
+    env._backroll_invalid_stall_steps[env_ids] = 0
+    env._backroll_landing_timeout_steps[env_ids] = 0
+    env._backroll_non_top_head_steps[env_ids] = 0
+    env._backroll_episode_max_non_top_head_steps[env_ids] = 0
+    env._backroll_head_alignment_previous[env_ids] = 0.0
+    env._backroll_head_alignment_delta[env_ids] = 0.0
+    env._backroll_head_alignment_active[env_ids] = False
+    env._backroll_previous_frontier[env_ids] = spawn_angle
+    env._backroll_completion_paid[env_ids] = spawn_angle
+    env._backroll_upright_previous[env_ids] = 0.0
+    env._backroll_height_previous[env_ids] = 0.0
+    env._backroll_upright_delta[env_ids] = 0.0
+    env._backroll_height_delta[env_ids] = 0.0
+    env._backroll_potential_ready[env_ids] = False
+    env._backroll_frontier_delta[env_ids] = 0.0
+    env._backroll_launch_tuck_paid[env_ids] = 0.0
+    env._backroll_cycle_count[env_ids] = 0
+    env._backroll_mastery_cycles[env_ids] = max(1, int(mastery_cycles))
+    env._backroll_cycle_max_lateral_axis_z[env_ids] = 0.0
+    env._backroll_cycle_offaxis_rotation[env_ids] = 0.0
+    env._backroll_max_air_steps[reference_ids] = reference_max_air_steps[
+        reference_mask
+    ]
+    env._backroll_cycle_max_lateral_axis_z[reference_ids] = (
+        reference_cycle_max_lateral[reference_mask]
+    )
+    env._backroll_cycle_offaxis_rotation[reference_ids] = (
+        reference_cycle_offaxis[reference_mask]
+    )
+    env._backroll_episode_max_lateral_axis_z[env_ids] = 0.0
+    env._backroll_episode_max_offaxis_rotation[env_ids] = 0.0
+    env._backroll_recovery_active[env_ids] = False
+    env._backroll_recovery_used[env_ids] = False
+    env._backroll_recovery_success_now[env_ids] = False
+    env._backroll_recovery_failed[env_ids] = False
+    env._backroll_recovery_steps[env_ids] = 0
+    env._backroll_recovery_hold_steps[env_ids] = 0
+    env._backroll_recovery_potential_previous[env_ids] = 0.0
+    env._backroll_recovery_potential_ready[env_ids] = False
+    env._backroll_recovery_progress_delta[env_ids] = 0.0
+    env._backroll_recovery_attempt_count[env_ids] = 0.0
+    env._backroll_recovery_success_count[env_ids] = 0.0
+    env._backroll_recovery_latency_total_steps[env_ids] = 0.0
+    env._backroll_recovery_rearm_count[env_ids] = 0
+    env._backroll_recovered_cycle_armed[env_ids] = False
+    env._backroll_recovered_and_rerolled[env_ids] = 0.0
+    env._backroll_recovered_rerolled_now[env_ids] = False
+
+    ground_ids = env_ids[ground_mask]
+    if len(ground_ids) > 0:
+        servo_ids = torch.as_tensor(
+            _servo_joint_ids(env, asset),
+            device=env.device,
+            dtype=torch.long,
+        )
+        qpos_columns = 7 + servo_ids
+        qvel_columns = 6 + servo_ids
+        env.sim.data.qpos[
+            ground_ids.unsqueeze(1), qpos_columns.unsqueeze(0)
+        ] = asset.data.default_joint_pos[
+            ground_ids.unsqueeze(1), servo_ids.unsqueeze(0)
+        ]
+        env.sim.data.qvel[
+            ground_ids.unsqueeze(1), qvel_columns.unsqueeze(0)
+        ] = 0.0
+        _set_roll_sprint_ground_state(
+            env,
+            ground_ids,
+            yaw_range=yaw_range,
+            face_down_prob=ground_face_down_prob,
+            face_up_prob=ground_face_up_prob,
+            left_prob=ground_left_prob,
+            right_prob=ground_right_prob,
+            z_range=ground_z_range,
+        )
+        env._roulade_roll_direction[ground_ids] = -1.0
+        ground = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        ground[ground_ids] = True
+        _reset_grounded_backroll_cycle_buffers(env, ground)
+        env._backroll_invalid[ground_ids] = True
+        env._backroll_recovery_active[ground_ids] = True
+        env._backroll_recovery_used[ground_ids] = True
+        env._backroll_recovery_attempt_count[ground_ids] = 1.0
+    env._backroll_last_update_step = -1
+
+
+def grounded_backroll_curriculum(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    event_name: str,
+    stages: list[dict],
+    window_episodes: int = 4096,
+    success_threshold: float = 0.70,
+    required_consecutive_windows: int = 1,
+    standing_only_mastery: bool = False,
+    speed_reward_name: Optional[str] = None,
+    speed_reward_weights: Optional[list[float]] = None,
+    invalid_reward_name: Optional[str] = None,
+    invalid_reward_weights: Optional[list[float]] = None,
+    action_rate_reward_name: Optional[str] = None,
+    action_rate_reward_weights: Optional[list[float]] = None,
+) -> torch.Tensor:
+    """Advance phase initialization after enough consecutive clean windows."""
+    del env_ids
+    _grounded_backroll_state(env)
+    if required_consecutive_windows < 1:
+        raise ValueError("required_consecutive_windows must be at least one")
+    stage = int(env._backroll_curriculum_stage)
+    if env.common_step_counter % 50 == 0:
+        episodes = int(
+            (
+                env._backroll_window_standing_episodes
+                if standing_only_mastery
+                else env._backroll_window_episodes
+            ).item()
+        )
+        if episodes >= window_episodes:
+            successes = int(
+                (
+                    env._backroll_window_standing_successes
+                    if standing_only_mastery
+                    else env._backroll_window_successes
+                ).item()
+            )
+            bad_states = int(env._backroll_window_bad_states.item())
+            success_rate = successes / max(episodes, 1)
+            clean_mastery = success_rate >= success_threshold and bad_states == 0
+            if clean_mastery:
+                env._backroll_consecutive_mastery_windows = min(
+                    env._backroll_consecutive_mastery_windows + 1,
+                    required_consecutive_windows,
+                )
+            else:
+                env._backroll_consecutive_mastery_windows = 0
+            if (
+                env._backroll_consecutive_mastery_windows
+                >= required_consecutive_windows
+                and stage + 1 < len(stages)
+            ):
+                stage += 1
+                env._backroll_curriculum_stage = stage
+                env._backroll_consecutive_mastery_windows = 0
+            env._backroll_window_episodes.zero_()
+            env._backroll_window_successes.zero_()
+            env._backroll_window_bad_states.zero_()
+            env._backroll_window_standing_episodes.zero_()
+            env._backroll_window_standing_successes.zero_()
+    event_cfg = env.event_manager.get_term_cfg(event_name)
+    event_cfg.params.update(stages[stage]["params"])
+    if speed_reward_name is not None:
+        if speed_reward_weights is None or len(speed_reward_weights) != len(stages):
+            raise ValueError("speed_reward_weights must match the curriculum stages")
+        env.reward_manager.get_term_cfg(speed_reward_name).weight = (
+            speed_reward_weights[stage]
+        )
+    if invalid_reward_name is not None:
+        if invalid_reward_weights is None or len(invalid_reward_weights) != len(stages):
+            raise ValueError("invalid_reward_weights must match the curriculum stages")
+        env.reward_manager.get_term_cfg(invalid_reward_name).weight = (
+            invalid_reward_weights[stage]
+        )
+    if action_rate_reward_name is not None:
+        if (
+            action_rate_reward_weights is None
+            or len(action_rate_reward_weights) != len(stages)
+        ):
+            raise ValueError(
+                "action_rate_reward_weights must match the curriculum stages"
+            )
+        env.reward_manager.get_term_cfg(action_rate_reward_name).weight = (
+            action_rate_reward_weights[stage]
+        )
+    return torch.tensor(float(stage), device=env.device)
+
+
+def grounded_backroll_progress(
+    env: ManagerBasedRlEnv,
+    target_angle: float = 2.0 * math.pi,
+    max_paid_rate: float = 5.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay only new signed, supported, sagittal backward rotation."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    _, frontier, paid = _roulade_state(env)
+    new_paid = torch.clamp(frontier, max=target_angle)
+    delta = torch.clamp(new_paid - torch.clamp(paid, max=target_angle), min=0.0)
+    delta = torch.clamp(delta, max=max_paid_rate * env.step_dt)
+    env._roulade_paid = torch.maximum(paid, new_paid)
+    # In repeated mode, generic ground support is not enough to earn the
+    # maneuver.  Keep the shaping gradient through each contact's physically
+    # valid acquisition window, then stop paying if the policy exits that
+    # window without the ordered latch.  Gating at the *start* of the window
+    # made the 30--contact and 100--contact bridges unrewarded and A126 learned
+    # to crouch instead of attempting the warm-started roll.
+    ordered_contacts = (
+        ((frontier <= _BACKROLL_TRUNK_LATCH_HI) | env._backroll_trunk_latch)
+        & ((frontier <= _BACKROLL_HEAD_LATCH_HI) | env._backroll_head_latch)
+    )
+    # The one-shot bridge is subject to the same sagittal gate as repeated
+    # training.  Otherwise a side-roll can keep collecting rotation shaping
+    # while never satisfying the physical landing criterion.
+    valid = ordered_contacts & _grounded_backroll_positive_reward_valid(env)
+    reward = delta / (env.step_dt * target_angle)
+    purity = _grounded_backroll_sagittal_purity(asset)
+    return torch.where(valid, reward * purity, 0.0)
+
+
+def _grounded_backroll_launch_tuck_potential(
+    env: ManagerBasedRlEnv,
+    asset: Entity,
+    target_overrides: Optional[dict],
+) -> torch.Tensor:
+    """Return HOME-to-tuck progress on the explicitly requested servo subset."""
+    if not target_overrides:
+        return torch.zeros(env.num_envs, device=env.device)
+    joint_pos = _servo_joint_pos(env, asset)
+    home = _servo_default_joint_pos(env, asset)
+    target = home.clone()
+    active = torch.zeros(home.shape[-1], dtype=torch.bool, device=env.device)
+    for joint_index, angle in target_overrides.items():
+        if joint_index < 0 or joint_index >= home.shape[-1]:
+            raise ValueError("launch-tuck override index is outside the servo layout")
+        target[:, joint_index] = float(angle)
+        active[joint_index] = True
+    if not active.any():
+        return torch.zeros(env.num_envs, device=env.device)
+    # Normalize by each servo's HOME-to-tuck excursion.  HOME scores zero,
+    # tuck scores one, and overshooting a servo cannot increase the score.
+    span = (target - home).abs().clamp_min(0.25)
+    residual = ((joint_pos - target).abs() / span).clamp(max=1.0)
+    return 1.0 - residual[:, active].mean(dim=-1)
+
+
+def grounded_backroll_launch_tuck_progress(
+    env: ManagerBasedRlEnv,
+    target_overrides: Optional[dict] = None,
+    entry_angle: float = math.radians(45.0),
+    max_paid_rate: float = 2.5,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay new physical tuck progress only before a standing backroll starts.
+
+    A218's independent standing audits at checkpoints 50, 100, and 150 held
+    HOME indefinitely while the late reference bucket supplied all observed
+    reward.  This max-so-far potential gives PPO a short bridge into the
+    measured tuck. It requires both feet and a valid sagittal attempt, turns
+    off after 45 degrees, and cannot pay from lying, a shoulder roll, repeated
+    rocking, or holding the tucked pose.
+    """
+    if entry_angle <= 0.0 or max_paid_rate < 0.0:
+        raise ValueError("entry_angle must be positive and max_paid_rate nonnegative")
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    potential = _grounded_backroll_launch_tuck_potential(
+        env, asset, target_overrides
+    )
+    left_foot = _sensor_any_contact(env, _BACKROLL_LEFT_FOOT_SENSOR)
+    right_foot = _sensor_any_contact(env, _BACKROLL_RIGHT_FOOT_SENSOR)
+    both_feet = (
+        torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        if left_foot is None or right_foot is None
+        else left_foot & right_foot
+    )
+    eligible = (
+        env._backroll_start_is_standing
+        & both_feet
+        & (env._roulade_max <= entry_angle)
+        & _grounded_backroll_positive_reward_valid(env)
+    )
+    paid = env._backroll_launch_tuck_paid
+    new_paid = torch.where(eligible, torch.maximum(paid, potential), paid)
+    delta = torch.clamp(new_paid - paid, min=0.0)
+    delta = torch.clamp(delta, max=max_paid_rate * env.step_dt)
+    env._backroll_launch_tuck_paid = new_paid
+    return delta / env.step_dt
+
+
+def grounded_backroll_head_pivot(
+    env: ManagerBasedRlEnv,
+    rate_norm: float = 2.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward active flat-head pivoting after ordered trunk contact."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    head = _sensor_any_contact(env, _ROULADE_HEAD_SENSOR)
+    if head is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    phase = (env._roulade_max >= _BACKROLL_HEAD_LATCH_LO) & (
+        env._roulade_max <= _BACKROLL_HEAD_LATCH_HI
+    )
+    omega_back = torch.nan_to_num(
+        -asset.data.root_link_ang_vel_b[:, 1],
+        nan=0.0,
+    )
+    rate = torch.clamp(omega_back / rate_norm, 0.0, 1.0)
+    return (
+        env._backroll_trunk_latch.float()
+        * head.float()
+        * phase.float()
+        * _head_top_down(env, asset).float()
+        * rate
+        * _grounded_backroll_sagittal_purity(asset)
+        * _grounded_backroll_positive_reward_valid(env).float()
+    )
+
+
+def grounded_backroll_head_alignment_progress(
+    env: ManagerBasedRlEnv,
+    max_paid_rate: float = 1.5,
+) -> torch.Tensor:
+    """Bounded signed potential change from rounded head contact to flat top.
+
+    This term is deliberately gated to active backroll head contact and pays
+    only while the robot actively pivots in the measured contact window.
+    Holding a headstand pays zero, and a closed rocking loop telescopes to zero.
+    """
+    if max_paid_rate < 0.0:
+        raise ValueError("max_paid_rate must be nonnegative")
+    asset: Entity = env.scene["robot"]
+    _update_grounded_backroll_state(env, asset)
+    return torch.clamp(
+        env._backroll_head_alignment_delta,
+        min=-max_paid_rate * env.step_dt,
+        max=max_paid_rate * env.step_dt,
+    )
+
+
+def grounded_backroll_contact_sequence(
+    env: ManagerBasedRlEnv,
+    trunk_value: float = 1.0,
+    head_value: float = 2.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Bounded one-shot credit for the ordered trunk then flat-head contacts."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    pulse = (
+        trunk_value * env._backroll_trunk_latch_now.float()
+        + head_value * env._backroll_head_latch_now.float()
+    )
+    return (
+        pulse
+        * _grounded_backroll_positive_reward_valid(env).float()
+        / env.step_dt
+    )
+
+
+def grounded_backroll_non_top_head_dwell_penalty(
+    env: ManagerBasedRlEnv,
+    grace_steps: int = 9,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Tax persistent face/side head contact after a measured tuck grace."""
+    if grace_steps < 0:
+        raise ValueError("grace_steps must be nonnegative")
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return -(env._backroll_non_top_head_steps > grace_steps).float()
+
+
+def grounded_backroll_completion_progress(
+    env: ManagerBasedRlEnv,
+    start_angle: float = math.radians(150.0),
+    target_angle: float = math.radians(350.0),
+    max_paid_rate: float = 6.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay only new supported backward rotation after flat head contact.
+
+    This is the small second-half push missing from the original objective.
+    Its own max-so-far payment frontier prevents backward/forward rocking from
+    re-earning reward, while the shared roulade frontier already rejects
+    airborne, unsupported, forward, and non-sagittal rotation.
+    """
+    if target_angle <= start_angle:
+        raise ValueError("target_angle must be greater than start_angle")
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    _, frontier, _ = _roulade_state(env)
+    paid = env._backroll_completion_paid
+    clipped_frontier = torch.clamp(frontier, min=start_angle, max=target_angle)
+    clipped_paid = torch.clamp(paid, min=start_angle, max=target_angle)
+    delta = torch.clamp(clipped_frontier - clipped_paid, min=0.0)
+    delta = torch.clamp(delta, max=max_paid_rate * env.step_dt)
+    valid = (
+        env._backroll_head_latch
+        & _grounded_backroll_positive_reward_valid(env)
+        & (env._backroll_max_air_steps * env.step_dt <= _BACKROLL_MAX_AIR_SECONDS)
+    )
+    env._backroll_completion_paid = torch.maximum(paid, frontier)
+    span = target_angle - start_angle
+    reward = delta / (env.step_dt * span)
+    purity = _grounded_backroll_sagittal_purity(asset)
+    return torch.where(valid, reward * purity, 0.0)
+
+
+def grounded_backroll_upright_progress(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return (
+        env._backroll_upright_delta
+        * _grounded_backroll_potential_reward_valid(env).float()
+        / env.step_dt
+    )
+
+
+def grounded_backroll_height_progress(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return (
+        env._backroll_height_delta
+        * _grounded_backroll_potential_reward_valid(env).float()
+        / env.step_dt
+    )
+
+
+def grounded_backroll_rise_velocity(
+    env: ManagerBasedRlEnv,
+    gate_lo: float = math.radians(180.0),
+    gate_hi: float = math.radians(260.0),
+    max_height: float = 0.125,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Modest late-roll upward-velocity bootstrap after ordered head contact."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    if gate_hi <= gate_lo:
+        raise ValueError("gate_hi must be greater than gate_lo")
+    frontier = env._roulade_max
+    phase = torch.clamp((frontier - gate_lo) / (gate_hi - gate_lo), 0.0, 1.0)
+    phase = phase * phase * (3.0 - 2.0 * phase)
+    height = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2],
+        nan=0.0,
+    )
+    upward = torch.clamp(
+        torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0),
+        min=0.0,
+    )
+    valid = env._backroll_head_latch & _grounded_backroll_positive_reward_valid(env)
+    return upward * phase * (height < max_height).float() * valid.float()
+
+
+def grounded_backroll_speed_progress(
+    env: ManagerBasedRlEnv,
+    minimum_rate: float = 2.0,
+    target_rate: float = 4.5,
+    target_angle: float = 2.0 * math.pi,
+    require_head_latch: bool = False,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward fast *new* supported backward progress without rocking annuities.
+
+    The payment is proportional to the current cycle's newly extended angular
+    frontier.  Reversing, revisiting an old angle, spinning in the air, or
+    holding angular velocity without progress therefore earns zero.
+    """
+    if target_rate <= minimum_rate:
+        raise ValueError("target_rate must be greater than minimum_rate")
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    omega_back = torch.nan_to_num(-asset.data.root_link_ang_vel_b[:, 1], nan=0.0)
+    speed = torch.clamp(
+        (omega_back - minimum_rate) / (target_rate - minimum_rate),
+        min=0.0,
+        max=1.0,
+    )
+    strict_sagittal = _grounded_backroll_cycle_is_sagittal(env)
+    ordered_contacts = (
+        ((env._roulade_max <= _BACKROLL_TRUNK_LATCH_HI) | env._backroll_trunk_latch)
+        & ((env._roulade_max <= _BACKROLL_HEAD_LATCH_HI) | env._backroll_head_latch)
+    )
+    if require_head_latch:
+        ordered_contacts &= env._backroll_trunk_latch & env._backroll_head_latch
+    return (
+        env._backroll_frontier_delta
+        * speed
+        * _grounded_backroll_sagittal_purity(asset)
+        * strict_sagittal.float()
+        * ordered_contacts.float()
+        * (~env._backroll_invalid).float()
+        / (env.step_dt * target_angle)
+    )
+
+
+def grounded_backroll_feet_recontact_rate(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """One pulse for releasing the head and reacquiring both feet after 300 degrees."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_feet_recontact_now.float() / env.step_dt
+
+
+def grounded_backroll_landing_readiness_progress(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay only a new post-recontact landing-readiness frontier."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_landing_readiness_delta / env.step_dt
+
+
+def grounded_backroll_success_rate(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_success_now.float() / env.step_dt
+
+
+def grounded_backroll_repeat_success_rate(
+    env: ManagerBasedRlEnv,
+    later_cycle_bonus: float = 0.5,
+    max_bonus_cycles: int = 3,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """One pulse per valid cycle, with a bounded preference for chaining."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    completed_before = torch.clamp(
+        env._backroll_cycle_count - 1,
+        min=0,
+        max=max_bonus_cycles,
+    ).float()
+    multiplier = 1.0 + later_cycle_bonus * completed_before
+    return env._backroll_success_now.float() * multiplier / env.step_dt
+
+
+def grounded_backroll_success_termination(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_success
+
+
+def grounded_backroll_invalid_termination(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_invalid & ~env._backroll_recovery_active
+
+
+def grounded_backroll_invalid_rate(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """One-shot terminal cost so deliberately flopping cannot shorten taxes."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_invalid_now.float() / env.step_dt
+
+
+def grounded_backroll_recovery_command(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Expose retry recovery through twist[0] without changing the 61D contract."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    command = env.command_manager.get_command(command_name).clone()
+    command[:, 0] = torch.where(
+        env._backroll_recovery_active,
+        torch.ones_like(command[:, 0]),
+        command[:, 0],
+    )
+    return command
+
+
+def grounded_backroll_recovery_progress(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Potential-delta self-right shaping; holding any pose pays zero."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_recovery_progress_delta
+
+
+def grounded_backroll_recovery_success(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """One-frame pulse after the physical recovery hold completes."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_recovery_success_now.float() / env.step_dt
+
+
+def grounded_backroll_rotation_deg(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return torch.rad2deg(env._roulade_max)
+
+
+def grounded_backroll_trunk_contact_latched(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_trunk_latch.float()
+
+
+def grounded_backroll_head_contact_latched(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_head_latch.float()
+
+
+def grounded_backroll_max_non_top_head_dwell_s(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_episode_max_non_top_head_steps.float() * env.step_dt
+
+
+def grounded_backroll_max_air_gap_s(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_max_air_steps.float() * env.step_dt
+
+
+def grounded_backroll_landing_hold_s(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_landing_hold_steps.float() * env.step_dt
+
+
+def grounded_backroll_success_fraction(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_success.float()
+
+
+def grounded_backroll_feet_recontact_fraction(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_feet_recontact_latch.float()
+
+
+def grounded_backroll_landing_readiness(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Highest post-recontact landing readiness reached this cycle."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_landing_readiness_paid
+
+
+def grounded_backroll_cycle_count(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_cycle_count.float()
+
+
+def grounded_backroll_recovery_attempt_count(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_recovery_attempt_count
+
+
+def grounded_backroll_recovery_success_count(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_recovery_success_count
+
+
+def grounded_backroll_recovery_success_fraction(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    attempts = env._backroll_recovery_attempt_count.clamp_min(1.0)
+    return env._backroll_recovery_success_count / attempts
+
+
+def grounded_backroll_mean_recovery_latency_s(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    successes = env._backroll_recovery_success_count.clamp_min(1.0)
+    return env._backroll_recovery_latency_total_steps * env.step_dt / successes
+
+
+def grounded_backroll_recovered_reroll_count(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_recovered_and_rerolled
+
+
+def grounded_backroll_episode_max_lateral_axis_z(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_episode_max_lateral_axis_z
+
+
+def grounded_backroll_episode_max_offaxis_deg(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return torch.rad2deg(env._backroll_episode_max_offaxis_rotation)
+
+
+# ============================================================================
+# Roll sprint task: repeated supported forward rolls
+# ============================================================================
+#
+# This state is deliberately separate from the one-roll roulade state.  The
+# existing task uses a monotonic angular frontier and landing rewards; a sprint
+# needs a cyclic accumulator plus a separate global forward frontier. Distance
+# is released only at a valid cycle boundary and only for newly covered ground.
+_ROLL_SPRINT_TARGET_ANGLE = 2.0 * math.pi
+_ROLL_SPRINT_SUPPORT_SENSOR = _ROULADE_SUPPORT_SENSOR
+_ROLL_SPRINT_HEAD_SENSOR = _ROULADE_HEAD_SENSOR
+_ROLL_SPRINT_FEET_SENSOR = "feet_ground_contact"
+_ROLL_SPRINT_MIN_FORWARD_RATE = 0.5
+_ROLL_SPRINT_MAX_DISTANCE_PER_RAD = 0.12
+_ROLL_SPRINT_ROAD_HALF_WIDTH = 0.56
+_ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH = 0.42
+# Compatibility aliases for older checkpoint tooling. These now describe the
+# fixed shared road, not an individual start lane.
+_ROLL_SPRINT_LANE_HALF_WIDTH = _ROLL_SPRINT_ROAD_HALF_WIDTH
+_ROLL_SPRINT_BOOTSTRAP_LANE_HALF_WIDTH = _ROLL_SPRINT_ROAD_HALF_WIDTH
+_ROLL_SPRINT_LATERAL_INVALID_Z = math.sin(math.radians(60.0))
+# A launch-ready recovery is deliberately dynamic. Normal MicroDuck roll
+# transit is 3.5--5.5 rad/s. The frozen parent policy produced 94 feet-down,
+# head-released, upright, sagittal recovery steps in 10 s, but the old 3 rad/s
+# cutoff rejected 92 of them. Six rad/s preserves that dynamic transition
+# without accepting the inverted phase, which is excluded independently by
+# feet support, head release, and the upright cone. Five 50 Hz steps enforce
+# the required 100 ms continuous launch-ready latch.
+_ROLL_SPRINT_RECOVERY_MAX_FORWARD_RATE = 6.0
+_ROLL_SPRINT_RECOVERY_UPRIGHT_COS = math.cos(math.radians(25.0))
+_ROLL_SPRINT_RECOVERY_LATERAL_Z = math.sin(math.radians(35.0))
+_ROLL_SPRINT_RECOVERY_MIN_HEIGHT_M = 0.09
+_ROLL_SPRINT_RECOVERY_HOLD_STEPS = 5
+_ROLL_SPRINT_REARM_HOLD_STEPS = 2
+_ROLL_SPRINT_SELF_RIGHT_TILT_COS = math.cos(math.radians(60.0))
+_ROLL_SPRINT_SELF_RIGHT_STALL_RATE = 1.0
+_ROLL_SPRINT_SELF_RIGHT_STALL_SECONDS = 0.30
+_ROLL_SPRINT_SELF_RIGHT_HEIGHT_CEILING_M = 0.115
+# The four visible lane guides share one 1.12 m-wide course road. Internal lane
+# crossings are legal. Reposition begins before the hard road edge, rearms with
+# hysteresis, and aims only for the nearest safe edge instead of the center.
+_ROLL_SPRINT_REPOSITION_TRIGGER_M = 0.50
+_ROLL_SPRINT_REPOSITION_REARM_M = 0.46
+_ROLL_SPRINT_REPOSITION_LATERAL_COMMAND_MPS = 0.20
+_ROLL_SPRINT_REPOSITION_LATERAL_KP = 2.0
+_ROLL_SPRINT_REPOSITION_HEADING_TRIGGER_RAD = math.radians(20.0)
+_ROLL_SPRINT_REPOSITION_HEADING_REARM_RAD = math.radians(10.0)
+_ROLL_SPRINT_REPOSITION_HEADING_COMMAND_KP = 1.0
+_ROLL_SPRINT_HEADING_RETURN_RESET_MIN_RAD = math.radians(20.0)
+_ROLL_SPRINT_HEADING_RETURN_RESET_MAX_RAD = math.radians(40.0)
+# The inherited actor's yaw-command normalizer has std about 0.024. Keeping
+# this at 0.05 exposes direction and error without a 15-sigma distribution
+# shift that would destabilize the compatible A60 warm start.
+_ROLL_SPRINT_REPOSITION_YAW_COMMAND_RPS = 0.05
+
+
+def _roll_sprint_state(env: ManagerBasedRlEnv) -> None:
+    """Create the per-environment cyclic roll-sprint buffers lazily."""
+    if hasattr(env, "_roll_sprint_accum"):
+        if not hasattr(env, "_roll_sprint_roll_direction"):
+            env._roll_sprint_roll_direction = torch.ones(
+                env.num_envs, device=env.device
+            )
+        if not hasattr(env, "_roll_sprint_body_heading_w"):
+            env._roll_sprint_body_heading_w = env._roll_sprint_heading_w.clone()
+        if not hasattr(env, "_roll_sprint_directional_bootstrap_frontier"):
+            env._roll_sprint_directional_bootstrap_frontier = torch.zeros(
+                env.num_envs, device=env.device
+            )
+            env._roll_sprint_directional_position_frontier = torch.zeros(
+                env.num_envs, device=env.device
+            )
+            env._roll_sprint_directional_bootstrap_delta = torch.zeros(
+                env.num_envs, device=env.device
+            )
+        return
+    z = torch.zeros(env.num_envs, device=env.device)
+    env._roll_sprint_accum = z.clone()
+    env._roll_sprint_phase_frontier = z.clone()
+    env._roll_sprint_completed = z.clone()
+    env._roll_sprint_head_latch = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_cycle_eligible = torch.ones(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_awaiting_recovery = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_awaiting_reposition = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_self_righting = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_self_right_started_now = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_self_righted_now = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_self_right_stall_steps = torch.zeros(
+        env.num_envs, dtype=torch.long, device=env.device
+    )
+    env._roll_sprint_self_right_hold_steps = torch.zeros(
+        env.num_envs, dtype=torch.long, device=env.device
+    )
+    env._roll_sprint_self_right_latency_steps = torch.zeros(
+        env.num_envs, dtype=torch.long, device=env.device
+    )
+    env._roll_sprint_self_right_latency_total_steps = z.clone()
+    env._roll_sprint_self_right_attempt_count = z.clone()
+    env._roll_sprint_self_right_success_count = z.clone()
+    env._roll_sprint_self_right_upright_delta = z.clone()
+    env._roll_sprint_self_right_height_delta = z.clone()
+    env._roll_sprint_self_right_upright_previous = z.clone()
+    env._roll_sprint_self_right_height_previous = z.clone()
+    env._roll_sprint_self_right_potential_ready = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_frontier_after_self_right = z.clone()
+    env._roll_sprint_recovery_spawn_kind = torch.zeros(
+        env.num_envs, dtype=torch.long, device=env.device
+    )
+    env._roll_sprint_reposition_latency_steps = torch.zeros(
+        env.num_envs, dtype=torch.long, device=env.device
+    )
+    env._roll_sprint_reposition_latency_total_steps = z.clone()
+    env._roll_sprint_reposition_count = z.clone()
+    env._roll_sprint_recovery_hold_steps = torch.zeros(
+        env.num_envs, dtype=torch.long, device=env.device
+    )
+    env._roll_sprint_recovery_latency_steps = torch.zeros(
+        env.num_envs, dtype=torch.long, device=env.device
+    )
+    env._roll_sprint_recovery_latency_total_steps = z.clone()
+    env._roll_sprint_recovery_count = z.clone()
+    env._roll_sprint_recovered_cycle_armed = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_recovered_and_rerolled = z.clone()
+    env._roll_sprint_recovered_now = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_repositioned_now = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_recovered_rerolled_now = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_lateral_invalid = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_forward_position = z.clone()
+    env._roll_sprint_forward_origin = z.clone()
+    env._roll_sprint_cycle_start_position = z.clone()
+    env._roll_sprint_forward_frontier = z.clone()
+    env._roll_sprint_lateral_origin = z.clone()
+    env._roll_sprint_lateral_displacement = z.clone()
+    env._roll_sprint_lane_centering_delta = z.clone()
+    env._roll_sprint_lane_half_width_m = _ROLL_SPRINT_ROAD_HALF_WIDTH
+    env._roll_sprint_course_center_xy_w = torch.zeros(
+        (env.num_envs, 2), device=env.device
+    )
+    env._roll_sprint_course_lateral_position = z.clone()
+    env._roll_sprint_roll_direction = torch.ones(env.num_envs, device=env.device)
+    env._roll_sprint_body_heading_w = torch.zeros(
+        (env.num_envs, 2), device=env.device
+    )
+    env._roll_sprint_heading_w = torch.zeros((env.num_envs, 2), device=env.device)
+    env._roll_sprint_heading_ready = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_reset_heading_override_w = torch.zeros(
+        (env.num_envs, 2), device=env.device
+    )
+    env._roll_sprint_reset_heading_override_valid = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_spawn_heading_error_rad = z.clone()
+    env._roll_sprint_heading_error_rad = z.clone()
+    env._roll_sprint_heading_alignment_delta = z.clone()
+    env._roll_sprint_progress_delta = z.clone()
+    env._roll_sprint_directional_bootstrap_frontier = z.clone()
+    env._roll_sprint_directional_position_frontier = z.clone()
+    env._roll_sprint_directional_bootstrap_delta = z.clone()
+    env._roll_sprint_completed_distance = z.clone()
+    env._roll_sprint_credited_distance = z.clone()
+    env._roll_sprint_completed_now = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_invalid_now = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_bootstrap_completed_now = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    env._roll_sprint_last_update_step = torch.full(
+        (env.num_envs,), -1, dtype=torch.long, device=env.device
+    )
+
+
+def _roll_sprint_heading(asset: Entity) -> torch.Tensor:
+    """Return planar forward heading, including at a 90-degree roll pose.
+
+    Projecting body x fails when the robot is pitched vertically because the
+    planar vector collapses to zero.  Pure sagittal pitch leaves body y in the
+    horizontal plane, so rotating its projected left vector by -90 degrees
+    recovers the reset heading without a gimbal singularity.
+    """
+    quat = torch.nan_to_num(asset.data.root_link_quat_w, nan=0.0)
+    w, x, y, z = quat.unbind(dim=-1)
+    body_y_x = 2.0 * (x * y - w * z)
+    body_y_y = 1.0 - 2.0 * (x.square() + z.square())
+    heading = torch.stack(
+        [body_y_y, -body_y_x],
+        dim=-1,
+    )
+    return heading / heading.norm(dim=-1, keepdim=True).clamp_min(1.0e-6)
+
+
+def _roll_sprint_signed_heading_error(
+    current_heading_w: torch.Tensor,
+    target_heading_w: torch.Tensor,
+) -> torch.Tensor:
+    """Return the wrap-safe signed yaw correction from current to target."""
+    dot = (current_heading_w * target_heading_w).sum(dim=-1).clamp(-1.0, 1.0)
+    cross = (
+        current_heading_w[:, 0] * target_heading_w[:, 1]
+        - current_heading_w[:, 1] * target_heading_w[:, 0]
+    )
+    return torch.atan2(cross, dot)
+
+
+def _roll_sprint_rotate_heading(
+    heading_w: torch.Tensor,
+    angle_rad: torch.Tensor,
+) -> torch.Tensor:
+    """Rotate planar headings by signed angles without changing their norm."""
+    cosine = torch.cos(angle_rad)
+    sine = torch.sin(angle_rad)
+    return torch.stack(
+        (
+            heading_w[:, 0] * cosine - heading_w[:, 1] * sine,
+            heading_w[:, 0] * sine + heading_w[:, 1] * cosine,
+        ),
+        dim=-1,
+    )
+
+
+def _roll_sprint_forward_position(
+    env: ManagerBasedRlEnv,
+    asset: Entity,
+    heading_w: torch.Tensor,
+) -> torch.Tensor:
+    """Project root position onto the frozen global course heading."""
+    position_xy = torch.nan_to_num(asset.data.root_link_pos_w[:, :2], nan=0.0)
+    course_center_xy = torch.nan_to_num(
+        env._roll_sprint_course_center_xy_w,
+        nan=0.0,
+    )
+    return ((position_xy - course_center_xy) * heading_w).sum(dim=-1)
+
+
+def _roll_sprint_lateral_position(
+    env: ManagerBasedRlEnv,
+    asset: Entity,
+    heading_w: torch.Tensor,
+) -> torch.Tensor:
+    """Project root position onto the frozen shared course's lateral axis."""
+    position_xy = torch.nan_to_num(asset.data.root_link_pos_w[:, :2], nan=0.0)
+    course_center_xy = torch.nan_to_num(
+        env._roll_sprint_course_center_xy_w,
+        nan=0.0,
+    )
+    lateral_w = torch.stack((-heading_w[:, 1], heading_w[:, 0]), dim=-1)
+    return ((position_xy - course_center_xy) * lateral_w).sum(dim=-1)
+
+
+def _roll_sprint_bounded_cycle_credit(
+    rotation_accum: torch.Tensor,
+    forward_position: torch.Tensor,
+    cycle_start_position: torch.Tensor,
+    forward_frontier: torch.Tensor,
+) -> torch.Tensor:
+    """Return the valid-cycle distance credit without advancing raw frontier state."""
+    rotation_budget = _ROLL_SPRINT_MAX_DISTANCE_PER_RAD * torch.clamp(
+        rotation_accum, min=0.0, max=_ROLL_SPRINT_TARGET_ANGLE
+    )
+    cycle_net_advance = torch.clamp(
+        forward_position - cycle_start_position, min=0.0
+    )
+    new_frontier_advance = torch.clamp(
+        forward_position - forward_frontier, min=0.0
+    )
+    return torch.minimum(
+        rotation_budget,
+        torch.minimum(cycle_net_advance, new_frontier_advance),
+    )
+
+
+def _roll_sprint_directional_bootstrap_update(
+    previous_frontier: torch.Tensor,
+    previous_position_frontier: torch.Tensor,
+    rotation_accum: torch.Tensor,
+    progress_delta: torch.Tensor,
+    forward_position: torch.Tensor,
+    cycle_start_position: torch.Tensor,
+    eligible: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Advance a non-farmable partial-cycle toward-goal potential.
+
+    This is not positive-velocity integration. Credit is bounded by both the
+    current signed rotation budget and net course advance from cycle start,
+    advances only on a step with new signed phase progress, and retains a
+    per-cycle frontier so backtracking and revisiting cannot pay twice.
+    """
+    rotation_budget = _ROLL_SPRINT_MAX_DISTANCE_PER_RAD * torch.clamp(
+        rotation_accum,
+        min=0.0,
+        max=_ROLL_SPRINT_TARGET_ANGLE,
+    )
+    cycle_net_advance = torch.clamp(
+        forward_position - cycle_start_position,
+        min=0.0,
+    )
+    potential = torch.minimum(rotation_budget, cycle_net_advance)
+    can_advance = (
+        eligible
+        & (progress_delta > 1.0e-8)
+        & (cycle_net_advance > previous_position_frontier + 1.0e-8)
+    )
+    next_position_frontier = torch.where(
+        can_advance,
+        torch.maximum(previous_position_frontier, cycle_net_advance),
+        previous_position_frontier,
+    )
+    next_frontier = torch.where(
+        can_advance,
+        torch.maximum(previous_frontier, potential),
+        previous_frontier,
+    )
+    return (
+        next_frontier,
+        next_position_frontier,
+        torch.clamp(next_frontier - previous_frontier, min=0.0),
+    )
+
+
+def _update_roll_sprint_state(env: ManagerBasedRlEnv, asset: Entity) -> None:
+    """Advance one cyclic roll state update, guarded against double updates.
+
+    Signed angular progress requires ground support and sagittal orientation,
+    so backward rocking removes phase instead of accumulating a fake turn.
+    Dense shaping advances only at a new per-cycle angular frontier. Forward
+    distance is the signed net cycle advance beyond the globally credited
+    frontier, bounded by the cycle's supported rotation budget, and released
+    only after a witnessed flat head-top contact on an eligible full cycle.
+    """
+    _roll_sprint_state(env)
+    step = int(env.common_step_counter)
+    active = env._roll_sprint_last_update_step != step
+    if not bool(active.any()):
+        return
+
+    body_heading = _roll_sprint_heading(asset)
+    not_ready = active & ~env._roll_sprint_heading_ready
+    use_reset_heading = not_ready & env._roll_sprint_reset_heading_override_valid
+    reset_body_heading = torch.where(
+        use_reset_heading.unsqueeze(-1),
+        env._roll_sprint_reset_heading_override_w,
+        body_heading,
+    )
+    initial_body_heading = _roll_sprint_rotate_heading(
+        reset_body_heading,
+        torch.where(
+            not_ready,
+            env._roll_sprint_spawn_heading_error_rad,
+            torch.zeros_like(env._roll_sprint_spawn_heading_error_rad),
+        ),
+    )
+    reference_body_heading = torch.where(
+        not_ready.unsqueeze(-1),
+        initial_body_heading,
+        env._roll_sprint_body_heading_w,
+    )
+    reference_heading = (
+        reference_body_heading * env._roll_sprint_roll_direction.unsqueeze(-1)
+    )
+    env._roll_sprint_body_heading_w = reference_body_heading
+    env._roll_sprint_heading_w = reference_heading
+    position_xy = torch.nan_to_num(asset.data.root_link_pos_w[:, :2], nan=0.0)
+    reference_lateral_w = torch.stack(
+        (-reference_heading[:, 1], reference_heading[:, 0]), dim=-1
+    )
+    initialized_course_center_xy = position_xy - (
+        env._roll_sprint_course_lateral_position.unsqueeze(-1) * reference_lateral_w
+    )
+    env._roll_sprint_course_center_xy_w = torch.where(
+        not_ready.unsqueeze(-1),
+        initialized_course_center_xy,
+        env._roll_sprint_course_center_xy_w,
+    )
+    heading_error = _roll_sprint_signed_heading_error(
+        body_heading, reference_body_heading
+    )
+    heading_error_abs = heading_error.abs()
+    previous_heading_error_abs = torch.where(
+        not_ready,
+        heading_error_abs,
+        env._roll_sprint_heading_error_rad.abs(),
+    )
+    env._roll_sprint_heading_alignment_delta = torch.where(
+        active,
+        previous_heading_error_abs - heading_error_abs,
+        env._roll_sprint_heading_alignment_delta,
+    )
+    env._roll_sprint_heading_error_rad = torch.where(
+        active,
+        heading_error,
+        env._roll_sprint_heading_error_rad,
+    )
+    position = _roll_sprint_forward_position(env, asset, reference_heading)
+    env._roll_sprint_forward_origin = torch.where(
+        not_ready, position, env._roll_sprint_forward_origin
+    )
+    cycle_start_position = torch.where(
+        not_ready, position, env._roll_sprint_cycle_start_position
+    )
+    forward_frontier = torch.where(
+        not_ready, position, env._roll_sprint_forward_frontier
+    )
+    lateral_position = _roll_sprint_lateral_position(
+        env, asset, reference_heading
+    )
+    lateral_origin = torch.where(
+        not_ready, lateral_position, env._roll_sprint_lateral_origin
+    )
+    env._roll_sprint_heading_ready |= not_ready
+    env._roll_sprint_reset_heading_override_valid &= ~not_ready
+    env._roll_sprint_spawn_heading_error_rad = torch.where(
+        active & not_ready,
+        torch.zeros_like(env._roll_sprint_spawn_heading_error_rad),
+        env._roll_sprint_spawn_heading_error_rad,
+    )
+    env._roll_sprint_forward_position = torch.where(
+        active, position, env._roll_sprint_forward_position
+    )
+    lateral_displacement = lateral_position - lateral_origin
+    previous_course_lateral = torch.where(
+        not_ready,
+        lateral_position,
+        env._roll_sprint_course_lateral_position,
+    )
+    previous_road_edge_excess = torch.clamp(
+        previous_course_lateral.abs() - _ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH,
+        min=0.0,
+    )
+    road_edge_excess = torch.clamp(
+        lateral_position.abs() - _ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH,
+        min=0.0,
+    )
+    env._roll_sprint_lane_centering_delta = torch.where(
+        active,
+        previous_road_edge_excess - road_edge_excess,
+        env._roll_sprint_lane_centering_delta,
+    )
+    env._roll_sprint_lateral_displacement = torch.where(
+        active,
+        lateral_displacement,
+        env._roll_sprint_lateral_displacement,
+    )
+    env._roll_sprint_course_lateral_position = torch.where(
+        active,
+        lateral_position,
+        env._roll_sprint_course_lateral_position,
+    )
+
+    support = _sensor_any_contact(env, _ROLL_SPRINT_SUPPORT_SENSOR)
+    if support is None:
+        support = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    foot_support = _sensor_any_contact(env, _ROLL_SPRINT_FEET_SENSOR)
+    if foot_support is None:
+        foot_support = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    head_contact = _sensor_any_contact(env, _ROLL_SPRINT_HEAD_SENSOR)
+    if head_contact is None:
+        head_contact = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    omega_fwd = torch.nan_to_num(
+        _ROULADE_FWD_SIGN
+        * env._roll_sprint_roll_direction
+        * asset.data.root_link_ang_vel_b[:, 1],
+        nan=0.0,
+    )
+    positive_rate = torch.clamp(omega_fwd, min=0.0)
+
+    lateral_z = torch.nan_to_num(
+        _lateral_axis_z(asset.data.root_link_quat_w), nan=1.0
+    ).abs()
+    flat_u = torch.clamp((_FLAT_ZERO - lateral_z) / (_FLAT_ZERO - _FLAT_FULL), 0.0, 1.0)
+    flatness = flat_u.square() * (3.0 - 2.0 * flat_u)
+
+    quat = torch.nan_to_num(asset.data.root_link_quat_w, nan=0.0)
+    upright_cos = 1.0 - 2.0 * (quat[:, 1].square() + quat[:, 2].square())
+    relative_height = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2],
+        nan=0.0,
+    )
+    awaiting_before = env._roll_sprint_awaiting_recovery
+    reposition_before = env._roll_sprint_awaiting_reposition
+    self_right_before = env._roll_sprint_self_righting
+    reposition_triggered = (
+        active
+        & ~self_right_before
+        & ~reposition_before
+        & (upright_cos > _ROLL_SPRINT_SELF_RIGHT_TILT_COS)
+        & (
+            (lateral_position.abs() > _ROLL_SPRINT_REPOSITION_TRIGGER_M)
+            | (
+                heading_error_abs
+                > _ROLL_SPRINT_REPOSITION_HEADING_TRIGGER_RAD
+            )
+        )
+    )
+    waiting_before = awaiting_before | reposition_before | self_right_before
+
+    launch_ready = (
+        foot_support
+        & ~head_contact
+        & (upright_cos >= _ROLL_SPRINT_RECOVERY_UPRIGHT_COS)
+        & (relative_height >= _ROLL_SPRINT_RECOVERY_MIN_HEIGHT_M)
+        & (omega_fwd.abs() <= _ROLL_SPRINT_RECOVERY_MAX_FORWARD_RATE)
+    )
+
+    # Recovery shaping is potential-based and exists only while the explicit
+    # self-righting mode was active before this update. A newly entered mode
+    # snapshots the current potential so neither reset pose nor mode entry can
+    # create a jackpot.
+    upright_potential = upright_cos
+    height_potential = torch.clamp(
+        relative_height,
+        max=_ROLL_SPRINT_SELF_RIGHT_HEIGHT_CEILING_M,
+    )
+    potential_ready = env._roll_sprint_self_right_potential_ready
+    self_right_potential_active = active & self_right_before & potential_ready
+    env._roll_sprint_self_right_upright_delta = torch.where(
+        active,
+        torch.where(
+            self_right_potential_active,
+            upright_potential - env._roll_sprint_self_right_upright_previous,
+            torch.zeros_like(upright_potential),
+        ),
+        env._roll_sprint_self_right_upright_delta,
+    )
+    env._roll_sprint_self_right_height_delta = torch.where(
+        active,
+        torch.where(
+            self_right_potential_active,
+            height_potential - env._roll_sprint_self_right_height_previous,
+            torch.zeros_like(height_potential),
+        ),
+        env._roll_sprint_self_right_height_delta,
+    )
+
+    self_right_candidate = active & self_right_before & launch_ready
+    old_self_right_hold = env._roll_sprint_self_right_hold_steps
+    self_right_hold = torch.where(
+        self_right_candidate,
+        old_self_right_hold + 1,
+        torch.zeros_like(old_self_right_hold),
+    )
+    self_righted_now = (
+        self_right_candidate
+        & (old_self_right_hold < _ROLL_SPRINT_RECOVERY_HOLD_STEPS)
+        & (self_right_hold >= _ROLL_SPRINT_RECOVERY_HOLD_STEPS)
+    )
+
+    regular_transition_candidate = (
+        active
+        & ~self_right_before
+        & (awaiting_before | reposition_before)
+        & (lateral_position.abs() <= _ROLL_SPRINT_REPOSITION_REARM_M)
+        & (heading_error_abs <= _ROLL_SPRINT_REPOSITION_HEADING_REARM_RAD)
+        & launch_ready
+    )
+    old_recovery_hold = env._roll_sprint_recovery_hold_steps
+    recovery_hold = torch.where(
+        regular_transition_candidate,
+        old_recovery_hold + 1,
+        torch.zeros_like(old_recovery_hold),
+    )
+    regular_transitioned_now = (
+        regular_transition_candidate
+        & (old_recovery_hold < _ROLL_SPRINT_REARM_HOLD_STEPS)
+        & (recovery_hold >= _ROLL_SPRINT_REARM_HOLD_STEPS)
+    )
+    self_right_rearmed_now = self_righted_now & (
+        lateral_position.abs() <= _ROLL_SPRINT_REPOSITION_REARM_M
+    ) & (heading_error_abs <= _ROLL_SPRINT_REPOSITION_HEADING_REARM_RAD)
+    transitioned_now = regular_transitioned_now | self_right_rearmed_now
+    recovered_now = transitioned_now & awaiting_before
+    repositioned_now = transitioned_now & reposition_before
+
+    self_right_latency_steps = torch.where(
+        active & self_right_before,
+        env._roll_sprint_self_right_latency_steps + 1,
+        env._roll_sprint_self_right_latency_steps,
+    )
+    env._roll_sprint_self_right_latency_total_steps += torch.where(
+        self_righted_now,
+        self_right_latency_steps.float(),
+        torch.zeros_like(env._roll_sprint_self_right_latency_total_steps),
+    )
+    env._roll_sprint_self_right_success_count += self_righted_now.float()
+    recovery_latency_steps = torch.where(
+        active & awaiting_before,
+        env._roll_sprint_recovery_latency_steps + 1,
+        env._roll_sprint_recovery_latency_steps,
+    )
+    env._roll_sprint_recovery_latency_total_steps += torch.where(
+        recovered_now,
+        recovery_latency_steps.float(),
+        torch.zeros_like(env._roll_sprint_recovery_latency_total_steps),
+    )
+    env._roll_sprint_recovery_count += recovered_now.float()
+    reposition_latency_steps = torch.where(
+        active & reposition_before,
+        env._roll_sprint_reposition_latency_steps + 1,
+        env._roll_sprint_reposition_latency_steps,
+    )
+    env._roll_sprint_reposition_latency_total_steps += torch.where(
+        repositioned_now,
+        reposition_latency_steps.float(),
+        torch.zeros_like(env._roll_sprint_reposition_latency_total_steps),
+    )
+    env._roll_sprint_reposition_count += repositioned_now.float()
+    env._roll_sprint_recovered_now = torch.where(
+        active, recovered_now, env._roll_sprint_recovered_now
+    )
+    env._roll_sprint_repositioned_now = torch.where(
+        active, repositioned_now, env._roll_sprint_repositioned_now
+    )
+    env._roll_sprint_self_righted_now = torch.where(
+        active, self_righted_now, env._roll_sprint_self_righted_now
+    )
+    env._roll_sprint_self_right_hold_steps = torch.where(
+        active, self_right_hold, env._roll_sprint_self_right_hold_steps
+    )
+    env._roll_sprint_recovery_hold_steps = torch.where(
+        active, recovery_hold, env._roll_sprint_recovery_hold_steps
+    )
+    env._roll_sprint_self_right_latency_steps = torch.where(
+        self_righted_now,
+        torch.zeros_like(self_right_latency_steps),
+        self_right_latency_steps,
+    )
+    env._roll_sprint_recovery_latency_steps = torch.where(
+        transitioned_now,
+        torch.zeros_like(recovery_latency_steps),
+        recovery_latency_steps,
+    )
+    env._roll_sprint_reposition_latency_steps = torch.where(
+        transitioned_now,
+        torch.zeros_like(reposition_latency_steps),
+        reposition_latency_steps,
+    )
+
+    # Recovery and lane reposition both block angular progress. Returning to a
+    # launch-ready pose inside the lane rearms phase zero, but that transition
+    # cannot also rotate the new cycle on the same simulation step.
+    locked_before = waiting_before | reposition_triggered
+    rotation_eligible = active & ~locked_before & ~transitioned_now
+    supported = support.float()
+    valid_rotation = supported * flatness
+    signed_rotation_delta = (
+        omega_fwd * env.step_dt * valid_rotation * rotation_eligible.float()
+    )
+
+    old_accum = torch.where(
+        locked_before | transitioned_now,
+        torch.zeros_like(env._roll_sprint_accum),
+        env._roll_sprint_accum,
+    )
+    candidate_accum = torch.clamp(old_accum + signed_rotation_delta, min=0.0)
+    new_accum = torch.where(active, candidate_accum, old_accum)
+    old_phase_frontier = env._roll_sprint_phase_frontier
+    new_phase_frontier = torch.where(
+        active,
+        torch.maximum(old_phase_frontier, new_accum),
+        old_phase_frontier,
+    )
+    progress_delta = torch.clamp(new_phase_frontier - old_phase_frontier, min=0.0)
+    env._roll_sprint_progress_delta = torch.where(
+        active, progress_delta, env._roll_sprint_progress_delta
+    )
+
+    # A low, supported robot that has made no new phase progress for 0.30 s is
+    # an accidental stalled fall. Active forward phase progress resets this
+    # timer every step, so the mode cannot interrupt a moving roll.
+    stalled_fall_candidate = (
+        active
+        & ~waiting_before
+        & ~reposition_triggered
+        & support
+        & (upright_cos <= _ROLL_SPRINT_SELF_RIGHT_TILT_COS)
+        & (omega_fwd.abs() < _ROLL_SPRINT_SELF_RIGHT_STALL_RATE)
+        & (progress_delta <= 1.0e-8)
+    )
+    old_stall_steps = env._roll_sprint_self_right_stall_steps
+    stall_steps = torch.where(
+        stalled_fall_candidate,
+        old_stall_steps + 1,
+        torch.zeros_like(old_stall_steps),
+    )
+    stall_threshold_steps = max(
+        1,
+        round(_ROLL_SPRINT_SELF_RIGHT_STALL_SECONDS / env.step_dt),
+    )
+    stalled_fall_now = (
+        stalled_fall_candidate
+        & (old_stall_steps < stall_threshold_steps)
+        & (stall_steps >= stall_threshold_steps)
+    )
+
+    in_head_window = (new_accum > _HEAD_LATCH_LO) & (new_accum < _HEAD_LATCH_HI)
+    old_head_latch = torch.where(
+        transitioned_now | reposition_triggered,
+        torch.zeros_like(env._roll_sprint_head_latch),
+        env._roll_sprint_head_latch,
+    )
+    new_head_latch = old_head_latch | (
+        active
+        & ~locked_before
+        & head_contact
+        & support
+        & in_head_window
+        & _head_top_down(env, asset)
+    )
+
+    orientation_violation = (
+        active
+        & ~locked_before
+        & support
+        & (positive_rate >= _ROLL_SPRINT_MIN_FORWARD_RATE)
+        & (lateral_z > _ROLL_SPRINT_LATERAL_INVALID_Z)
+    )
+    corridor_violation = (
+        active
+        & ~locked_before
+        & (lateral_position.abs() > env._roll_sprint_lane_half_width_m)
+    )
+    heading_violation = (
+        active
+        & ~locked_before
+        & (
+            heading_error_abs
+            > _ROLL_SPRINT_REPOSITION_HEADING_TRIGGER_RAD
+        )
+    )
+    lateral_violation = (
+        orientation_violation | corridor_violation | heading_violation
+    )
+    old_lateral_invalid = torch.where(
+        transitioned_now | reposition_triggered,
+        torch.zeros_like(env._roll_sprint_lateral_invalid),
+        env._roll_sprint_lateral_invalid,
+    )
+    new_lateral_invalid = old_lateral_invalid | lateral_violation
+
+    cycle_eligible = env._roll_sprint_cycle_eligible | transitioned_now
+    completed = active & ~locked_before & (new_accum >= _ROLL_SPRINT_TARGET_ANGLE)
+    bootstrap_completion = completed & ~cycle_eligible
+    valid_completion = (
+        completed & cycle_eligible & new_head_latch & ~new_lateral_invalid
+    )
+    invalid_completion = completed & cycle_eligible & ~valid_completion
+    any_completion = valid_completion | invalid_completion | bootstrap_completion
+
+    (
+        directional_bootstrap_frontier,
+        directional_position_frontier,
+        directional_bootstrap_delta,
+    ) = (
+        _roll_sprint_directional_bootstrap_update(
+            env._roll_sprint_directional_bootstrap_frontier,
+            env._roll_sprint_directional_position_frontier,
+            new_accum,
+            progress_delta,
+            position,
+            cycle_start_position,
+            active
+            & (env._roll_sprint_roll_direction < 0.0)
+            & rotation_eligible
+            & ~new_lateral_invalid
+            & ~any_completion,
+        )
+    )
+    env._roll_sprint_directional_bootstrap_delta = torch.where(
+        active,
+        directional_bootstrap_delta,
+        env._roll_sprint_directional_bootstrap_delta,
+    )
+
+    completed_distance = _roll_sprint_bounded_cycle_credit(
+        new_accum,
+        position,
+        cycle_start_position,
+        forward_frontier,
+    )
+
+    env._roll_sprint_completed_now = torch.where(
+        active, valid_completion, env._roll_sprint_completed_now
+    )
+    env._roll_sprint_invalid_now = torch.where(
+        active, invalid_completion, env._roll_sprint_invalid_now
+    )
+    env._roll_sprint_bootstrap_completed_now = torch.where(
+        active, bootstrap_completion, env._roll_sprint_bootstrap_completed_now
+    )
+    env._roll_sprint_completed_distance = torch.where(
+        active & valid_completion,
+        completed_distance,
+        torch.where(
+            active,
+            torch.zeros_like(completed_distance),
+            env._roll_sprint_completed_distance,
+        ),
+    )
+    env._roll_sprint_credited_distance += torch.where(
+        active & valid_completion,
+        completed_distance,
+        torch.zeros_like(completed_distance),
+    )
+    env._roll_sprint_completed += valid_completion.float()
+    recovered_rerolled_now = valid_completion & env._roll_sprint_recovered_cycle_armed
+    env._roll_sprint_recovered_and_rerolled += recovered_rerolled_now.float()
+    env._roll_sprint_recovered_rerolled_now = torch.where(
+        active,
+        recovered_rerolled_now,
+        env._roll_sprint_recovered_rerolled_now,
+    )
+
+    env._roll_sprint_frontier_after_self_right += torch.where(
+        valid_completion & env._roll_sprint_recovered_cycle_armed,
+        completed_distance,
+        torch.zeros_like(completed_distance),
+    )
+
+    completion_needs_self_right = (
+        valid_completion | bootstrap_completion
+    ) & ~launch_ready
+    begin_self_right = (
+        (completion_needs_self_right | stalled_fall_now) & ~self_right_before
+    )
+    post_self_right_reposition = self_righted_now & (
+        (lateral_position.abs() > _ROLL_SPRINT_REPOSITION_REARM_M)
+        | (heading_error_abs > _ROLL_SPRINT_REPOSITION_HEADING_REARM_RAD)
+    )
+    completion_reposition = (
+        (valid_completion | bootstrap_completion)
+        & launch_ready
+        & (
+            (lateral_position.abs() > _ROLL_SPRINT_REPOSITION_REARM_M)
+            | (heading_error_abs > _ROLL_SPRINT_REPOSITION_HEADING_REARM_RAD)
+        )
+    )
+    reposition_started = (
+        reposition_triggered | post_self_right_reposition | completion_reposition
+    )
+    env._roll_sprint_self_right_started_now = torch.where(
+        active,
+        begin_self_right,
+        env._roll_sprint_self_right_started_now,
+    )
+    env._roll_sprint_self_right_attempt_count += begin_self_right.float()
+
+    # Valid and bootstrap completions require a launch-ready recovery. A
+    # non-upright completion enters self-righting immediately. A successful
+    # self-right either rearms in-lane or hands off to lane repositioning.
+    state_reset = (
+        any_completion
+        | transitioned_now
+        | reposition_started
+        | begin_self_right
+    )
+    next_accum = torch.where(
+        state_reset,
+        torch.zeros_like(new_accum),
+        new_accum,
+    )
+    env._roll_sprint_accum = next_accum
+    env._roll_sprint_phase_frontier = torch.where(
+        state_reset,
+        torch.zeros_like(new_phase_frontier),
+        new_phase_frontier,
+    )
+    env._roll_sprint_directional_bootstrap_frontier = torch.where(
+        state_reset,
+        torch.zeros_like(directional_bootstrap_frontier),
+        directional_bootstrap_frontier,
+    )
+    env._roll_sprint_directional_position_frontier = torch.where(
+        state_reset,
+        torch.zeros_like(directional_position_frontier),
+        directional_position_frontier,
+    )
+    env._roll_sprint_forward_frontier = torch.where(
+        active & valid_completion,
+        torch.maximum(forward_frontier, position),
+        torch.where(active, forward_frontier, env._roll_sprint_forward_frontier),
+    )
+    env._roll_sprint_cycle_start_position = torch.where(
+        active & (invalid_completion | transitioned_now),
+        position,
+        torch.where(
+            active,
+            cycle_start_position,
+            env._roll_sprint_cycle_start_position,
+        ),
+    )
+    env._roll_sprint_lateral_origin = torch.where(
+        active, lateral_origin, env._roll_sprint_lateral_origin
+    )
+    env._roll_sprint_head_latch = torch.where(
+        state_reset,
+        torch.zeros_like(new_head_latch),
+        new_head_latch,
+    )
+    env._roll_sprint_lateral_invalid = torch.where(
+        state_reset,
+        torch.zeros_like(new_lateral_invalid),
+        new_lateral_invalid,
+    )
+    env._roll_sprint_cycle_eligible = torch.where(
+        valid_completion | bootstrap_completion | stalled_fall_now | reposition_started,
+        torch.zeros_like(cycle_eligible),
+        torch.where(transitioned_now, torch.ones_like(cycle_eligible), cycle_eligible),
+    )
+    env._roll_sprint_awaiting_recovery = torch.where(
+        valid_completion | bootstrap_completion | stalled_fall_now,
+        torch.ones_like(awaiting_before),
+        torch.where(
+            transitioned_now,
+            torch.zeros_like(awaiting_before),
+            awaiting_before,
+        ),
+    )
+    env._roll_sprint_awaiting_reposition = torch.where(
+        reposition_started,
+        torch.ones_like(reposition_before),
+        torch.where(
+            transitioned_now,
+            torch.zeros_like(reposition_before),
+            reposition_before,
+        ),
+    )
+    env._roll_sprint_recovered_cycle_armed = torch.where(
+        valid_completion | bootstrap_completion | stalled_fall_now,
+        torch.zeros_like(env._roll_sprint_recovered_cycle_armed),
+        torch.where(
+            recovered_now,
+            torch.ones_like(env._roll_sprint_recovered_cycle_armed),
+            env._roll_sprint_recovered_cycle_armed,
+        ),
+    )
+    next_self_righting = (self_right_before | begin_self_right) & ~self_righted_now
+    env._roll_sprint_self_righting = torch.where(
+        active,
+        next_self_righting,
+        env._roll_sprint_self_righting,
+    )
+    initialize_potential = active & next_self_righting & (
+        begin_self_right | ~potential_ready
+    )
+    update_potential = active & next_self_righting
+    env._roll_sprint_self_right_upright_previous = torch.where(
+        update_potential,
+        upright_potential,
+        env._roll_sprint_self_right_upright_previous,
+    )
+    env._roll_sprint_self_right_height_previous = torch.where(
+        update_potential,
+        height_potential,
+        env._roll_sprint_self_right_height_previous,
+    )
+    env._roll_sprint_self_right_potential_ready = torch.where(
+        active,
+        next_self_righting & (potential_ready | initialize_potential),
+        env._roll_sprint_self_right_potential_ready,
+    )
+    env._roll_sprint_self_right_stall_steps = torch.where(
+        active,
+        torch.where(begin_self_right, torch.zeros_like(stall_steps), stall_steps),
+        env._roll_sprint_self_right_stall_steps,
+    )
+    env._roll_sprint_self_right_hold_steps = torch.where(
+        begin_self_right | self_righted_now,
+        torch.zeros_like(env._roll_sprint_self_right_hold_steps),
+        env._roll_sprint_self_right_hold_steps,
+    )
+    env._roll_sprint_self_right_latency_steps = torch.where(
+        begin_self_right | self_righted_now,
+        torch.zeros_like(env._roll_sprint_self_right_latency_steps),
+        env._roll_sprint_self_right_latency_steps,
+    )
+    reset_recovery_clock = (
+        transitioned_now
+        | valid_completion
+        | bootstrap_completion
+        | stalled_fall_now
+    )
+    env._roll_sprint_recovery_hold_steps = torch.where(
+        reset_recovery_clock,
+        torch.zeros_like(env._roll_sprint_recovery_hold_steps),
+        env._roll_sprint_recovery_hold_steps,
+    )
+    env._roll_sprint_recovery_latency_steps = torch.where(
+        reset_recovery_clock,
+        torch.zeros_like(env._roll_sprint_recovery_latency_steps),
+        env._roll_sprint_recovery_latency_steps,
+    )
+    env._roll_sprint_reposition_latency_steps = torch.where(
+        transitioned_now | reposition_started,
+        torch.zeros_like(env._roll_sprint_reposition_latency_steps),
+        env._roll_sprint_reposition_latency_steps,
+    )
+    env._roll_sprint_last_update_step = torch.where(
+        active,
+        torch.full_like(env._roll_sprint_last_update_step, step),
+        env._roll_sprint_last_update_step,
+    )
+
+
+def _set_roll_sprint_ground_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    *,
+    yaw_range: tuple[float, float],
+    face_down_prob: float,
+    face_up_prob: float,
+    left_prob: float,
+    right_prob: float,
+    z_range: tuple[float, float] = (0.20, 0.25),
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Place selected envs in four lying orientations and return codes/headings."""
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    count = len(env_ids)
+    total = face_down_prob + face_up_prob + left_prob + right_prob
+    if count == 0:
+        return (
+            torch.zeros(0, dtype=torch.long, device=env.device),
+            torch.zeros((0, 2), device=env.device),
+        )
+    if total <= 0.0:
+        raise ValueError("ground recovery orientation probabilities need positive mass")
+
+    yaw = (
+        torch.rand(count, device=env.device) * (yaw_range[1] - yaw_range[0])
+        + yaw_range[0]
+    )
+    cy = torch.cos(0.5 * yaw)
+    sy = torch.sin(0.5 * yaw)
+    s = 2.0**-0.5
+    face_down = torch.stack((s * cy, -s * sy, s * cy, s * sy), dim=1)
+    face_up = torch.stack((s * cy, s * sy, -s * cy, s * sy), dim=1)
+    left = torch.stack((s * cy, s * cy, s * sy, s * sy), dim=1)
+    right = torch.stack((s * cy, -s * cy, -s * sy, s * sy), dim=1)
+
+    sample = torch.rand(count, device=env.device) * total
+    fd_limit = face_down_prob
+    fu_limit = fd_limit + face_up_prob
+    left_limit = fu_limit + left_prob
+    is_fd = sample < fd_limit
+    is_fu = (sample >= fd_limit) & (sample < fu_limit)
+    is_left = (sample >= fu_limit) & (sample < left_limit)
+    orientation = torch.full((count,), 4, dtype=torch.long, device=env.device)
+    orientation[is_fd] = 1
+    orientation[is_fu] = 2
+    orientation[is_left] = 3
+
+    quat = right
+    quat[is_fd] = face_down[is_fd]
+    quat[is_fu] = face_up[is_fu]
+    quat[is_left] = left[is_left]
+    height = (
+        torch.rand(count, device=env.device) * (z_range[1] - z_range[0])
+        + z_range[0]
+    )
+    env.sim.data.qpos[env_ids, 2] = height
+    env.sim.data.qpos[env_ids, 3:7] = quat
+    env.sim.data.qvel[env_ids, :6] = 0.0
+    heading = torch.stack((torch.cos(yaw), torch.sin(yaw)), dim=1)
+    return orientation, heading
+
+
+def reset_roll_sprint_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    standing_prob: float = 0.50,
+    midroll_prob: float = 0.25,
+    postroll_prob: float = 0.25,
+    crouch_prob: float = 0.0,
+    ground_recovery_prob: float = 0.0,
+    ground_face_down_prob: float = 0.25,
+    ground_face_up_prob: float = 0.25,
+    ground_left_prob: float = 0.25,
+    ground_right_prob: float = 0.25,
+    standing_z_min: float = 0.11,
+    standing_z_max: float = 0.12,
+    standing_tilt_max: float = 0.0,
+    yaw_range: tuple = (-math.pi, math.pi),
+    forward_vel_range: tuple = (0.0, 0.0),
+    midroll_pitch_min: float = math.radians(50.0),
+    midroll_pitch_max: float = math.radians(340.0),
+    midroll_z_min: float = 0.05,
+    midroll_z_max: float = 0.10,
+    midroll_omega_range: tuple = (0.0, 3.0),
+    midroll_forward_vel_range: tuple = (0.0, 0.0),
+    postroll_pitch_min: float = math.radians(300.0),
+    postroll_pitch_max: float = math.radians(350.0),
+    postroll_omega_range: tuple = (0.0, 2.5),
+    tuck_overrides: Optional[dict] = None,
+    tuck_factor_range: tuple = (0.3, 1.0),
+    joint_noise_std: float = 0.08,
+    road_interior_prob: float = 0.70,
+    road_edge_prob: float = 0.20,
+    road_return_prob: float = 0.10,
+    recovery_road_return_prob: float = 0.0,
+    heading_return_prob: float = 0.0,
+    heading_return_min_rad: float = _ROLL_SPRINT_HEADING_RETURN_RESET_MIN_RAD,
+    heading_return_max_rad: float = _ROLL_SPRINT_HEADING_RETURN_RESET_MAX_RAD,
+    roll_direction: float = 1.0,
+) -> None:
+    """Reset pose plus every cyclic sprint buffer for the selected envs."""
+    if env_ids is None or len(env_ids) == 0:
+        return
+    if roll_direction not in (-1.0, 1.0):
+        raise ValueError("roll_direction must be -1.0 or 1.0")
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    total = (
+        standing_prob
+        + midroll_prob
+        + postroll_prob
+        + crouch_prob
+        + ground_recovery_prob
+    )
+    if total <= 0.0:
+        raise ValueError("roll-sprint spawn probabilities must have positive mass")
+    sample = torch.rand(len(env_ids), device=env.device) * max(total, 1.0e-6)
+    is_standing = sample < standing_prob
+    is_midroll = (sample >= standing_prob) & (sample < standing_prob + midroll_prob)
+    postroll_limit = standing_prob + midroll_prob + postroll_prob
+    crouch_limit = postroll_limit + crouch_prob
+    is_postroll = (sample >= standing_prob + midroll_prob) & (sample < postroll_limit)
+    is_crouch = (sample >= postroll_limit) & (sample < crouch_limit)
+    is_ground = ~(is_standing | is_midroll | is_postroll | is_crouch)
+
+    def _reset_bucket(
+        selected: torch.Tensor,
+        *,
+        standing: bool,
+        pitch_range: tuple[float, float] | None = None,
+        omega_range: tuple[float, float] | None = None,
+    ) -> None:
+        bucket_ids = env_ids[selected]
+        if len(bucket_ids) == 0:
+            return
+        reset_roulade_state(
+            env,
+            bucket_ids,
+            asset_cfg=asset_cfg,
+            standing_prob=1.0 if standing else 0.0,
+            midroll_prob=0.0 if standing else 1.0,
+            standing_z_min=standing_z_min,
+            standing_z_max=standing_z_max,
+            standing_tilt_max=standing_tilt_max,
+            yaw_range=yaw_range,
+            forward_vel_range=forward_vel_range,
+            midroll_pitch_min=(pitch_range or (midroll_pitch_min, midroll_pitch_max))[
+                0
+            ],
+            midroll_pitch_max=(pitch_range or (midroll_pitch_min, midroll_pitch_max))[
+                1
+            ],
+            midroll_z_min=midroll_z_min,
+            midroll_z_max=midroll_z_max,
+            midroll_omega_range=omega_range or midroll_omega_range,
+            midroll_forward_vel_range=midroll_forward_vel_range,
+            tuck_overrides=tuck_overrides,
+            tuck_factor_range=tuck_factor_range,
+            joint_noise_std=joint_noise_std,
+            roll_direction=roll_direction,
+        )
+
+    _reset_bucket(is_standing | is_crouch | is_ground, standing=True)
+    _reset_bucket(is_midroll, standing=False)
+    _reset_bucket(
+        is_postroll,
+        standing=False,
+        pitch_range=(postroll_pitch_min, postroll_pitch_max),
+        omega_range=postroll_omega_range,
+    )
+    crouch_ids = env_ids[is_crouch]
+    if len(crouch_ids) > 0:
+        set_random_crouch_state(env, crouch_ids, asset_cfg=asset_cfg)
+    ground_ids = env_ids[is_ground]
+    ground_orientation, ground_heading = _set_roll_sprint_ground_state(
+        env,
+        ground_ids,
+        yaw_range=yaw_range,
+        face_down_prob=ground_face_down_prob,
+        face_up_prob=ground_face_up_prob,
+        left_prob=ground_left_prob,
+        right_prob=ground_right_prob,
+    )
+
+    spawn_accum = torch.zeros(len(env_ids), device=env.device)
+    # The physical reverse pose and angular velocity remain signed through
+    # ``roll_direction``. Phase progress is a magnitude, however: a reverse
+    # mid-roll must start at its already-covered positive angle rather than
+    # spending the first half-cycle climbing from a negative accumulator.
+    # Keeping this buffer non-negative lets the shared completion gate require
+    # the same full 2*pi turn for forward and reverse policies.
+    spawn_accum[is_midroll] = env._roulade_accum[env_ids[is_midroll]].abs()
+    spawn_cycle_eligible = is_standing.clone()
+    spawn_self_righting = is_postroll | is_crouch | is_ground
+    spawn_kind = torch.zeros(len(env_ids), dtype=torch.long, device=env.device)
+    spawn_kind[is_midroll] = 6
+    spawn_kind[is_postroll] = 7
+    spawn_kind[is_crouch] = 5
+    spawn_kind[is_ground] = ground_orientation
+    road_total = road_interior_prob + road_edge_prob + road_return_prob
+    if road_total <= 0.0:
+        raise ValueError("roll-sprint road start probabilities need positive mass")
+    if not 0.0 <= recovery_road_return_prob <= 1.0:
+        raise ValueError("recovery road-return probability must be in [0, 1]")
+    if not 0.0 <= heading_return_prob <= 1.0:
+        raise ValueError("heading-return probability must be in [0, 1]")
+    if not 0.0 <= heading_return_min_rad <= heading_return_max_rad:
+        raise ValueError("heading-return range must be non-negative and ordered")
+    road_sample = torch.rand(len(env_ids), device=env.device) * road_total
+    is_road_interior = road_sample < road_interior_prob
+    is_road_edge = (road_sample >= road_interior_prob) & (
+        road_sample < road_interior_prob + road_edge_prob
+    )
+    # A69 never completed a road reposition and side recoveries never rerolled.
+    # Train the combined self-right -> road-return handoff directly, rather
+    # than sampling those states only in isolation. Forced cases still use the
+    # normal return geometry below.
+    force_recovery_road_return = spawn_self_righting & (
+        torch.rand(len(env_ids), device=env.device) < recovery_road_return_prob
+    )
+    force_heading_return = torch.zeros(
+        len(env_ids), dtype=torch.bool, device=env.device
+    )
+    if heading_return_prob > 0.0:
+        force_heading_return = (
+            torch.rand(len(env_ids), device=env.device) < heading_return_prob
+        )
+    is_road_interior &= ~force_recovery_road_return
+    is_road_edge &= ~force_recovery_road_return
+    road_sign = torch.where(
+        torch.rand(len(env_ids), device=env.device) < 0.5,
+        -torch.ones(len(env_ids), device=env.device),
+        torch.ones(len(env_ids), device=env.device),
+    )
+    road_lateral_position = (
+        torch.rand(len(env_ids), device=env.device) * 0.70 - 0.35
+    )
+    road_lateral_position = torch.where(
+        is_road_edge,
+        road_sign
+        * (
+            _ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH
+            + torch.rand(len(env_ids), device=env.device) * 0.07
+        ),
+        road_lateral_position,
+    )
+    road_lateral_position = torch.where(
+        ~(is_road_interior | is_road_edge),
+        road_sign
+        * (
+            0.51
+            + torch.rand(len(env_ids), device=env.device) * 0.13
+        ),
+        road_lateral_position,
+    )
+    spawn_awaiting_reposition = (
+        road_lateral_position.abs() > _ROLL_SPRINT_REPOSITION_TRIGGER_M
+    ) | force_heading_return
+    heading_return_sign = torch.where(
+        torch.rand(len(env_ids), device=env.device) < 0.5,
+        -torch.ones(len(env_ids), device=env.device),
+        torch.ones(len(env_ids), device=env.device),
+    )
+    spawn_heading_error = torch.where(
+        force_heading_return,
+        heading_return_sign
+        * (
+            heading_return_min_rad
+            + torch.rand(len(env_ids), device=env.device)
+            * (heading_return_max_rad - heading_return_min_rad)
+        ),
+        torch.zeros(len(env_ids), device=env.device),
+    )
+    spawn_cycle_eligible &= ~spawn_awaiting_reposition
+    _reset_roll_sprint_buffers(
+        env,
+        env_ids,
+        spawn_accum=spawn_accum,
+        spawn_head_latch=torch.zeros(len(env_ids), dtype=torch.bool, device=env.device),
+        spawn_cycle_eligible=spawn_cycle_eligible,
+        spawn_awaiting_recovery=spawn_self_righting,
+        spawn_awaiting_reposition=spawn_awaiting_reposition,
+        spawn_self_righting=spawn_self_righting,
+        spawn_recovery_kind=spawn_kind,
+        spawn_course_lateral_position=road_lateral_position,
+        spawn_heading_error_rad=spawn_heading_error,
+        roll_direction=roll_direction,
+    )
+    if len(ground_ids) > 0:
+        env._roll_sprint_reset_heading_override_w[ground_ids] = ground_heading
+        env._roll_sprint_reset_heading_override_valid[ground_ids] = True
+    # Raw qpos writes above do not necessarily refresh ``asset.data`` before
+    # this reset event returns. Keep the intended road coordinate in the
+    # buffer, then freeze heading and course center from the first post-reset
+    # physics state in ``_update_roll_sprint_state``. Canonical evaluation
+    # helpers call ``sim.forward()`` and initialize their fixed +x frame
+    # explicitly, so they remain exactly deterministic.
+
+
+def _reset_roll_sprint_buffers(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    spawn_accum: torch.Tensor | None = None,
+    spawn_head_latch: torch.Tensor | None = None,
+    spawn_cycle_eligible: torch.Tensor | None = None,
+    spawn_awaiting_recovery: torch.Tensor | None = None,
+    spawn_awaiting_reposition: torch.Tensor | None = None,
+    spawn_self_righting: torch.Tensor | None = None,
+    spawn_recovery_kind: torch.Tensor | None = None,
+    spawn_course_lateral_position: torch.Tensor | None = None,
+    spawn_heading_error_rad: torch.Tensor | None = None,
+    roll_direction: float = 1.0,
+) -> None:
+    """Reset only cyclic sprint bookkeeping, preserving other env state."""
+    _roll_sprint_state(env)
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    if spawn_accum is None:
+        spawn_accum = torch.zeros(len(env_ids), device=env.device)
+    if spawn_head_latch is None:
+        spawn_head_latch = torch.zeros(
+            len(env_ids), dtype=torch.bool, device=env.device
+        )
+    if spawn_cycle_eligible is None:
+        spawn_cycle_eligible = spawn_accum <= 1.0e-6
+    if spawn_awaiting_recovery is None:
+        spawn_awaiting_recovery = torch.zeros(
+            len(env_ids), dtype=torch.bool, device=env.device
+        )
+    if spawn_self_righting is None:
+        spawn_self_righting = torch.zeros(
+            len(env_ids), dtype=torch.bool, device=env.device
+        )
+    if spawn_awaiting_reposition is None:
+        spawn_awaiting_reposition = torch.zeros(
+            len(env_ids), dtype=torch.bool, device=env.device
+        )
+    if spawn_recovery_kind is None:
+        spawn_recovery_kind = torch.zeros(
+            len(env_ids), dtype=torch.long, device=env.device
+        )
+    if spawn_course_lateral_position is None:
+        spawn_course_lateral_position = torch.zeros(len(env_ids), device=env.device)
+    if spawn_heading_error_rad is None:
+        spawn_heading_error_rad = torch.zeros(len(env_ids), device=env.device)
+    env._roll_sprint_accum[env_ids] = spawn_accum
+    env._roll_sprint_phase_frontier[env_ids] = spawn_accum
+    env._roll_sprint_head_latch[env_ids] = spawn_head_latch
+    env._roll_sprint_cycle_eligible[env_ids] = spawn_cycle_eligible
+    env._roll_sprint_awaiting_recovery[env_ids] = spawn_awaiting_recovery
+    env._roll_sprint_awaiting_reposition[env_ids] = spawn_awaiting_reposition
+    env._roll_sprint_self_righting[env_ids] = spawn_self_righting
+    env._roll_sprint_self_right_started_now[env_ids] = False
+    env._roll_sprint_self_righted_now[env_ids] = False
+    env._roll_sprint_self_right_stall_steps[env_ids] = 0
+    env._roll_sprint_self_right_hold_steps[env_ids] = 0
+    env._roll_sprint_self_right_latency_steps[env_ids] = 0
+    env._roll_sprint_self_right_latency_total_steps[env_ids] = 0.0
+    env._roll_sprint_self_right_attempt_count[env_ids] = spawn_self_righting.float()
+    env._roll_sprint_self_right_success_count[env_ids] = 0.0
+    env._roll_sprint_self_right_upright_delta[env_ids] = 0.0
+    env._roll_sprint_self_right_height_delta[env_ids] = 0.0
+    env._roll_sprint_self_right_upright_previous[env_ids] = 0.0
+    env._roll_sprint_self_right_height_previous[env_ids] = 0.0
+    env._roll_sprint_self_right_potential_ready[env_ids] = False
+    env._roll_sprint_frontier_after_self_right[env_ids] = 0.0
+    env._roll_sprint_recovery_spawn_kind[env_ids] = spawn_recovery_kind
+    env._roll_sprint_reposition_latency_steps[env_ids] = 0
+    env._roll_sprint_reposition_latency_total_steps[env_ids] = 0.0
+    env._roll_sprint_reposition_count[env_ids] = 0.0
+    env._roll_sprint_recovery_hold_steps[env_ids] = 0
+    env._roll_sprint_recovery_latency_steps[env_ids] = 0
+    env._roll_sprint_recovery_latency_total_steps[env_ids] = 0.0
+    env._roll_sprint_recovery_count[env_ids] = 0.0
+    env._roll_sprint_recovered_cycle_armed[env_ids] = False
+    env._roll_sprint_recovered_and_rerolled[env_ids] = 0.0
+    env._roll_sprint_recovered_now[env_ids] = False
+    env._roll_sprint_repositioned_now[env_ids] = False
+    env._roll_sprint_recovered_rerolled_now[env_ids] = False
+    env._roll_sprint_lateral_invalid[env_ids] = False
+    env._roll_sprint_completed[env_ids] = 0.0
+    env._roll_sprint_forward_position[env_ids] = 0.0
+    env._roll_sprint_forward_origin[env_ids] = 0.0
+    env._roll_sprint_cycle_start_position[env_ids] = 0.0
+    env._roll_sprint_forward_frontier[env_ids] = 0.0
+    env._roll_sprint_lateral_origin[env_ids] = 0.0
+    env._roll_sprint_lateral_displacement[env_ids] = 0.0
+    env._roll_sprint_lane_centering_delta[env_ids] = 0.0
+    env._roll_sprint_course_center_xy_w[env_ids] = 0.0
+    env._roll_sprint_course_lateral_position[env_ids] = (
+        spawn_course_lateral_position
+    )
+    env._roll_sprint_roll_direction[env_ids] = roll_direction
+    env._roll_sprint_body_heading_w[env_ids] = 0.0
+    env._roll_sprint_heading_w[env_ids] = 0.0
+    env._roll_sprint_heading_ready[env_ids] = False
+    env._roll_sprint_reset_heading_override_w[env_ids] = 0.0
+    env._roll_sprint_reset_heading_override_valid[env_ids] = False
+    env._roll_sprint_spawn_heading_error_rad[env_ids] = spawn_heading_error_rad
+    env._roll_sprint_heading_error_rad[env_ids] = 0.0
+    env._roll_sprint_heading_alignment_delta[env_ids] = 0.0
+    env._roll_sprint_progress_delta[env_ids] = 0.0
+    env._roll_sprint_directional_bootstrap_frontier[env_ids] = 0.0
+    env._roll_sprint_directional_position_frontier[env_ids] = 0.0
+    env._roll_sprint_directional_bootstrap_delta[env_ids] = 0.0
+    env._roll_sprint_completed_distance[env_ids] = 0.0
+    env._roll_sprint_credited_distance[env_ids] = 0.0
+    env._roll_sprint_completed_now[env_ids] = False
+    env._roll_sprint_invalid_now[env_ids] = False
+    env._roll_sprint_bootstrap_completed_now[env_ids] = False
+    env._roll_sprint_last_update_step[env_ids] = -1
+
+
+def arrange_roll_sprint_race_start(
+    env: ManagerBasedRlEnv,
+    lane_spacing: float,
+    roll_direction: float = 1.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Align every canonical race robot on one deterministic world +x line.
+
+    Backroll robots face world -x while their credited course remains world
+    +x, making the reverse direction visible without changing the race track.
+    """
+    if roll_direction not in (-1.0, 1.0):
+        raise ValueError("roll_direction must be -1.0 or 1.0")
+    asset: Entity = env.scene[asset_cfg.name]
+    old_origins = env.scene.terrain.env_origins.clone()
+    lane_indices = torch.arange(env.num_envs, device=env.device, dtype=old_origins.dtype)
+    lane_indices -= (env.num_envs - 1) / 2.0
+    origins = torch.zeros_like(old_origins)
+    origins[:, 1] = lane_indices * lane_spacing
+
+    pose = torch.cat(
+        (asset.data.root_link_pos_w.clone(), asset.data.root_link_quat_w.clone()),
+        dim=-1,
+    )
+    local_height = pose[:, 2] - old_origins[:, 2]
+    pose[:, :3] = origins
+    pose[:, 2] += local_height
+    pose[:, 3:] = 0.0
+    if roll_direction > 0.0:
+        pose[:, 3] = 1.0
+    else:
+        pose[:, 6] = 1.0
+    velocity = torch.zeros((env.num_envs, 6), device=env.device, dtype=pose.dtype)
+
+    env.scene.terrain.env_origins.copy_(origins)
+    asset.write_root_link_pose_to_sim(pose)
+    asset.write_root_link_velocity_to_sim(velocity)
+    env.sim.forward()
+
+    env_ids = torch.arange(env.num_envs, device=env.device)
+    course_lateral_position = lane_indices * lane_spacing
+    _reset_roll_sprint_buffers(
+        env,
+        env_ids,
+        spawn_course_lateral_position=course_lateral_position,
+        roll_direction=roll_direction,
+    )
+    body_heading = _roll_sprint_heading(asset)
+    heading = body_heading * roll_direction
+    env._roll_sprint_course_center_xy_w.zero_()
+    forward_position = _roll_sprint_forward_position(env, asset, heading)
+    lateral_position = _roll_sprint_lateral_position(env, asset, heading)
+    env._roll_sprint_body_heading_w.copy_(body_heading)
+    env._roll_sprint_heading_w.copy_(heading)
+    env._roll_sprint_heading_ready[:] = True
+    env._roll_sprint_heading_error_rad.zero_()
+    env._roll_sprint_heading_alignment_delta.zero_()
+    env._roll_sprint_forward_position.copy_(forward_position)
+    env._roll_sprint_forward_origin.copy_(forward_position)
+    env._roll_sprint_cycle_start_position.copy_(forward_position)
+    env._roll_sprint_forward_frontier.copy_(forward_position)
+    env._roll_sprint_lateral_origin.copy_(lateral_position)
+    env._roll_sprint_lateral_displacement.zero_()
+    env._roll_sprint_course_lateral_position.copy_(lateral_position)
+    env._roll_sprint_lane_centering_delta.zero_()
+    return origins
+
+
+def arrange_roll_sprint_recovery_start(
+    env: ManagerBasedRlEnv,
+    lane_spacing: float,
+    seed: int = 0,
+    orientations: tuple[str, ...] = ("face_down", "face_up", "left", "right"),
+    roll_direction: float = 1.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Arrange deterministic four-orientation self-right and reroll starts."""
+    asset: Entity = env.scene[asset_cfg.name]
+    if roll_direction not in (-1.0, 1.0):
+        raise ValueError("roll_direction must be -1.0 or 1.0")
+    if len(orientations) != env.num_envs:
+        raise ValueError("one recovery orientation is required for every environment")
+    orientation_to_code = {"face_down": 1, "face_up": 2, "left": 3, "right": 4}
+    try:
+        codes = torch.tensor(
+            [orientation_to_code[name] for name in orientations],
+            dtype=torch.long,
+            device=env.device,
+        )
+    except KeyError as error:
+        raise ValueError(f"unsupported recovery orientation: {error.args[0]}") from error
+
+    old_origins = env.scene.terrain.env_origins.clone()
+    lane_indices = torch.arange(env.num_envs, device=env.device, dtype=old_origins.dtype)
+    lane_indices -= (env.num_envs - 1) / 2.0
+    origins = torch.zeros_like(old_origins)
+    origins[:, 1] = lane_indices * lane_spacing
+    pose = torch.zeros((env.num_envs, 7), device=env.device, dtype=old_origins.dtype)
+    pose[:, :3] = origins
+    pose[:, 2] += 0.20 + 0.002 * float(seed % 4)
+    s = 2.0**-0.5
+    quaternions = {
+        1: (s, 0.0, s, 0.0),
+        2: (s, 0.0, -s, 0.0),
+        3: (s, s, 0.0, 0.0),
+        4: (s, -s, 0.0, 0.0),
+    }
+    for code, quat in quaternions.items():
+        pose[codes == code, 3:] = torch.tensor(
+            quat,
+            device=env.device,
+            dtype=pose.dtype,
+        )
+    if roll_direction < 0.0:
+        # Pre-multiply every lying pose by a deterministic world-yaw of pi.
+        w, x, y, z = pose[:, 3:].unbind(dim=-1)
+        pose[:, 3:] = torch.stack((-z, -y, x, w), dim=-1)
+    velocity = torch.zeros((env.num_envs, 6), device=env.device, dtype=pose.dtype)
+
+    joint_pos = asset.data.default_joint_pos.clone()
+    joint_vel = torch.zeros_like(joint_pos)
+    servo_ids = _servo_joint_ids(env, asset)
+    phase = torch.arange(
+        env.num_envs * len(servo_ids),
+        device=env.device,
+        dtype=joint_pos.dtype,
+    ).reshape(env.num_envs, len(servo_ids))
+    deterministic_offset = 0.025 * torch.sin(phase + float(seed) * 1.618)
+    joint_pos[:, servo_ids] += deterministic_offset
+
+    env.scene.terrain.env_origins.copy_(origins)
+    asset.write_root_link_pose_to_sim(pose)
+    asset.write_root_link_velocity_to_sim(velocity)
+    asset.write_joint_state_to_sim(joint_pos, joint_vel)
+    env.sim.forward()
+
+    env_ids = torch.arange(env.num_envs, device=env.device)
+    true = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    _reset_roll_sprint_buffers(
+        env,
+        env_ids,
+        spawn_cycle_eligible=~true,
+        spawn_awaiting_recovery=true,
+        spawn_self_righting=true,
+        spawn_recovery_kind=codes,
+        spawn_course_lateral_position=lane_indices * lane_spacing,
+        roll_direction=roll_direction,
+    )
+    body_heading = torch.zeros(
+        (env.num_envs, 2), device=env.device, dtype=pose.dtype
+    )
+    body_heading[:, 0] = roll_direction
+    heading = body_heading * roll_direction
+    env._roll_sprint_course_center_xy_w.zero_()
+    forward_position = _roll_sprint_forward_position(env, asset, heading)
+    lateral_position = _roll_sprint_lateral_position(env, asset, heading)
+    env._roll_sprint_body_heading_w.copy_(body_heading)
+    env._roll_sprint_heading_w.copy_(heading)
+    env._roll_sprint_heading_ready[:] = True
+    env._roll_sprint_heading_error_rad.zero_()
+    env._roll_sprint_heading_alignment_delta.zero_()
+    env._roll_sprint_forward_position.copy_(forward_position)
+    env._roll_sprint_forward_origin.copy_(forward_position)
+    env._roll_sprint_cycle_start_position.copy_(forward_position)
+    env._roll_sprint_forward_frontier.copy_(forward_position)
+    env._roll_sprint_lateral_origin.copy_(lateral_position)
+    env._roll_sprint_lateral_displacement.zero_()
+    env._roll_sprint_course_lateral_position.copy_(lateral_position)
+    env._roll_sprint_lane_centering_delta.zero_()
+    return origins
+
+
+def roll_sprint_progress(
+    env: ManagerBasedRlEnv,
+    max_paid_rate: float = 5.0,
+    road_half_width: float = _ROLL_SPRINT_ROAD_HALF_WIDTH,
+    road_safe_half_width: float = _ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay valid forward-roll progress, but never a known-invalid cycle."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    paid_rate = torch.clamp(
+        env._roll_sprint_progress_delta,
+        max=max_paid_rate * env.step_dt,
+    )
+    active_road_half_width = getattr(
+        env,
+        "_roll_sprint_lane_half_width_m",
+        road_half_width,
+    )
+    safe_half_width = min(road_safe_half_width, active_road_half_width)
+    road_edge_fraction = torch.clamp(
+        (
+            env._roll_sprint_course_lateral_position.abs()
+            - safe_half_width
+        )
+        / max(active_road_half_width - safe_half_width, 1.0e-6),
+        min=0.0,
+        max=1.0,
+    )
+    road_quality = torch.clamp(
+        1.0
+        - road_edge_fraction.square(),
+        min=0.0,
+        max=1.0,
+    )
+    heading_quality = torch.clamp(
+        1.0
+        - (
+            env._roll_sprint_heading_error_rad.abs()
+            / _ROLL_SPRINT_REPOSITION_HEADING_TRIGGER_RAD
+        ).square(),
+        min=0.0,
+        max=1.0,
+    )
+    # Bootstrap through the complete head-contact opportunity. Once that phase
+    # has passed, the rest of the dense cycle is eligible only if the required
+    # flat head-top contact was actually witnessed. Orientation/road-invalid
+    # cycles stop paying immediately, and their completion step cannot leak a
+    # final progress payment after the state machine resets its phase frontier.
+    bootstrap_segment = (
+        ~env._roll_sprint_cycle_eligible
+        & ~env._roll_sprint_awaiting_recovery
+        & ~env._roll_sprint_awaiting_reposition
+        & ~env._roll_sprint_self_righting
+    )
+    head_phase_valid = (
+        (env._roll_sprint_phase_frontier < _HEAD_LATCH_HI)
+        | env._roll_sprint_head_latch
+        | bootstrap_segment
+    )
+    cycle_valid = (
+        head_phase_valid
+        & ~env._roll_sprint_lateral_invalid
+        & ~env._roll_sprint_invalid_now
+    )
+    return (
+        road_quality
+        * heading_quality
+        * cycle_valid.float()
+        * paid_rate
+        / (env.step_dt * _ROLL_SPRINT_TARGET_ANGLE)
+    )
+
+
+def roll_sprint_distance(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Release only newly extended signed forward frontier on valid cycles."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_completed_distance / env.step_dt
+
+
+def roll_sprint_directional_bootstrap(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay bounded reverse-roll translation discovery, never the final score."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_directional_bootstrap_delta / env.step_dt
+
+
+def roll_sprint_straightness_penalty(
+    env: ManagerBasedRlEnv,
+    road_safe_half_width: float = _ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Charge only motion in the road-edge band during active roll progress."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    road_edge_excess = torch.clamp(
+        env._roll_sprint_course_lateral_position.abs() - road_safe_half_width,
+        min=0.0,
+    )
+    roll_activity = torch.clamp(
+        env._roll_sprint_progress_delta
+        / (env.step_dt * _ROLL_SPRINT_TARGET_ANGLE),
+        min=0.0,
+        max=1.0,
+    )
+    return road_edge_excess * roll_activity
+
+
+def _roll_sprint_roll_penalty_mask(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """One only while rolling, not during recovery or lane repositioning."""
+    transition_mode = (
+        env._roll_sprint_awaiting_recovery
+        | env._roll_sprint_self_righting
+        | env._roll_sprint_self_righted_now
+        | env._roll_sprint_awaiting_reposition
+    )
+    return (~transition_mode).float()
+
+
+def _roll_sprint_lane_reward_mask(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Pause road shaping only while getting up, not while repositioning."""
+    getting_up = (
+        env._roll_sprint_self_righting
+        | env._roll_sprint_self_righted_now
+        | (
+            env._roll_sprint_awaiting_recovery
+            & ~env._roll_sprint_awaiting_reposition
+        )
+    )
+    return (~getting_up).float()
+
+
+def roll_sprint_sagittal_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Apply roll-plane angular pressure only during roll attempts."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return roulade_sagittal_penalty(
+        env, asset_cfg
+    ) * _roll_sprint_roll_penalty_mask(env)
+
+
+def roll_sprint_lateral_velocity_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Apply lateral-speed pressure only during roll attempts."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return roulade_lateral_velocity_penalty(
+        env, asset_cfg
+    ) * _roll_sprint_roll_penalty_mask(env)
+
+
+def roll_sprint_flatness_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Apply shoulder/side pressure only during roll attempts."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return roulade_flatness_penalty(
+        env, asset_cfg
+    ) * _roll_sprint_roll_penalty_mask(env)
+
+
+def roll_sprint_road_return_progress(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Potential reward for reducing road-edge excess, with no center pull."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return (
+        env._roll_sprint_lane_centering_delta
+        / env.step_dt
+        * _roll_sprint_lane_reward_mask(env)
+    )
+
+
+def roll_sprint_lane_centering_progress(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Compatibility wrapper for the shared-road return potential."""
+    return roll_sprint_road_return_progress(env, asset_cfg)
+
+
+def roll_sprint_heading_alignment_progress(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Potential rate for reset-heading alignment, with no aligned annuity."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    active = (
+        ~env._roll_sprint_self_righting
+        & ~env._roll_sprint_self_righted_now
+    )
+    return env._roll_sprint_heading_alignment_delta / env.step_dt * active.float()
+
+
+def roll_sprint_reposition_command(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    lateral_speed: float = _ROLL_SPRINT_REPOSITION_LATERAL_COMMAND_MPS,
+    lateral_gain: float = _ROLL_SPRINT_REPOSITION_LATERAL_KP,
+    yaw_speed: float = _ROLL_SPRINT_REPOSITION_YAW_COMMAND_RPS,
+    heading_gain: float = _ROLL_SPRINT_REPOSITION_HEADING_COMMAND_KP,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Expose self-right and shared-road return modes in existing twist slots.
+
+    ``twist[0]`` is one only during self-righting. During explicit road
+    repositioning, ``twist[1]`` gives the nearest-safe-edge return while
+    ``twist[2]`` corrects yaw concurrently. It stays zero while self-righting
+    so the actor is never asked to get upright and translate laterally at the
+    same time. Concurrent correction avoids deadlocking side recoveries far
+    from the road behind a heading-only gate.
+    ``twist[2]`` continuously exposes the bounded reset-heading correction,
+    including while self-righting, so yaw-invariant proprioception can hold a
+    straight line. This preserves the shared 61D contract.
+    """
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    command = torch.zeros_like(env.command_manager.get_command(command_name))
+    road_position = env._roll_sprint_course_lateral_position
+    road_return_error = road_position - torch.clamp(
+        road_position,
+        min=-_ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH,
+        max=_ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH,
+    )
+    needs_return = road_return_error.abs() > 0.0
+    needs_heading_return = env._roll_sprint_heading_ready
+    lateral_return = torch.clamp(
+        -lateral_gain * road_return_error,
+        min=-lateral_speed,
+        max=lateral_speed,
+    )
+    heading_return = torch.clamp(
+        heading_gain * env._roll_sprint_heading_error_rad,
+        min=-yaw_speed,
+        max=yaw_speed,
+    )
+    command[:, 0] = env._roll_sprint_self_righting.float()
+    command[:, 1] = torch.where(
+        needs_return
+        & env._roll_sprint_awaiting_reposition
+        & ~env._roll_sprint_self_righting,
+        lateral_return,
+        command[:, 1],
+    )
+    command[:, 2] = torch.where(
+        needs_heading_return,
+        heading_return,
+        command[:, 2],
+    )
+    return command
+
+
+def roll_sprint_backroll_direction_flag(
+    env: ManagerBasedRlEnv,
+    dim: int = 6,
+) -> torch.Tensor:
+    """Expose the dedicated reverse-roll mode in existing body padding.
+
+    A standing forward start and a standing backroll start have identical
+    proprioception.  One signed flag in the pre-existing six-dimensional
+    body-command padding gives the separately trained backroll policy an
+    unambiguous task cue without changing the 61D actor contract or any of
+    the three twist-slot semantics.  The reverse value is -1 rather than +1
+    so a warm-started forward champion receives the cue polarity that already
+    produces toward-goal reverse motion; zero remains the forward/default
+    padding value.
+    """
+    if dim < 1:
+        raise ValueError("backroll direction flag needs at least one slot")
+    _roll_sprint_state(env)
+    command = torch.zeros(
+        (env.num_envs, dim),
+        dtype=torch.float32,
+        device=env.device,
+    )
+    command[:, 0] = torch.where(
+        env._roll_sprint_roll_direction < 0.0,
+        -torch.ones(env.num_envs, device=env.device, dtype=command.dtype),
+        torch.zeros(env.num_envs, device=env.device, dtype=command.dtype),
+    )
+    return command
+
+
+def roll_sprint_lane_half_width_curriculum(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    width_stages: list[dict],
+) -> torch.Tensor:
+    """Tighten the training cycle gate while canonical play stays exact."""
+    del env_ids
+    _roll_sprint_state(env)
+    current_width = width_stages[0]["width"]
+    for stage in width_stages:
+        if env.common_step_counter >= stage["step"]:
+            current_width = stage["width"]
+    env._roll_sprint_lane_half_width_m = float(current_width)
+    return torch.tensor([current_width], device=env.device)
+
+
+def roll_sprint_cycle_rate(
+    env: ManagerBasedRlEnv,
+    include_bootstrap: bool = False,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Low-weight completion-rate reward for valid or skill-bootstrap cycles."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    completed = env._roll_sprint_completed_now
+    if include_bootstrap:
+        completed = completed | env._roll_sprint_bootstrap_completed_now
+    return completed.float() / env.step_dt
+
+
+def roll_sprint_recovery_rate(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """One-shot recovery edge rate; never an upright per-step annuity."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_recovered_now.float() / env.step_dt
+
+
+def roll_sprint_reposition_rate(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """One-shot road-reposition completion rate, never a centering annuity."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_repositioned_now.float() / env.step_dt
+
+
+def roll_sprint_self_right_upright_progress(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Self-right-only cosine-tilt potential rate, with no upright annuity."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_self_right_upright_delta / env.step_dt
+
+
+def roll_sprint_self_right_height_progress(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Self-right-only capped trunk-height potential rate."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_self_right_height_delta / env.step_dt
+
+
+def roll_sprint_self_right_upward_velocity(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Bootstrap upward motion only while the self-right mode is active."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    upward = torch.clamp(
+        torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0),
+        min=0.0,
+    )
+    below_ceiling = (
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2]
+        < _ROLL_SPRINT_SELF_RIGHT_HEIGHT_CEILING_M
+    )
+    return upward * env._roll_sprint_self_righting.float() * below_ceiling.float()
+
+
+def roll_sprint_self_right_fallen_tax(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Positive self-right occupancy cost; configure it with negative weight."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_self_righting.float()
+
+
+def roll_sprint_self_right_success_rate(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """One-shot completed self-right edge rate."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_self_righted_now.float() / env.step_dt
+
+
+def roll_sprint_recovered_reroll_rate(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """One-shot rate for a valid roll completed after a latched recovery."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_recovered_rerolled_now.float() / env.step_dt
+
+
+def roll_sprint_recovery_count(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Cumulative feet-supported recoveries for episode-end metrics."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_recovery_count
+
+
+def roll_sprint_self_right_attempt_count(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Cumulative entries into explicit self-righting mode."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_self_right_attempt_count
+
+
+def roll_sprint_self_right_success_count(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Cumulative launch-ready self-right completions."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_self_right_success_count
+
+
+def roll_sprint_self_right_success_fraction(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Per-episode self-right success fraction."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    attempts = env._roll_sprint_self_right_attempt_count.clamp_min(1.0)
+    return env._roll_sprint_self_right_success_count / attempts
+
+
+def roll_sprint_mean_self_right_latency(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Mean seconds from self-right entry to launch-ready completion."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    successes = env._roll_sprint_self_right_success_count.clamp_min(1.0)
+    return env._roll_sprint_self_right_latency_total_steps * env.step_dt / successes
+
+
+def roll_sprint_frontier_after_self_right(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Cumulative valid frontier distance earned after a self-right/recovery."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_frontier_after_self_right
+
+
+def roll_sprint_recovered_reroll_count(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Cumulative valid rolls completed from a recovery-armed cycle."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_recovered_and_rerolled
+
+
+def roll_sprint_mean_recovery_latency(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Mean seconds from roll completion to the latched recovery edge."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    count = env._roll_sprint_recovery_count.clamp_min(1.0)
+    return env._roll_sprint_recovery_latency_total_steps * env.step_dt / count
+
+
+def roll_sprint_reposition_count(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Cumulative completed lane-reposition transitions."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_reposition_count
+
+
+def roll_sprint_mean_reposition_latency(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Mean seconds from excessive drift to launch-ready lane return."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    count = env._roll_sprint_reposition_count.clamp_min(1.0)
+    return env._roll_sprint_reposition_latency_total_steps * env.step_dt / count
+
+
+def roll_sprint_invalid_cycle_rate(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Event rate for eligible full turns that fail a structural roll gate."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    return env._roll_sprint_invalid_now.float() / env.step_dt
+
+
+def roll_sprint_head_pivot(
+    env: ManagerBasedRlEnv,
+    rate_norm: float = 2.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward actively rotating on the flat head top inside the cycle window."""
+    asset = env.scene[asset_cfg.name]
+    _update_roll_sprint_state(env, asset)
+    contact = _sensor_any_contact(env, _ROLL_SPRINT_HEAD_SENSOR)
+    support = _sensor_any_contact(env, _ROLL_SPRINT_SUPPORT_SENSOR)
+    if contact is None or support is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    in_window = (env._roll_sprint_accum > _HEAD_LATCH_LO) & (
+        env._roll_sprint_accum < _HEAD_LATCH_HI
+    )
+    omega_fwd = torch.nan_to_num(
+        _ROULADE_FWD_SIGN
+        * env._roll_sprint_roll_direction
+        * asset.data.root_link_ang_vel_b[:, 1],
+        nan=0.0,
+    )
+    rate = torch.clamp(omega_fwd / rate_norm, 0.0, 1.0)
+    return (
+        contact.float()
+        * support.float()
+        * in_window.float()
+        * rate
+        * _head_top_down(env, asset).float()
+    )

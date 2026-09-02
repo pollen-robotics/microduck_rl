@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101419">
+    <title>MicroDuck / policy evolution</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to dashboard</a>
+    <header class="topbar">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true">M</div>
+        <div>
+          <p class="eyebrow">MicroDuck / policy training</p>
+          <h1>Policy evolution</h1>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span id="connection-status" class="connection-status" aria-live="polite">Loading</span>
+      </div>
+    </header>
+
+    <main id="main-content" class="page-shell video-only-shell">
+      <div id="error-banner" class="notice notice-error" hidden role="alert"></div>
+      <section id="roll-champion" class="panel champion-panel" aria-labelledby="roll-champion-title" hidden>
+        <div class="section-heading champion-heading">
+          <div>
+            <p class="eyebrow accent">Best retained policy</p>
+            <h2 id="roll-champion-title">Roll-race champion</h2>
+            <p id="champion-version" class="gallery-copy"></p>
+          </div>
+          <span id="champion-status" class="gate-badge is-pass">Retained best</span>
+        </div>
+        <div class="champion-layout">
+          <div id="champion-preview" class="champion-preview">
+            <video id="champion-video" controls playsinline preload="metadata" aria-label="Featured roll-race video"></video>
+          </div>
+          <div id="champion-video-empty" class="empty-state champion-video-empty" hidden>The featured roll-race video is being prepared.</div>
+          <dl class="champion-meta" aria-label="Best retained policy identity">
+            <div><dt>Version</dt><dd id="champion-run"></dd></div>
+            <div><dt>Checkpoint</dt><dd id="champion-checkpoint"></dd></div>
+            <div><dt>Policy hash</dt><dd id="champion-hash"></dd></div>
+            <div><dt>10 m finishers</dt><dd id="champion-finishers"></dd></div>
+            <div><dt>Mean valid frontier</dt><dd id="champion-frontier"></dd></div>
+            <div><dt>Mean finish time</dt><dd id="champion-finish-time"></dd></div>
+          </dl>
+        </div>
+      </section>
+      <section id="roll-audit" class="panel audit-panel" aria-labelledby="roll-audit-title">
+        <div class="section-heading audit-heading">
+          <div>
+            <p class="eyebrow">Latest checkpoint audit</p>
+            <h2 id="roll-audit-title">Self-righting race readiness</h2>
+            <p id="audit-checkpoint" class="gallery-copy">Waiting for evaluator results.</p>
+          </div>
+          <span id="audit-overall" class="gate-badge is-unknown">Pending</span>
+        </div>
+        <div id="audit-empty" class="empty-state">No self-righting evaluation has been recorded yet.</div>
+        <div id="audit-content" hidden>
+          <dl class="audit-metrics" aria-label="Recovery and shared-road metrics">
+            <div class="audit-metric">
+              <dt>Self-right</dt>
+              <dd id="metric-self-right">Not reported</dd>
+              <dd id="metric-self-right-rate" class="audit-metric-note">Attempts / successes</dd>
+            </div>
+            <div class="audit-metric">
+              <dt>Recovery latency</dt>
+              <dd id="metric-recovery-latency">Not reported</dd>
+              <dd class="audit-metric-note">Mean / p95</dd>
+            </div>
+            <div class="audit-metric">
+              <dt>Recovered rerolls</dt>
+              <dd id="metric-recovered-rerolls">Not reported</dd>
+              <dd id="metric-recovered-rerolls-rate" class="audit-metric-note">Self-right then valid roll</dd>
+            </div>
+            <div class="audit-metric">
+              <dt>Post-recovery frontier</dt>
+              <dd id="metric-frontier-after-recovery">Not reported</dd>
+              <dd class="audit-metric-note">New credited distance</dd>
+            </div>
+            <div class="audit-metric">
+              <dt>Road return</dt>
+              <dd id="metric-lane-reposition">Not reported</dd>
+              <dd class="audit-metric-note">Count / mean latency</dd>
+            </div>
+          </dl>
+          <div id="audit-gates" class="gate-list" aria-label="Acceptance gates"></div>
+          <div class="orientation-table-wrap">
+            <table class="orientation-table">
+              <caption>Recovery by deterministic start orientation</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Start</th>
+                  <th scope="col">Recovered</th>
+                  <th scope="col">Rate</th>
+                  <th scope="col">Latency mean / p95</th>
+                  <th scope="col">Rerolls</th>
+                  <th scope="col">Frontier</th>
+                  <th scope="col">Gate</th>
+                </tr>
+              </thead>
+              <tbody id="orientation-results"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+      <section class="panel media-panel" aria-labelledby="media-title">
+        <div class="section-heading media-heading">
+          <div>
+            <p class="eyebrow">Newest sample first</p>
+            <h2 id="media-title">Roll sprint evolution</h2>
+            <p id="gallery-copy" class="gallery-copy">A rollout from the selected policy run.</p>
+          </div>
+          <div class="media-controls">
+            <label class="video-selector">
+              <span>Video run</span>
+              <select id="video-collection" class="select-control" aria-label="Choose the training run to visualize"></select>
+            </label>
+            <span id="video-count" class="section-count">0 videos</span>
+          </div>
+        </div>
+        <div id="media-grid" class="media-grid" aria-live="polite"></div>
+        <nav id="media-pagination" class="media-pagination" aria-label="Video pages" hidden>
+          <button id="media-page-previous" class="button" type="button">Previous</button>
+          <span id="media-page-status" class="media-page-status" aria-live="polite"></span>
+          <button id="media-page-next" class="button" type="button">Next</button>
+        </nav>
+        <div id="media-empty" class="empty-state" hidden>No training samples have been recorded yet.</div>
+      </section>
+    </main>
+
+    <footer class="footer"><span>MicroDuck RL</span><span id="loaded-at">Waiting for samples</span></footer>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

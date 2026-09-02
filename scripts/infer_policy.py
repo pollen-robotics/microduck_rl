@@ -7,16 +7,20 @@ import math
 import os
 import pickle
 import queue
-import select
 import sys
-import termios
 import threading
 import time
-import tty
 import numpy as np
 import mujoco
 import mujoco.viewer
 import onnxruntime as ort
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import select
+    import termios
+    import tty
 
 MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene.xml"
 # MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene_ramps.xml"
@@ -85,20 +89,37 @@ class TerminalInput:
         if not self.enabled:
             print("WARNING: stdin is not a TTY — keyboard control disabled")
             return self
-        self._old_attrs = termios.tcgetattr(self._fd)
-        tty.setcbreak(self._fd)
+        if os.name != "nt":
+            self._old_attrs = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
         threading.Thread(target=self._reader, daemon=True).start()
         return self
 
     def __exit__(self, *exc):
         self._stop.set()
-        if self._old_attrs is not None:
+        if os.name != "nt" and self._old_attrs is not None:
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_attrs)
 
     def _read1(self, timeout):
         """Read one byte from stdin, or None on timeout. os.read (unbuffered):
         buffered sys.stdin.read would swallow escape-sequence bytes past what
         select reported ready."""
+        if os.name == "nt":
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if msvcrt.kbhit():
+                    ch = msvcrt.getwch()
+                    if ch in ("\x00", "\xe0"):
+                        arrow = {
+                            "H": "up",
+                            "P": "down",
+                            "K": "left",
+                            "M": "right",
+                        }
+                        return arrow.get(msvcrt.getwch())
+                    return ch
+                time.sleep(0.01)
+            return None
         r, _, _ = select.select([self._fd], [], [], timeout)
         if not r:
             return None
@@ -830,10 +851,11 @@ def main():
                         help="Use the unified 13D command obs layout (twist+head_pose+body_pose). "
                              "Required for policies trained with the new pose-command-tracking setup. "
                              "Old policies (51D obs, head_offset added to ctrl) need this flag OFF.")
-    parser.add_argument("--current-limit", type=float, default=1.75,
-                        help="XL330 firmware current limit [A]. Actuator torque is clipped to "
-                             "+/- current_limit * kt (kt from the bam package), matching the "
-                             "current saturation modeled in training. <=0 disables.")
+    parser.add_argument("--current-limit", type=float, default=0.0,
+                        help="Optional XL330 firmware current limit [A]. Actuator torque is "
+                             "clipped to +/- current_limit * kt (kt from the bam package). "
+                             "Defaults to 0, preserving the official simulator's actuator "
+                             "limits; use 1.75 for an explicit hardware-like saturation test.")
     parser.add_argument("--foot-friction", type=float, default=None,
                         help="Override the foot sliding friction (mu) to emulate the real grippy "
                              "PU sole. Training used mu~1.0 (range 0.7-1.3); real PU is likely "
@@ -882,11 +904,10 @@ def main():
     model.opt.timestep = 0.005
     data = mujoco.MjData(model)
 
-    # XL330 firmware current limit. The motors saturate current at ~1.75 A; since
-    # torque = kt * current, this caps the actuator force at +/- kt * I_max. The
-    # MuJoCo position actuators here are not the BAM voltage model, but clipping
-    # their output force reproduces the same current saturation the policy was
-    # trained against (see BamActuator.max_current). kt comes from the bam package.
+    # Optional XL330 firmware current limit. The official manufacturer simulator
+    # leaves the XML actuator limits unchanged, so the default is intentionally
+    # unclipped. Enable this only when testing hardware-like current saturation.
+    # Since torque = kt * current, this caps the actuator force at +/- kt * I_max.
     if args.current_limit and args.current_limit > 0:
         from bam.model import load_model
         kt = load_model(motor_name="xl330", model="m6").kt.value

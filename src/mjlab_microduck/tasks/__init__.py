@@ -1,3 +1,6 @@
+from pathlib import Path
+
+import torch
 from mjlab.tasks.registry import register_mjlab_task
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
@@ -13,6 +16,166 @@ class MicroduckOnPolicyRunner(VelocityOnPolicyRunner):
         sym = alg.get("symmetry_cfg") if isinstance(alg, dict) else None
         if isinstance(sym, dict) and "_env" in sym:
             alg["symmetry_cfg"] = {k: v for k, v in sym.items() if k != "_env"}
+
+
+class MicroduckFrozenActorNormRunner(MicroduckOnPolicyRunner):
+    """Preserve a transferred actor's observation coordinates.
+
+    Contact-rich reverse starts have a very different observation distribution
+    from standing or runway motion. Updating the actor normalizer shifts even
+    unchanged source observations and can destroy the inherited skill within a
+    few PPO iterations. The critic normalizer remains adaptive; only the
+    actor's transferred input transform is frozen.
+    """
+
+    def __init__(self, env, train_cfg: dict, log_dir=None, device="cpu", **kwargs):
+        self._configured_learning_rate = float(train_cfg["algorithm"]["learning_rate"])
+        distribution_cfg = train_cfg.get("actor", {}).get("distribution_cfg") or {}
+        self._bootstrap_actor_std = float(distribution_cfg.get("init_std", 1.0))
+        super().__init__(env, train_cfg, log_dir, device, **kwargs)
+        normalizer = getattr(self.alg.actor, "obs_normalizer", None)
+        if hasattr(normalizer, "until"):
+            normalizer.until = 0
+
+    def load(
+        self,
+        path: str,
+        load_cfg: dict | None = None,
+        strict: bool = True,
+        map_location: str | None = None,
+    ) -> dict:
+        """Load the parent while keeping the requested fine-tuning state.
+
+        PyTorch optimizer state includes its parameter-group learning rate. A
+        normal resume therefore overwrites a CLI/configured fine-tuning rate
+        with the parent's final rate. Restore the explicit child-run rate after
+        loading so a fixed schedule is actually fixed. The dedicated full-
+        rotation parent is an actor initializer, not a training resume: its
+        critic, optimizer, iteration, and curriculum clock describe the old
+        false-success objective and must not leak into the strict child run.
+        """
+
+        bootstrap_actor = (
+            load_cfg is None
+            and Path(path).parent.name == ".bootstrap-full-rotation-parent"
+        )
+        if bootstrap_actor:
+            load_cfg = {
+                "actor": True,
+                "critic": False,
+                "optimizer": False,
+                "iteration": False,
+                "rnd": False,
+            }
+        infos = super().load(path, load_cfg, strict, map_location)
+        self.alg.learning_rate = self._configured_learning_rate
+        for param_group in self.alg.optimizer.param_groups:
+            param_group["lr"] = self._configured_learning_rate
+        if bootstrap_actor:
+            self.env.unwrapped.common_step_counter = 0
+            distribution = self.alg.actor.distribution
+            with torch.no_grad():
+                if hasattr(distribution, "std_param"):
+                    distribution.std_param.fill_(self._bootstrap_actor_std)
+                elif hasattr(distribution, "log_std_param"):
+                    distribution.log_std_param.fill_(
+                        torch.log(
+                            torch.tensor(
+                                self._bootstrap_actor_std,
+                                device=distribution.log_std_param.device,
+                            )
+                        )
+                    )
+        return infos
+
+
+class MicroduckStairSpecialistRunner(MicroduckOnPolicyRunner):
+    """Seed the specialist actor without importing walking PPO state."""
+
+    def __init__(self, env, train_cfg: dict, log_dir=None, device="cpu", **kwargs):
+        distribution_cfg = train_cfg.get("actor", {}).get("distribution_cfg") or {}
+        self._bootstrap_actor_std = float(distribution_cfg.get("init_std", 1.0))
+        super().__init__(env, train_cfg, log_dir, device, **kwargs)
+
+    def load(
+        self,
+        path: str,
+        load_cfg: dict | None = None,
+        strict: bool = True,
+        map_location: str | None = None,
+    ) -> dict:
+        bootstrap_actor = (
+            load_cfg is None and Path(path).parent.name == ".bootstrap-walking"
+        )
+        if bootstrap_actor:
+            load_cfg = {
+                "actor": True,
+                "critic": False,
+                "optimizer": False,
+                "iteration": False,
+                "rnd": False,
+            }
+        infos = super().load(path, load_cfg, strict, map_location)
+        if bootstrap_actor:
+            distribution = self.alg.actor.distribution
+            with torch.no_grad():
+                if hasattr(distribution, "std_param"):
+                    distribution.std_param.fill_(self._bootstrap_actor_std)
+                elif hasattr(distribution, "log_std_param"):
+                    distribution.log_std_param.fill_(
+                        torch.log(
+                            torch.tensor(
+                                self._bootstrap_actor_std,
+                                device=distribution.log_std_param.device,
+                            )
+                        )
+                    )
+        return infos
+
+
+class MicroduckRepeatedBackrollRunner(MicroduckOnPolicyRunner):
+    """Warm-start the repeated skill from the verified one-shot actor only."""
+
+    def __init__(self, env, train_cfg: dict, log_dir=None, device="cpu", **kwargs):
+        distribution_cfg = train_cfg.get("actor", {}).get("distribution_cfg") or {}
+        self._bootstrap_actor_std = float(distribution_cfg.get("init_std", 0.55))
+        super().__init__(env, train_cfg, log_dir, device, **kwargs)
+
+    def load(
+        self,
+        path: str,
+        load_cfg: dict | None = None,
+        strict: bool = True,
+        map_location: str | None = None,
+    ) -> dict:
+        bootstrap_actor = (
+            load_cfg is None
+            and Path(path).parent.name == ".bootstrap-backroll-champion"
+        )
+        if bootstrap_actor:
+            load_cfg = {
+                "actor": True,
+                "critic": False,
+                "optimizer": False,
+                "iteration": False,
+                "rnd": False,
+            }
+        infos = super().load(path, load_cfg, strict, map_location)
+        if bootstrap_actor:
+            distribution = self.alg.actor.distribution
+            with torch.no_grad():
+                if hasattr(distribution, "std_param"):
+                    distribution.std_param.fill_(self._bootstrap_actor_std)
+                elif hasattr(distribution, "log_std_param"):
+                    distribution.log_std_param.fill_(
+                        torch.log(
+                            torch.tensor(
+                                self._bootstrap_actor_std,
+                                device=distribution.log_std_param.device,
+                            )
+                        )
+                    )
+        return infos
 
 
 from .microduck_velocity_env_cfg import (
@@ -63,9 +226,101 @@ from .microduck_spin_env_cfg import (
     make_microduck_spin_env_cfg,
     MicroduckSpinRlCfg,
 )
+from .microduck_backroll_env_cfg import (
+    make_microduck_backroll_env_cfg,
+    make_microduck_repeated_backroll_env_cfg,
+    MicroduckBackrollRlCfg,
+    MicroduckRepeatedBackrollRlCfg,
+)
 from .microduck_roulade_env_cfg import (
     make_microduck_roulade_env_cfg,
     MicroduckRouladeRlCfg,
+)
+from .microduck_roll_sprint_env_cfg import (
+    make_microduck_backroll_skill_env_cfg,
+    make_microduck_backroll_sprint_env_cfg,
+    make_microduck_roll_sprint_env_cfg,
+    MicroduckBackrollSkillRlCfg,
+    MicroduckBackrollSprintRlCfg,
+    MicroduckRollSprintRlCfg,
+)
+from .microduck_stairs_env_cfg import (
+    make_microduck_stairs_env_cfg,
+    MicroduckStairsRlCfg,
+)
+from .microduck_standard_stairs_env_cfg import (
+    make_microduck_assisted_stair_specialist_env_cfg,
+    make_microduck_stair_apex_mantle_env_cfg,
+    make_microduck_stair_roulade_bank_env_cfg,
+    make_microduck_stair_phase_balanced_rsi_env_cfg,
+    make_microduck_stair_curriculum_rsi_env_cfg,
+    make_microduck_stair_contact_mantle_rsi_env_cfg,
+    make_microduck_stair_contact_release_rsi_env_cfg,
+    make_microduck_stair_lip_commitment_rsi_env_cfg,
+    make_microduck_stair_lip_checkpoint_rsi_env_cfg,
+    make_microduck_stair_frontier_collocation_rsi_env_cfg,
+    make_microduck_stair_terminal_position_rsi_env_cfg,
+    make_microduck_stair_frontier_tier_rsi_env_cfg,
+    make_microduck_stair_forward_propagation_rsi_env_cfg,
+    make_microduck_stair_virtual_lip_transfer_rsi_env_cfg,
+    make_microduck_stair_contact_stage_rsi_env_cfg,
+    make_microduck_stair_stage15_reverse_rsi_env_cfg,
+    make_microduck_stair_stage2_reverse_rsi_env_cfg,
+    make_microduck_stair_near_shell_reverse_rsi_env_cfg,
+    make_microduck_stair_stratified_shell_reverse_rsi_env_cfg,
+    make_microduck_stair_option_frontier_forward_rsi_env_cfg,
+    make_microduck_stair_stage2_forward_rsi_env_cfg,
+    make_microduck_stair_soft_dynamics_rsi_env_cfg,
+    make_microduck_stair_medium_dynamics_rsi_env_cfg,
+    make_microduck_stair_foot_anchor_vault_env_cfg,
+    make_microduck_stair_ordered_vault_env_cfg,
+    make_microduck_stair_tread_contact_bank_env_cfg,
+    make_microduck_stair_bridge_specialist_env_cfg,
+    make_microduck_stair_launch_bank_env_cfg,
+    make_microduck_stair_walker_bank_env_cfg,
+    make_microduck_route_stairs_env_cfg,
+    make_microduck_stair_specialist_env_cfg,
+    make_microduck_standard_stairs_env_cfg,
+    MicroduckAssistedStairSpecialistRlCfg,
+    MicroduckStairApexMantleRlCfg,
+    MicroduckStairRouladeBankRlCfg,
+    MicroduckStairPhaseBalancedRsiRlCfg,
+    MicroduckStairCurriculumRsiRlCfg,
+    MicroduckStairContactMantleRsiRlCfg,
+    MicroduckStairContactReleaseRsiRlCfg,
+    MicroduckStairLipCommitmentRsiRlCfg,
+    MicroduckStairLipCheckpointRsiRlCfg,
+    MicroduckStairFrontierCollocationRsiRlCfg,
+    MicroduckStairTerminalPositionRsiRlCfg,
+    MicroduckStairFrontierTierRsiRlCfg,
+    MicroduckStairForwardPropagationRsiRlCfg,
+    MicroduckStairVirtualLipTransferRsiRlCfg,
+    MicroduckStairContactStageRsiRlCfg,
+    MicroduckStairStage15ReverseRsiRlCfg,
+    MicroduckStairStage2ReverseRsiRlCfg,
+    MicroduckStairNearShellReverseRsiRlCfg,
+    MicroduckStairStratifiedShellReverseRsiRlCfg,
+    MicroduckStairOptionFrontierForwardRsiRlCfg,
+    MicroduckStairStage2ForwardRsiRlCfg,
+    MicroduckStairSoftDynamicsRsiRlCfg,
+    MicroduckStairMediumDynamicsRsiRlCfg,
+    MicroduckStairFootAnchorVaultRlCfg,
+    MicroduckStairOrderedVaultRlCfg,
+    MicroduckStairTreadContactBankRlCfg,
+    MicroduckStairBridgeSpecialistRlCfg,
+    MicroduckStairLaunchBankRlCfg,
+    MicroduckStairWalkerBankRlCfg,
+    MicroduckRouteStairsRlCfg,
+    MicroduckStairSpecialistRlCfg,
+    MicroduckStandardStairsRlCfg,
+)
+from .microduck_headstand_env_cfg import (
+    make_microduck_headstand_env_cfg,
+    MicroduckHeadstandRlCfg,
+)
+from .microduck_backflip_env_cfg import (
+    make_microduck_backflip_env_cfg,
+    MicroduckBackflipRlCfg,
 )
 from .backlash import make_backlash_variant
 
@@ -225,6 +480,342 @@ register_mjlab_task(
     runner_cls=MicroduckOnPolicyRunner,
 )
 
+# Grounded backroll: one supported reverse roulade and feet landing. It is a
+# standalone skill with no course, distance, recovery, or repeated-cycle goal.
+register_mjlab_task(
+    task_id="Mjlab-Backroll-Flat-MicroDuck",
+    env_cfg=make_microduck_backroll_env_cfg(),
+    play_env_cfg=make_microduck_backroll_env_cfg(play=True),
+    rl_cfg=MicroduckBackrollRlCfg,
+    runner_cls=MicroduckFrozenActorNormRunner,
+)
+
+# Repeated grounded backroll: each valid sagittal feet landing rearms a fresh
+# full backward cycle. It remains a stationary skill with no race/course goal.
+register_mjlab_task(
+    task_id="Mjlab-Repeated-Backroll-Flat-MicroDuck",
+    env_cfg=make_microduck_repeated_backroll_env_cfg(),
+    play_env_cfg=make_microduck_repeated_backroll_env_cfg(play=True),
+    rl_cfg=MicroduckRepeatedBackrollRlCfg,
+    runner_cls=MicroduckRepeatedBackrollRunner,
+)
+
+# Roll sprint: repeated supported forward rolls, distance released per cycle.
+register_mjlab_task(
+    task_id="Mjlab-Roll-Sprint-Flat-MicroDuck",
+    env_cfg=make_microduck_roll_sprint_env_cfg(),
+    play_env_cfg=make_microduck_roll_sprint_env_cfg(play=True),
+    rl_cfg=MicroduckRollSprintRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Backroll sprint: same 61D/14D contract, opposite supported rotation and
+# signed travel direction, isolated in its own experiment and checkpoints.
+register_mjlab_task(
+    task_id="Mjlab-Backroll-Sprint-Flat-MicroDuck",
+    env_cfg=make_microduck_backroll_sprint_env_cfg(),
+    play_env_cfg=make_microduck_backroll_sprint_env_cfg(play=True),
+    rl_cfg=MicroduckBackrollSprintRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Completion-first reverse-roll pretraining. This keeps the same 61D/14D
+# contract so its actor can be transferred into the later sprint task.
+register_mjlab_task(
+    task_id="Mjlab-Backroll-Skill-Flat-MicroDuck",
+    env_cfg=make_microduck_backroll_skill_env_cfg(),
+    play_env_cfg=make_microduck_backroll_skill_env_cfg(play=True),
+    rl_cfg=MicroduckBackrollSkillRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Experimental stair and acrobatics tasks.  They keep the shared observation
+# contract, but are intentionally separate policies with task-specific resets
+# and rewards.
+register_mjlab_task(
+    task_id="Mjlab-Stairs-MicroDuck",
+    env_cfg=make_microduck_stairs_env_cfg(),
+    play_env_cfg=make_microduck_stairs_env_cfg(play=True),
+    rl_cfg=MicroduckStairsRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Standard-MicroDuck",
+    env_cfg=make_microduck_standard_stairs_env_cfg(),
+    play_env_cfg=make_microduck_standard_stairs_env_cfg(play=True),
+    rl_cfg=MicroduckStandardStairsRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Route-MicroDuck",
+    env_cfg=make_microduck_route_stairs_env_cfg(),
+    play_env_cfg=make_microduck_route_stairs_env_cfg(play=True),
+    rl_cfg=MicroduckRouteStairsRlCfg,
+    runner_cls=MicroduckFrozenActorNormRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_specialist_env_cfg(),
+    play_env_cfg=make_microduck_stair_specialist_env_cfg(play=True),
+    rl_cfg=MicroduckStairSpecialistRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Assisted-Specialist-MicroDuck",
+    env_cfg=make_microduck_assisted_stair_specialist_env_cfg(),
+    play_env_cfg=make_microduck_assisted_stair_specialist_env_cfg(play=True),
+    rl_cfg=MicroduckAssistedStairSpecialistRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Bridge-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_bridge_specialist_env_cfg(),
+    play_env_cfg=make_microduck_stair_bridge_specialist_env_cfg(play=True),
+    rl_cfg=MicroduckStairBridgeSpecialistRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Walker-Bank-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_walker_bank_env_cfg(),
+    play_env_cfg=make_microduck_stair_walker_bank_env_cfg(play=True),
+    rl_cfg=MicroduckStairWalkerBankRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Launch-Bank-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_launch_bank_env_cfg(),
+    play_env_cfg=make_microduck_stair_launch_bank_env_cfg(play=True),
+    rl_cfg=MicroduckStairLaunchBankRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Apex-Mantle-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_apex_mantle_env_cfg(),
+    play_env_cfg=make_microduck_stair_apex_mantle_env_cfg(play=True),
+    rl_cfg=MicroduckStairApexMantleRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Roulade-Bank-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_roulade_bank_env_cfg(),
+    play_env_cfg=make_microduck_stair_roulade_bank_env_cfg(play=True),
+    rl_cfg=MicroduckStairRouladeBankRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Phase-Balanced-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_phase_balanced_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_phase_balanced_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairPhaseBalancedRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Curriculum-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_curriculum_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_curriculum_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairCurriculumRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Contact-Mantle-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_contact_mantle_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_contact_mantle_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairContactMantleRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Soft-Dynamics-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_soft_dynamics_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_soft_dynamics_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairSoftDynamicsRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Medium-Dynamics-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_medium_dynamics_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_medium_dynamics_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairMediumDynamicsRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Contact-Release-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_contact_release_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_contact_release_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairContactReleaseRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Lip-Commitment-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_lip_commitment_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_lip_commitment_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairLipCommitmentRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Lip-Checkpoint-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_lip_checkpoint_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_lip_checkpoint_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairLipCheckpointRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Frontier-Collocation-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_frontier_collocation_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_frontier_collocation_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairFrontierCollocationRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Terminal-Position-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_terminal_position_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_terminal_position_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairTerminalPositionRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Frontier-Tier-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_frontier_tier_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_frontier_tier_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairFrontierTierRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Forward-Propagation-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_forward_propagation_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_forward_propagation_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairForwardPropagationRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Virtual-Lip-Transfer-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_virtual_lip_transfer_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_virtual_lip_transfer_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairVirtualLipTransferRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Contact-Stage-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_contact_stage_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_contact_stage_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairContactStageRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Stage15-Reverse-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_stage15_reverse_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_stage15_reverse_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairStage15ReverseRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Stage2-Reverse-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_stage2_reverse_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_stage2_reverse_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairStage2ReverseRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Near-Shell-Reverse-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_near_shell_reverse_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_near_shell_reverse_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairNearShellReverseRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Stratified-Shell-Reverse-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_stratified_shell_reverse_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_stratified_shell_reverse_rsi_env_cfg(
+        play=True
+    ),
+    rl_cfg=MicroduckStairStratifiedShellReverseRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Option-Frontier-Forward-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_option_frontier_forward_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_option_frontier_forward_rsi_env_cfg(
+        play=True
+    ),
+    rl_cfg=MicroduckStairOptionFrontierForwardRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Stage2-Forward-RSI-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_stage2_forward_rsi_env_cfg(),
+    play_env_cfg=make_microduck_stair_stage2_forward_rsi_env_cfg(play=True),
+    rl_cfg=MicroduckStairStage2ForwardRsiRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Tread-Contact-Bank-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_tread_contact_bank_env_cfg(),
+    play_env_cfg=make_microduck_stair_tread_contact_bank_env_cfg(play=True),
+    rl_cfg=MicroduckStairTreadContactBankRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Foot-Anchor-Vault-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_foot_anchor_vault_env_cfg(),
+    play_env_cfg=make_microduck_stair_foot_anchor_vault_env_cfg(play=True),
+    rl_cfg=MicroduckStairFootAnchorVaultRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Stairs-Ordered-Vault-Specialist-MicroDuck",
+    env_cfg=make_microduck_stair_ordered_vault_env_cfg(),
+    play_env_cfg=make_microduck_stair_ordered_vault_env_cfg(play=True),
+    rl_cfg=MicroduckStairOrderedVaultRlCfg,
+    runner_cls=MicroduckStairSpecialistRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Headstand-Flat-MicroDuck",
+    env_cfg=make_microduck_headstand_env_cfg(),
+    play_env_cfg=make_microduck_headstand_env_cfg(play=True),
+    rl_cfg=MicroduckHeadstandRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Backflip-Flat-MicroDuck",
+    env_cfg=make_microduck_backflip_env_cfg(),
+    play_env_cfg=make_microduck_backflip_env_cfg(play=True),
+    rl_cfg=MicroduckBackflipRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
 # Backlash variants — ±1° serial gear play per servo + encoder-through-backlash
 # actuator feedback and joint obs (see tasks/backlash.py). Each family keeps its
 # base task's collision model: Velocity → robot_walk_backlash.xml,
@@ -259,6 +850,7 @@ _BACKLASH_TASKS = (
     ("Mjlab-Velocity-Swizzle-Backlash-MicroDuck", make_microduck_velocity_swizzle_env_cfg, {}, MicroduckSwizzleRlCfg, _BL_ROLLERS),
     ("Mjlab-RollerCrouch-Flat-Backlash-MicroDuck", make_microduck_roller_crouch_env_cfg, {}, MicroduckRollerCrouchRlCfg, _BL_ROLLERS),
     ("Mjlab-RollerSlope-Flat-Backlash-MicroDuck", make_microduck_roller_slope_env_cfg, {}, MicroduckRollerSlopeRlCfg, _BL_ROLLERS),
+    ("Mjlab-Roll-Sprint-Flat-Backlash-MicroDuck", make_microduck_roll_sprint_env_cfg, {}, MicroduckRollSprintRlCfg, _BL_ALLCOL),
 )
 for _task_id, _make_cfg, _kw, _rl_cfg, _robot_cfg in _BACKLASH_TASKS:
     register_mjlab_task(

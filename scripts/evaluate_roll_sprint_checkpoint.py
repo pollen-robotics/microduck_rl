@@ -1,0 +1,1561 @@
+#!/usr/bin/env python3
+"""Evaluate a frozen repeated-roll checkpoint with independent physics gates."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import os
+from dataclasses import asdict
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+
+import mjlab.tasks  # noqa: F401  # Populate the task registry.
+import torch
+from mjlab.envs import ManagerBasedRlEnv
+from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
+from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
+from mjlab.utils.torch import configure_torch_backends
+
+from mjlab_microduck.tasks import mdp as microduck_mdp
+
+TASK_ID = "Mjlab-Roll-Sprint-Flat-MicroDuck"
+TARGET_ANGLE = 2.0 * math.pi
+HEAD_WINDOW = (math.radians(20.0), math.radians(170.0))
+HEAD_TOP_AXIS = (0.882, 0.0, 0.471)
+HEAD_TOP_DOWN_MIN = 0.3
+FLAT_FULL = 0.5
+FLAT_ZERO = math.sin(math.radians(60.0))
+MIN_FORWARD_RATE = 0.5
+MAX_DISTANCE_PER_RAD = 0.12
+ROAD_HALF_WIDTH_M = microduck_mdp._ROLL_SPRINT_ROAD_HALF_WIDTH
+ROAD_SAFE_FULL_REWARD_HALF_WIDTH_M = (
+    microduck_mdp._ROLL_SPRINT_ROAD_SAFE_HALF_WIDTH
+)
+ROAD_REPOSITION_TRIGGER_M = microduck_mdp._ROLL_SPRINT_REPOSITION_TRIGGER_M
+ROAD_REPOSITION_REARM_M = microduck_mdp._ROLL_SPRINT_REPOSITION_REARM_M
+ROAD_BOUNDARY_TOLERANCE_M = 1.0e-6
+RECOVERY_MAX_FORWARD_RATE = microduck_mdp._ROLL_SPRINT_RECOVERY_MAX_FORWARD_RATE
+RECOVERY_UPRIGHT_COS = microduck_mdp._ROLL_SPRINT_RECOVERY_UPRIGHT_COS
+RECOVERY_LATERAL_Z = microduck_mdp._ROLL_SPRINT_RECOVERY_LATERAL_Z
+RECOVERY_MIN_HEIGHT_M = microduck_mdp._ROLL_SPRINT_RECOVERY_MIN_HEIGHT_M
+RECOVERY_HOLD_STEPS = microduck_mdp._ROLL_SPRINT_RECOVERY_HOLD_STEPS
+REARM_HOLD_STEPS = microduck_mdp._ROLL_SPRINT_REARM_HOLD_STEPS
+REPOSITION_HEADING_TRIGGER_RAD = (
+    microduck_mdp._ROLL_SPRINT_REPOSITION_HEADING_TRIGGER_RAD
+)
+REPOSITION_HEADING_REARM_RAD = microduck_mdp._ROLL_SPRINT_REPOSITION_HEADING_REARM_RAD
+SELF_RIGHT_TILT_COS = microduck_mdp._ROLL_SPRINT_SELF_RIGHT_TILT_COS
+SELF_RIGHT_STALL_RATE = microduck_mdp._ROLL_SPRINT_SELF_RIGHT_STALL_RATE
+SELF_RIGHT_STALL_SECONDS = microduck_mdp._ROLL_SPRINT_SELF_RIGHT_STALL_SECONDS
+RACE_LANE_SPACING = 0.28
+TARGET_DISTANCE_M = 10.0
+# Give the policy the full training horizon to finish the race.  Ten metres is
+# the hard objective; elapsed time is a ranking metric after a valid finish,
+# not a deadline that discards slower but genuine finishers.
+CANONICAL_RACE_DURATION_S = 40.0
+MIN_VALID_ROLLS_FOR_TARGET = math.ceil(
+    TARGET_DISTANCE_M / (TARGET_ANGLE * MAX_DISTANCE_PER_RAD)
+)
+MIN_RECOVERED_REROLLS_FOR_TARGET = max(0, MIN_VALID_ROLLS_FOR_TARGET - 1)
+ROAD_MAX_YAW_DEVIATION_DEG = 20.0
+PROMOTION = {
+    "repeated_roll_rate": 0.75,
+    "mean_valid_roll_count": float(MIN_VALID_ROLLS_FOR_TARGET),
+    "mean_recovered_and_rerolled_count": float(MIN_RECOVERED_REROLLS_FOR_TARGET),
+    "mean_roll_linked_distance_m": TARGET_DISTANCE_M,
+    "target_distance_reach_rate": 0.75,
+    "standing_on_road_target_reach_rate": 0.75,
+    "maximum_road_boundary_overshoot_m": 0.0,
+    "mean_uncredited_positive_displacement_m": 0.08,
+}
+RECOVERY_ORIENTATIONS = ("face_down", "face_up", "left", "right")
+RECOVERY_SEEDS = (0, 1, 2, 3)
+RECOVERY_DURATION_S = 12.0
+RECOVERY_MIN_OVERALL_RATE = 0.75
+RECOVERY_MIN_ORIENTATION_RATE = 0.50
+RECOVERY_MAX_P95_LATENCY_S = 7.0
+RECOVERY_MIN_REROLL_RATE = 0.50
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(
+        "w", encoding="utf-8", suffix=".tmp", dir=path.parent, delete=False
+    ) as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        temporary = Path(handle.name)
+    os.replace(temporary, path)
+
+
+def heading_from_quat(quat: torch.Tensor) -> torch.Tensor:
+    """Planar forward heading from body y, stable at vertical pitch."""
+    quat = torch.nan_to_num(quat, nan=0.0)
+    w, x, y, z = quat.unbind(dim=-1)
+    body_y_x = 2.0 * (x * y - w * z)
+    body_y_y = 1.0 - 2.0 * (x.square() + z.square())
+    heading = torch.stack((body_y_y, -body_y_x), dim=-1)
+    return heading / heading.norm(dim=-1, keepdim=True).clamp_min(1.0e-6)
+
+
+def lateral_axis_z(quat: torch.Tensor) -> torch.Tensor:
+    return 2.0 * (quat[:, 2] * quat[:, 3] + quat[:, 0] * quat[:, 1])
+
+
+def head_top_down(head_quat: torch.Tensor) -> torch.Tensor:
+    w, x, y, z = head_quat.unbind(dim=-1)
+    a, b, c = HEAD_TOP_AXIS
+    axis_world_z = (
+        2.0 * (x * z - w * y) * a
+        + 2.0 * (y * z + w * x) * b
+        + (1.0 - 2.0 * (x.square() + y.square())) * c
+    )
+    return axis_world_z < -HEAD_TOP_DOWN_MIN
+
+
+def sensor_contact(env: ManagerBasedRlEnv, name: str) -> torch.Tensor:
+    sensor = env.scene.sensors.get(name)
+    if sensor is None or sensor.data.found is None:
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    found = sensor.data.found
+    return (found.view(found.shape[0], -1) > 0).any(dim=-1)
+
+
+class RollCycleAuditor:
+    """Independent cycle reconstruction that never reads reward state buffers."""
+
+    def __init__(
+        self,
+        initial_position_xy: torch.Tensor,
+        initial_root_quat: torch.Tensor,
+        initial_vertical_velocity: torch.Tensor,
+        step_dt: float,
+        course_center_xy: torch.Tensor | None = None,
+    ) -> None:
+        self.step_dt = step_dt
+        self.heading = heading_from_quat(initial_root_quat)
+        self.lateral = torch.stack((-self.heading[:, 1], self.heading[:, 0]), dim=-1)
+        self.start_position = initial_position_xy.clone()
+        self.last_position = initial_position_xy.clone()
+        if course_center_xy is None:
+            course_center_xy = torch.zeros(
+                2,
+                device=initial_position_xy.device,
+                dtype=initial_position_xy.dtype,
+            )
+        self.course_center_xy = course_center_xy.reshape(1, 2).clone()
+        self.initial_course_lateral = (
+            (initial_position_xy - self.course_center_xy) * self.lateral
+        ).sum(dim=-1)
+        self.final_course_lateral = self.initial_course_lateral.clone()
+        self.previous_vertical_velocity = initial_vertical_velocity.clone()
+        count = initial_position_xy.shape[0]
+        device = initial_position_xy.device
+        zero = torch.zeros(count, device=device)
+        false = torch.zeros(count, dtype=torch.bool, device=device)
+        self.accum = zero.clone()
+        self.phase_frontier = zero.clone()
+        self.head_latch = false.clone()
+        self.lateral_invalid = false.clone()
+        self.cycle_start_forward = zero.clone()
+        self.forward_frontier = zero.clone()
+        self.linked_distance = zero.clone()
+        self.target_reach_time_s = torch.full_like(zero, float("nan"))
+        self.valid_count = torch.zeros(count, dtype=torch.long, device=device)
+        self.invalid_count = torch.zeros(count, dtype=torch.long, device=device)
+        self.awaiting_recovery = false.clone()
+        self.awaiting_reposition = false.clone()
+        self.self_righting = false.clone()
+        self.self_right_hold_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.self_right_stall_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.recovery_hold_steps = torch.zeros(count, dtype=torch.long, device=device)
+        self.recovery_latency_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.recovery_latency_total_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.recovery_count = torch.zeros(count, dtype=torch.long, device=device)
+        self.reposition_latency_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.reposition_latency_total_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.reposition_count = torch.zeros(count, dtype=torch.long, device=device)
+        self.recovered_cycle_armed = false.clone()
+        self.recovered_and_rerolled_count = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.awaiting_recovery_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.recovery_foot_release_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.recovery_upright_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.recovery_sagittal_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.recovery_rate_steps = torch.zeros(count, dtype=torch.long, device=device)
+        self.recovery_candidate_steps = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.max_recovery_candidate_streak = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.head_top_contact_count = torch.zeros(
+            count, dtype=torch.long, device=device
+        )
+        self.max_lateral_drift = zero.clone()
+        self.max_abs_course_lateral = self.initial_course_lateral.abs()
+        self.max_safe_band_excursion = torch.clamp(
+            self.max_abs_course_lateral - ROAD_SAFE_FULL_REWARD_HALF_WIDTH_M,
+            min=0.0,
+        )
+        self.max_road_boundary_overshoot = torch.clamp(
+            self.max_abs_course_lateral
+            - (ROAD_HALF_WIDTH_M + ROAD_BOUNDARY_TOLERANCE_M),
+            min=0.0,
+        )
+        self.road_exit_steps = torch.zeros(count, dtype=torch.long, device=device)
+        self.active_steps = torch.zeros(count, dtype=torch.long, device=device)
+        self.max_heading_deviation = zero.clone()
+        self.final_heading_deviation = zero.clone()
+        self.launch_ready = false.clone()
+        self.max_forward_speed = zero.clone()
+        self.peak_angular_speed = zero.clone()
+        self.peak_impact_acceleration = zero.clone()
+        self.nan_seen = false.clone()
+
+    def observe(
+        self,
+        *,
+        position_xy: torch.Tensor,
+        root_quat: torch.Tensor,
+        head_quat: torch.Tensor,
+        linear_velocity_w: torch.Tensor,
+        angular_velocity_b: torch.Tensor,
+        support: torch.Tensor,
+        foot_support: torch.Tensor,
+        head_contact: torch.Tensor,
+        root_height: torch.Tensor | None = None,
+        active: torch.Tensor | None = None,
+    ) -> None:
+        if active is None:
+            active = torch.ones_like(support)
+        finite = (
+            torch.isfinite(position_xy).all(dim=-1)
+            & torch.isfinite(root_quat).all(dim=-1)
+            & torch.isfinite(head_quat).all(dim=-1)
+            & torch.isfinite(linear_velocity_w).all(dim=-1)
+            & torch.isfinite(angular_velocity_b).all(dim=-1)
+        )
+        self.nan_seen |= active & ~finite
+        active = active & finite
+        position_xy = torch.nan_to_num(position_xy, nan=0.0)
+        root_quat = torch.nan_to_num(root_quat, nan=0.0)
+        head_quat = torch.nan_to_num(head_quat, nan=0.0)
+        linear_velocity_w = torch.nan_to_num(linear_velocity_w, nan=0.0)
+        angular_velocity_b = torch.nan_to_num(angular_velocity_b, nan=0.0)
+        if root_height is None:
+            root_height = torch.full_like(support, RECOVERY_MIN_HEIGHT_M)
+        root_height = torch.nan_to_num(root_height, nan=0.0)
+
+        lateral_z = lateral_axis_z(root_quat).abs()
+        flat_u = torch.clamp(
+            (FLAT_ZERO - lateral_z) / (FLAT_ZERO - FLAT_FULL), 0.0, 1.0
+        )
+        flatness = flat_u.square() * (3.0 - 2.0 * flat_u)
+        omega = angular_velocity_b[:, 1]
+        upright_cos = 1.0 - 2.0 * (root_quat[:, 1].square() + root_quat[:, 2].square())
+        displacement = position_xy - self.start_position
+        forward_position = (displacement * self.heading).sum(dim=-1)
+        lateral_displacement = (displacement * self.lateral).sum(dim=-1)
+        course_lateral = self.initial_course_lateral + lateral_displacement
+        current_heading = heading_from_quat(root_quat)
+        heading_dot = (current_heading * self.heading).sum(dim=-1).clamp(-1.0, 1.0)
+        heading_cross = (
+            current_heading[:, 0] * self.heading[:, 1]
+            - current_heading[:, 1] * self.heading[:, 0]
+        )
+        heading_error = torch.atan2(heading_cross, heading_dot)
+        heading_error_abs = heading_error.abs()
+        awaiting_before = self.awaiting_recovery
+        reposition_before = self.awaiting_reposition
+        self_right_before = self.self_righting
+        reposition_triggered = (
+            active
+            & ~self_right_before
+            & ~reposition_before
+            & (upright_cos > SELF_RIGHT_TILT_COS)
+            & (
+                (course_lateral.abs() > ROAD_REPOSITION_TRIGGER_M)
+                | (heading_error_abs > REPOSITION_HEADING_TRIGGER_RAD)
+            )
+        )
+        waiting_before = awaiting_before | reposition_before | self_right_before
+        awaiting_active = active & awaiting_before
+        launch_ready = (
+            foot_support
+            & ~head_contact
+            & (upright_cos >= RECOVERY_UPRIGHT_COS)
+            & (lateral_z <= RECOVERY_LATERAL_Z)
+            & (root_height >= RECOVERY_MIN_HEIGHT_M)
+            & (omega.abs() <= RECOVERY_MAX_FORWARD_RATE)
+        )
+        foot_release = awaiting_active & foot_support & ~head_contact
+        upright_ready = foot_release & (upright_cos >= RECOVERY_UPRIGHT_COS)
+        sagittal_ready = upright_ready & (lateral_z <= RECOVERY_LATERAL_Z)
+        height_ready = sagittal_ready & (root_height >= RECOVERY_MIN_HEIGHT_M)
+        rate_ready = height_ready & (omega.abs() <= RECOVERY_MAX_FORWARD_RATE)
+        recovery_candidate = (
+            rate_ready
+            & (course_lateral.abs() <= ROAD_REPOSITION_REARM_M)
+            & (heading_error_abs <= REPOSITION_HEADING_REARM_RAD)
+        )
+        self_right_candidate = active & self_right_before & launch_ready
+        old_self_right_hold = self.self_right_hold_steps
+        self_right_hold = torch.where(
+            self_right_candidate,
+            old_self_right_hold + 1,
+            torch.zeros_like(old_self_right_hold),
+        )
+        self_righted_now = (
+            self_right_candidate
+            & (old_self_right_hold < RECOVERY_HOLD_STEPS)
+            & (self_right_hold >= RECOVERY_HOLD_STEPS)
+        )
+        regular_transition_candidate = (
+            active
+            & ~self_right_before
+            & (awaiting_before | reposition_before)
+            & (course_lateral.abs() <= ROAD_REPOSITION_REARM_M)
+            & (heading_error_abs <= REPOSITION_HEADING_REARM_RAD)
+            & launch_ready
+        )
+        self.awaiting_recovery_steps += awaiting_active.to(torch.long)
+        self.recovery_foot_release_steps += foot_release.to(torch.long)
+        self.recovery_upright_steps += upright_ready.to(torch.long)
+        self.recovery_sagittal_steps += sagittal_ready.to(torch.long)
+        self.recovery_rate_steps += rate_ready.to(torch.long)
+        self.recovery_candidate_steps += recovery_candidate.to(torch.long)
+        old_recovery_hold = self.recovery_hold_steps
+        recovery_hold = torch.where(
+            regular_transition_candidate,
+            old_recovery_hold + 1,
+            torch.zeros_like(old_recovery_hold),
+        )
+        self.max_recovery_candidate_streak = torch.maximum(
+            self.max_recovery_candidate_streak,
+            recovery_hold,
+        )
+        regular_transitioned = (
+            regular_transition_candidate
+            & (old_recovery_hold < REARM_HOLD_STEPS)
+            & (recovery_hold >= REARM_HOLD_STEPS)
+        )
+        self_right_rearmed = (
+            self_righted_now
+            & (course_lateral.abs() <= ROAD_REPOSITION_REARM_M)
+            & (heading_error_abs <= REPOSITION_HEADING_REARM_RAD)
+        )
+        transitioned = regular_transitioned | self_right_rearmed
+        recovered = transitioned & awaiting_before
+        repositioned = transitioned & reposition_before
+        recovery_latency = torch.where(
+            active & awaiting_before,
+            self.recovery_latency_steps + 1,
+            self.recovery_latency_steps,
+        )
+        self.recovery_latency_total_steps += torch.where(
+            recovered,
+            recovery_latency,
+            torch.zeros_like(recovery_latency),
+        )
+        self.recovery_count += recovered.to(torch.long)
+        reposition_latency = torch.where(
+            active & reposition_before,
+            self.reposition_latency_steps + 1,
+            self.reposition_latency_steps,
+        )
+        self.reposition_latency_total_steps += torch.where(
+            repositioned,
+            reposition_latency,
+            torch.zeros_like(reposition_latency),
+        )
+        self.reposition_count += repositioned.to(torch.long)
+
+        locked_before = waiting_before | reposition_triggered
+        valid_rotation = support.float() * flatness
+        rotation_eligible = active & ~locked_before & ~transitioned
+        signed_delta = omega * self.step_dt * valid_rotation * rotation_eligible.float()
+        old_accum = torch.where(
+            locked_before | transitioned,
+            torch.zeros_like(self.accum),
+            self.accum,
+        )
+        candidate_accum = torch.clamp(old_accum + signed_delta, min=0.0)
+        new_accum = torch.where(active, candidate_accum, self.accum)
+        old_phase_frontier = self.phase_frontier
+        new_phase_frontier = torch.where(
+            active,
+            torch.maximum(old_phase_frontier, new_accum),
+            old_phase_frontier,
+        )
+        progress_delta = torch.clamp(
+            new_phase_frontier - old_phase_frontier,
+            min=0.0,
+        )
+        stalled_fall_candidate = (
+            active
+            & ~waiting_before
+            & ~reposition_triggered
+            & support
+            & (upright_cos <= SELF_RIGHT_TILT_COS)
+            & (omega.abs() < SELF_RIGHT_STALL_RATE)
+            & (progress_delta <= 1.0e-8)
+        )
+        old_stall_steps = self.self_right_stall_steps
+        stall_steps = torch.where(
+            stalled_fall_candidate,
+            old_stall_steps + 1,
+            torch.zeros_like(old_stall_steps),
+        )
+        stall_threshold_steps = max(
+            1,
+            round(SELF_RIGHT_STALL_SECONDS / self.step_dt),
+        )
+        stalled_fall_now = (
+            stalled_fall_candidate
+            & (old_stall_steps < stall_threshold_steps)
+            & (stall_steps >= stall_threshold_steps)
+        )
+
+        in_head_window = (new_accum > HEAD_WINDOW[0]) & (new_accum < HEAD_WINDOW[1])
+        top_contact = (
+            active & support & head_contact & in_head_window & head_top_down(head_quat)
+        )
+        self.head_top_contact_count += (top_contact & ~self.head_latch).to(torch.long)
+        old_head_latch = torch.where(
+            transitioned | reposition_triggered,
+            torch.zeros_like(self.head_latch),
+            self.head_latch,
+        )
+        new_head_latch = old_head_latch | (top_contact & ~locked_before)
+        orientation_violation = (
+            active
+            & ~locked_before
+            & support
+            & (omega >= MIN_FORWARD_RATE)
+            & (lateral_z > FLAT_ZERO)
+        )
+        corridor_violation = (
+            active
+            & ~locked_before
+            & (course_lateral.abs() > ROAD_HALF_WIDTH_M + ROAD_BOUNDARY_TOLERANCE_M)
+        )
+        heading_violation = (
+            active
+            & ~locked_before
+            & (heading_error_abs > REPOSITION_HEADING_TRIGGER_RAD)
+        )
+        lateral_violation = (
+            orientation_violation | corridor_violation | heading_violation
+        )
+        old_lateral_invalid = torch.where(
+            transitioned | reposition_triggered,
+            torch.zeros_like(self.lateral_invalid),
+            self.lateral_invalid,
+        )
+        new_lateral_invalid = old_lateral_invalid | lateral_violation
+
+        completed = active & ~locked_before & (new_accum >= TARGET_ANGLE)
+        valid = completed & new_head_latch & ~new_lateral_invalid
+        invalid = completed & ~valid
+        completion_needs_self_right = valid & ~launch_ready
+        begin_self_right = (
+            (completion_needs_self_right | stalled_fall_now) & ~self_right_before
+        )
+        post_self_right_reposition = self_righted_now & (
+            (course_lateral.abs() > ROAD_REPOSITION_REARM_M)
+            | (heading_error_abs > REPOSITION_HEADING_REARM_RAD)
+        )
+        completion_reposition = (
+            valid
+            & launch_ready
+            & (
+                (course_lateral.abs() > ROAD_REPOSITION_REARM_M)
+                | (heading_error_abs > REPOSITION_HEADING_REARM_RAD)
+            )
+        )
+        reposition_started = (
+            reposition_triggered
+            | post_self_right_reposition
+            | completion_reposition
+        )
+        credited_distance = microduck_mdp._roll_sprint_bounded_cycle_credit(
+            new_accum,
+            forward_position,
+            self.cycle_start_forward,
+            self.forward_frontier,
+        )
+        self.valid_count += valid.to(torch.long)
+        self.invalid_count += invalid.to(torch.long)
+        recovered_rerolled = valid & self.recovered_cycle_armed
+        self.recovered_and_rerolled_count += recovered_rerolled.to(torch.long)
+        new_linked_distance = self.linked_distance + torch.where(
+            valid, credited_distance, torch.zeros_like(credited_distance)
+        )
+        reached_target_now = (
+            active
+            & torch.isnan(self.target_reach_time_s)
+            & (new_linked_distance >= TARGET_DISTANCE_M)
+        )
+        self.target_reach_time_s = torch.where(
+            reached_target_now,
+            (self.active_steps + 1).to(new_linked_distance.dtype) * self.step_dt,
+            self.target_reach_time_s,
+        )
+        self.linked_distance = new_linked_distance
+        self.forward_frontier = torch.where(
+            valid,
+            torch.maximum(self.forward_frontier, forward_position),
+            self.forward_frontier,
+        )
+        state_reset = (
+            completed | transitioned | reposition_started | begin_self_right
+        )
+        self.cycle_start_forward = torch.where(
+            invalid | transitioned,
+            forward_position,
+            self.cycle_start_forward,
+        )
+        self.accum = torch.where(
+            state_reset,
+            torch.zeros_like(new_accum),
+            new_accum,
+        )
+        self.phase_frontier = torch.where(
+            state_reset,
+            torch.zeros_like(new_phase_frontier),
+            new_phase_frontier,
+        )
+        self.head_latch = torch.where(
+            state_reset,
+            torch.zeros_like(new_head_latch),
+            new_head_latch,
+        )
+        self.lateral_invalid = torch.where(
+            state_reset,
+            torch.zeros_like(new_lateral_invalid),
+            new_lateral_invalid,
+        )
+        self.awaiting_recovery = torch.where(
+            valid | stalled_fall_now,
+            torch.ones_like(awaiting_before),
+            torch.where(
+                transitioned,
+                torch.zeros_like(awaiting_before),
+                awaiting_before,
+            ),
+        )
+        self.awaiting_reposition = torch.where(
+            reposition_started,
+            torch.ones_like(reposition_before),
+            torch.where(
+                transitioned,
+                torch.zeros_like(reposition_before),
+                reposition_before,
+            ),
+        )
+        self.recovered_cycle_armed = torch.where(
+            valid | stalled_fall_now,
+            torch.zeros_like(self.recovered_cycle_armed),
+            torch.where(
+                recovered,
+                torch.ones_like(self.recovered_cycle_armed),
+                self.recovered_cycle_armed,
+            ),
+        )
+        next_self_righting = (
+            (self_right_before | begin_self_right) & ~self_righted_now
+        )
+        self.self_righting = torch.where(
+            active,
+            next_self_righting,
+            self.self_righting,
+        )
+        self.self_right_stall_steps = torch.where(
+            active,
+            torch.where(
+                begin_self_right,
+                torch.zeros_like(stall_steps),
+                stall_steps,
+            ),
+            self.self_right_stall_steps,
+        )
+        updated_self_right_hold = torch.where(
+            active,
+            self_right_hold,
+            self.self_right_hold_steps,
+        )
+        self.self_right_hold_steps = torch.where(
+            begin_self_right | self_righted_now,
+            torch.zeros_like(updated_self_right_hold),
+            updated_self_right_hold,
+        )
+        reset_recovery_clock = transitioned | valid | stalled_fall_now
+        self.recovery_hold_steps = torch.where(
+            reset_recovery_clock,
+            torch.zeros_like(recovery_hold),
+            recovery_hold,
+        )
+        self.recovery_latency_steps = torch.where(
+            reset_recovery_clock,
+            torch.zeros_like(recovery_latency),
+            recovery_latency,
+        )
+        self.reposition_latency_steps = torch.where(
+            transitioned | reposition_started,
+            torch.zeros_like(reposition_latency),
+            reposition_latency,
+        )
+
+        lateral_drift = lateral_displacement.abs()
+        self.max_lateral_drift = torch.where(
+            active,
+            torch.maximum(self.max_lateral_drift, lateral_drift),
+            self.max_lateral_drift,
+        )
+        abs_course_lateral = course_lateral.abs()
+        road_overshoot = torch.clamp(
+            abs_course_lateral - (ROAD_HALF_WIDTH_M + ROAD_BOUNDARY_TOLERANCE_M),
+            min=0.0,
+        )
+        safe_band_excursion = torch.clamp(
+            abs_course_lateral - ROAD_SAFE_FULL_REWARD_HALF_WIDTH_M,
+            min=0.0,
+        )
+        self.max_abs_course_lateral = torch.where(
+            active,
+            torch.maximum(self.max_abs_course_lateral, abs_course_lateral),
+            self.max_abs_course_lateral,
+        )
+        self.max_safe_band_excursion = torch.where(
+            active,
+            torch.maximum(self.max_safe_band_excursion, safe_band_excursion),
+            self.max_safe_band_excursion,
+        )
+        self.max_road_boundary_overshoot = torch.where(
+            active,
+            torch.maximum(self.max_road_boundary_overshoot, road_overshoot),
+            self.max_road_boundary_overshoot,
+        )
+        self.road_exit_steps += (active & (road_overshoot > 0.0)).to(torch.long)
+        self.active_steps += active.to(torch.long)
+        self.final_course_lateral = torch.where(
+            active, course_lateral, self.final_course_lateral
+        )
+        self.final_heading_deviation = torch.where(
+            active, heading_error_abs, self.final_heading_deviation
+        )
+        self.launch_ready = torch.where(active, launch_ready, self.launch_ready)
+        forward_speed = (linear_velocity_w[:, :2] * self.heading).sum(dim=-1)
+        self.max_forward_speed = torch.where(
+            active,
+            torch.maximum(self.max_forward_speed, forward_speed.clamp_min(0.0)),
+            self.max_forward_speed,
+        )
+        heading_deviation = heading_error_abs
+        self.max_heading_deviation = torch.where(
+            active,
+            torch.maximum(self.max_heading_deviation, heading_deviation),
+            self.max_heading_deviation,
+        )
+        self.peak_angular_speed = torch.where(
+            active,
+            torch.maximum(self.peak_angular_speed, omega.abs()),
+            self.peak_angular_speed,
+        )
+        vertical_acceleration = (
+            linear_velocity_w[:, 2] - self.previous_vertical_velocity
+        ) / self.step_dt
+        self.peak_impact_acceleration = torch.where(
+            active,
+            torch.maximum(self.peak_impact_acceleration, vertical_acceleration.abs()),
+            self.peak_impact_acceleration,
+        )
+        self.previous_vertical_velocity = torch.where(
+            active,
+            linear_velocity_w[:, 2],
+            self.previous_vertical_velocity,
+        )
+        self.last_position = torch.where(
+            active.unsqueeze(-1), position_xy, self.last_position
+        )
+
+    def summary(self, duration_s: float) -> dict[str, object]:
+        displacement = self.last_position - self.start_position
+        raw_forward = (displacement * self.heading).sum(dim=-1)
+        uncredited = torch.clamp(
+            torch.clamp(raw_forward, min=0.0) - self.linked_distance,
+            min=0.0,
+        )
+        repeated = self.recovered_and_rerolled_count >= 1
+        total_recoveries = int(self.recovery_count.sum().item())
+        total_repositions = int(self.reposition_count.sum().item())
+        awaiting_steps = int(self.awaiting_recovery_steps.sum().item())
+        foot_release_steps = int(self.recovery_foot_release_steps.sum().item())
+        upright_steps = int(self.recovery_upright_steps.sum().item())
+        sagittal_steps = int(self.recovery_sagittal_steps.sum().item())
+        rate_steps = int(self.recovery_rate_steps.sum().item())
+        mean_recovery_latency = (
+            float(self.recovery_latency_total_steps.sum().item())
+            * self.step_dt
+            / max(total_recoveries, 1)
+        )
+        mean_reposition_latency = (
+            float(self.reposition_latency_total_steps.sum().item())
+            * self.step_dt
+            / max(total_repositions, 1)
+        )
+        max_heading_deviation_deg = torch.rad2deg(self.max_heading_deviation)
+        final_heading_deviation_deg = torch.rad2deg(self.final_heading_deviation)
+        road_corridor_pass = (
+            (self.max_road_boundary_overshoot <= 0.0)
+            & (max_heading_deviation_deg <= ROAD_MAX_YAW_DEVIATION_DEG)
+            & (self.recovered_and_rerolled_count >= 1)
+            & ~self.nan_seen
+        )
+        target_distance_pass = self.linked_distance >= TARGET_DISTANCE_M
+        target_reach_time_s = self.target_reach_time_s
+        reached_times = target_reach_time_s[torch.isfinite(target_reach_time_s)]
+        mean_target_reach_time_s = (
+            float(reached_times.mean().item()) if reached_times.numel() else None
+        )
+        slowest_target_reach_time_s = (
+            float(reached_times.max().item()) if reached_times.numel() else None
+        )
+        final_on_road = (
+            self.final_course_lateral.abs()
+            <= ROAD_HALF_WIDTH_M + ROAD_BOUNDARY_TOLERANCE_M
+        )
+        final_standing_on_road = (
+            self.launch_ready
+            & final_on_road
+            & (final_heading_deviation_deg <= ROAD_MAX_YAW_DEVIATION_DEG)
+            & ~self.nan_seen
+        )
+        standing_on_road_target_pass = final_standing_on_road & target_distance_pass
+        ranking = sorted(
+            (
+                index
+                for index in range(len(raw_forward))
+                if bool(final_standing_on_road[index].item())
+            ),
+            key=lambda index: (
+                -float(self.linked_distance[index].item()),
+                -float(raw_forward[index].item()),
+                index,
+            ),
+        )
+        rank_by_robot: list[int | None] = [None] * len(raw_forward)
+        for rank, index in enumerate(ranking, start=1):
+            rank_by_robot[index] = rank
+        winner_index = ranking[0] if ranking else None
+        per_robot = [
+            {
+                "robot_index": index,
+                "net_forward_distance_m": float(raw_forward[index].item()),
+                "credited_forward_frontier_m": float(
+                    self.linked_distance[index].item()
+                ),
+                "maximum_lateral_drift_m": float(self.max_lateral_drift[index].item()),
+                "initial_course_lateral_m": float(
+                    self.initial_course_lateral[index].item()
+                ),
+                "final_course_lateral_m": float(
+                    self.final_course_lateral[index].item()
+                ),
+                "maximum_abs_course_lateral_m": float(
+                    self.max_abs_course_lateral[index].item()
+                ),
+                "minimum_road_margin_m": float(
+                    (ROAD_HALF_WIDTH_M - self.max_abs_course_lateral[index]).item()
+                ),
+                "maximum_safe_band_excursion_m": float(
+                    self.max_safe_band_excursion[index].item()
+                ),
+                "maximum_road_boundary_overshoot_m": float(
+                    self.max_road_boundary_overshoot[index].item()
+                ),
+                "road_exit_steps": int(self.road_exit_steps[index].item()),
+                "road_exit_fraction": float(
+                    (
+                        self.road_exit_steps[index].float()
+                        / self.active_steps[index].clamp_min(1).float()
+                    ).item()
+                ),
+                "maximum_heading_yaw_deviation_deg": float(
+                    max_heading_deviation_deg[index].item()
+                ),
+                "final_heading_yaw_deviation_deg": float(
+                    final_heading_deviation_deg[index].item()
+                ),
+                "valid_roll_recover_reroll_count": int(
+                    self.recovered_and_rerolled_count[index].item()
+                ),
+                "lane_reposition_count": int(self.reposition_count[index].item()),
+                "maximum_forward_speed_mps": float(
+                    self.max_forward_speed[index].item()
+                ),
+                "mean_net_forward_speed_mps": float(
+                    (raw_forward[index] / duration_s).item()
+                ),
+                "target_10m_pass": bool(target_distance_pass[index].item()),
+                "time_to_valid_10m_s": (
+                    float(target_reach_time_s[index].item())
+                    if torch.isfinite(target_reach_time_s[index])
+                    else None
+                ),
+                "road_corridor_pass": bool(road_corridor_pass[index].item()),
+                "final_launch_ready": bool(self.launch_ready[index].item()),
+                "final_standing_on_road": bool(final_standing_on_road[index].item()),
+                "standing_on_road_finish_pass": bool(
+                    standing_on_road_target_pass[index].item()
+                ),
+                "standing_on_road_rank": rank_by_robot[index],
+            }
+            for index in range(len(raw_forward))
+        ]
+        return {
+            "mean_raw_forward_distance_m": float(raw_forward.mean().item()),
+            "best_raw_forward_distance_m": float(raw_forward.max().item()),
+            "mean_credited_forward_frontier_m": float(
+                self.linked_distance.mean().item()
+            ),
+            "best_credited_forward_frontier_m": float(
+                self.linked_distance.max().item()
+            ),
+            "mean_roll_linked_distance_m": float(self.linked_distance.mean().item()),
+            "best_roll_linked_distance_m": float(self.linked_distance.max().item()),
+            "mean_roll_linked_speed_mps": float(
+                (self.linked_distance / duration_s).mean().item()
+            ),
+            "mean_valid_roll_count": float(self.valid_count.float().mean().item()),
+            "total_valid_roll_count": int(self.valid_count.sum().item()),
+            "mean_invalid_roll_count": float(self.invalid_count.float().mean().item()),
+            "total_invalid_roll_count": int(self.invalid_count.sum().item()),
+            "mean_recovery_count": float(self.recovery_count.float().mean().item()),
+            "total_recovery_count": total_recoveries,
+            "mean_recovered_and_rerolled_count": float(
+                self.recovered_and_rerolled_count.float().mean().item()
+            ),
+            "total_recovered_and_rerolled_count": int(
+                self.recovered_and_rerolled_count.sum().item()
+            ),
+            "mean_recovery_latency_s": mean_recovery_latency,
+            "mean_lane_reposition_count": float(
+                self.reposition_count.float().mean().item()
+            ),
+            "total_lane_reposition_count": total_repositions,
+            "mean_lane_reposition_latency_s": mean_reposition_latency,
+            "recovery_gate_diagnostics": {
+                "awaiting_steps": awaiting_steps,
+                "foot_supported_head_released_steps": foot_release_steps,
+                "upright_ready_steps": upright_steps,
+                "sagittal_ready_steps": sagittal_steps,
+                "rate_ready_steps": rate_steps,
+                "candidate_steps": int(self.recovery_candidate_steps.sum().item()),
+                "max_consecutive_candidate_steps": int(
+                    self.max_recovery_candidate_streak.max().item()
+                ),
+                "foot_release_fraction": foot_release_steps / max(awaiting_steps, 1),
+                "upright_given_foot_release_fraction": upright_steps
+                / max(foot_release_steps, 1),
+                "sagittal_given_upright_fraction": sagittal_steps
+                / max(upright_steps, 1),
+                "rate_given_sagittal_fraction": rate_steps / max(sagittal_steps, 1),
+            },
+            "repeated_roll_rate": float(repeated.float().mean().item()),
+            "head_top_contact_count": int(self.head_top_contact_count.sum().item()),
+            "p95_lateral_drift_m": float(
+                torch.quantile(self.max_lateral_drift, 0.95).item()
+            ),
+            "maximum_lateral_drift_m": float(self.max_lateral_drift.max().item()),
+            "road_half_width_m": ROAD_HALF_WIDTH_M,
+            "road_safe_full_reward_half_width_m": (ROAD_SAFE_FULL_REWARD_HALF_WIDTH_M),
+            "road_reposition_trigger_m": ROAD_REPOSITION_TRIGGER_M,
+            "road_reposition_rearm_m": ROAD_REPOSITION_REARM_M,
+            "p95_maximum_abs_course_lateral_m": float(
+                torch.quantile(self.max_abs_course_lateral, 0.95).item()
+            ),
+            "maximum_abs_course_lateral_m": float(
+                self.max_abs_course_lateral.max().item()
+            ),
+            "maximum_safe_band_excursion_m": float(
+                self.max_safe_band_excursion.max().item()
+            ),
+            "maximum_road_boundary_overshoot_m": float(
+                self.max_road_boundary_overshoot.max().item()
+            ),
+            "road_exit_env_count": int(
+                (self.max_road_boundary_overshoot > 0.0).sum().item()
+            ),
+            "total_road_exit_steps": int(self.road_exit_steps.sum().item()),
+            "maximum_heading_yaw_deviation_deg": float(
+                max_heading_deviation_deg.max().item()
+            ),
+            "maximum_forward_speed_mps": float(self.max_forward_speed.max().item()),
+            "target_distance_m": TARGET_DISTANCE_M,
+            "target_distance_reach_rate": float(
+                target_distance_pass.float().mean().item()
+            ),
+            "target_distance_reach_count": int(target_distance_pass.sum().item()),
+            "mean_time_to_valid_10m_s": mean_target_reach_time_s,
+            "slowest_time_to_valid_10m_s": slowest_target_reach_time_s,
+            "four_robot_batch_target_10m_pass": bool(
+                len(per_robot) == 4 and target_distance_pass.all().item()
+            ),
+            "standing_on_road_target_reach_rate": float(
+                standing_on_road_target_pass.float().mean().item()
+            ),
+            "standing_on_road_winner_robot_index": winner_index,
+            "per_robot": per_robot,
+            "four_robot_batch_road_corridor_pass": bool(
+                len(per_robot) == 4 and road_corridor_pass.all().item()
+            ),
+            "mean_uncredited_positive_displacement_m": float(uncredited.mean().item()),
+            "p95_peak_angular_speed_rad_s": float(
+                torch.quantile(self.peak_angular_speed, 0.95).item()
+            ),
+            "maximum_angular_speed_rad_s": float(self.peak_angular_speed.max().item()),
+            "p95_peak_impact_acceleration_m_s2": float(
+                torch.quantile(self.peak_impact_acceleration, 0.95).item()
+            ),
+            "maximum_impact_acceleration_m_s2": float(
+                self.peak_impact_acceleration.max().item()
+            ),
+            "nan_env_count": int(self.nan_seen.sum().item()),
+        }
+
+
+def absolute_race_goal_pass(report: dict[str, object]) -> bool:
+    """Return whether the long-term 10 m race target is fully satisfied."""
+
+    return (
+        float(report["repeated_roll_rate"]) >= PROMOTION["repeated_roll_rate"]
+        and float(report["mean_valid_roll_count"]) >= PROMOTION["mean_valid_roll_count"]
+        and float(report["mean_recovered_and_rerolled_count"])
+        >= PROMOTION["mean_recovered_and_rerolled_count"]
+        and float(report["mean_roll_linked_distance_m"])
+        >= PROMOTION["mean_roll_linked_distance_m"]
+        and float(report["target_distance_reach_rate"])
+        >= PROMOTION["target_distance_reach_rate"]
+        and float(report["standing_on_road_target_reach_rate"])
+        >= PROMOTION["standing_on_road_target_reach_rate"]
+        and float(report["maximum_road_boundary_overshoot_m"])
+        <= PROMOTION["maximum_road_boundary_overshoot_m"]
+        and float(report["mean_uncredited_positive_displacement_m"])
+        <= PROMOTION["mean_uncredited_positive_displacement_m"]
+        and int(report["road_exit_env_count"]) == 0
+        and int(report["nan_env_count"]) == 0
+        and int(report["out_of_bounds_env_count"]) == 0
+    )
+
+
+def _p95(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return float(torch.quantile(torch.tensor(values, dtype=torch.float64), 0.95).item())
+
+
+def summarize_recovery_battery(
+    cases: list[dict[str, object]],
+    *,
+    race_report: dict[str, object],
+    parent_frontier_m: float | None,
+) -> dict[str, object]:
+    """Aggregate deterministic recovery cases into acceptance-oriented metrics."""
+
+    def summarize(selected: list[dict[str, object]]) -> dict[str, object]:
+        attempts = len(selected)
+        successes = sum(bool(case["success"]) for case in selected)
+        latencies = [
+            float(case["recovery_latency_s"])
+            for case in selected
+            if case["recovery_latency_s"] is not None
+        ]
+        rerolls = sum(bool(case["self_right_then_reroll"]) for case in selected)
+        return {
+            "attempts": attempts,
+            "successes": successes,
+            "success_rate": successes / max(attempts, 1),
+            "recovery_latency_mean_s": (
+                sum(latencies) / len(latencies) if latencies else None
+            ),
+            "recovery_latency_p95_s": _p95(latencies),
+            "self_right_then_reroll_count": rerolls,
+            "frontier_after_recovery_m": sum(
+                float(case["frontier_after_recovery_m"]) for case in selected
+            ),
+        }
+
+    by_orientation: dict[str, dict[str, object]] = {}
+    for orientation in RECOVERY_ORIENTATIONS:
+        orientation_cases = [
+            case for case in cases if case["orientation"] == orientation
+        ]
+        orientation_report = summarize(orientation_cases)
+        p95 = orientation_report["recovery_latency_p95_s"]
+        orientation_report["pass"] = bool(
+            float(orientation_report["success_rate"]) >= RECOVERY_MIN_ORIENTATION_RATE
+            and p95 is not None
+            and float(p95) <= RECOVERY_MAX_P95_LATENCY_S
+            and not any(bool(case["nan_seen"]) for case in orientation_cases)
+            and not any(bool(case["out_of_bounds"]) for case in orientation_cases)
+            and not any(int(case["road_exit_steps"]) > 0 for case in orientation_cases)
+        )
+        by_orientation[orientation] = orientation_report
+
+    aggregate = summarize(cases)
+    successes = int(aggregate["successes"])
+    rerolls = int(aggregate["self_right_then_reroll_count"])
+    reroll_rate = rerolls / max(successes, 1)
+    aggregate_p95 = aggregate["recovery_latency_p95_s"]
+    lane_reposition_count = sum(int(case["lane_reposition_count"]) for case in cases)
+    reposition_latencies = [
+        float(case["lane_reposition_latency_s"])
+        for case in cases
+        if case["lane_reposition_latency_s"] is not None
+    ]
+    recovery_drift = [float(case["maximum_lateral_drift_m"]) for case in cases]
+    recovery_p95_drift = _p95(recovery_drift) or 0.0
+    recovery_overshoots = [
+        float(case["maximum_road_boundary_overshoot_m"]) for case in cases
+    ]
+    recovery_max_overshoot = max(recovery_overshoots, default=0.0)
+    recovery_road_exit_case_count = sum(
+        int(case["road_exit_steps"]) > 0 for case in cases
+    )
+    race_frontier = float(race_report["mean_credited_forward_frontier_m"])
+    if parent_frontier_m is None or parent_frontier_m <= 0.0:
+        parent_ratio = None
+        parent_delta = None
+        race_frontier_retained = True
+        race_frontier_improved = True
+    else:
+        parent_ratio = race_frontier / parent_frontier_m
+        parent_delta = race_frontier - parent_frontier_m
+        race_frontier_retained = parent_ratio >= 0.90
+        race_frontier_improved = parent_delta > 0.0
+    nan_count = int(race_report["nan_env_count"]) + sum(
+        bool(case["nan_seen"]) for case in cases
+    )
+    out_of_bounds_count = int(race_report["out_of_bounds_env_count"]) + sum(
+        bool(case["out_of_bounds"]) for case in cases
+    )
+    overall_pass = bool(
+        float(aggregate["success_rate"]) >= RECOVERY_MIN_OVERALL_RATE
+        and aggregate_p95 is not None
+        and float(aggregate_p95) <= RECOVERY_MAX_P95_LATENCY_S
+        and reroll_rate >= RECOVERY_MIN_REROLL_RATE
+        and all(bool(report["pass"]) for report in by_orientation.values())
+        and race_frontier_improved
+        and bool(race_report["four_robot_batch_road_corridor_pass"])
+        and recovery_road_exit_case_count == 0
+        and recovery_max_overshoot <= 0.0
+        and nan_count == 0
+        and out_of_bounds_count == 0
+    )
+    return {
+        "total_attempts": int(aggregate["attempts"]),
+        "total_successes": successes,
+        "success_rate": aggregate["success_rate"],
+        "recovery_latency_mean_s": aggregate["recovery_latency_mean_s"],
+        "recovery_latency_p95_s": aggregate_p95,
+        "self_right_then_reroll_count": rerolls,
+        "self_right_then_reroll_rate": reroll_rate,
+        "frontier_after_recovery_m": aggregate["frontier_after_recovery_m"],
+        "lane_reposition_count": lane_reposition_count,
+        "lane_reposition_latency_mean_s": (
+            sum(reposition_latencies) / len(reposition_latencies)
+            if reposition_latencies
+            else None
+        ),
+        "p95_lateral_drift_m": recovery_p95_drift,
+        "maximum_road_boundary_overshoot_m": recovery_max_overshoot,
+        "road_exit_case_count": recovery_road_exit_case_count,
+        "nan_case_count": nan_count - int(race_report["nan_env_count"]),
+        "out_of_bounds_case_count": out_of_bounds_count
+        - int(race_report["out_of_bounds_env_count"]),
+        "parent_frontier_m": parent_frontier_m,
+        "race_frontier_ratio_to_parent": parent_ratio,
+        "race_frontier_delta_to_parent_m": parent_delta,
+        "race_frontier_at_least_90pct_parent": race_frontier_retained,
+        "race_frontier_improved_over_parent": race_frontier_improved,
+        "by_orientation": by_orientation,
+        "cases": cases,
+        "overall_pass": overall_pass,
+    }
+
+
+def _run_recovery_battery(
+    *,
+    base_env: ManagerBasedRlEnv,
+    env: RslRlVecEnvWrapper,
+    policy,
+    robot,
+    duration_s: float,
+) -> list[dict[str, object]]:
+    """Run four deterministic orientation starts for each of four seeds."""
+    cases: list[dict[str, object]] = []
+    steps = round(duration_s / base_env.step_dt)
+    for seed in RECOVERY_SEEDS:
+        # Stepping constructs actuator delay buffers while inference mode is
+        # active, so subsequent resets must mutate those buffers in the same
+        # mode.  Keeping the deterministic recovery arrangement in the scope
+        # also avoids mixing inference and normal tensors between cases.
+        initial_course_lateral = _reset_and_arrange_recovery_case(
+            base_env=base_env,
+            env=env,
+            seed=seed,
+        )
+        alive = torch.ones(4, dtype=torch.bool, device=base_env.device)
+        nan_seen = torch.zeros_like(alive)
+        out_of_bounds = torch.zeros_like(alive)
+        first_latency = torch.full(
+            (4,), float("nan"), device=base_env.device, dtype=torch.float32
+        )
+        max_lateral_drift = torch.zeros(4, device=base_env.device)
+        max_abs_course_lateral = initial_course_lateral.abs().clone()
+        max_road_boundary_overshoot = torch.zeros(4, device=base_env.device)
+        road_exit_steps = torch.zeros(4, dtype=torch.long, device=base_env.device)
+        final_course_lateral = initial_course_lateral.clone()
+        for step in range(steps):
+            with torch.inference_mode():
+                observations = env.get_observations()
+                actions = policy(observations)
+                _, _, dones, _ = env.step(actions)
+            finite = (
+                torch.isfinite(robot.data.root_link_pos_w).all(dim=-1)
+                & torch.isfinite(robot.data.root_link_quat_w).all(dim=-1)
+                & torch.isfinite(robot.data.root_link_lin_vel_w).all(dim=-1)
+                & torch.isfinite(robot.data.root_link_ang_vel_b).all(dim=-1)
+            )
+            nan_seen |= alive & ~finite
+            max_lateral_drift = torch.maximum(
+                max_lateral_drift,
+                torch.nan_to_num(
+                    base_env._roll_sprint_lateral_displacement.abs(),
+                    nan=float("inf"),
+                ),
+            )
+            course_lateral = initial_course_lateral + torch.nan_to_num(
+                base_env._roll_sprint_lateral_displacement,
+                nan=float("inf"),
+            )
+            abs_course_lateral = course_lateral.abs()
+            road_overshoot = torch.clamp(
+                abs_course_lateral - (ROAD_HALF_WIDTH_M + ROAD_BOUNDARY_TOLERANCE_M),
+                min=0.0,
+            )
+            max_abs_course_lateral = torch.maximum(
+                max_abs_course_lateral, abs_course_lateral
+            )
+            max_road_boundary_overshoot = torch.maximum(
+                max_road_boundary_overshoot, road_overshoot
+            )
+            road_exit_steps += (alive & (road_overshoot > 0.0)).to(torch.long)
+            final_course_lateral = torch.where(
+                alive, course_lateral, final_course_lateral
+            )
+            self_righted = base_env._roll_sprint_self_righted_now & alive
+            first_edge = self_righted & torch.isnan(first_latency)
+            first_latency = torch.where(
+                first_edge,
+                torch.full_like(first_latency, (step + 1) * base_env.step_dt),
+                first_latency,
+            )
+            out_of_bounds |= alive & base_env.termination_manager.get_term(
+                "out_of_terrain_bounds"
+            )
+            alive &= ~dones.bool()
+            if not bool(alive.any()):
+                break
+
+        successes = ~torch.isnan(first_latency)
+        rerolled = base_env._roll_sprint_recovered_and_rerolled > 0
+        frontier_after = base_env._roll_sprint_frontier_after_self_right
+        reposition_count = base_env._roll_sprint_reposition_count
+        reposition_latency_total = (
+            base_env._roll_sprint_reposition_latency_total_steps * base_env.step_dt
+        )
+        for index, orientation in enumerate(RECOVERY_ORIENTATIONS):
+            reposition_events = int(reposition_count[index].item())
+            cases.append(
+                {
+                    "orientation": orientation,
+                    "seed": seed,
+                    "success": bool(successes[index].item()),
+                    "recovery_latency_s": (
+                        float(first_latency[index].item())
+                        if bool(successes[index].item())
+                        else None
+                    ),
+                    "self_right_then_reroll": bool(rerolled[index].item()),
+                    "frontier_after_recovery_m": float(frontier_after[index].item()),
+                    "lane_reposition_count": reposition_events,
+                    "lane_reposition_latency_s": (
+                        float(reposition_latency_total[index].item())
+                        / reposition_events
+                        if reposition_events
+                        else None
+                    ),
+                    "maximum_lateral_drift_m": float(max_lateral_drift[index].item()),
+                    "initial_course_lateral_m": float(
+                        initial_course_lateral[index].item()
+                    ),
+                    "final_course_lateral_m": float(final_course_lateral[index].item()),
+                    "maximum_abs_course_lateral_m": float(
+                        max_abs_course_lateral[index].item()
+                    ),
+                    "maximum_road_boundary_overshoot_m": float(
+                        max_road_boundary_overshoot[index].item()
+                    ),
+                    "road_exit_steps": int(road_exit_steps[index].item()),
+                    "nan_seen": bool(nan_seen[index].item()),
+                    "out_of_bounds": bool(out_of_bounds[index].item()),
+                }
+            )
+    return cases
+
+
+def _reset_and_arrange_recovery_case(
+    *,
+    base_env: ManagerBasedRlEnv,
+    env: RslRlVecEnvWrapper,
+    seed: int,
+) -> torch.Tensor:
+    """Reset, arrange, and refresh one deterministic recovery battery seed."""
+    with torch.inference_mode():
+        env.reset()
+        microduck_mdp.arrange_roll_sprint_recovery_start(
+            base_env,
+            RACE_LANE_SPACING,
+            seed=seed,
+            orientations=RECOVERY_ORIENTATIONS,
+        )
+        _refresh_manual_start_state(base_env)
+        return base_env.scene.terrain.env_origins[:, 1].clone()
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("checkpoint", type=Path)
+    parser.add_argument("--num-envs", type=int, default=4)
+    parser.add_argument("--duration", type=float, default=CANONICAL_RACE_DURATION_S)
+    parser.add_argument(
+        "--device", default="cuda:0" if torch.cuda.is_available() else "cpu"
+    )
+    parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--parent-frontier-m",
+        type=float,
+        help="Optional selected-parent mean credited frontier for the 90%% gate.",
+    )
+    parser.add_argument("--recovery-duration", type=float, default=RECOVERY_DURATION_S)
+    return parser.parse_args()
+
+
+def _refresh_manual_start_state(base_env: ManagerBasedRlEnv) -> None:
+    """Refresh sensors and delayed observations after a manual pose."""
+    env_ids = torch.arange(
+        base_env.num_envs, device=base_env.device, dtype=torch.long
+    )
+    base_env.sim.sense()
+    base_env.observation_manager.reset(env_ids)
+    base_env.obs_buf = base_env.observation_manager.compute(update_history=True)
+
+
+def _load_policy_then_arrange_race(
+    *,
+    base_env: ManagerBasedRlEnv,
+    agent_cfg,
+    checkpoint: Path,
+    device: str,
+):
+    """Load inference first, then apply the final canonical race state."""
+    env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
+    runner_cls = load_runner_cls(TASK_ID) or MjlabOnPolicyRunner
+    runner = runner_cls(env, asdict(agent_cfg), device=device)
+    runner.load(
+        str(checkpoint),
+        load_cfg={"actor": True},
+        strict=True,
+        map_location=device,
+    )
+    policy = runner.get_inference_policy(device=device)
+    race_origins = microduck_mdp.arrange_roll_sprint_race_start(
+        base_env, RACE_LANE_SPACING
+    )
+    _refresh_manual_start_state(base_env)
+    return env, policy, race_origins
+
+
+def _canonical_race_alignment_pass(
+    *,
+    forward_starts: torch.Tensor,
+    lateral_starts: torch.Tensor,
+    race_origins: torch.Tensor,
+    reward_headings: torch.Tensor,
+    body_yaws: torch.Tensor,
+    reward_forward_origins: torch.Tensor,
+    reward_course_lateral: torch.Tensor,
+    reward_course_centers: torch.Tensor,
+) -> bool:
+    """Validate the actual post-wrapper robot state used by the race rollout."""
+    expected_lateral = torch.tensor(
+        [-0.42, -0.14, 0.14, 0.42],
+        device=race_origins.device,
+        dtype=race_origins.dtype,
+    )
+    expected_headings = torch.tensor(
+        [[1.0, 0.0]] * 4,
+        device=reward_headings.device,
+        dtype=reward_headings.dtype,
+    )
+    return bool(
+        torch.allclose(
+            forward_starts, torch.zeros_like(forward_starts), atol=1.0e-7
+        )
+        and torch.allclose(race_origins[:, 1], expected_lateral, atol=1.0e-7)
+        and torch.allclose(lateral_starts, expected_lateral, atol=1.0e-7)
+        and torch.allclose(reward_headings, expected_headings, atol=1.0e-7)
+        and torch.allclose(body_yaws, torch.zeros_like(body_yaws), atol=1.0e-7)
+        and torch.allclose(reward_forward_origins, forward_starts, atol=1.0e-7)
+        and torch.allclose(reward_course_lateral, expected_lateral, atol=1.0e-7)
+        and torch.allclose(
+            reward_course_centers,
+            torch.zeros_like(reward_course_centers),
+            atol=1.0e-7,
+        )
+    )
+
+
+def main() -> int:
+    args = _parse_args()
+    checkpoint = args.checkpoint.expanduser().resolve()
+    if not checkpoint.is_file():
+        raise SystemExit(f"Checkpoint not found: {checkpoint}")
+    if (
+        args.num_envs != 4
+        or not math.isclose(args.duration, CANONICAL_RACE_DURATION_S)
+        or args.recovery_duration <= 0.0
+    ):
+        raise SystemExit(
+            "canonical evaluation requires --num-envs 4, --duration 40, "
+            "and positive recovery duration"
+        )
+
+    configure_torch_backends()
+    env_cfg = load_env_cfg(TASK_ID, play=True)
+    agent_cfg = load_rl_cfg(TASK_ID)
+    env_cfg.scene.num_envs = args.num_envs
+    env_cfg.scene.env_spacing = RACE_LANE_SPACING
+    env_cfg.scene.terrain.env_spacing = RACE_LANE_SPACING
+    env_cfg.seed = 0
+    env_cfg.auto_reset = False
+    env_cfg.episode_length_s = args.duration
+    reset_cfg = env_cfg.events["set_roll_sprint_state"]
+    reset_cfg.params["standing_prob"] = 1.0
+    reset_cfg.params["midroll_prob"] = 0.0
+    reset_cfg.params["postroll_prob"] = 0.0
+    reset_cfg.params["crouch_prob"] = 0.0
+    reset_cfg.params["ground_recovery_prob"] = 0.0
+    reset_cfg.params["yaw_range"] = (0.0, 0.0)
+
+    base_env = ManagerBasedRlEnv(cfg=env_cfg, device=args.device, render_mode=None)
+    env, policy, race_origins = _load_policy_then_arrange_race(
+        base_env=base_env,
+        agent_cfg=agent_cfg,
+        checkpoint=checkpoint,
+        device=args.device,
+    )
+    robot = base_env.scene["robot"]
+    race_headings = base_env._roll_sprint_heading_w.clone()
+    race_forward_starts = microduck_mdp._roll_sprint_forward_position(
+        base_env, robot, race_headings
+    )
+    race_lateral_starts = microduck_mdp._roll_sprint_lateral_position(
+        base_env, robot, race_headings
+    )
+    race_forward_origins = base_env._roll_sprint_forward_origin.clone()
+    race_course_lateral = base_env._roll_sprint_course_lateral_position.clone()
+    race_course_centers = base_env._roll_sprint_course_center_xy_w.clone()
+    race_body_headings = heading_from_quat(robot.data.root_link_quat_w)
+    race_yaws = torch.atan2(race_body_headings[:, 1], race_body_headings[:, 0])
+    race_alignment_pass = _canonical_race_alignment_pass(
+        forward_starts=race_forward_starts,
+        lateral_starts=race_lateral_starts,
+        race_origins=race_origins,
+        reward_headings=race_headings,
+        body_yaws=race_yaws,
+        reward_forward_origins=race_forward_origins,
+        reward_course_lateral=race_course_lateral,
+        reward_course_centers=race_course_centers,
+    )
+    head_ids, _ = robot.find_bodies("jaw_soft")
+    head_id = head_ids[0]
+    auditor = RollCycleAuditor(
+        robot.data.root_link_pos_w[:, :2],
+        robot.data.root_link_quat_w,
+        robot.data.root_link_lin_vel_w[:, 2],
+        base_env.step_dt,
+        course_center_xy=race_origins[:, :2].mean(dim=0),
+    )
+    alive = torch.ones(args.num_envs, dtype=torch.bool, device=args.device)
+    termination_seen = {
+        name: torch.zeros_like(alive)
+        for name in base_env.termination_manager.active_terms
+    }
+    steps = round(args.duration / base_env.step_dt)
+
+    recovery_cases: list[dict[str, object]] = []
+    try:
+        for _ in range(steps):
+            with torch.inference_mode():
+                observations = env.get_observations()
+                actions = policy(observations)
+                _, _, dones, _ = env.step(actions)
+            auditor.observe(
+                position_xy=robot.data.root_link_pos_w[:, :2],
+                root_quat=robot.data.root_link_quat_w,
+                head_quat=robot.data.body_link_quat_w[:, head_id],
+                linear_velocity_w=robot.data.root_link_lin_vel_w,
+                angular_velocity_b=robot.data.root_link_ang_vel_b,
+                support=sensor_contact(base_env, "robot_ground_contact"),
+                foot_support=sensor_contact(base_env, "feet_ground_contact"),
+                head_contact=sensor_contact(base_env, "head_ground_contact"),
+                root_height=(
+                    robot.data.root_link_pos_w[:, 2]
+                    - base_env.scene.terrain.env_origins[:, 2]
+                ),
+                active=alive,
+            )
+            for name in termination_seen:
+                termination_seen[name] |= alive & base_env.termination_manager.get_term(
+                    name
+                )
+            done = alive & dones
+            if bool(done.any()):
+                alive[done] = False
+            if not bool(alive.any()):
+                break
+        recovery_cases = _run_recovery_battery(
+            base_env=base_env,
+            env=env,
+            policy=policy,
+            robot=robot,
+            duration_s=args.recovery_duration,
+        )
+    finally:
+        env.close()
+
+    race_summary = auditor.summary(args.duration)
+    report: dict[str, object] = {
+        "schema_version": 8,
+        "task": TASK_ID,
+        "checkpoint": str(checkpoint),
+        "checkpoint_sha256": _sha256(checkpoint),
+        "checkpoint_iteration": int(checkpoint.stem.rsplit("_", 1)[-1]),
+        "num_envs": args.num_envs,
+        "duration_s": args.duration,
+        "canonical_race_alignment": {
+            "seed": env_cfg.seed,
+            "projected_forward_start_m": race_forward_starts.cpu().tolist(),
+            "lane_center_y_m": race_origins[:, 1].cpu().tolist(),
+            "projected_lateral_start_m": race_lateral_starts.cpu().tolist(),
+            "body_yaw_rad": race_yaws.cpu().tolist(),
+            "reward_heading_xy": race_headings.cpu().tolist(),
+            "reward_forward_origin_m": race_forward_origins.cpu().tolist(),
+            "reward_course_lateral_m": race_course_lateral.cpu().tolist(),
+            "reward_course_center_xy_m": race_course_centers.cpu().tolist(),
+            "shared_road_boundary_y_m": [-ROAD_HALF_WIDTH_M, ROAD_HALF_WIDTH_M],
+            "shared_road_width_m": 2.0 * ROAD_HALF_WIDTH_M,
+            "alignment_pass": race_alignment_pass,
+        },
+        **race_summary,
+        "termination_counts": {
+            name: int(values.sum().item()) for name, values in termination_seen.items()
+        },
+        "out_of_bounds_env_count": int(
+            termination_seen.get("out_of_terrain_bounds", torch.zeros_like(alive))
+            .sum()
+            .item()
+        ),
+        "promotion_thresholds": PROMOTION,
+    }
+    recovery_battery = summarize_recovery_battery(
+        recovery_cases,
+        race_report=report,
+        parent_frontier_m=args.parent_frontier_m,
+    )
+    report["recovery_battery"] = recovery_battery
+    report["absolute_race_goal_pass"] = absolute_race_goal_pass(report)
+    report["promotion_pass"] = bool(recovery_battery["overall_pass"])
+    report["race_frontier_retention_pass"] = recovery_battery[
+        "race_frontier_at_least_90pct_parent"
+    ]
+    report["race_frontier_improvement_pass"] = recovery_battery[
+        "race_frontier_improved_over_parent"
+    ]
+    report["shared_road_batch_pass"] = report["four_robot_batch_road_corridor_pass"]
+    report["shared_road_boundary_pass"] = bool(
+        int(report["road_exit_env_count"]) == 0
+        and float(report["maximum_road_boundary_overshoot_m"]) <= 0.0
+    )
+    final_recovery_pass = bool(
+        float(recovery_battery["success_rate"]) >= 0.90
+        and all(
+            float(orientation["success_rate"]) >= 0.80
+            for orientation in recovery_battery["by_orientation"].values()
+        )
+        and float(recovery_battery["self_right_then_reroll_rate"]) >= 0.75
+    )
+    report["final_recovery_pass"] = final_recovery_pass
+    report["acceptance_pass"] = bool(
+        report["absolute_race_goal_pass"]
+        and final_recovery_pass
+        and race_alignment_pass
+        and report["shared_road_batch_pass"]
+        and report["race_frontier_improvement_pass"]
+        and report["shared_road_boundary_pass"]
+    )
+    output = args.output or checkpoint.with_suffix(".roll-sprint-eval.json")
+    _write_json_atomic(output.resolve(), report)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    print(f"[roll-sprint-eval] wrote {output.resolve()}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

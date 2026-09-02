@@ -17,11 +17,15 @@ https://github.com/user-attachments/assets/50c3d537-8db2-4005-9d9c-3472faeec4d0
 The repo encodes the full sim2real recipe: [BAM](https://github.com/Rhoban/bam)
 actuator physics, domain randomization, backlash simulation, and the
 reward-design lessons that made it work
-(see [CLAUDE.md](CLAUDE.md) for the distilled playbook).
+(see [AGENTS.md](AGENTS.md) for the distilled playbook).
 
 ## Quickstart
 
 Requires a CUDA GPU (training runs through MuJoCo Warp) and [uv](https://docs.astral.sh/uv/).
+
+> **On ARM boxes (DGX Spark / GB10, Jetson):** `uv sync` pulls ~2 GB of CUDA
+> wheels on first run and uv's default 30 s HTTP timeout can abort mid-download.
+> Export `UV_HTTP_TIMEOUT=600` for the first sync. 
 
 ```bash
 git clone https://github.com/pollen-robotics/microduck_rl
@@ -50,6 +54,29 @@ uv run train Mjlab-Velocity-Flat-MicroDuck --env.scene.num-envs 4096 \
 No GPU? Add `--hf-jobs` to any train command to run it on Hugging Face Jobs
 instead of locally (see [scripts/hf/README.md](scripts/hf/README.md)).
 
+### Local training dashboard
+
+The repository includes a small local dashboard for watching runs, checkpoints,
+TensorBoard metrics, screenshots, and MP4 captures. It binds to all interfaces
+so it can be opened from another device on the same Tailscale network:
+
+```powershell
+uv run python scripts/serve_dashboard.py --host 0.0.0.0 --port 9999
+```
+
+Open `http://localhost:9999` locally, or replace `localhost` with this
+machine's Tailscale address. The dashboard reads `logs/` and
+`output/playwright/` without uploading anything.
+
+Only videos listed in `dashboard/featured_media.json` are shown. Training and
+evaluation stay headless by default. The live preview watcher writes a 20-second
+clip only when a candidate passes the physics promotion gate. Generate a
+verified manufacturer-policy clip explicitly with:
+
+```powershell
+uv run python scripts/record_policy.py --walking .tmp/codex/BEST_alpha_walking.onnx
+```
+
 ## Tasks
 
 `uv run list-envs` prints the live registry. Flat/Rough variants exist where noted.
@@ -67,6 +94,11 @@ instead of locally (see [scripts/hf/README.md](scripts/hf/README.md)).
 | `Mjlab-GroundPick-{Flat,Rough}-MicroDuck` | flat/rough | Crouch and touch the ground with the mouth tip, return to stand |
 | `Mjlab-BallKick-Flat-MicroDuck` | flat | Kick a 70 mm / 15 g ball forward (actor is ball-blind) |
 | `Mjlab-Roulade-Flat-MicroDuck` | flat | Forward roll over the head, land back on the feet |
+| `Mjlab-Stairs-MicroDuck` | low stairs | Dedicated 0 to 15 mm stair ascent curriculum |
+| `Mjlab-Stairs-Standard-MicroDuck` | standard-height stairs | Five 170 mm risers with 280 mm treads, a fixed forward walking command, and a one-shot upright top-landing goal |
+| `Mjlab-Stairs-Phase-Balanced-RSI-Specialist-MicroDuck` | standard-height stairs | Research-inspired reference-state initialization with balanced manufacturer-roll preload, contact, apex, and release phases |
+| `Mjlab-Headstand-Flat-MicroDuck` | flat | Experimental head-supported balance freeze |
+| `Mjlab-Backflip-Flat-MicroDuck` | flat | Experimental staged backward aerial rotation and landing |
 | `Mjlab-Velocity-Flat-MicroDuck-Rollers` | flat | Roller-skate velocity tracking (passive wheels under the feet) |
 | `Mjlab-Velocity-Swizzle-MicroDuck` | flat | Classic symmetric swizzle skating |
 | `Mjlab-RollerCrouch-Flat-MicroDuck` | flat | Crouch while gliding on rollers |
@@ -75,6 +107,37 @@ instead of locally (see [scripts/hf/README.md](scripts/hf/README.md)).
 | `Mjlab-Spin-Flat-MicroDuck` | flat | Fast spin in place on rollers |
 
 At deployment the runtime hot-swaps these policies (walk / recover / trick)
+
+### Walking into the staircase
+
+The standard-stair task keeps the normal flat walking objective until the
+robot reaches the first riser, then fades that objective and lets the stair
+route, height, and upright top-landing terms take over. Start with a real flat
+walking checkpoint and fine-tune it on the staircase:
+
+```powershell
+uv run python scripts/train_stair_from_walking.py `
+  --walking-checkpoint logs/rsl_rl/velocity/<run>/model_XXXX.pt `
+  --num-envs 4096
+```
+
+The helper also finds the newest local walking checkpoint when
+`--walking-checkpoint` is omitted. Use `--num-envs 4` only for a local
+pipeline check. The native viewer uses four fixed terrain patches in a 2x2
+layout so all four robots remain visible at once.
+
+For the current specialist experiment, train headlessly with the same exact
+manufacturer-roll checkpoint used by the ordinary roulade-bank stage:
+
+```powershell
+uv run train Mjlab-Stairs-Phase-Balanced-RSI-Specialist-MicroDuck `
+  --env.scene.num-envs 256 `
+  --agent.max-iterations 400
+```
+
+The phase-balanced reset exposes sparse late-roll states evenly to PPO. Full
+route evaluation still uses the immutable walking policy for the approach and
+the 170 mm staircase for promotion.
 behind a shared 61-dimensional observation contract, so any of them can take
 over the robot at any moment. `scripts/infer_policy.py` rehearses exactly that:
 
@@ -85,6 +148,10 @@ uv run scripts/infer_policy.py --walking walk.onnx --standing stand.onnx \
 
 Keyboard-driven (velocity commands, `G` ground pick, `Y` sit/stand, `R` roulade,
 `K`/`L` kicks); `--debug`, `--save-csv`, `--record` support sim2real comparisons.
+For the official manufacturer walking export, keep the default simulator
+actuator limits. `--current-limit 1.75` is an optional hardware-like saturation
+test and is not enabled by default because it makes the official policy stand
+still in this MuJoCo scene.
 
 ### Backlash variants
 
@@ -166,7 +233,7 @@ Conventions worth knowing:
   deploy ONNX produced by `scripts/export.py`, never a hand-converted
   checkpoint, or the policy sees unnormalized observations at runtime.
 
-[CLAUDE.md](CLAUDE.md) documents the env-building workflow and the reward-design
+[AGENTS.md](AGENTS.md) documents the env-building workflow and the reward-design
 rules learned across the project (also aimed at AI coding agents working in
 this repo).
 
@@ -188,4 +255,4 @@ joint-index mappings, reward sign conventions, and NaN guards.
 ## License
 
 This project is licensed under the Apache 2.0 License. See the [LICENSE](LICENSE) file for details.
-Hardware design files are licensed under Creative Commons BY-SA-NC.
+3D model files are licensed under Creative Commons BY-SA-NC.
