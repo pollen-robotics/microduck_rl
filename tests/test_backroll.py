@@ -126,6 +126,9 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     )
     assert cfg.rewards["backroll_launch_tuck_progress"].weight == pytest.approx(2.0)
     assert cfg.rewards["backroll_completion_progress"].weight == pytest.approx(12.0)
+    assert cfg.rewards["backroll_completion_progress"].params["start_angle"] == pytest.approx(
+        math.radians(110.0)
+    )
     assert cfg.rewards["backroll_upright_progress"].weight == pytest.approx(5.0)
     assert cfg.rewards["backroll_height_progress"].weight == pytest.approx(4.0)
     assert cfg.rewards["backroll_success"].weight == pytest.approx(20.0)

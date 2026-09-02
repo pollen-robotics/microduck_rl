@@ -351,7 +351,14 @@ def make_microduck_backroll_env_cfg(play: bool = False):
         func=microduck_mdp.grounded_backroll_completion_progress,
         weight=12.0,
         params={
-            "start_angle": math.radians(150.0),
+            # A223's independent standing audit reached the ordered trunk and
+            # flat-head latches in 14/16 trials, but its 120--155 degree
+            # frontier received no completion gradient because this gate
+            # opened at 150 degrees.  Release the same max-so-far,
+            # contact-gated completion frontier immediately after the
+            # physically valid head-top window opens; it still cannot pay for
+            # rocking, airborne rotation, or an unlatched/side attempt.
+            "start_angle": math.radians(110.0),
             "target_angle": math.radians(350.0),
             "max_paid_rate": 6.0,
         },
