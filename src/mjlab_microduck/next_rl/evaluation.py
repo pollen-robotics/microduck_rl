@@ -251,15 +251,14 @@ def evaluate_thresholds(
     unexpected_seeds = {scenario.seed for scenario in scenarios} - set(spec.evaluation_seeds)
     if unexpected_seeds:
         raise EvaluationError(f"scenario seed {min(unexpected_seeds)} is not an evaluation seed")
+    scenario_digests = {scenario.policy_sha256 for scenario in scenarios}
+    if len(scenario_digests) != 1:
+        raise ArtifactIntegrityError("all scenario evidence must be bound to the same policy")
     if policy is not None:
-        mismatched = [
-            scenario.scenario_id
-            for scenario in scenarios
-            if scenario.policy_sha256 != policy.sha256
-        ]
-        if mismatched:
+        (scenario_digest,) = scenario_digests
+        if scenario_digest != policy.sha256:
             raise ArtifactIntegrityError(
-                f"scenario {min(mismatched)!r} policy digest does not match the report policy"
+                "scenario policy digest does not match the report policy"
             )
 
     evaluated: list[ScenarioResult] = []

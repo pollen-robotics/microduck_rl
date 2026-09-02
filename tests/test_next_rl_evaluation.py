@@ -204,6 +204,20 @@ def test_policy_a_scenario_evidence_cannot_be_reported_for_policy_b(tmp_path):
         )
 
 
+def test_unbound_aggregation_rejects_mixed_policy_scenario_evidence(tmp_path):
+    policy_a = _tiny_policy(tmp_path / "policy-a.onnx", weight=0.1)
+    policy_b = _tiny_policy(tmp_path / "policy-b.onnx", weight=0.2)
+
+    with pytest.raises(ArtifactIntegrityError, match="same policy"):
+        evaluate_thresholds(
+            spec_with(maximum("falls", 0)),
+            [
+                scenario("policy-a", policy_sha256=sha256_file(policy_a), falls=0),
+                scenario("policy-b", policy_sha256=sha256_file(policy_b), falls=0),
+            ],
+        )
+
+
 def test_preflight_refuses_a_source_changed_after_its_snapshot_is_checked(tiny_onnx, monkeypatch):
     real_smoke = evaluation_module.smoke_run_onnx
 
