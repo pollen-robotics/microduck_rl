@@ -403,10 +403,14 @@ def make_microduck_backroll_env_cfg(play: bool = False):
         # frontier while its sagittal backward rate is useful; rocking,
         # revisiting an angle, spinning in the air, or leaving the strict gate
         # remains worth zero.
-        weight=3.0,
+        # A241 was the first standing policy to pass the parent's 175-degree
+        # frontier, but it stalled on the head at 182 degrees. Increase only
+        # this frontier-gated, anti-rocking term and extend its useful-rate
+        # gradient toward the existing 7 rad/s overspeed boundary.
+        weight=8.0,
         params={
-            "minimum_rate": 2.0,
-            "target_rate": 4.5,
+            "minimum_rate": 2.5,
+            "target_rate": 6.0,
             "target_angle": 2.0 * math.pi,
         },
     )
@@ -735,12 +739,11 @@ _backroll_algorithm_params.update(
 )
 MicroduckBackrollRlCfg.algorithm = AnchoredPpoCfg(
     **_backroll_algorithm_params,
-    # A239's 90% retention allowed 0.78% actor drift and collapsed ordered
-    # contacts to 2/16. A240's 50% retention held drift near 0.14% and preserved
-    # 12--13/16 contacts through 150 updates, but could not move beyond the
-    # parent's 175-degree frontier. Use the measured midpoint for enough
-    # residual freedom to learn the landing without reopening A239's collapse.
-    anchor_retention=0.70,
+    # Re-anchor each explicitly selected checkpoint so improvement can ratchet
+    # forward. A240 proved 50% retention preserves the local behavior basin;
+    # A241 model 300 supplies the new measured 182-degree parent for A242.
+    anchor_retention=0.50,
+    refresh_anchor_on_load=True,
 )
 MicroduckBackrollRlCfg.actor.distribution_cfg["init_std"] = 1.0
 

@@ -133,10 +133,10 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert cfg.rewards["backroll_completion_progress"].params["start_angle"] == pytest.approx(
         math.radians(110.0)
     )
-    assert cfg.rewards["backroll_speed_progress"].weight == pytest.approx(3.0)
+    assert cfg.rewards["backroll_speed_progress"].weight == pytest.approx(8.0)
     assert cfg.rewards["backroll_speed_progress"].params == {
-        "minimum_rate": 2.0,
-        "target_rate": 4.5,
+        "minimum_rate": 2.5,
+        "target_rate": 6.0,
         "target_angle": 2.0 * math.pi,
     }
     assert cfg.rewards["backroll_feet_recontact"].weight == pytest.approx(5.0)
@@ -179,7 +179,8 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert MicroduckBackrollRlCfg.algorithm.learning_rate == pytest.approx(2.5e-5)
     assert MicroduckBackrollRlCfg.algorithm.schedule == "fixed"
     assert MicroduckBackrollRlCfg.algorithm.entropy_coef == pytest.approx(5.0e-4)
-    assert MicroduckBackrollRlCfg.algorithm.anchor_retention == pytest.approx(0.70)
+    assert MicroduckBackrollRlCfg.algorithm.anchor_retention == pytest.approx(0.50)
+    assert MicroduckBackrollRlCfg.algorithm.refresh_anchor_on_load is True
     assert (
         MicroduckBackrollRlCfg.algorithm.class_name
         == "mjlab_microduck.tasks.backroll_ppo.AnchoredPPO"
@@ -228,6 +229,31 @@ def test_backroll_actor_anchor_preserves_only_a_bounded_residual():
         torch.full_like(algorithm.actor.mlp.weight, 2.90),
     )
     assert relative_l2 == pytest.approx(0.45)
+
+
+def test_backroll_actor_anchor_can_refresh_from_selected_child(monkeypatch):
+    algorithm = object.__new__(AnchoredPPO)
+    algorithm.device = "cpu"
+    algorithm.refresh_anchor_on_load = True
+    algorithm.actor = nn.Sequential()
+    algorithm.actor.mlp = nn.Linear(2, 1, bias=False)
+    with torch.no_grad():
+        algorithm.actor.mlp.weight.fill_(3.0)
+
+    monkeypatch.setattr(
+        "rsl_rl.algorithms.PPO.load",
+        lambda self, loaded_dict, load_cfg, strict: True,
+    )
+    algorithm.load(
+        {"actor_anchor_state_dict": {"mlp.weight": torch.ones(1, 2)}},
+        load_cfg={"actor": True},
+        strict=True,
+    )
+
+    assert torch.allclose(
+        algorithm._actor_anchor["mlp.weight"],
+        torch.full((1, 2), 3.0),
+    )
 
 
 def test_backroll_play_is_deterministic_standing_start():

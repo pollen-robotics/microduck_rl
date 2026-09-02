@@ -13,7 +13,8 @@ class AnchoredPpoCfg(PpoWithSymmetryCfg):
     """PPO config with an iteration-level proximal pull to a loaded actor."""
 
     class_name: str = "mjlab_microduck.tasks.backroll_ppo.AnchoredPPO"
-    anchor_retention: float = 0.70
+    anchor_retention: float = 0.50
+    refresh_anchor_on_load: bool = False
 
 
 class AnchoredPPO(PPO):
@@ -25,10 +26,17 @@ class AnchoredPPO(PPO):
     the former, while PPO remains free to tune exploration independently.
     """
 
-    def __init__(self, *args, anchor_retention: float = 0.70, **kwargs):
+    def __init__(
+        self,
+        *args,
+        anchor_retention: float = 0.50,
+        refresh_anchor_on_load: bool = False,
+        **kwargs,
+    ):
         if not 0.0 <= anchor_retention <= 1.0:
             raise ValueError("anchor_retention must be between zero and one")
         self.anchor_retention = float(anchor_retention)
+        self.refresh_anchor_on_load = bool(refresh_anchor_on_load)
         self._actor_anchor: dict[str, torch.Tensor] | None = None
         super().__init__(*args, **kwargs)
 
@@ -77,7 +85,7 @@ class AnchoredPPO(PPO):
         loads_actor = load_cfg is None or load_cfg.get("actor", False)
         if loads_actor:
             stored_anchor = loaded_dict.get("actor_anchor_state_dict")
-            if stored_anchor:
+            if stored_anchor and not self.refresh_anchor_on_load:
                 self._actor_anchor = {
                     name: value.detach().clone().to(self.device)
                     for name, value in stored_anchor.items()
