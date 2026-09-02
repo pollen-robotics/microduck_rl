@@ -179,7 +179,7 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert MicroduckBackrollRlCfg.algorithm.learning_rate == pytest.approx(2.5e-5)
     assert MicroduckBackrollRlCfg.algorithm.schedule == "fixed"
     assert MicroduckBackrollRlCfg.algorithm.entropy_coef == pytest.approx(5.0e-4)
-    assert MicroduckBackrollRlCfg.algorithm.anchor_retention == pytest.approx(0.90)
+    assert MicroduckBackrollRlCfg.algorithm.anchor_retention == pytest.approx(0.50)
     assert (
         MicroduckBackrollRlCfg.algorithm.class_name
         == "mjlab_microduck.tasks.backroll_ppo.AnchoredPPO"
