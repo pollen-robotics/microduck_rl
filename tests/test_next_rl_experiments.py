@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
+from queue import Empty
+from typing import Any
 
 import pytest
 
@@ -39,6 +42,23 @@ def manifest(**overrides: object) -> ExperimentManifest:
     }
     value.update(overrides)
     return ExperimentManifest.from_dict(value)
+
+
+def _compete_terminal_transition(
+    root: str,
+    fingerprint: str,
+    status: str,
+    start: Any,
+    results: Any,
+) -> None:
+    """Attempt one terminal transition simultaneously from a separate process."""
+    start.wait()
+    try:
+        ExperimentStore(root).update_status(fingerprint, status)
+    except ValueError:
+        results.put(("rejected", status))
+    else:
+        results.put(("updated", status))
 
 
 def test_manifest_builder_records_planning_provenance_and_parent_artifact_digest():
@@ -106,6 +126,34 @@ def test_fingerprint_ignores_operational_values_and_credentials_in_configs():
     assert experiment_fingerprint(left) == experiment_fingerprint(right)
 
 
+def test_credential_structures_are_redacted_without_collapsing_learning_settings(tmp_path):
+    first = manifest(
+        environment_config={"auth": {"token": "environment-secret"}, "tokenizer": "v1"},
+        agent_config={
+            "transport": {"authorization": "Bearer agent-secret"},
+            "token_budget": 128,
+        },
+        metadata={"remote": {"credentials": {"password": "provenance-secret"}}},
+    )
+    second = manifest(
+        environment_config={"auth": {"token": "changed-secret"}, "tokenizer": "v2"},
+        agent_config={
+            "transport": {"authorization": "Bearer changed-secret"},
+            "token_budget": 256,
+        },
+        metadata={"remote": {"credentials": {"password": "changed-provenance-secret"}}},
+    )
+
+    store = ExperimentStore(tmp_path)
+    fingerprint = store.create(first)
+    saved = (tmp_path / fingerprint / "manifest.json").read_text()
+
+    assert experiment_fingerprint(first) != experiment_fingerprint(second)
+    assert all(secret not in saved for secret in ("environment-secret", "agent-secret", "provenance-secret"))
+    assert "tokenizer" in saved
+    assert "token_budget" in saved
+
+
 def test_duplicate_active_experiment_is_rejected(tmp_path):
     store = ExperimentStore(tmp_path)
     record = manifest(status="running")
@@ -157,6 +205,39 @@ def test_lifecycle_is_linear_and_status_history_is_atomic(tmp_path):
     }
     with pytest.raises(ValueError, match="cannot transition"):
         store.update_status(fingerprint, "running")
+
+
+def test_simultaneous_terminal_transitions_allow_exactly_one_and_preserve_history(tmp_path):
+    store = ExperimentStore(tmp_path)
+    fingerprint = store.create(manifest())
+    store.reserve(fingerprint)
+    store.update_status(fingerprint, "running")
+
+    context = multiprocessing.get_context()
+    start = context.Barrier(9)
+    results = context.Queue()
+    workers = [
+        context.Process(
+            target=_compete_terminal_transition,
+            args=(str(tmp_path), fingerprint, "succeeded" if index % 2 else "failed", start, results),
+        )
+        for index in range(8)
+    ]
+    for worker in workers:
+        worker.start()
+    start.wait(timeout=10)
+    for worker in workers:
+        worker.join(timeout=10)
+        assert worker.exitcode == 0
+    try:
+        outcomes = [results.get(timeout=1) for _ in workers]
+    except Empty as error:
+        raise AssertionError("every competing process must report an outcome") from error
+
+    assert sum(outcome == "updated" for outcome, _ in outcomes) == 1
+    status = json.loads((tmp_path / fingerprint / "status.json").read_text())
+    assert len(status["history"]) == 4
+    assert status["history"][-1] == {"status": status["status"]}
 
 
 def test_create_rejects_mutation_of_immutable_learning_inputs(tmp_path):

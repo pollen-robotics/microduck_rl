@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import time
+import uuid
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -50,32 +54,56 @@ _OPERATING_KEYS = {
     "status",
     "timestamp",
 }
-_CREDENTIAL_MARKERS = ("credential", "password", "private_key", "secret", "token", "api_key")
+_CREDENTIAL_KEYS = frozenset(
+    (
+        "access_key",
+        "access_token",
+        "api_key",
+        "api_token",
+        "auth",
+        "authorization",
+        "bearer_token",
+        "client_secret",
+        "credential",
+        "credentials",
+        "password",
+        "private_key",
+        "secret",
+        "token",
+    )
+)
 _ACTIVE_STATUSES = frozenset(("pending", "running", "succeeded"))
 _TRANSITIONS = {
     "planned": frozenset(("pending",)),
     "pending": frozenset(("running",)),
     "running": frozenset(("succeeded", "failed", "interrupted")),
 }
+_LOCK_TIMEOUT_SECONDS = 10
+_STALE_LOCK_SECONDS = 300
 
 
-def _is_operational_or_credential(key: str) -> bool:
-    normalized = key.strip().lower().replace("-", "_")
-    return normalized in _OPERATING_KEYS or any(marker in normalized for marker in _CREDENTIAL_MARKERS)
+def _normalized_key(key: str) -> str:
+    return key.strip().lower().replace("-", "_")
 
 
-def _normalize(value: Any) -> Any:
-    """Return JSON-compatible learning data with operational secrets removed."""
+def _is_redacted_path(path: tuple[str, ...]) -> bool:
+    """Return whether the value at an explicit config path is non-learning data."""
+    key = _normalized_key(path[-1])
+    return key in _OPERATING_KEYS or key in _CREDENTIAL_KEYS
+
+
+def _normalize(value: Any, path: tuple[str, ...] = ()) -> Any:
+    """Return JSON-compatible learning data without operational or credential paths."""
     if isinstance(value, Mapping):
         return {
-            key: _normalize(item)
+            key: _normalize(item, (*path, key))
             for key, item in value.items()
-            if isinstance(key, str) and not _is_operational_or_credential(key)
+            if isinstance(key, str) and not _is_redacted_path((*path, key))
         }
     if isinstance(value, tuple):
-        return [_normalize(item) for item in value]
+        return [_normalize(item, path) for item in value]
     if isinstance(value, list):
-        return [_normalize(item) for item in value]
+        return [_normalize(item, path) for item in value]
     return value
 
 
@@ -181,9 +209,47 @@ class ExperimentStore:
     def _reservation_path(self, fingerprint: str) -> Path:
         return self._directory(fingerprint) / "reservation.json"
 
-    def _read_json(self, path: Path) -> dict[str, Any]:
-        import json
+    def _lock_path(self, fingerprint: str) -> Path:
+        return self._directory(fingerprint) / ".lock"
 
+    @contextmanager
+    def _lock(self, fingerprint: str):
+        """Acquire an ownership-checked lockfile for one experiment fingerprint."""
+        path = self._lock_path(fingerprint)
+        owner = uuid.uuid4().hex
+        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                _exclusive_write_json(path, {"owner": owner, "pid": os.getpid()})
+                break
+            except FileExistsError:
+                try:
+                    stale = time.time() - path.stat().st_mtime > _STALE_LOCK_SECONDS
+                except FileNotFoundError:
+                    continue
+                if stale:
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    continue
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"timed out waiting for experiment lock {fingerprint}")
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            try:
+                lock = self._read_json(path)
+            except (FileNotFoundError, TypeError, json.JSONDecodeError):
+                lock = {}
+            if lock.get("owner") == owner:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def _read_json(self, path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(value, dict):
             raise TypeError(f"{path} must contain a JSON object")
@@ -206,41 +272,48 @@ class ExperimentStore:
             "learning_inputs": learning_inputs(parsed),
             "provenance": _normalize(parsed.metadata),
         }
-        manifest_path = self._manifest_path(target)
-        try:
-            _exclusive_write_json(manifest_path, immutable)
-        except FileExistsError:
-            if self._read_json(manifest_path) != immutable:
-                raise ValueError("immutable learning inputs cannot be changed") from None
+        with self._lock(target):
+            manifest_path = self._manifest_path(target)
+            try:
+                _exclusive_write_json(manifest_path, immutable)
+            except FileExistsError:
+                if self._read_json(manifest_path) != immutable:
+                    raise ValueError("immutable learning inputs cannot be changed") from None
 
-        status_path = self._status_path(target)
-        if not status_path.exists():
-            atomic_write_json(status_path, {"status": parsed.status, "history": [{"status": parsed.status}]})
+            status_path = self._status_path(target)
+            if not status_path.exists():
+                atomic_write_json(status_path, {"status": parsed.status, "history": [{"status": parsed.status}]})
         return target
 
     def reserve(self, fingerprint: str) -> ReservationDecision:
         """Claim a planned run exactly once or return the safe next action."""
-        manifest_path = self._manifest_path(fingerprint)
-        if not manifest_path.exists():
-            raise FileNotFoundError(f"no experiment exists for fingerprint {fingerprint}")
-        current = self._read_json(self._status_path(fingerprint))["status"]
-        if current in _ACTIVE_STATUSES:
-            raise DuplicateExperimentError(f"experiment {fingerprint} is already {current}")
-        if current == "failed":
-            return ReservationDecision(fingerprint, "retry")
-        if current == "interrupted":
-            return ReservationDecision(fingerprint, "resume")
-        if current != "planned":
-            raise ValueError(f"unknown experiment status {current!r}")
-        try:
-            _exclusive_write_json(self._reservation_path(fingerprint), {"fingerprint": fingerprint})
-        except FileExistsError:
-            raise DuplicateExperimentError(f"experiment {fingerprint} is already reserved") from None
-        self.update_status(fingerprint, "pending")
-        return ReservationDecision(fingerprint, "reserved")
+        with self._lock(fingerprint):
+            manifest_path = self._manifest_path(fingerprint)
+            if not manifest_path.exists():
+                raise FileNotFoundError(f"no experiment exists for fingerprint {fingerprint}")
+            current = self._read_json(self._status_path(fingerprint))["status"]
+            if current in _ACTIVE_STATUSES:
+                raise DuplicateExperimentError(f"experiment {fingerprint} is already {current}")
+            if current == "failed":
+                return ReservationDecision(fingerprint, "retry")
+            if current == "interrupted":
+                return ReservationDecision(fingerprint, "resume")
+            if current != "planned":
+                raise ValueError(f"unknown experiment status {current!r}")
+            try:
+                _exclusive_write_json(self._reservation_path(fingerprint), {"fingerprint": fingerprint})
+            except FileExistsError:
+                raise DuplicateExperimentError(f"experiment {fingerprint} is already reserved") from None
+            self._update_status_locked(fingerprint, "pending")
+            return ReservationDecision(fingerprint, "reserved")
 
     def update_status(self, fingerprint: str, status: str) -> None:
         """Atomically advance operational state without ever rewriting the manifest."""
+        with self._lock(fingerprint):
+            self._update_status_locked(fingerprint, status)
+
+    def _update_status_locked(self, fingerprint: str, status: str) -> None:
+        """Advance status while the caller holds this fingerprint's lock."""
         status_path = self._status_path(fingerprint)
         current_record = self._read_json(status_path)
         current = current_record.get("status")
