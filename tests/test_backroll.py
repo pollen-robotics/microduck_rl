@@ -3,9 +3,11 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from torch import nn
 from mjlab.tasks.registry import load_runner_cls
 
 from mjlab_microduck.tasks import MicroduckFrozenActorNormRunner, mdp
+from mjlab_microduck.tasks.backroll_ppo import AnchoredPPO
 from mjlab_microduck.tasks.microduck_backroll_env_cfg import (
     BACKROLL_CURRICULUM_STAGES,
     BACKROLL_TUCK_OVERRIDES,
@@ -177,6 +179,11 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert MicroduckBackrollRlCfg.algorithm.learning_rate == pytest.approx(2.5e-5)
     assert MicroduckBackrollRlCfg.algorithm.schedule == "fixed"
     assert MicroduckBackrollRlCfg.algorithm.entropy_coef == pytest.approx(5.0e-4)
+    assert MicroduckBackrollRlCfg.algorithm.anchor_retention == pytest.approx(0.90)
+    assert (
+        MicroduckBackrollRlCfg.algorithm.class_name
+        == "mjlab_microduck.tasks.backroll_ppo.AnchoredPPO"
+    )
     assert MicroduckBackrollRlCfg.actor.distribution_cfg["init_std"] == 1.0
     assert load_runner_cls("Mjlab-Backroll-Flat-MicroDuck") is MicroduckFrozenActorNormRunner
 
@@ -200,6 +207,27 @@ def test_backroll_runner_restores_configured_lr_after_optimizer_resume(monkeypat
     assert infos == {"loaded": "parent.pt"}
     assert runner.alg.learning_rate == pytest.approx(configured_lr)
     assert runner.alg.optimizer.param_groups[0]["lr"] == pytest.approx(configured_lr)
+
+
+def test_backroll_actor_anchor_preserves_only_a_bounded_residual():
+    algorithm = object.__new__(AnchoredPPO)
+    algorithm.device = "cpu"
+    algorithm.anchor_retention = 0.90
+    algorithm.actor = nn.Sequential()
+    algorithm.actor.mlp = nn.Linear(2, 1, bias=False)
+    with torch.no_grad():
+        algorithm.actor.mlp.weight.fill_(2.0)
+    algorithm._capture_actor_anchor()
+
+    with torch.no_grad():
+        algorithm.actor.mlp.weight.add_(1.0)
+    relative_l2 = algorithm._apply_actor_anchor()
+
+    assert torch.allclose(
+        algorithm.actor.mlp.weight,
+        torch.full_like(algorithm.actor.mlp.weight, 2.90),
+    )
+    assert relative_l2 == pytest.approx(0.45)
 
 
 def test_backroll_play_is_deterministic_standing_start():

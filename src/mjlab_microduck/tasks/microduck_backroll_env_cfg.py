@@ -24,6 +24,7 @@ from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.tasks.velocity import mdp
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
+from mjlab_microduck.tasks.backroll_ppo import AnchoredPpoCfg
 from mjlab_microduck.tasks.microduck_roulade_env_cfg import (
     MicroduckRouladeRlCfg,
     make_microduck_roulade_env_cfg,
@@ -725,9 +726,17 @@ MicroduckBackrollRlCfg.experiment_name = "microduck_backroll"
 MicroduckBackrollRlCfg.run_name = "microduck_backroll"
 MicroduckBackrollRlCfg.max_iterations = 4000
 MicroduckBackrollRlCfg.save_interval = 50
-MicroduckBackrollRlCfg.algorithm.learning_rate = 2.5e-5
-MicroduckBackrollRlCfg.algorithm.schedule = "fixed"
-MicroduckBackrollRlCfg.algorithm.entropy_coef = 5.0e-4
+_backroll_algorithm_params = vars(deepcopy(MicroduckBackrollRlCfg.algorithm))
+_backroll_algorithm_params.update(
+    learning_rate=2.5e-5,
+    schedule="fixed",
+    entropy_coef=5.0e-4,
+    class_name="mjlab_microduck.tasks.backroll_ppo.AnchoredPPO",
+)
+MicroduckBackrollRlCfg.algorithm = AnchoredPpoCfg(
+    **_backroll_algorithm_params,
+    anchor_retention=0.90,
+)
 MicroduckBackrollRlCfg.actor.distribution_cfg["init_std"] = 1.0
 
 MicroduckRepeatedBackrollRlCfg = deepcopy(MicroduckBackrollRlCfg)
