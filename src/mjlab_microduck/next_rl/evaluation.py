@@ -8,6 +8,9 @@ that evidence, and binds it to the exact exported ONNX bytes it checked.
 from __future__ import annotations
 
 import math
+import os
+import shutil
+import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -16,7 +19,7 @@ from typing import Protocol
 
 from mjlab_microduck.publish.manifest import ManifestError, check_onnx, smoke_run_onnx
 
-from .artifacts import atomic_write_json, sha256_file
+from .artifacts import canonical_json, sha256_file
 from .schema import ArtifactRef, MetricThreshold, SkillSpec
 
 
@@ -38,6 +41,34 @@ def _text(value: object, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise EvaluationError(f"{name} must be a non-empty string")
     return value
+
+
+def _sha256(value: object, name: str) -> str:
+    digest = _text(value, name)
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise EvaluationError(f"{name} must be a lowercase SHA-256 digest")
+    return digest
+
+
+def _write_json_once(path: Path, value: object) -> None:
+    """Publish complete canonical JSON at *path* only if no report exists there."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(canonical_json(value).encode("utf-8"))
+            output.flush()
+            os.fsync(output.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError as error:
+            raise FileExistsError(f"refusing to overwrite immutable evaluation report {path}") from error
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 @dataclass(frozen=True)
@@ -76,11 +107,13 @@ class ScenarioResult:
     family: str
     seed: int
     metrics: Mapping[str, float]
+    policy_sha256: str
     threshold_results: tuple[MetricResult, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.scenario_id, "scenario_id")
         _text(self.family, "scenario family")
+        _sha256(self.policy_sha256, "scenario policy_sha256")
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
             raise EvaluationError("scenario seed must be an integer")
         if not isinstance(self.metrics, Mapping) or not self.metrics:
@@ -99,6 +132,7 @@ class ScenarioResult:
             "scenario_id": self.scenario_id,
             "family": self.family,
             "seed": self.seed,
+            "policy_sha256": self.policy_sha256,
             "metrics": dict(self.metrics),
             "threshold_results": [result.as_dict() for result in self.threshold_results],
         }
@@ -151,9 +185,7 @@ class EvaluationReport:
     def write(self, path: str | Path) -> Path:
         """Create a canonical report once; an existing report is immutable evidence."""
         target = Path(path)
-        if target.exists():
-            raise FileExistsError(f"refusing to overwrite immutable evaluation report {target}")
-        atomic_write_json(target, self.as_dict())
+        _write_json_once(target, self.as_dict())
         return target
 
 
@@ -208,6 +240,8 @@ def evaluate_thresholds(
     """Validate supplied scenario metrics and conjunctively apply mandatory thresholds."""
     _validate_spec(spec)
     _text(evaluator_revision, "evaluator_revision")
+    if not scenarios:
+        raise EvaluationError("evaluation requires at least one scenario")
     scenario_ids = [scenario.scenario_id for scenario in scenarios]
     if len(set(scenario_ids)) != len(scenario_ids):
         raise EvaluationError("scenario IDs must be unique")
@@ -217,6 +251,16 @@ def evaluate_thresholds(
     unexpected_seeds = {scenario.seed for scenario in scenarios} - set(spec.evaluation_seeds)
     if unexpected_seeds:
         raise EvaluationError(f"scenario seed {min(unexpected_seeds)} is not an evaluation seed")
+    if policy is not None:
+        mismatched = [
+            scenario.scenario_id
+            for scenario in scenarios
+            if scenario.policy_sha256 != policy.sha256
+        ]
+        if mismatched:
+            raise ArtifactIntegrityError(
+                f"scenario {min(mismatched)!r} policy digest does not match the report policy"
+            )
 
     evaluated: list[ScenarioResult] = []
     for scenario in sorted(scenarios, key=lambda item: item.scenario_id):
@@ -235,14 +279,23 @@ def select_worst_case(results: Iterable[ScenarioResult]) -> ScenarioResult:
 
 
 def preflight_onnx(policy: str | Path) -> ArtifactRef:
-    """Apply the existing daemon shape and finite-output gates to an ONNX policy."""
-    path = Path(policy)
+    """Check an immutable copy, then ensure the source still has the checked bytes."""
+    source = Path(policy)
     try:
-        check_onnx(path)
-        smoke_run_onnx(path)
+        with tempfile.TemporaryDirectory(prefix="microduck-next-rl-onnx-") as directory:
+            snapshot = Path(directory) / source.name
+            shutil.copyfile(source, snapshot)
+            snapshot.chmod(0o400)
+            digest = sha256_file(snapshot)
+            check_onnx(snapshot)
+            smoke_run_onnx(snapshot)
+            if sha256_file(source) != digest:
+                raise ArtifactIntegrityError("policy source changed while preflighting its snapshot")
     except ManifestError as error:
         raise EvaluationError(f"ONNX preflight failed: {error}") from error
-    return ArtifactRef(str(path), "onnx", sha256_file(path))
+    except OSError as error:
+        raise EvaluationError(f"ONNX preflight failed: {error}") from error
+    return ArtifactRef(str(source), "onnx", digest)
 
 
 def build_report(
@@ -254,12 +307,14 @@ def build_report(
     report_path: str | Path | None = None,
 ) -> EvaluationReport:
     """Preflight a policy, aggregate supplied metrics, and optionally persist immutable evidence."""
+    artifact = preflight_onnx(policy)
     report = evaluate_thresholds(
         spec,
         scenarios,
         evaluator_revision=evaluator_revision,
-        policy=preflight_onnx(policy),
+        policy=artifact,
     )
+    report.verify_policy(policy)
     if report_path is not None:
         report.write(report_path)
     return report

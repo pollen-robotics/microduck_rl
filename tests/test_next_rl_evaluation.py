@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import numpy as np
 import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
+import mjlab_microduck.next_rl.evaluation as evaluation_module
+from mjlab_microduck.next_rl.artifacts import sha256_file
 from mjlab_microduck.next_rl.evaluation import (
     ArtifactIntegrityError,
     EvaluationError,
@@ -43,8 +46,13 @@ def spec_with(*metrics: MetricThreshold, **overrides: object) -> SkillSpec:
     return SkillSpec(**values)
 
 
-def scenario(scenario_id: str = "nominal-01", **metrics: float) -> ScenarioResult:
-    return ScenarioResult(scenario_id, "nominal", 3, metrics)
+def scenario(
+    scenario_id: str = "nominal-01",
+    *,
+    policy_sha256: str = "a" * 64,
+    **metrics: float,
+) -> ScenarioResult:
+    return ScenarioResult(scenario_id, "nominal", 3, metrics, policy_sha256=policy_sha256)
 
 
 def test_mandatory_safety_failure_fails_the_report():
@@ -107,9 +115,8 @@ def test_nonmandatory_failure_does_not_fail_the_aggregate_report():
     assert report.passed is True
 
 
-@pytest.fixture
-def tiny_onnx(tmp_path):
-    weights = numpy_helper.from_array(np.full((61, 14), 0.1, dtype=np.float32), "weights")
+def _tiny_policy(path, weight: float = 0.1):
+    weights = numpy_helper.from_array(np.full((61, 14), weight, dtype=np.float32), "weights")
     graph = helper.make_graph(
         [helper.make_node("MatMul", ["obs", "weights"], ["actions"])],
         "tiny-policy",
@@ -119,9 +126,13 @@ def tiny_onnx(tmp_path):
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
     model.ir_version = 8
-    path = tmp_path / "policy.onnx"
     onnx.save(model, path)
     return path
+
+
+@pytest.fixture
+def tiny_onnx(tmp_path):
+    return _tiny_policy(tmp_path / "policy.onnx")
 
 
 @pytest.fixture
@@ -144,7 +155,7 @@ def test_report_is_bound_to_exact_policy_bytes(tiny_onnx, tmp_path):
     report = build_report(
         policy=tiny_onnx,
         spec=spec_with(maximum("falls", 0)),
-        scenarios=[scenario(falls=0)],
+        scenarios=[scenario(policy_sha256=sha256_file(tiny_onnx), falls=0)],
         evaluator_revision="eval-abc123",
         report_path=tmp_path / "evaluation.json",
     )
@@ -164,7 +175,7 @@ def test_report_persistence_is_canonical_and_immutable(tiny_onnx, tmp_path):
     report = build_report(
         policy=tiny_onnx,
         spec=spec_with(maximum("falls", 0)),
-        scenarios=[scenario(falls=0)],
+        scenarios=[scenario(policy_sha256=sha256_file(tiny_onnx), falls=0)],
         evaluator_revision="eval-abc123",
         report_path=destination,
     )
@@ -173,3 +184,61 @@ def test_report_persistence_is_canonical_and_immutable(tiny_onnx, tmp_path):
     assert destination.read_text().startswith('{"evaluator_revision"')
     with pytest.raises(FileExistsError, match="immutable"):
         report.write(destination)
+
+
+def test_empty_scenario_collection_is_refused():
+    with pytest.raises(EvaluationError, match="at least one scenario"):
+        evaluate_thresholds(spec_with(maximum("falls", 0)), [])
+
+
+def test_policy_a_scenario_evidence_cannot_be_reported_for_policy_b(tmp_path):
+    policy_a = _tiny_policy(tmp_path / "policy-a.onnx", weight=0.1)
+    policy_b = _tiny_policy(tmp_path / "policy-b.onnx", weight=0.2)
+
+    with pytest.raises(ArtifactIntegrityError, match="scenario.*policy"):
+        build_report(
+            policy=policy_b,
+            spec=spec_with(maximum("falls", 0)),
+            scenarios=[scenario(policy_sha256=sha256_file(policy_a), falls=0)],
+            evaluator_revision="eval-abc123",
+        )
+
+
+def test_preflight_refuses_a_source_changed_after_its_snapshot_is_checked(tiny_onnx, monkeypatch):
+    real_smoke = evaluation_module.smoke_run_onnx
+
+    def mutate_source_after_snapshot(snapshot):
+        real_smoke(snapshot)
+        tiny_onnx.write_bytes(tiny_onnx.read_bytes() + b"changed")
+
+    monkeypatch.setattr(evaluation_module, "smoke_run_onnx", mutate_source_after_snapshot)
+
+    with pytest.raises(ArtifactIntegrityError, match="changed while preflighting"):
+        preflight_onnx(tiny_onnx)
+
+
+def test_concurrent_report_creation_allows_one_writer_and_preserves_existing_bytes(tmp_path):
+    report = evaluate_thresholds(spec_with(maximum("falls", 0)), [scenario(falls=0)])
+    destination = tmp_path / "evaluation.json"
+    start = threading.Barrier(3)
+    outcomes: list[str] = []
+
+    def write_once() -> None:
+        start.wait()
+        try:
+            report.write(destination)
+        except FileExistsError:
+            outcomes.append("exists")
+        else:
+            outcomes.append("created")
+
+    writers = [threading.Thread(target=write_once) for _ in range(2)]
+    for writer in writers:
+        writer.start()
+    start.wait()
+    for writer in writers:
+        writer.join(timeout=5)
+        assert not writer.is_alive()
+
+    assert sorted(outcomes) == ["created", "exists"]
+    assert destination.read_text() == evaluation_module.canonical_json(report.as_dict())
