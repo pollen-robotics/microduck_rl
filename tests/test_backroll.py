@@ -1009,14 +1009,14 @@ def test_backward_purity_fades_before_the_robot_can_side_roll():
     assert escaped.item() == pytest.approx(0.0, abs=1.0e-6)
 
 
-def test_alignment_penalties_ramp_only_during_completion_window():
+def test_alignment_penalties_start_after_entry_and_are_full_by_head_window():
     env, asset = _fake_env()
     asset.data.root_link_ang_vel_b[:] = torch.tensor([[1.0, -6.0, 2.0]])
     half = math.radians(45.0) * 0.5
     asset.data.root_link_quat_w[:] = torch.tensor(
         [[math.cos(half), math.sin(half), 0.0, 0.0]]
     )
-    frontiers = [0.0, math.radians(120.0), math.radians(210.0), math.radians(300.0)]
+    frontiers = [0.0, math.radians(10.0), math.radians(45.0), math.radians(90.0)]
     sagittal = []
     flatness = []
     for frontier in frontiers:

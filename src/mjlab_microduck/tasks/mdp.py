@@ -11539,10 +11539,18 @@ def roulade_lateral_velocity_penalty(
 
 def _grounded_backroll_late_phase_ramp(
     env: ManagerBasedRlEnv,
-    start_angle: float = math.radians(120.0),
-    full_angle: float = math.radians(300.0),
+    start_angle: float = math.radians(10.0),
+    full_angle: float = math.radians(90.0),
 ) -> torch.Tensor:
-    """Fade alignment pressure in only after launch momentum is established."""
+    """Smoothly price alignment once a backward roll has actually begun.
+
+    The maneuver gate rejects a shoulder escape at 20--30 degrees.  Leaving
+    the alignment terms off until 120 degrees made that early rejection a
+    cliff: a fresh policy could discover that it was invalid, but received no
+    continuous signal to keep its pitch rotation in the sagittal plane.  This
+    ramp is still exactly zero for a stationary standing robot, reaches its
+    bounded value by 90 degrees, and never taxes the required body-y rotation.
+    """
     if full_angle <= start_angle:
         raise ValueError("full_angle must be greater than start_angle")
     frontier = torch.nan_to_num(env._roulade_max, nan=0.0)
@@ -11558,13 +11566,11 @@ def grounded_backroll_sagittal_penalty(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Late-phase off-axis tax for preserving launch momentum.
+    """Bounded off-axis tax throughout a started backroll.
 
-    Early A203 fine-tuning showed that an always-on large sagittal tax makes
-    a near-complete parent abandon the roll before it reaches the contact
-    bridge.  Delaying the same physical penalty until the 120--300 degree
-    completion window keeps launch exploration open while steering the final
-    pivot over the head rather than a shoulder.
+    It begins only after signed backward rotation crosses 10 degrees, so
+    standing does not pay.  Pure body-y backroll velocity is free; only the
+    transverse component is charged.
     """
     asset: Entity = env.scene[asset_cfg.name]
     omega_b = torch.nan_to_num(asset.data.root_link_ang_vel_b, nan=0.0)
@@ -11581,16 +11587,15 @@ def grounded_backroll_flatness_penalty(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Late-phase lateral-axis tilt tax, zero during the launch window."""
+    """Bounded early lateral-axis tilt tax for a sagittal backroll entry."""
     asset: Entity = env.scene[asset_cfg.name]
     lateral_axis_z = torch.nan_to_num(
         _lateral_axis_z(asset.data.root_link_quat_w), nan=0.0
     ).abs()
-    # Preserve a clean sagittal roll for free while bounding the late-phase
-    # side-flop tax.  This avoids turning a recoverable near-landing into a
-    # do-nothing optimum while still making a shoulder roll strictly costly.
-    excess = torch.clamp((lateral_axis_z - 0.30) / 0.70, min=0.0, max=1.0)
-    return excess.square() * _grounded_backroll_late_phase_ramp(env)
+    # A squared, capped axis term provides a gradient *before* the strict
+    # 20-degree cycle gate closes.  It is zero for a pure pitch roll and the
+    # smooth ramp keeps it inactive while the robot is simply standing.
+    return lateral_axis_z.square() * _grounded_backroll_late_phase_ramp(env)
 
 
 # ============================================================================
