@@ -52,12 +52,13 @@ BACKROLL_CURRICULUM_STAGES = [
             "midroll_pitch_max": math.radians(340.0),
             "midroll_omega_range": (1.0, 3.0),
             "joint_noise_std": 0.0,
-            # Use the analytic sagittal late-phase reset here.  The champion
-            # parent learned from this direct 180--340 degree envelope; the
-            # sparse 100--180 reference bank is reserved for later bridges.
-            "reference_state_prob": 0.0,
+            # Seed the late-phase bucket from measured sagittal states.  The
+            # bank was collected only from physically aligned roll segments,
+            # so this supplies the correction target without relaxing the
+            # landing gate or inventing a scripted action sequence.
+            "reference_state_prob": 1.0,
             "reference_state_path": BACKROLL_REFERENCE_STATE_PATH,
-            "reference_phase_range_deg": (100.0, 180.0),
+            "reference_phase_range_deg": (180.0, 290.0),
             "reference_source_seed": None,
             "yaw_range": (0.0, 0.0),
         }
