@@ -357,10 +357,10 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     )
     cfg.rewards["backroll_invalid"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_invalid_rate,
-        # A219 escaped HOME but every deterministic standing rollout violated
-        # the hard sagittal gate. The launch bridge now supplies a safe first
-        # action, so restore a meaningful one-shot rejection of invalid rolls.
-        weight=-2.0,
+        # A220 model 50 held still from every deterministic standing start.
+        # The launch bridge needs its exploratory motion before invalid-roll
+        # rejection can tighten through the phase curriculum.
+        weight=-1.0,
     )
     cfg.rewards["backroll_overspeed"] = RewardTermCfg(
         func=microduck_mdp.roulade_overspeed_penalty,
@@ -369,10 +369,10 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     )
     cfg.rewards["backroll_sagittal"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_sagittal_penalty,
-        # A219 model 300 first failed through accumulated off-axis rotation in
-        # 15/16 audited standing trials. Charge that budget continuously; this
-        # leaves the required backward body-y rotation entirely unrestricted.
-        weight=-2.0,
+        # Start neutral so the standing tuck can be discovered. A step-based
+        # curriculum turns on the continuous, trunk-gated off-axis budget only
+        # after the policy has had an initial exploration window.
+        weight=0.0,
     )
     cfg.rewards["backroll_lateral_velocity"] = RewardTermCfg(
         func=microduck_mdp.roulade_lateral_velocity_penalty,
@@ -440,7 +440,7 @@ def make_microduck_backroll_env_cfg(play: bool = False):
                 "window_episodes": 4096,
                 "success_threshold": 0.70,
                 "invalid_reward_name": "backroll_invalid",
-                "invalid_reward_weights": [-2.0, -3.0, -4.0, -4.0, -4.0],
+                "invalid_reward_weights": [-1.0, -2.0, -3.0, -4.0, -4.0],
                 "action_rate_reward_name": "action_rate_l2",
                 "action_rate_reward_weights": [
                     0.0,
@@ -448,6 +448,18 @@ def make_microduck_backroll_env_cfg(play: bool = False):
                     -0.05,
                     -0.075,
                     -0.10,
+                ],
+            },
+        )
+        cfg.curriculum["backroll_sagittal_weight"] = CurriculumTermCfg(
+            func=microduck_mdp.reward_weight,
+            params={
+                "reward_name": "backroll_sagittal",
+                "weight_stages": [
+                    {"step": 0, "weight": 0.0},
+                    {"step": 100 * 24, "weight": -0.25},
+                    {"step": 250 * 24, "weight": -0.75},
+                    {"step": 600 * 24, "weight": -1.25},
                 ],
             },
         )

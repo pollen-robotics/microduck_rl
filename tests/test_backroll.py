@@ -127,8 +127,8 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert cfg.rewards["backroll_upright_progress"].weight == pytest.approx(5.0)
     assert cfg.rewards["backroll_height_progress"].weight == pytest.approx(4.0)
     assert cfg.rewards["backroll_success"].weight == pytest.approx(20.0)
-    assert cfg.rewards["backroll_invalid"].weight == pytest.approx(-2.0)
-    assert cfg.rewards["backroll_sagittal"].weight == pytest.approx(-2.0)
+    assert cfg.rewards["backroll_invalid"].weight == pytest.approx(-1.0)
+    assert cfg.rewards["backroll_sagittal"].weight == pytest.approx(0.0)
     assert cfg.rewards["backroll_flatness"].weight == pytest.approx(-1.0)
     assert cfg.rewards["backroll_sagittal"].func is mdp.grounded_backroll_sagittal_penalty
     assert cfg.rewards["backroll_flatness"].func is mdp.grounded_backroll_flatness_penalty
@@ -138,7 +138,14 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     ] == [0.0, -0.025, -0.05, -0.075, -0.10]
     assert cfg.curriculum["backroll_phase"].params[
         "invalid_reward_weights"
-    ] == [-2.0, -3.0, -4.0, -4.0, -4.0]
+    ] == [-1.0, -2.0, -3.0, -4.0, -4.0]
+    assert cfg.curriculum["backroll_sagittal_weight"].func is mdp.reward_weight
+    assert cfg.curriculum["backroll_sagittal_weight"].params["weight_stages"] == [
+        {"step": 0, "weight": 0.0},
+        {"step": 100 * 24, "weight": -0.25},
+        {"step": 250 * 24, "weight": -0.75},
+        {"step": 600 * 24, "weight": -1.25},
+    ]
     forbidden = ("sprint", "distance", "lane", "road", "recovery", "reposition")
     assert not any(token in name for name in cfg.rewards for token in forbidden)
     assert cfg.events["set_grounded_backroll_state"].func is mdp.reset_grounded_backroll_state
@@ -229,6 +236,10 @@ def test_sagittal_penalty_prices_small_persistent_twist_but_not_pitch(monkeypatc
     # zone, yet it can accumulate past the 90-degree physical gate. It must
     # now receive a continuous signal, bounded independently of body-y speed.
     asset.data.root_link_ang_vel_b[:] = torch.tensor([[0.25, -4.0, 0.0]])
+    # Entry and tuck exploration remain free until trunk contact commits this
+    # sample to an actual grounded backroll.
+    assert mdp.grounded_backroll_sagittal_penalty(env).item() == pytest.approx(0.0)
+    env._backroll_trunk_latch[:] = True
     assert mdp.grounded_backroll_sagittal_penalty(env).item() == pytest.approx(0.25)
 
     asset.data.root_link_ang_vel_b[:] = torch.tensor([[5.0, -4.0, 0.0]])
@@ -1135,6 +1146,7 @@ def test_backward_purity_fades_before_the_robot_can_side_roll():
 
 def test_alignment_penalties_start_after_entry_and_are_full_by_head_window():
     env, asset = _fake_env()
+    env._backroll_trunk_latch[:] = True
     asset.data.root_link_ang_vel_b[:] = torch.tensor([[1.0, -6.0, 2.0]])
     half = math.radians(45.0) * 0.5
     asset.data.root_link_quat_w[:] = torch.tensor(

@@ -11572,8 +11572,9 @@ def grounded_backroll_sagittal_penalty(
     The strict maneuver gate rejects a cycle after 90 degrees of accumulated
     off-axis rotation.  A prior 1 rad/s dead zone let a small but persistent
     body-x/body-z twist reach that hard boundary with nearly no learning
-    signal.  This returns the bounded *rate* from the first meaningful roll
-    phase onward, so the integral tracks the physical off-axis budget.  Pure
+    signal.  This returns the bounded *rate* after the ordered trunk contact,
+    when the policy has committed to the physical roll, so the integral tracks
+    the off-axis budget without taxing the exploratory standing tuck. Pure
     backward body-y rotation remains exactly free and standing remains zero.
     """
     if max_offaxis_rate <= 0.0:
@@ -11582,7 +11583,11 @@ def grounded_backroll_sagittal_penalty(
     omega_b = torch.nan_to_num(asset.data.root_link_ang_vel_b, nan=0.0)
     off_axis_rate = torch.sqrt(omega_b[:, 0].square() + omega_b[:, 2].square())
     bounded_rate = torch.clamp(off_axis_rate, max=max_offaxis_rate)
-    return bounded_rate * _grounded_backroll_late_phase_ramp(env)
+    return (
+        bounded_rate
+        * _grounded_backroll_late_phase_ramp(env)
+        * env._backroll_trunk_latch.float()
+    )
 
 
 def grounded_backroll_flatness_penalty(
