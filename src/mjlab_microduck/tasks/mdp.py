@@ -11877,9 +11877,11 @@ def _update_grounded_backroll_state(
     )
     first_cycle_relaxed = _grounded_backroll_first_cycle_relaxed(env)
     repeated_sagittal = _grounded_backroll_cycle_is_sagittal(env)
-    sagittal_landing = (
-        ~env._backroll_repeat_mode | first_cycle_relaxed | repeated_sagittal
-    )
+    # Every counted landing must satisfy the measured sagittal physical gate.
+    # The relaxed envelope is intentionally limited to the first cycle of a
+    # repeated run; one-shot stages must not promote a side/off-axis landing
+    # into curriculum mastery.
+    sagittal_landing = first_cycle_relaxed | repeated_sagittal
     landing_ang_vel_ok = torch.where(
         env._backroll_repeat_mode,
         ang_speed <= _BACKROLL_REPEAT_MAX_LANDING_ANG_VEL,

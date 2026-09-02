@@ -1164,6 +1164,29 @@ def test_repeated_backroll_rejects_side_landing(monkeypatch):
     assert env._backroll_cycle_count.item() == 0
 
 
+def test_one_shot_side_landing_cannot_count_as_curriculum_success(monkeypatch):
+    env, _asset = _fake_env()
+    env._backroll_repeat_mode[:] = False
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.full((1,), 0.7))
+    env._roulade_accum[:] = math.radians(355.0)
+    env._roulade_max[:] = math.radians(355.0)
+    env._backroll_previous_frontier[:] = math.radians(355.0)
+    env._backroll_trunk_latch[:] = True
+    env._backroll_head_latch[:] = True
+
+    hold_steps = math.ceil(mdp._BACKROLL_LANDING_HOLD_SECONDS / env.step_dt)
+    for _ in range(hold_steps + 2):
+        assert mdp.grounded_backroll_success_rate(env).item() == 0.0
+        env.common_step_counter += 1
+
+    assert not env._backroll_success.item()
+
+
 def test_repeated_backroll_cannot_park_on_trunk_mid_cycle(monkeypatch):
     env, asset = _fake_env()
     env._backroll_repeat_mode[:] = True
