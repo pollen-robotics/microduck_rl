@@ -11568,10 +11568,13 @@ def grounded_backroll_sagittal_penalty(
     """
     asset: Entity = env.scene[asset_cfg.name]
     omega_b = torch.nan_to_num(asset.data.root_link_ang_vel_b, nan=0.0)
-    return (
-        (omega_b[:, 0].square() + omega_b[:, 2].square())
-        * _grounded_backroll_late_phase_ramp(env)
-    )
+    # The previous raw squared-rate tax was unbounded: the A204 learner found
+    # that the cheapest way to avoid a large off-axis update was to stop the
+    # roll entirely.  Charge only excess transverse rate and cap the signal so
+    # the signed rotation objective remains the dominant gradient.
+    off_axis_rate = torch.sqrt(omega_b[:, 0].square() + omega_b[:, 2].square())
+    excess = torch.clamp((off_axis_rate - 1.0) / 3.0, min=0.0, max=1.0)
+    return excess.square() * _grounded_backroll_late_phase_ramp(env)
 
 
 def grounded_backroll_flatness_penalty(
@@ -11583,7 +11586,11 @@ def grounded_backroll_flatness_penalty(
     lateral_axis_z = torch.nan_to_num(
         _lateral_axis_z(asset.data.root_link_quat_w), nan=0.0
     ).abs()
-    return lateral_axis_z.square() * _grounded_backroll_late_phase_ramp(env)
+    # Preserve a clean sagittal roll for free while bounding the late-phase
+    # side-flop tax.  This avoids turning a recoverable near-landing into a
+    # do-nothing optimum while still making a shoulder roll strictly costly.
+    excess = torch.clamp((lateral_axis_z - 0.30) / 0.70, min=0.0, max=1.0)
+    return excess.square() * _grounded_backroll_late_phase_ramp(env)
 
 
 # ============================================================================
