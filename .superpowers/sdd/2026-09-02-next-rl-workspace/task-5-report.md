@@ -203,3 +203,45 @@ uv run --with pytest pytest tests/ -q
   automatically, eliminating stale-file unlink races. Distinct pending versions
   are also covered by a serialized-approval test that leaves one learned policy
   per skill.
+
+## Fix round 4 — authoritative SkillSpec threshold binding
+
+### RED evidence
+
+Before this round, report consistency was self-contained: an attacker could
+remove the same failed metric from every scenario and leave an internally
+consistent, but incomplete, report. The initial TDD run failed at collection
+because `ReviewBundle.build(..., spec=...)` did not yet accept authoritative
+specification evidence:
+
+```text
+TypeError: ReviewBundle.build() got an unexpected keyword argument 'spec'
+```
+
+### GREEN evidence
+
+```text
+uv run --with pytest pytest tests/test_next_rl_review.py tests/test_next_rl_promotion.py -q
+30 passed in 0.15s
+
+uv run --with pytest pytest tests/test_next_rl_*.py -q
+108 passed in 1.75s
+
+uv run --with pytest pytest tests/ -q
+304 passed, 1 skipped in 7.92s
+```
+
+### Fixes
+
+- Bundles now retain canonical `SkillSpec` JSON and its digest. Build and every
+  later verification bind skill ID/version, held-out scenario families,
+  evaluation seeds, and every threshold result to that exact specification.
+- Each scenario must have exactly one result for every spec metric name, with
+  matching unit/direction/limit/mandatory fields. Duplicate names are refused
+  even when their other fields differ; non-threshold diagnostic metrics remain
+  permitted in raw scenario metrics.
+- Promotion inherits the check through `ReviewBundle.verify()` at validation,
+  request, approval, and rejection.
+- Distinct-version approvals now race through a barrier and leave exactly one
+  learned record and inventory capability for the skill, with the other marked
+  superseded.

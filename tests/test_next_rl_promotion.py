@@ -14,7 +14,7 @@ from mjlab_microduck.next_rl.evaluation import EvaluationReport, MetricResult, S
 from mjlab_microduck.next_rl.promotion import PromotionError, PromotionStore
 from mjlab_microduck.next_rl.review import ReviewBundle, ReviewClip
 from mjlab_microduck.next_rl.artifacts import canonical_json
-from mjlab_microduck.next_rl.schema import ArtifactRef, Capability, PolicyContract
+from mjlab_microduck.next_rl.schema import ArtifactRef, Capability, MetricThreshold, PolicyContract, SkillSpec
 
 
 @pytest.fixture
@@ -45,7 +45,12 @@ def bundle(tmp_path) -> ReviewBundle:
         path = tmp_path / f"{role}.mp4"
         path.write_bytes(role.encode())
         clips[role] = ReviewClip(role, scenario.scenario_id, scenario.seed, path, digest)
-    return ReviewBundle.build(report, clips)
+    spec = SkillSpec(
+        "hello", "1.0.0", "promotion contract", PolicyContract.microduck(),
+        (MetricThreshold("falls", "count", "maximum", 0),), (1,), (7, 8, 9, 10),
+        held_out_scenarios=("nominal", "entry", "exit", "stress"),
+    )
+    return ReviewBundle.build(report, clips, spec=spec)
 
 
 @pytest.fixture
@@ -114,7 +119,10 @@ def test_rejection_preserves_prior_learned_policy(store, capability, bundle, pri
     evidence = json.loads(bundle.evaluation_json)
     evidence["spec_version"] = "1.0.1"
     versioned_json = canonical_json(evidence)
-    candidate_bundle = replace(bundle, evaluation_json=versioned_json, evaluation_digest=hashlib.sha256(versioned_json.encode()).hexdigest())
+    spec_evidence = json.loads(bundle.spec_json)
+    spec_evidence["version"] = "1.0.1"
+    spec_json = canonical_json(spec_evidence)
+    candidate_bundle = replace(bundle, evaluation_json=versioned_json, evaluation_digest=hashlib.sha256(versioned_json.encode()).hexdigest(), spec_json=spec_json, spec_digest=hashlib.sha256(spec_json.encode()).hexdigest())
     candidate = replace(capability, version="1.0.1")
     rejected = store.reject(pending(store, candidate, candidate_bundle).id, reviewer="rakesh", reason="leans")
     assert rejected.status == "validated"
@@ -202,14 +210,36 @@ def test_distinct_pending_versions_serialize_to_one_learned_policy(store, capabi
     evidence = json.loads(bundle.evaluation_json)
     evidence["spec_version"] = "1.0.1"
     text = canonical_json(evidence)
-    candidate = replace(bundle, evaluation_json=text, evaluation_digest=hashlib.sha256(text.encode()).hexdigest())
+    spec_evidence = json.loads(bundle.spec_json)
+    spec_evidence["version"] = "1.0.1"
+    spec_json = canonical_json(spec_evidence)
+    candidate = replace(bundle, evaluation_json=text, evaluation_digest=hashlib.sha256(text.encode()).hexdigest(), spec_json=spec_json, spec_digest=hashlib.sha256(spec_json.encode()).hexdigest())
     pending_a = pending(store, capability, bundle)
     pending_b = pending(store, replace(capability, version="1.0.1"), candidate)
+    start = threading.Barrier(3)
+    outcomes: list[object] = []
 
-    first = store.approve(pending_a.id, reviewer="a")
-    second = store.approve(pending_b.id, reviewer="b")
-    records = store._load()["records"].values()
+    def approve(record_id: str, reviewer: str) -> None:
+        start.wait()
+        outcomes.append(PromotionStore(store.root).approve(record_id, reviewer=reviewer))
 
-    assert first.status == "learned"
-    assert second.status == "learned"
+    workers = [
+        threading.Thread(target=approve, args=(pending_a.id, "a")),
+        threading.Thread(target=approve, args=(pending_b.id, "b")),
+    ]
+    for worker in workers:
+        worker.start()
+    start.wait()
+    for worker in workers:
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+
+    state = store._load()
+    records = state["records"].values()
+    capabilities = [item for item in state["capabilities"] if item["id"] == "hello"]
+
+    assert len(outcomes) == 2
     assert sum(record["status"] == "learned" for record in records) == 1
+    assert sum(record["status"] == "superseded" for record in records) == 1
+    assert sum(item["status"] == "learned" for item in capabilities) == 1
+    assert sum(item["status"] == "superseded" for item in capabilities) == 1

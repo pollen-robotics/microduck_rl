@@ -13,6 +13,7 @@ from typing import Any
 
 from .artifacts import canonical_json, sha256_file
 from .evaluation import ArtifactIntegrityError, EvaluationReport
+from .schema import SkillSpec
 
 
 class ReviewError(ValueError):
@@ -108,6 +109,7 @@ def _report(value: str, label: str, *, require_passing: bool = True) -> dict[str
         if not scenario["threshold_results"]:
             raise ReviewError(f"{label} threshold results are required")
         signatures: set[tuple[str, str, str, float, bool]] = set()
+        metric_names: set[str] = set()
         for result in scenario["threshold_results"]:
             fields = {"scenario_id", "metric_name", "unit", "direction", "limit", "value", "mandatory", "passed", "normalized_violation"}
             if not isinstance(result, dict) or set(result) != fields:
@@ -126,12 +128,13 @@ def _report(value: str, label: str, *, require_passing: bool = True) -> dict[str
             if result["passed"] is not passed or result["normalized_violation"] != violation:
                 raise ReviewError(f"{label} threshold result is inconsistent")
             signature = (result["metric_name"], result["unit"], result["direction"], float(result["limit"]), result["mandatory"])
+            if result["metric_name"] in metric_names:
+                raise ReviewError(f"{label} duplicate threshold metric name")
+            metric_names.add(result["metric_name"])
             if signature in signatures:
                 raise ReviewError(f"{label} threshold result keys are not unique")
             signatures.add(signature)
             mandatory_passed = mandatory_passed and (passed or not result["mandatory"])
-        if set(metrics) != {signature[0] for signature in signatures}:
-            raise ReviewError(f"{label} threshold results do not cover scenario metrics")
         if threshold_contract is None:
             threshold_contract = signatures
         elif threshold_contract != signatures:
@@ -141,6 +144,40 @@ def _report(value: str, label: str, *, require_passing: bool = True) -> dict[str
     if require_passing and raw["passed"] is not True:
         raise ReviewError(f"{label} evaluation must record a passing evaluation")
     return raw
+
+
+def _spec(value: str) -> SkillSpec:
+    try:
+        raw = json.loads(value)
+        if canonical_json(raw) != value:
+            raise ValueError
+        return SkillSpec.from_dict(raw)
+    except (TypeError, ValueError) as error:
+        raise ReviewError("skill spec evidence is invalid") from error
+
+
+def _validate_spec(report: Mapping[str, Any], spec: SkillSpec) -> None:
+    if (report["skill_id"], report["spec_version"]) != (spec.id, spec.version):
+        raise ReviewError("evaluation does not match bound skill spec")
+    families = {scenario["family"] for scenario in report["scenarios"]}
+    if not set(spec.held_out_scenarios) <= families:
+        raise ReviewError("evaluation omits bound skill spec scenario families")
+    expected = {metric.name: (metric.unit, metric.direction, float(metric.limit), metric.mandatory) for metric in spec.metrics}
+    for scenario in report["scenarios"]:
+        if scenario["seed"] not in spec.evaluation_seeds:
+            raise ReviewError("evaluation scenario seed is not in bound skill spec")
+        results: dict[str, Mapping[str, Any]] = {}
+        for result in scenario["threshold_results"]:
+            name = result["metric_name"]
+            if name in results:
+                raise ReviewError("duplicate spec threshold metric name")
+            results[name] = result
+        if set(results) != set(expected):
+            raise ReviewError("evaluation does not contain the complete spec threshold contract")
+        for name, signature in expected.items():
+            result = results[name]
+            if (result["unit"], result["direction"], float(result["limit"]), result["mandatory"]) != signature:
+                raise ReviewError("evaluation threshold does not match bound skill spec")
 
 
 def _summary(report: Mapping[str, Any]) -> dict[str, float]:
@@ -187,9 +224,11 @@ class ReviewBundle:
     passed: bool
     baseline: BaselineComparison | None
     policy_path: Path
+    spec_json: str
+    spec_digest: str
 
     @classmethod
-    def build(cls, report: EvaluationReport, clip_files: Mapping[str, ReviewClip], *, baseline: EvaluationReport | None = None) -> ReviewBundle:
+    def build(cls, report: EvaluationReport, clip_files: Mapping[str, ReviewClip], *, spec: SkillSpec, baseline: EvaluationReport | None = None) -> ReviewBundle:
         if report.policy is None or report.passed is not True:
             raise ReviewError("review requires a passing evaluation bound to an ONNX policy")
         try:
@@ -197,6 +236,8 @@ class ReviewBundle:
         except ArtifactIntegrityError as error:
             raise ReviewError(str(error)) from error
         raw = _report(canonical_json(report.as_dict()), "candidate")
+        spec_json = canonical_json(spec.as_dict())
+        _validate_spec(raw, _spec(spec_json))
         expected = _expected(raw)
         clips: list[BoundReviewClip] = []
         for role in _ROLES:
@@ -212,7 +253,7 @@ class ReviewBundle:
             clips.append(BoundReviewClip(role, clip.scenario_id, clip.seed, path, sha256_file(path), clip.policy_digest))
         evaluation_json = canonical_json(report.as_dict())
         baseline_data = cls._baseline(raw, baseline) if baseline else None
-        bundle = cls(evaluation_json, _digest(evaluation_json), report.policy.sha256, tuple(clips), _summary(raw), True, baseline_data, Path(report.policy.path))
+        bundle = cls(evaluation_json, _digest(evaluation_json), report.policy.sha256, tuple(clips), _summary(raw), True, baseline_data, Path(report.policy.path), spec_json, _digest(spec_json))
         bundle.verify()
         return bundle
 
@@ -245,6 +286,8 @@ class ReviewBundle:
         result: dict[str, object] = {"evaluation": self.evaluation_json, "evaluation_digest": self.evaluation_digest,
             "policy_sha256": self.policy_digest, "policy_path": str(self.policy_path), "clips": [clip.as_dict() for clip in self.clips],
             "metric_summary": self.metric_summary, "passed": self.passed}
+        result["skill_spec"] = self.spec_json
+        result["skill_spec_digest"] = self.spec_digest
         if self.baseline is not None:
             result["baseline"] = self.baseline.as_dict()
         return result
@@ -254,7 +297,7 @@ class ReviewBundle:
         clips = tuple(BoundReviewClip(item["role"], item["scenario_id"], item["seed"], Path(item["path"]), item["sha256"], item["policy_sha256"]) for item in raw["clips"])
         base = raw.get("baseline")
         baseline = None if base is None else BaselineComparison(base["evaluation"], base["evaluation_digest"], Path(base["policy_path"]), base["policy_sha256"], dict(base["metric_summary"]))
-        return cls(raw["evaluation"], raw["evaluation_digest"], raw["policy_sha256"], clips, dict(raw["metric_summary"]), raw["passed"], baseline, Path(raw["policy_path"]))
+        return cls(raw["evaluation"], raw["evaluation_digest"], raw["policy_sha256"], clips, dict(raw["metric_summary"]), raw["passed"], baseline, Path(raw["policy_path"]), raw["skill_spec"], raw["skill_spec_digest"])
 
     @property
     def digest(self) -> str:
@@ -264,6 +307,10 @@ class ReviewBundle:
         if self.passed is not True or _digest(self.evaluation_json) != self.evaluation_digest:
             raise ReviewError("review requires a passing evaluation")
         report = _report(self.evaluation_json, "candidate")
+        if _digest(self.spec_json) != self.spec_digest:
+            raise ReviewError("skill spec digest mismatch")
+        spec = _spec(self.spec_json)
+        _validate_spec(report, spec)
         policy = report["policy"]
         if not isinstance(self.policy_path, Path):
             raise ReviewError("policy path is required")
@@ -289,6 +336,7 @@ class ReviewBundle:
             if _digest(base.evaluation_json) != base.evaluation_digest:
                 raise ReviewError("baseline evaluation digest mismatch")
             raw = _report(base.evaluation_json, "baseline", require_passing=False)
+            _validate_spec(raw, spec)
             if base.metric_summary != _summary(raw):
                 raise ReviewError("baseline metric summary does not match evaluation")
             if raw["policy"]["sha256"] != base.policy_digest or raw["policy"]["path"] != str(base.policy_path):
