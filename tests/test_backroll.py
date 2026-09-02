@@ -425,6 +425,7 @@ def test_repeated_first_cycle_relaxation_cannot_open_the_sagittal_gate():
 def test_late_pose_potential_does_not_reward_a_side_basin():
     env, _asset = _fake_env()
     env._roulade_max[:] = math.radians(320.0)
+    env._backroll_head_latch[:] = True
     env._backroll_cycle_max_lateral_axis_z[:] = 1.0
     env._backroll_cycle_offaxis_rotation[:] = math.radians(240.0)
 
@@ -440,6 +441,19 @@ def test_late_pose_potential_does_not_reward_a_side_basin():
 
     env._roulade_max[:] = math.radians(320.0)
     env._backroll_invalid[:] = True
+    assert mdp._grounded_backroll_potential_reward_valid(env).item() is False
+
+
+def test_landing_potential_starts_after_flat_head_pivot_not_before():
+    env, _asset = _fake_env()
+    env._backroll_head_latch[:] = True
+    env._roulade_max[:] = math.radians(169.0)
+    assert mdp._grounded_backroll_potential_reward_valid(env).item() is False
+
+    env._roulade_max[:] = math.radians(170.0)
+    assert mdp._grounded_backroll_potential_reward_valid(env).item() is True
+
+    env._backroll_head_latch[:] = False
     assert mdp._grounded_backroll_potential_reward_valid(env).item() is False
 
 

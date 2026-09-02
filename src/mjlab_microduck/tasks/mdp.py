@@ -11621,7 +11621,14 @@ _BACKROLL_HEAD_LATCH_HI = math.radians(300.0)
 _BACKROLL_NON_TOP_HEAD_LO = math.radians(150.0)
 _BACKROLL_NON_TOP_HEAD_HI = math.radians(240.0)
 _BACKROLL_LANDING_ANGLE = math.radians(350.0)
-_BACKROLL_POTENTIAL_ANGLE = math.radians(300.0)
+# A224's corrected continuation frontier gets standing starts through the
+# ordered trunk/head pivot (158--218 degrees), but the original 300-degree
+# release withheld the only upright/height gradient until after the policy had
+# already chosen a side spin.  Begin these *delta-only*, sagittal-gated landing
+# potentials just after a genuine flat-head pivot can exist.  The reward
+# function additionally requires the head latch, so an early crouch or an
+# unlatched fall cannot receive this bridge.
+_BACKROLL_POTENTIAL_ANGLE = math.radians(170.0)
 _BACKROLL_UPRIGHT_COS = math.cos(math.radians(20.0))
 _BACKROLL_STALL_TILT_COS = math.cos(math.radians(60.0))
 _BACKROLL_MIN_LANDING_HEIGHT = 0.10
@@ -11769,6 +11776,7 @@ def _grounded_backroll_potential_reward_valid(env: ManagerBasedRlEnv) -> torch.T
     """Pay late landing potentials only inside the real backroll envelope."""
     return (
         (env._roulade_max >= _BACKROLL_POTENTIAL_ANGLE)
+        & env._backroll_head_latch
         & _grounded_backroll_cycle_is_sagittal(env)
         & ~env._backroll_invalid
         & ~env._backroll_recovery_active
