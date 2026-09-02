@@ -100,6 +100,7 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
         "backroll_speed_progress",
         "backroll_upright_progress",
         "backroll_height_progress",
+        "backroll_feet_recontact",
         "backroll_success",
         "backroll_invalid",
         "backroll_overspeed",
@@ -138,6 +139,11 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     }
     assert cfg.rewards["backroll_upright_progress"].weight == pytest.approx(2.0)
     assert cfg.rewards["backroll_height_progress"].weight == pytest.approx(2.0)
+    assert cfg.rewards["backroll_feet_recontact"].weight == pytest.approx(5.0)
+    assert (
+        cfg.rewards["backroll_feet_recontact"].func
+        is mdp.grounded_backroll_feet_recontact_rate
+    )
     assert cfg.rewards["backroll_success"].weight == pytest.approx(20.0)
     assert cfg.rewards["backroll_invalid"].weight == pytest.approx(-1.0)
     assert cfg.rewards["backroll_sagittal"].weight == pytest.approx(-0.10)
@@ -1517,6 +1523,36 @@ def test_repeated_backroll_rearms_and_credits_two_distinct_cycles(monkeypatch):
         assert not env._backroll_success.item()
 
     assert sum(value > 0.0 for value in pulses) == 2
+
+
+def test_feet_recontact_bridge_requires_head_release_and_pays_once(monkeypatch):
+    env, _asset = _fake_env()
+    monkeypatch.setattr(mdp, "_lateral_axis_z", lambda _quat: torch.zeros(1))
+    monkeypatch.setattr(
+        mdp,
+        "_head_top_down",
+        lambda _env, _asset: torch.ones(1, dtype=torch.bool),
+    )
+    env._roulade_accum[:] = math.radians(305.0)
+    env._roulade_max[:] = math.radians(305.0)
+    env._roulade_paid[:] = math.radians(305.0)
+    env._backroll_previous_frontier[:] = math.radians(305.0)
+    env._backroll_trunk_latch[:] = True
+    env._backroll_head_latch[:] = True
+
+    # A head/feet tripod is not a landing bridge.
+    env.scene.sensors["head_ground_contact"].data.found[:] = 1.0
+    assert mdp.grounded_backroll_feet_recontact_rate(env).item() == 0.0
+    env.common_step_counter += 1
+
+    # Releasing the head while upright enough and supported on both feet emits
+    # exactly one pulse. Holding the same posture cannot farm it.
+    env.scene.sensors["head_ground_contact"].data.found[:] = 0.0
+    first = mdp.grounded_backroll_feet_recontact_rate(env)
+    env.common_step_counter += 1
+    second = mdp.grounded_backroll_feet_recontact_rate(env)
+    assert first.item() == pytest.approx(1.0 / env.step_dt)
+    assert second.item() == 0.0
 
 
 def test_repeated_backroll_rejects_side_landing(monkeypatch):

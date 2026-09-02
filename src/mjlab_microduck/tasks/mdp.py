@@ -11620,6 +11620,9 @@ _BACKROLL_HEAD_LATCH_HI = math.radians(300.0)
 # phase qualification so early tuck contact is not mistaken for a stalled pivot.
 _BACKROLL_NON_TOP_HEAD_LO = math.radians(150.0)
 _BACKROLL_NON_TOP_HEAD_HI = math.radians(240.0)
+_BACKROLL_FEET_RECONTACT_ANGLE = math.radians(300.0)
+_BACKROLL_FEET_RECONTACT_UPRIGHT_COS = math.cos(math.radians(60.0))
+_BACKROLL_FEET_RECONTACT_MIN_HEIGHT = 0.075
 _BACKROLL_LANDING_ANGLE = math.radians(350.0)
 # A224's corrected continuation frontier gets standing starts through the
 # ordered trunk/head pivot (158--218 degrees), but the original 300-degree
@@ -11674,6 +11677,8 @@ def _grounded_backroll_state(env: ManagerBasedRlEnv) -> None:
     env._backroll_head_latch = b.clone()
     env._backroll_trunk_latch_now = b.clone()
     env._backroll_head_latch_now = b.clone()
+    env._backroll_feet_recontact_latch = b.clone()
+    env._backroll_feet_recontact_now = b.clone()
     env._backroll_success = b.clone()
     env._backroll_success_now = b.clone()
     env._backroll_invalid = b.clone()
@@ -11798,6 +11803,8 @@ def _reset_grounded_backroll_cycle_buffers(
     env._backroll_head_latch[reset] = False
     env._backroll_trunk_latch_now[reset] = False
     env._backroll_head_latch_now[reset] = False
+    env._backroll_feet_recontact_latch[reset] = False
+    env._backroll_feet_recontact_now[reset] = False
     env._backroll_success[reset] = False
     env._backroll_air_steps[reset] = 0
     env._backroll_max_air_steps[reset] = 0
@@ -11863,6 +11870,7 @@ def _update_grounded_backroll_state(
         env._roulade_paid[recovery_before] = 0.0
     env._backroll_recovery_success_now.zero_()
     env._backroll_recovered_rerolled_now.zero_()
+    env._backroll_feet_recontact_now.zero_()
 
     accum, frontier, _ = _roulade_state(env)
     support = _sensor_any_contact(env, _ROULADE_SUPPORT_SENSOR)
@@ -11981,6 +11989,30 @@ def _update_grounded_backroll_state(
     # Every counted landing must satisfy the same narrow sagittal physical
     # gate.  A checkpoint warm-start never relaxes this maneuver definition.
     sagittal_landing = repeated_sagittal
+    # A landing jackpot alone supplied no gradient for the discontinuous
+    # head-release -> feet-support transition. Latch the first physically
+    # plausible feet reacquisition after the robot has actually passed over
+    # the ordered flat head-top. This is deliberately one-shot and stricter
+    # than a head/feet tripod: the head must be released, the trunk must be on
+    # its rising side, and the whole cycle must still be sagittal.
+    feet_recontact_candidate = (
+        ~recovery_before
+        & (frontier >= _BACKROLL_FEET_RECONTACT_ANGLE)
+        & ~env._backroll_invalid
+        & env._backroll_trunk_latch
+        & env._backroll_head_latch
+        & left_foot
+        & right_foot
+        & ~head
+        & (height >= _BACKROLL_FEET_RECONTACT_MIN_HEIGHT)
+        & (upright >= _BACKROLL_FEET_RECONTACT_UPRIGHT_COS)
+        & sagittal_landing
+    )
+    previous_feet_recontact = env._backroll_feet_recontact_latch.clone()
+    env._backroll_feet_recontact_latch |= feet_recontact_candidate
+    env._backroll_feet_recontact_now = (
+        env._backroll_feet_recontact_latch & ~previous_feet_recontact
+    )
     landing_ang_vel_ok = torch.where(
         env._backroll_repeat_mode,
         ang_speed <= _BACKROLL_REPEAT_MAX_LANDING_ANG_VEL,
@@ -12603,6 +12635,8 @@ def reset_grounded_backroll_state(
     env._roulade_head_latch[env_ids] = env._backroll_head_latch[env_ids]
     env._backroll_trunk_latch_now[env_ids] = False
     env._backroll_head_latch_now[env_ids] = False
+    env._backroll_feet_recontact_latch[env_ids] = False
+    env._backroll_feet_recontact_now[env_ids] = False
     env._backroll_success[env_ids] = False
     env._backroll_success_now[env_ids] = False
     env._backroll_invalid[env_ids] = False
@@ -13097,6 +13131,16 @@ def grounded_backroll_speed_progress(
     )
 
 
+def grounded_backroll_feet_recontact_rate(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """One pulse for releasing the head and reacquiring both feet after 300 degrees."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_feet_recontact_now.float() / env.step_dt
+
+
 def grounded_backroll_success_rate(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -13250,6 +13294,15 @@ def grounded_backroll_success_fraction(
     asset: Entity = env.scene[asset_cfg.name]
     _update_grounded_backroll_state(env, asset)
     return env._backroll_success.float()
+
+
+def grounded_backroll_feet_recontact_fraction(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_grounded_backroll_state(env, asset)
+    return env._backroll_feet_recontact_latch.float()
 
 
 def grounded_backroll_cycle_count(

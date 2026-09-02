@@ -418,6 +418,13 @@ def make_microduck_backroll_env_cfg(play: bool = False):
         func=microduck_mdp.grounded_backroll_height_progress,
         weight=2.0,
     )
+    cfg.rewards["backroll_feet_recontact"] = RewardTermCfg(
+        func=microduck_mdp.grounded_backroll_feet_recontact_rate,
+        # One bounded bridge into the true landing gate. It requires 300
+        # degrees, ordered contacts, head release, both feet, rising posture,
+        # and the same strict sagittal history as final success.
+        weight=5.0,
+    )
     cfg.rewards["backroll_success"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_success_rate,
         weight=20.0,
@@ -587,6 +594,9 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     )
     cfg.metrics["backroll_success"] = MetricsTermCfg(
         func=microduck_mdp.grounded_backroll_success_fraction,
+    )
+    cfg.metrics["backroll_feet_recontact"] = MetricsTermCfg(
+        func=microduck_mdp.grounded_backroll_feet_recontact_fraction,
     )
     return cfg
 
