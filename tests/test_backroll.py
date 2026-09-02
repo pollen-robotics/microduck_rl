@@ -129,8 +129,8 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
     assert cfg.rewards["backroll_completion_progress"].params["start_angle"] == pytest.approx(
         math.radians(110.0)
     )
-    assert cfg.rewards["backroll_upright_progress"].weight == pytest.approx(5.0)
-    assert cfg.rewards["backroll_height_progress"].weight == pytest.approx(4.0)
+    assert cfg.rewards["backroll_upright_progress"].weight == pytest.approx(0.0)
+    assert cfg.rewards["backroll_height_progress"].weight == pytest.approx(0.0)
     assert cfg.rewards["backroll_success"].weight == pytest.approx(20.0)
     assert cfg.rewards["backroll_invalid"].weight == pytest.approx(-1.0)
     assert cfg.rewards["backroll_sagittal"].weight == pytest.approx(0.0)
@@ -150,6 +150,14 @@ def test_backroll_is_one_shot_roulade_without_sprint_objectives():
         {"step": 100 * 24, "weight": -0.25},
         {"step": 250 * 24, "weight": -0.75},
         {"step": 600 * 24, "weight": -1.25},
+    ]
+    assert cfg.curriculum["backroll_upright_weight"].params["weight_stages"] == [
+        {"step": 0, "weight": 0.0},
+        {"step": 200 * 24, "weight": 5.0},
+    ]
+    assert cfg.curriculum["backroll_height_weight"].params["weight_stages"] == [
+        {"step": 0, "weight": 0.0},
+        {"step": 200 * 24, "weight": 4.0},
     ]
     forbidden = ("sprint", "distance", "lane", "road", "recovery", "reposition")
     assert not any(token in name for name in cfg.rewards for token in forbidden)

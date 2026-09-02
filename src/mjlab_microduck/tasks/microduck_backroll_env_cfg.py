@@ -365,15 +365,14 @@ def make_microduck_backroll_env_cfg(play: bool = False):
     )
     cfg.rewards["backroll_upright_progress"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_upright_progress,
-        # A212 reaches the ordered trunk/head contacts but settles in a
-        # crouched, non-upright pose before the landing hold.  Strengthen the
-        # late, delta-only potential so the policy has enough signal to finish
-        # the last 50 degrees; this is not a standing annuity.
-        weight=5.0,
+        # A225 showed that this valid late-phase potential must not influence
+        # the initial standing-launch discovery.  The curriculum enables it
+        # after the launch bridge has had 200 PPO iterations to form.
+        weight=0.0,
     )
     cfg.rewards["backroll_height_progress"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_height_progress,
-        weight=4.0,
+        weight=0.0,
     )
     cfg.rewards["backroll_success"] = RewardTermCfg(
         func=microduck_mdp.grounded_backroll_success_rate,
@@ -484,6 +483,32 @@ def make_microduck_backroll_env_cfg(play: bool = False):
                     {"step": 100 * 24, "weight": -0.25},
                     {"step": 250 * 24, "weight": -0.75},
                     {"step": 600 * 24, "weight": -1.25},
+                ],
+            },
+        )
+        # The 110-degree exit frontier in A224 establishes ordered head
+        # contact from standing, while enabling landing potentials from the
+        # first batch in A225 erased that bridge.  Turn on the existing,
+        # latch-gated delta potentials only after this initial discovery
+        # window; they then guide the real head-over exit before the later
+        # side-spin regime can take over.
+        cfg.curriculum["backroll_upright_weight"] = CurriculumTermCfg(
+            func=microduck_mdp.reward_weight,
+            params={
+                "reward_name": "backroll_upright_progress",
+                "weight_stages": [
+                    {"step": 0, "weight": 0.0},
+                    {"step": 200 * 24, "weight": 5.0},
+                ],
+            },
+        )
+        cfg.curriculum["backroll_height_weight"] = CurriculumTermCfg(
+            func=microduck_mdp.reward_weight,
+            params={
+                "reward_name": "backroll_height_progress",
+                "weight_stages": [
+                    {"step": 0, "weight": 0.0},
+                    {"step": 200 * 24, "weight": 4.0},
                 ],
             },
         )
