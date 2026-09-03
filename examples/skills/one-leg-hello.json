@@ -1,0 +1,138 @@
+{
+  "id": "one-leg-hello",
+  "version": "1.0.0",
+  "description": "From an ordinary two-foot stand, support on the left foot, raise the right foot, wave the right hip laterally three times with a slightly bent right knee, keep the trunk controlled, and return safely to an ordinary stand.",
+  "contract": {
+    "model_api": 1,
+    "obs_len": 61,
+    "action_len": 14,
+    "robot_model": "microduck",
+    "control_hz": 50
+  },
+  "metrics": [
+    {
+      "name": "left_foot_support_ratio",
+      "unit": "ratio",
+      "direction": "minimum",
+      "limit": 0.98
+    },
+    {
+      "name": "right_foot_clearance_m",
+      "unit": "m",
+      "direction": "minimum",
+      "limit": 0.03
+    },
+    {
+      "name": "right_hip_lateral_cycles",
+      "unit": "count",
+      "direction": "minimum",
+      "limit": 3
+    },
+    {
+      "name": "right_knee_flexion_min_rad",
+      "unit": "rad",
+      "direction": "minimum",
+      "limit": 0.15
+    },
+    {
+      "name": "right_knee_flexion_max_rad",
+      "unit": "rad",
+      "direction": "maximum",
+      "limit": 0.45
+    },
+    {
+      "name": "trunk_tilt_abs_rad",
+      "unit": "rad",
+      "direction": "maximum",
+      "limit": 0.25
+    },
+    {
+      "name": "forbidden_contact_count",
+      "unit": "count",
+      "direction": "maximum",
+      "limit": 0
+    },
+    {
+      "name": "fall_count",
+      "unit": "count",
+      "direction": "maximum",
+      "limit": 0
+    },
+    {
+      "name": "safe_return_success_ratio",
+      "unit": "ratio",
+      "direction": "minimum",
+      "limit": 0.98
+    }
+  ],
+  "training_seeds": [101, 102, 103, 104],
+  "evaluation_seeds": [1001, 1002, 1003, 1004],
+  "aliases": [
+    "one leg hello",
+    "right-foot hello"
+  ],
+  "entry_states": {
+    "required_pose": "ordinary_two_foot_standing",
+    "left_foot": "support_contact_required",
+    "right_foot": "raised_without_floor_contact"
+  },
+  "exit_states": {
+    "required_pose": "ordinary_two_foot_standing",
+    "minimum_hold_s": 2.0,
+    "safe_return_required": true
+  },
+  "commands": {
+    "right_hip_roll": {
+      "motion": "lateral_side_to_side",
+      "cycles": 3,
+      "peak_to_peak_rad": 0.3
+    },
+    "right_knee": {
+      "target_flexion_rad": 0.25
+    },
+    "trunk": {
+      "maximum_abs_tilt_rad": 0.25
+    }
+  },
+  "held_out_scenarios": [
+    "nominal",
+    "entry",
+    "exit",
+    "stress"
+  ],
+  "allowed_parent_capabilities": [
+    "standing"
+  ],
+  "rendering_views": [
+    "front",
+    "side"
+  ],
+  "minimum_review_clips": [
+    "nominal",
+    "entry",
+    "exit",
+    "stress",
+    "worst_case"
+  ],
+  "metadata": {
+    "simulation_acceptance_defaults": {
+      "evaluation_duration_s": 4.0,
+      "left_foot_support_ratio_min": 0.98,
+      "right_foot_clearance_m_min": 0.03,
+      "right_hip_lateral_cycles_min": 3,
+      "trunk_tilt_abs_rad_max": 0.25,
+      "forbidden_contact_count_max": 0,
+      "fall_count_max": 0,
+      "safe_return_success_ratio_min": 0.98
+    },
+    "forbidden_contacts": [
+      "head",
+      "trunk",
+      "right_foot"
+    ],
+    "hardware_deployment": {
+      "calibration_required": true,
+      "deployment_allowed_after_calibration": false
+    }
+  }
+}

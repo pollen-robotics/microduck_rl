@@ -55,6 +55,15 @@ uv run train Mjlab-Velocity-Flat-MicroDuck --env.scene.num-envs 4096 \
 No GPU? Add `--hf-jobs` to any train command to run it on Hugging Face Jobs
 instead of locally (see [scripts/hf/README.md](scripts/hf/README.md)).
 
+## Guarded Next RL workspace
+
+`next-rl` plans and records evidence-backed skill work without replacing the
+existing trainer, exporter, publisher, or robot runtime. Start with the
+[Next RL workspace operator guide](docs/next-rl-workspace.md); it documents
+inventory, conservative planning, Nitro preparation and status, evaluation
+evidence, five-video human review, and explicit approval or rejection. A
+capability marked `learned` is not automatically published or deployed.
+
 ## Tasks
 
 `uv run list-envs` prints the live registry. Flat/Rough variants exist where noted.
