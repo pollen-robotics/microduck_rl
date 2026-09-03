@@ -7235,10 +7235,14 @@ def backflip_plate_kinematics(
     t_launch = torch.clamp(t_launch, min=1e-4)
     t_rel = t - t_hold                      # < 0 during hold
     in_hold = t_rel < 0.0
+    # epsilon: t - t_hold can round a hair past t_launch in float32 at the exact
+    # ramp-completion instant; inclusion ensures the endpoint is part of LAUNCH.
     in_launch = (~in_hold) & (t_rel < t_launch + 1e-6)
     gone = ~(in_hold | in_launch)
 
     # Constant-acceleration ramp over [0, t_launch].
+    # torch.minimum(torch.maximum(...)) replaces torch.clamp(..., max=Tensor) which
+    # raises TypeError when min is float and max is Tensor in torch 2.9.1+.
     tau = torch.minimum(torch.maximum(t_rel, torch.zeros_like(t_rel)), t_launch)
     a_lin = vz / t_launch
     a_ang = w0 / t_launch
