@@ -62,9 +62,9 @@ uv run next-rl status <fingerprint>
 `Mjlab-OneLegHello-MicroDuck` is a non-runnable planning placeholder: this
 repository does not yet have its task or reward registration. The
 `one-leg-hello` specification is valid planning data, but it **MUST NOT** be
-started or sent to a real runner. The command form above documents the current
-CLI arguments only; do not use it to prepare or start the hello example on
-Nitro.
+started. `prepare` can record and stage the planning boundary, but it cannot
+turn the placeholder into a runnable hello task and must never be followed by a
+hello start on Nitro.
 
 `prepare` records an immutable manifest and stages a safe, tracked-source
 bundle for the configured Nitro runner. It does **not** expose a `start`
@@ -92,6 +92,22 @@ already be trusted. Transport uses BatchMode public-key authentication. Never
 include a password in an environment variable, command, manifest, or
 documentation. Do not disable host checking or replace the known-hosts file.
 
+### One-time remote root bootstrap
+
+The fixed runner root is `/home/aif_eng/microduck-training/runs`. If that exact
+directory is absent, bootstrap it once with the same host-checked, public-key
+transport boundary:
+
+```bash
+ssh -o BatchMode=yes aif-engineering@108.61.217.115 \
+  wsl.exe -d Ubuntu -- mkdir -p /home/aif_eng/microduck-training/runs
+```
+
+This command creates only the fixed runner root. The runner intentionally will
+not create the broader parent, so do not substitute a broader path, use a
+host-check bypass, or put a password in the command. Once the root exists,
+normal guarded `prepare` operations own only their fingerprint directory.
+
 The safe runner archives the committed Git tree, not local uncommitted edits.
 Therefore commit the example, guide, README, and readiness tests before a
 remote sync or bounded Nitro smoke. The required documentation commit is:
@@ -111,6 +127,26 @@ WANDB_MODE=disabled uv run train Mjlab-Velocity-Flat-MicroDuck \
 This is not a prepared hello job and does not validate the hello task, reward,
 or phase contract. It is only a workspace/GPU configuration check; do not
 publish or deploy its checkpoint.
+
+### Verified live readiness — 2026-09-02
+
+The following evidence was collected for source commit
+`b60c85c6569bfe9767ef565333bdd9aed0052c1a` only. Later documentation-only
+commits were not GPU tested.
+
+- The fixed runner root was absent once; the host-checked bootstrap above
+  created it. Afterwards, `next-rl prepare` returned `planned` for fingerprint
+  `bf220169cd67449688a97cdf9d5c3dcc3e20aa983f9af9e91ca193707435fd29`.
+  Its source tree was `110b84b16b24d45cb6bdbb4ca81f29ede6a5a5ca`, and archive
+  SHA-256 `55e80206a875e7acc2c06593dfe7f375b74f3bf2a1400b894adaedf527afb3a0`
+  matched the local and remote copies.
+- A separate registered Velocity smoke used W&B disabled, 64 environments, and
+  5 iterations on RTX 5050 `cuda:0` with 8 GiB. It reported actor 61→14 and
+  critic 76→1, displayed finite losses and rewards, exited 0, and produced
+  `model_0.pt`, `model_4.pt`, and an ONNX export. Afterwards, `pgrep -af train`
+  exited 1 with no output.
+- No hello start, promotion, or publish occurred. The staged hello preparation
+  is not a task registration, learned-policy claim, or deployment authorization.
 
 ### Resume semantics
 

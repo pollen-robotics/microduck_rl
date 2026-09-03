@@ -225,6 +225,24 @@ def test_operator_guide_documents_the_current_safe_nitro_connection_contract():
     assert "UserKnownHostsFile=/dev/null" not in guide
 
 
+def test_operator_guide_records_the_dated_live_readiness_boundary_and_evidence():
+    """Catch a guide that blurs a one-time bootstrap with the verified smoke evidence."""
+    guide = GUIDE.read_text(encoding="utf-8")
+    normalized = " ".join(guide.split())
+
+    assert "/home/aif_eng/microduck-training/runs" in normalized
+    assert "runner intentionally will not create the broader parent" in normalized
+    assert "2026-09-02" in normalized
+    assert "b60c85c6569bfe9767ef565333bdd9aed0052c1a" in normalized
+    assert "bf220169cd67449688a97cdf9d5c3dcc3e20aa983f9af9e91ca193707435fd29" in normalized
+    assert "55e80206a875e7acc2c06593dfe7f375b74f3bf2a1400b894adaedf527afb3a0" in normalized
+    assert "actor 61→14" in normalized
+    assert "critic 76→1" in normalized
+    assert "model_0.pt" in normalized and "model_4.pt" in normalized
+    assert "No hello start, promotion, or publish occurred" in normalized
+    assert "later documentation-only commits were GPU tested" not in normalized
+
+
 def test_public_cli_readiness_flow_stays_local_until_human_approval(tmp_path: Path):
     """Catch a CLI workflow that cannot repeat preparation and review isolated evidence."""
     home = tmp_path / "workspace"

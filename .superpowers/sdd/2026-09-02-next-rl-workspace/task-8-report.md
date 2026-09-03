@@ -114,6 +114,53 @@ Fresh staged whitespace and status checks precede this round's distinct commit.
 
 `docs(next-rl): document Nitro WSL connection`
 
+## Fix round 3/5 — commit-scoped live readiness record
+
+### RED evidence
+
+The new local documentation-contract test failed before the guide recorded the
+fixed runner-root and supplied live-readiness evidence:
+
+```text
+FAILED test_operator_guide_records_the_dated_live_readiness_boundary_and_evidence
+assert '/home/aif_eng/microduck-training/runs' in normalized
+```
+
+### Changes
+
+- Documented the safe, one-time fixed-root bootstrap through host-checked
+  BatchMode SSH and the Windows-to-WSL bridge. The runner intentionally does
+  not create the broader parent.
+- Clarified that a staged `prepare` for the planning-only hello specification is
+  not a hello start and cannot make its unregistered task runnable.
+- Recorded the primary agent's 2026-09-02 evidence for source commit
+  `b60c85c6569bfe9767ef565333bdd9aed0052c1a`: planned fingerprint, source tree,
+  matching local/remote archive SHA-256, and the separate registered Velocity
+  64-environment/five-iteration smoke result.
+- Recorded the actor/critic shapes, finite displayed values, exit/checkpoint and
+  ONNX evidence, empty post-run `pgrep`, and that no hello start, promotion, or
+  publish occurred. Later documentation-only commits are explicitly not claimed
+  as GPU tested.
+
+### Verification
+
+```text
+uv run --with pytest pytest tests/test_next_rl_readiness.py -q
+4 passed in 0.85s
+
+uv run --with pytest pytest tests/test_next_rl_*.py -q
+258 passed in 8.19s
+
+uv run --with pytest pytest tests/ -q
+454 passed, 1 skipped in 14.99s
+```
+
+Fresh staged whitespace and status checks precede this round's distinct commit.
+
+### Commit
+
+`docs(next-rl): record verified Nitro readiness`
+
 ## Concerns / handoff
 
 The phase-qualified numeric values remain simulation acceptance defaults, not
