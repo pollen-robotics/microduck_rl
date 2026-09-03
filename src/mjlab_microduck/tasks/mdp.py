@@ -7595,3 +7595,59 @@ def backflip_landing(
     )
     settle = torch.exp(-(lin_vel**2) / (lin_vel_std**2))
     return gate * feet_f * up * height * calm * settle
+
+
+def backflip_phase_obs(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """CRITIC-ONLY phase scalar: HOLD / LAUNCH / GONE as a (num_envs, 1) column.
+
+    Never put this in the actor group. The real robot has no launcher sensing —
+    it feels the toss through its IMU and nothing else — so a policy that reads
+    the phase in sim would be reading an input that does not exist on hardware.
+    The critic may use it freely (asymmetric actor-critic, same pattern as the
+    ball-kick env's critic-only ball state): knowing whether the flick has
+    happened yet makes the value function's job much easier without touching
+    what the deployed network sees.
+    """
+    return backflip_phase(env).float().unsqueeze(-1)
+
+
+def reset_backflip_robot_on_plate(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    stand_z: float = 0.115,
+    plate_half_thickness: float = 0.01,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Place the robot standing on the plate TOP, at the z0 sampled this episode.
+
+    MUST run AFTER ``reset_backflip_launch_params`` (events fire in dict
+    insertion order): it reads that episode's ``env._backflip_z0``.
+
+    WHY THIS EXISTS: the plate is parked at ``z0`` during HOLD, and ``z0`` is
+    sampled per-env per-episode. Nothing else in the reset chain knows that
+    number — the base ``reset_base`` event draws the root height from a fixed
+    uniform range, independent of ``z0``. With two independent draws the robot
+    would spawn up to 10 cm above the plate (a free-fall onto the launcher
+    before the flick, at up to 1.4 m/s) or 10 cm inside it (contact-solver
+    ejection). Both are silent: nothing errors, the episodes just start wrong.
+    Deriving the spawn height from the same sample is the only way to keep the
+    feet on the plate across the whole ``z0`` range.
+
+    Trunk z = origin_z + z0 + plate_half_thickness + stand_z: ``z0`` is the
+    plate BODY centre, its top surface sits one half-thickness above that, and
+    ``stand_z`` is the measured trunk height above the sole contact plane.
+    Orientation, x/y and root velocity are left to ``reset_base`` (which the
+    backflip cfg narrows to a small on-plate scatter with near-zero yaw).
+    Writes ``qpos[:, 2]`` directly, like ``set_random_ground_state``: this
+    relies on the robot being the FIRST scene entity.
+    """
+    del asset_cfg
+    if env_ids is None or len(env_ids) == 0:
+        return
+    _backflip_state(env)
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    origin_z = env.scene.terrain.env_origins[env_ids, 2]
+    env.sim.data.qpos[env_ids, 2] = (
+        origin_z + env._backflip_z0[env_ids] + plate_half_thickness + stand_z
+    )
+    env.sim.data.qvel[env_ids, :6] = 0.0
