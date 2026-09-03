@@ -8,9 +8,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import tomllib
 
+from mjlab_microduck.next_rl.artifacts import canonical_json
 from mjlab_microduck.next_rl.cli import CliDependencies, main
 from mjlab_microduck.next_rl.evaluation import EvaluationReport, MetricResult, ScenarioResult, select_worst_case
-from mjlab_microduck.next_rl.review import ReviewBundle, ReviewClip
+from mjlab_microduck.next_rl.review import ReviewClip
 from mjlab_microduck.next_rl.schema import ArtifactRef, Capability, MetricThreshold, PolicyContract, SkillSpec
 
 
@@ -21,8 +22,8 @@ def test_next_rl_is_a_declared_script():
     assert scripts["next-rl"] == "mjlab_microduck.next_rl.cli:main"
 
 
-def _write_skill(path: Path, skill_id: str) -> Path:
-    path.write_text(json.dumps({
+def _write_skill(path: Path, skill_id: str, **overrides: object) -> Path:
+    value: dict[str, object] = {
         "id": skill_id,
         "version": "1.0.0",
         "description": "A test skill.",
@@ -30,7 +31,9 @@ def _write_skill(path: Path, skill_id: str) -> Path:
         "metrics": [{"name": "falls", "unit": "count", "direction": "maximum", "limit": 0}],
         "training_seeds": [1],
         "evaluation_seeds": [2],
-    }))
+    }
+    value.update(overrides)
+    path.write_text(json.dumps(value))
     return path
 
 
@@ -75,7 +78,7 @@ def test_prepare_is_dry_run_by_default(tmp_path: Path, monkeypatch, capsys):
     )
 
     assert rc == 0
-    assert json.loads(capsys.readouterr().out)["status"] == "prepared"
+    assert json.loads(capsys.readouterr().out)["status"] == "planned"
     assert runner.prepare_calls
     assert runner.start_calls == []
 
@@ -119,7 +122,53 @@ def test_status_uses_injected_runner_and_redacts_transport_data(tmp_path: Path, 
     assert output == {"fingerprint": fingerprint, "status": "pending"}
 
 
-def _review_inputs(tmp_path: Path) -> tuple[Path, Path]:
+def test_status_allowlists_only_validated_checkpoint_primitives(tmp_path: Path, monkeypatch, capsys):
+    """Catch nested runner data or malformed checkpoint fields reaching JSON output."""
+    runner = _FakeRunner()
+    runner.status = lambda fingerprint: {
+        "status": "running",
+        "stderr": "token=leak",
+        "last_stable_checkpoint": {
+            "name": "model_100.pt",
+            "sha256": "c" * 64,
+            "size": 12,
+            "mtime_ns": 34,
+            "relative_path": "source/logs/run/model_100.pt",
+            "nested": {"token": "leak"},
+        },
+        "metadata": {"authorization": "leak"},
+    }
+    monkeypatch.setenv("NEXT_RL_HOME", str(tmp_path / "state"))
+
+    assert main(["status", "c" * 64], dependencies=CliDependencies(runner_factory=lambda home: runner)) == 0
+
+    assert json.loads(capsys.readouterr().out) == {
+        "fingerprint": "c" * 64,
+        "last_stable_checkpoint": {
+            "mtime_ns": 34,
+            "name": "model_100.pt",
+            "sha256": "c" * 64,
+            "size": 12,
+        },
+        "status": "running",
+    }
+
+
+def test_status_drops_malformed_checkpoint_values(tmp_path: Path, monkeypatch, capsys):
+    """Catch a checkpoint field that bypasses the primitive type allowlist."""
+    runner = _FakeRunner()
+    runner.status = lambda fingerprint: {
+        "status": "running",
+        "last_stable_checkpoint": {"name": "model_1.pt", "sha256": "bad", "size": True, "mtime_ns": -1},
+    }
+    monkeypatch.setenv("NEXT_RL_HOME", str(tmp_path / "state"))
+
+    assert main(["status", "d" * 64], dependencies=CliDependencies(runner_factory=lambda home: runner)) == 0
+
+    assert json.loads(capsys.readouterr().out) == {"fingerprint": "d" * 64, "status": "running"}
+
+
+def _review_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path, dict[str, Path]]:
     spec = SkillSpec(
         "new-skill", "1.0.0", "A reviewable skill.", PolicyContract.microduck(),
         (MetricThreshold("falls", "count", "maximum", 0),), (1,), (2, 3, 4, 5),
@@ -147,20 +196,43 @@ def _review_inputs(tmp_path: Path) -> tuple[Path, Path]:
         "contract": PolicyContract.microduck().as_dict(), "status": "available",
     })
     capability_path = tmp_path / "capability.json"
-    bundle_path = tmp_path / "bundle.json"
+    spec_path = tmp_path / "skill.json"
+    evaluation_path = tmp_path / "evaluation.json"
     capability_path.write_text(json.dumps(capability.as_dict()))
-    bundle_path.write_text(json.dumps(ReviewBundle.build(report, clips, spec=spec).as_dict()))
-    return capability_path, bundle_path
+    spec_path.write_text(canonical_json(spec.as_dict()))
+    evaluation_path.write_text(canonical_json(report.as_dict()))
+    return capability_path, spec_path, evaluation_path, policy, {
+        role: clip.path for role, clip in clips.items()
+    }
+
+
+def _review_args(inputs: tuple[Path, Path, Path, Path, dict[str, Path]]) -> list[str]:
+    capability, spec, evaluation, _policy, clips = inputs
+    return [
+        "review",
+        "--capability", str(capability),
+        "--skill", str(spec),
+        "--evaluation", str(evaluation),
+        "--nominal-clip", str(clips["nominal"]),
+        "--entry-clip", str(clips["entry"]),
+        "--exit-clip", str(clips["exit"]),
+        "--stress-clip", str(clips["stress"]),
+        "--worst-case-clip", str(clips["worst_case"]),
+    ]
 
 
 def test_review_then_approval_requires_a_persisted_record_and_reviewer(tmp_path: Path, monkeypatch, capsys):
     """Catch approval that can bypass the persisted human-review record."""
     monkeypatch.setenv("NEXT_RL_HOME", str(tmp_path / "state"))
-    capability, bundle = _review_inputs(tmp_path)
+    inputs = _review_inputs(tmp_path)
 
-    assert main(["review", str(capability), str(bundle)]) == 0
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(inputs[2].read_text())
+    assert main(_review_args(inputs) + ["--baseline", str(baseline)]) == 0
     review = json.loads(capsys.readouterr().out)
     assert review["status"] == "review_pending"
+    assert Path(review["bundle_path"]).is_file()
+    assert len(review["bundle_digest"]) == 64
     assert main(["approve", "not-a-persisted-record", "--reviewer", "operator"]) == 2
     assert json.loads(capsys.readouterr().out) == {"error": "invalid_request"}
     assert main(["approve", review["record_id"], "--reviewer", " "]) == 2
@@ -171,23 +243,71 @@ def test_review_then_approval_requires_a_persisted_record_and_reviewer(tmp_path:
     assert approved == {"record_id": review["record_id"], "status": "learned"}
 
 
-def test_reject_returns_the_exact_review_record_to_validated(tmp_path: Path, monkeypatch, capsys):
-    """Catch rejection that fails to preserve the durable review lifecycle."""
+def test_review_after_rejection_reuses_the_exact_validated_candidate(tmp_path: Path, monkeypatch, capsys):
+    """Catch re-review that revalidates rather than preserving the original audit."""
     monkeypatch.setenv("NEXT_RL_HOME", str(tmp_path / "state"))
-    capability, bundle = _review_inputs(tmp_path)
-    assert main(["review", str(capability), str(bundle)]) == 0
+    inputs = _review_inputs(tmp_path)
+    assert main(_review_args(inputs)) == 0
     record_id = json.loads(capsys.readouterr().out)["record_id"]
 
     assert main(["reject", record_id, "--reviewer", "operator", "--reason", "leans"]) == 0
-
     assert json.loads(capsys.readouterr().out) == {"record_id": record_id, "status": "validated"}
+    assert main(_review_args(inputs)) == 0
+
+    reopened = json.loads(capsys.readouterr().out)
+    assert reopened["record_id"] == record_id
+    state = json.loads((tmp_path / "state" / "promotions" / "state.json").read_text())
+    assert [item["action"] for item in state["records"][record_id]["audit"]] == [
+        "available", "validated", "requested", "rejected", "requested",
+    ]
+
+
+def test_re_review_rejects_mismatched_capability_spec_or_policy_evidence(tmp_path: Path, monkeypatch, capsys):
+    """Catch re-review that overwrites a rejected candidate with different evidence."""
+    monkeypatch.setenv("NEXT_RL_HOME", str(tmp_path / "state"))
+    inputs = _review_inputs(tmp_path)
+    assert main(_review_args(inputs)) == 0
+    record_id = json.loads(capsys.readouterr().out)["record_id"]
+    assert main(["reject", record_id, "--reviewer", "operator", "--reason", "leans"]) == 0
+    capsys.readouterr()
+
+    capability, spec, evaluation, _policy, _clips = inputs
+    changed_spec = tmp_path / "changed-spec.json"
+    changed_spec_data = json.loads(spec.read_text())
+    changed_spec_data["description"] = "Different skill evidence."
+    changed_spec.write_text(canonical_json(changed_spec_data))
+    assert main(_review_args((capability, changed_spec, evaluation, _policy, _clips))) == 2
+    assert json.loads(capsys.readouterr().out) == {"error": "invalid_request"}
+
+    changed_capability = tmp_path / "changed-capability.json"
+    changed = json.loads(capability.read_text())
+    changed["id"] = "other-skill"
+    changed_capability.write_text(canonical_json(changed))
+    assert main(_review_args((changed_capability, spec, evaluation, _policy, _clips))) == 2
+    assert json.loads(capsys.readouterr().out) == {"error": "invalid_request"}
+
+    changed_policy = tmp_path / "other.onnx"
+    changed_policy.write_bytes(b"different evaluated policy")
+    changed_evaluation = tmp_path / "changed-evaluation.json"
+    changed_evaluation_data = json.loads(evaluation.read_text())
+    policy_digest = hashlib.sha256(changed_policy.read_bytes()).hexdigest()
+    changed_evaluation_data["policy"]["path"] = str(changed_policy)
+    changed_evaluation_data["policy"]["sha256"] = policy_digest
+    for scenario in changed_evaluation_data["scenarios"]:
+        scenario["policy_sha256"] = policy_digest
+    changed_evaluation.write_text(canonical_json(changed_evaluation_data))
+    assert main(_review_args((capability, spec, changed_evaluation, changed_policy, _clips))) == 2
+    assert json.loads(capsys.readouterr().out) == {"error": "invalid_request"}
+
+    state = json.loads((tmp_path / "state" / "promotions" / "state.json").read_text())
+    assert state["records"][record_id]["status"] == "validated"
 
 
 def test_inventory_combines_shipped_and_promoted_capabilities(tmp_path: Path, monkeypatch, capsys):
     """Catch an inventory that hides durable promoted capabilities or the shipped catalogue."""
     monkeypatch.setenv("NEXT_RL_HOME", str(tmp_path / "state"))
-    capability, bundle = _review_inputs(tmp_path)
-    assert main(["review", str(capability), str(bundle)]) == 0
+    inputs = _review_inputs(tmp_path)
+    assert main(_review_args(inputs)) == 0
     record_id = json.loads(capsys.readouterr().out)["record_id"]
     assert main(["approve", record_id, "--reviewer", "operator"]) == 0
     capsys.readouterr()
@@ -199,3 +319,13 @@ def test_inventory_combines_shipped_and_promoted_capabilities(tmp_path: Path, mo
         item.items() for item in capabilities if item["id"] == "new-skill"
     )
     assert any(item["id"] == "walking" for item in capabilities)
+
+
+def test_warm_start_plan_uses_task8_parent_capability_json(tmp_path: Path, monkeypatch, capsys):
+    """Catch warm-start output that loses the selected parent capability identity."""
+    monkeypatch.setenv("NEXT_RL_HOME", str(tmp_path / "state"))
+    skill = _write_skill(tmp_path / "hello.json", "one-leg-hello", allowed_parent_capabilities=["standing"])
+
+    assert main(["plan", str(skill)]) == 0
+
+    assert json.loads(capsys.readouterr().out)["parent_capability_id"] == "standing"

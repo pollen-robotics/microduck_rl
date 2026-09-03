@@ -75,3 +75,73 @@ environment. Python compilation of the added CLI and test completed, and
 - Review evaluates the already-bound durable `ReviewBundle`; the command does
   not publish a policy or change the learned state without the exact persisted
   review record and a non-empty reviewer.
+
+## Fix round 1/5 — review package and fail-closed status
+
+### RED evidence
+
+The new review regressions failed before the CLI changes:
+
+```text
+FAILED test_prepare_is_dry_run_by_default
+AssertionError: assert 'prepared' == 'planned'
+
+FAILED test_status_allowlists_only_validated_checkpoint_primitives
+AssertionError: nested checkpoint token metadata reached JSON output
+
+FAILED test_review_then_approval_requires_a_persisted_record_and_reviewer
+assert 2 == 0
+
+FAILED test_warm_start_plan_uses_task8_parent_capability_json
+KeyError: 'parent_capability_id'
+6 failed, 5 passed
+```
+
+The exact-candidate mutation then exposed that a rejected candidate could be
+reopened with a changed, otherwise-valid bound SkillSpec:
+
+```text
+assert 0 == 2
+```
+
+### Changes
+
+- `review` now requires exact `--capability`, `--skill`, and `--evaluation`
+  JSON inputs plus five evaluator-produced video paths; it builds the
+  `ReviewBundle` itself, binds clips to deterministic scenario/seed choices,
+  optionally binds a baseline evaluation, persists canonical bundle JSON below
+  `NEXT_RL_HOME/review-bundles/`, and returns bundle path/digest plus record ID.
+- A rejected validated candidate may be reopened only with the exact persisted
+  bundle digest and policy binding. Different capability, spec, or policy
+  evidence fails before promotion state is modified; the original audit record
+  is reused.
+- `status` now allowlists validated primitive lifecycle/checkpoint fields and
+  drops nested data, arbitrary metadata, transport stderr, and malformed
+  checkpoint records.
+- Warm-start planning emits `parent_capability_id`; successful preparation is
+  reported as non-started `status: planned`.
+
+### GREEN evidence
+
+```text
+uv sync
+Resolved 154 packages in 2ms
+Audited 126 packages in 1ms
+
+uv run --with pytest pytest tests/test_next_rl_cli.py -q
+13 passed in 0.08s
+
+uv run --with pytest pytest tests/test_next_rl_*.py -q
+226 passed in 6.66s
+
+uv run --with pytest pytest tests/ -q
+422 passed, 1 skipped in 13.50s
+```
+
+No start, publish, rendering, browser automation, live Nitro, training, or
+network action was invoked. Ruff remains unavailable in this environment;
+syntax compilation and whitespace checks passed.
+
+### Commit
+
+`fix(next-rl): harden review package workflow`
