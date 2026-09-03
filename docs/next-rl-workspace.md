@@ -81,10 +81,11 @@ experiment fingerprint before transport, rejects another launch of the same
 inputs, releases only its own reservation if transfer fails before launch,
 retains the same-owner claim when the launch response is uncertain, and
 synchronizes pending, running, succeeded, or failed status as the remote
-lifecycle advances. Status inspection also revalidates the recorded detached
-supervisor PID, Linux start time, and exact command/job digest. If an
-acknowledged supervisor disappears before launching the trainer, inspection
-marks that launch failed and retryable so a newly reserved start can recover it.
+lifecycle advances. While a launch is pending, status inspection revalidates
+the recorded detached supervisor PID, Linux start time, and exact command/job
+digest in both spawned and supervising states. If an acknowledged supervisor
+disappears before launching the trainer, inspection marks that launch failed
+and retryable so a newly reserved start can recover it.
 None of this creates a public `start` command, and the runner does not publish
 or deploy a policy.
 

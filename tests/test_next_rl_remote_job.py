@@ -954,10 +954,12 @@ def test_legacy_pid_only_spawn_record_is_untrusted_and_recovered(
     assert result["supervisor_identity"]["pid"] == 457
 
 
+@pytest.mark.parametrize("launch_state", ("spawned", "supervising"))
 def test_acknowledged_dead_supervisor_status_allows_exactly_one_restart(
     remote_job,
     job_directory: Path,
     monkeypatch,
+    launch_state: str,
 ):
     """Recover after the start request was consumed but its supervisor died."""
     _pending_start(remote_job, job_directory)
@@ -979,6 +981,9 @@ def test_acknowledged_dead_supervisor_status_allows_exactly_one_restart(
     assert acknowledged["status"] == "pending"
     assert acknowledged["launch_state"] == "spawned"
     assert not (job_directory / "start-request.json").exists()
+    if launch_state == "supervising":
+        acknowledged = {**acknowledged, "launch_state": "supervising"}
+        remote_job.atomic_write_json(job_directory / "status.json", acknowledged)
     assert remote_job.inspect_read_only(job_directory)["status"] == "pending"
 
     live_pids.remove(456)
@@ -1007,18 +1012,20 @@ def test_acknowledged_dead_supervisor_status_allows_exactly_one_restart(
     assert not (job_directory / "start-request.json").exists()
 
 
+@pytest.mark.parametrize("launch_state", ("spawned", "supervising"))
 @pytest.mark.parametrize("legacy", (False, True))
-def test_spawned_status_rejects_reused_or_legacy_supervisor_identity_without_request(
+def test_pending_status_rejects_reused_or_legacy_supervisor_identity_without_request(
     remote_job,
     job_directory: Path,
     monkeypatch,
     legacy: bool,
+    launch_state: str,
 ):
     identity = _supervisor_identity(remote_job, job_directory, 456)
     state = {
         "status": "pending",
         "launch_request_id": "start-abc123",
-        "launch_state": "spawned",
+        "launch_state": launch_state,
         "supervisor_pid": 456,
     }
     if not legacy:

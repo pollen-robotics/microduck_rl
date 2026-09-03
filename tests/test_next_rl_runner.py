@@ -721,7 +721,7 @@ def test_status_advances_pending_through_running_to_a_terminal_state(
     }
 
 
-def test_acknowledged_lost_supervisor_status_permits_one_reserved_restart(
+def test_acknowledged_lost_supervising_status_permits_one_reserved_restart(
     repository: Path,
     tmp_path: Path,
 ):
@@ -729,7 +729,12 @@ def test_acknowledged_lost_supervisor_status_permits_one_reserved_restart(
     runner, store, manifest = stored_runner(repository, tmp_path, adapter)
     prepared = runner.prepare(manifest)
     adapter.calls.clear()
-    adapter.outputs.extend((CommandResult(), CommandResult(stdout='{"status":"pending"}')))
+    adapter.outputs.extend(
+        (
+            CommandResult(),
+            CommandResult(stdout='{"status":"pending","launch_state":"supervising"}'),
+        )
+    )
 
     assert runner.start(prepared, owner="operator-a")["status"] == "pending"
     adapter.outputs.append(

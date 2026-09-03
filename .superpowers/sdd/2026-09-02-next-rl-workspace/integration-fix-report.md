@@ -8,7 +8,10 @@ Baseline: `e0f8393`
 
 Commit: `fix(next-rl): close integration provenance gaps`
 
-Follow-up: `fix(next-rl): reject static evidence and recover lost starts`
+Follow-ups:
+
+- `fix(next-rl): reject static evidence and recover lost starts`
+- `fix(next-rl): recover supervising launch loss`
 
 ## Outcome
 
@@ -39,10 +42,11 @@ publishing/deploying a policy.
 6. Detached supervisor state persists PID, Linux process start identity, and
    exact supervisor command/job digest. Exact live identities remain
    idempotent; dead, reused, mismatched, and legacy PID-only records recover
-   under the existing singleton locks. Status inspection revalidates a
-   pending/spawned supervisor even after its start request was acknowledged and
-   removed; a lost identity becomes an explicit retryable failure, allowing a
-   newly reserved start to recover exactly once.
+   under the existing singleton locks. Status inspection revalidates a pending
+   supervisor in both spawned and supervising launch states, even after its
+   start request was acknowledged and removed; a lost identity becomes an
+   explicit retryable failure, allowing a newly reserved start to recover
+   exactly once.
 7. Metric summaries now retain the direction-aware worst scenario: minimum for
    minimum thresholds and maximum for maximum thresholds. Promoted capability
    evidence uses those conservative values.
@@ -74,7 +78,7 @@ publishing/deploying a policy.
   response-loss retry, and lifecycle synchronization.
 - Final required suite:
   `uv run --with pytest pytest tests/test_next_rl_*.py tests/test_next_rl_readiness.py -q`
-  — 305 passed in 76.73 seconds after the scoped follow-up review corrections.
+  — 308 passed in 77.34 seconds after the scoped follow-up review corrections.
 - Compilation:
   `uv run python -m compileall -q src/mjlab_microduck/next_rl scripts/next_rl_remote_job.py tests/test_next_rl_*.py`
   — passed.

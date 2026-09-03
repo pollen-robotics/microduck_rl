@@ -1044,7 +1044,10 @@ def inspect_or_control(
 
 def _inspection_state(job: Path) -> dict[str, object]:
     state = _load_object(job / "status.json", "status")
-    if state.get("status") == "pending" and state.get("launch_state") == "spawned":
+    if (
+        state.get("status") == "pending"
+        and state.get("launch_state") in {"spawned", "supervising"}
+    ):
         supervisor_command_sha256 = command_digest(_supervisor_argv(job))
         if not _spawned_supervisor_is_live(
             state,
