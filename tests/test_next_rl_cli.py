@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 import tomllib
@@ -11,7 +12,7 @@ import tomllib
 import pytest
 
 from mjlab_microduck.next_rl.artifacts import canonical_json
-from mjlab_microduck.next_rl.cli import CliDependencies, main
+from mjlab_microduck.next_rl.cli import CliDependencies, _default_runner, main
 from mjlab_microduck.next_rl.evaluation import EvaluationReport, MetricResult, ScenarioResult, select_worst_case
 from mjlab_microduck.next_rl.review import ReviewClip
 from mjlab_microduck.next_rl.schema import ArtifactRef, Capability, MetricThreshold, PolicyContract, SkillSpec
@@ -106,6 +107,62 @@ def test_start_is_not_an_operator_command(capsys):
     """Catch accidental exposure of a training-launch command."""
     assert main(["start"]) == 2
     assert json.loads(capsys.readouterr().out) == {"error": "invalid_request"}
+
+
+def _reject_command_execution(*args, **kwargs):
+    raise AssertionError("runner construction must not execute a command")
+
+
+@pytest.mark.parametrize("distribution", (None, ""))
+def test_default_runner_uses_direct_linux_without_a_wsl_distribution(tmp_path: Path, monkeypatch, distribution: str | None):
+    """Catch factory construction that enables a WSL bridge without an explicit setting."""
+    monkeypatch.setenv("NEXT_RL_NITRO_SSH_ALIAS", "108.61.217.115")
+    monkeypatch.setenv("NEXT_RL_NITRO_SSH_USER", "aif-engineering")
+    if distribution is None:
+        monkeypatch.delenv("NEXT_RL_NITRO_WSL_DISTRIBUTION", raising=False)
+    else:
+        monkeypatch.setenv("NEXT_RL_NITRO_WSL_DISTRIBUTION", distribution)
+    monkeypatch.setattr(subprocess, "run", _reject_command_execution)
+
+    runner = _default_runner(tmp_path / "state")
+
+    assert runner.config.ssh_alias == "108.61.217.115"
+    assert runner.config.ssh_user == "aif-engineering"
+    assert runner.config.wsl_distribution is None
+
+
+def test_default_runner_passes_explicit_wsl_distribution_without_contacting_nitro(tmp_path: Path, monkeypatch):
+    """Catch the Windows OpenSSH-to-WSL bridge setting being omitted or eagerly used."""
+    monkeypatch.setenv("NEXT_RL_NITRO_SSH_ALIAS", "108.61.217.115")
+    monkeypatch.setenv("NEXT_RL_NITRO_SSH_USER", "aif-engineering")
+    monkeypatch.setenv("NEXT_RL_NITRO_WSL_DISTRIBUTION", "Ubuntu")
+    monkeypatch.setattr(subprocess, "run", _reject_command_execution)
+
+    runner = _default_runner(tmp_path / "state")
+
+    assert runner.config.ssh_alias == "108.61.217.115"
+    assert runner.config.ssh_user == "aif-engineering"
+    assert runner.config.wsl_distribution == "Ubuntu"
+
+
+def test_invalid_wsl_distribution_fails_closed_before_runner_contact(tmp_path: Path, monkeypatch, capsys):
+    """Catch unsafe WSL configuration that would otherwise reach the runner transport."""
+    command_calls: list[object] = []
+
+    def reject_and_record(*args, **kwargs):
+        command_calls.append(args)
+        _reject_command_execution(*args, **kwargs)
+
+    monkeypatch.setenv("NEXT_RL_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("NEXT_RL_NITRO_SSH_ALIAS", "108.61.217.115")
+    monkeypatch.setenv("NEXT_RL_NITRO_SSH_USER", "aif-engineering")
+    monkeypatch.setenv("NEXT_RL_NITRO_WSL_DISTRIBUTION", "Ubuntu;whoami")
+    monkeypatch.setattr(subprocess, "run", reject_and_record)
+
+    assert main(["status", "a" * 64]) == 2
+
+    assert json.loads(capsys.readouterr().out) == {"error": "invalid_request"}
+    assert command_calls == []
 
 
 def test_status_uses_injected_runner_and_redacts_transport_data(tmp_path: Path, monkeypatch, capsys):

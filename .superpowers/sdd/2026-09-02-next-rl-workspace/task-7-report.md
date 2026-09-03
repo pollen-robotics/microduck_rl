@@ -246,3 +246,49 @@ browser automation, live Nitro, training, or network action was invoked.
 ### Commit
 
 `fix(next-rl): align CLI runner validation`
+
+## Fix round 4/5 — optional Windows-to-WSL runner bridge
+
+### RED evidence
+
+The factory regressions initially produced:
+
+```text
+2 failed, 28 passed
+```
+
+With `NEXT_RL_NITRO_WSL_DISTRIBUTION=Ubuntu`, the produced `NitroConfig` had
+`wsl_distribution is None`. With an unsafe value, the CLI ignored it and tried
+to invoke SSH instead of failing at configuration validation.
+
+### Changes
+
+- `_default_runner` now passes non-empty
+  `NEXT_RL_NITRO_WSL_DISTRIBUTION` through to `NitroConfig`; empty or unset
+  values remain `None` for direct-Linux transport.
+- Alias and user environment handling are unchanged. Factory tests verify the
+  actual configured `aif-engineering` login for direct and `Ubuntu` bridge
+  configurations, and guard construction with a command-execution tripwire.
+- Invalid WSL values are validated by `NitroConfig` before runner contact and
+  become the established redacted CLI error.
+
+### GREEN evidence
+
+```text
+uv run --with pytest pytest tests/test_next_rl_cli.py -q
+31 passed in 0.16s
+
+uv run --with pytest pytest tests/test_next_rl_*.py -q
+256 passed in 8.41s
+
+uv run --with pytest pytest tests/ -q
+452 passed, 1 skipped in 15.28s
+```
+
+Syntax compilation and whitespace checks passed. No runner command, network,
+live Nitro, start, publish, rendering, browser automation, or training action
+was invoked.
+
+### Commit
+
+`fix(next-rl): configure optional WSL runner bridge`

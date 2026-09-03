@@ -37,6 +37,7 @@ def _default_runner(home: Path) -> NitroRunner:
         NitroConfig(
             ssh_alias=os.environ["NEXT_RL_NITRO_SSH_ALIAS"],
             ssh_user=os.environ.get("NEXT_RL_NITRO_SSH_USER", "aif_eng"),
+            wsl_distribution=os.environ.get("NEXT_RL_NITRO_WSL_DISTRIBUTION") or None,
             repository=Path.cwd(),
             bundle_root=_workspace_child(home, "bundles"),
         )
