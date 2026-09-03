@@ -13,6 +13,7 @@ wheels/
 # Virtual environments
 .venv
 .worktrees/
+/.next-rl/
 
 # Logs and databases
 wandb

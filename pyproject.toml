@@ -52,6 +52,7 @@ mjlab_microduck = "mjlab_microduck.tasks"
 # (train_hook.py), not here. Locked by tests/test_hf_jobs_flag.py.
 train = "mjlab_microduck.train_cli:main"
 publish = "mjlab_microduck.publish.cli:main"
+next-rl = "mjlab_microduck.next_rl.cli:main"
 
 [tool.ruff]
 src = ["src"]  # Helpful for recognizing first-party imports.
