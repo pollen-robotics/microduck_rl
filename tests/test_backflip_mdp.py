@@ -258,7 +258,7 @@ def test_plate_step_mid_launch_writes_signed_pitch_quat_and_matching_rates():
     assert torch.allclose(vel[:, [0, 1, 3, 5]], torch.zeros(1, 4))
 
 
-def test_plate_step_once_gone_parks_far_below_floor_with_zero_velocity():
+def test_plate_step_once_gone_parks_above_and_beside_the_floor_with_zero_velocity():
     origin = torch.tensor([[5.0, -2.0, 0.5]])
     env = _FakeEnvWithScene(num_envs=1, env_origins=origin)
     microduck_mdp.reset_backflip_launch_params(
@@ -276,11 +276,52 @@ def test_plate_step_once_gone_parks_far_below_floor_with_zero_velocity():
     pose, _ = env.plate.pose_calls[-1]
     vel, _ = env.plate.vel_calls[-1]
 
-    assert torch.equal(pose[:, 0:2], origin[:, 0:2])
-    assert torch.allclose(pose[:, 2], origin[:, 2] + microduck_mdp.BACKFLIP_GONE_Z)
+    # WAS: parked at origin x/y and BACKFLIP_GONE_Z = -3.0, i.e. 3 m INSIDE an
+    # infinite ground plane — maximal penetration, not absence (4 spurious
+    # contacts per env per step, and the solver ejecting the 50 kg plate at
+    # 59 m/s between step-event writes). Now parked above and beside the floor.
+    gx, gy, gz = microduck_mdp.BACKFLIP_GONE_POS
+    assert torch.allclose(pose[:, 0], origin[:, 0] + gx)
+    assert torch.allclose(pose[:, 1], origin[:, 1] + gy)
+    assert torch.allclose(pose[:, 2], origin[:, 2] + gz)
     assert torch.allclose(pose[:, 3], torch.tensor([1.0]))  # identity: no rotation once gone
     assert torch.allclose(pose[:, 5], torch.tensor([0.0]))
     assert torch.equal(vel, torch.zeros(1, 6))
+
+
+def test_the_parked_plate_is_clear_of_the_floor_and_far_from_the_env_origin():
+    """The property that matters, stated directly on the constant.
+
+    ``terrain_type="plane"`` is an INFINITE half-space at the env origin's z, so
+    "out of the way" can only mean ABOVE it: any negative parking z is
+    penetration depth. The plate is an 18x18x2 cm box, so its underside sits
+    one half-thickness below the parked z. The measured flight envelope apexes
+    at 0.90 m, which is the highest anything in the scene ever gets.
+    """
+    gx, gy, gz = microduck_mdp.BACKFLIP_GONE_POS
+    plate_half_thickness = 0.01
+    assert gz - plate_half_thickness > 0.90, "parked plate must clear the flight apex"
+    assert math.hypot(gx, gy) > 1.0, "parked plate must be well off the env origin"
+
+
+def test_the_plate_only_moves_laterally_once_it_is_gone():
+    """HOLD and LAUNCH must stay over the env origin — the robot stands on it."""
+    origin = torch.tensor([[5.0, -2.0, 0.5], [5.0, -2.0, 0.5]])
+    env = _FakeEnvWithScene(num_envs=2, env_origins=origin)
+    microduck_mdp.reset_backflip_launch_params(
+        env,
+        torch.tensor([0, 1]),
+        hold_range=(0.5, 0.5),
+        launch_range=(0.1, 0.1),
+        z0_range=(0.15, 0.15),
+        vz_range=(2.0, 2.0),
+        w0_range=(24.0, 24.0),
+    )
+    for buf in (torch.tensor([0, 0]), torch.tensor([27, 27])):  # HOLD, LAUNCH
+        env.episode_length_buf = buf
+        microduck_mdp.backflip_plate_step(env)
+        pose, _ = env.plate.pose_calls[-1]
+        assert torch.allclose(pose[:, 0:2], origin[:, 0:2]), buf
 
 
 def test_completion_gate_is_closed_below_and_open_above():

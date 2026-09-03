@@ -165,6 +165,21 @@ def test_robot_is_placed_on_the_plate_after_z0_is_sampled(cfg):
     assert spawn.func is microduck_mdp.reset_backflip_robot_on_plate
 
 
+def test_the_spawn_height_and_the_stance_target_are_the_same_number(cfg):
+    # THE invariant between the two halves of the plate geometry. The spawn puts
+    # the trunk at z0 + plate_half_thickness + stand_z; backflip_ready_stance
+    # scores it against z0 + its own stand_z. Edit either constant alone and the
+    # robot spawns at a height its own stance reward calls wrong — with every
+    # other test in this file still green.
+    spawn = cfg.events["backflip_spawn"].params
+    assert spawn["stand_z"] + spawn["plate_half_thickness"] == pytest.approx(
+        cfg.rewards["ready_stance"].params["stand_z"]
+    )
+    # and both halves are the constants this module exports, not stray numbers
+    assert spawn["stand_z"] == pytest.approx(STAND_Z)
+    assert spawn["plate_half_thickness"] == pytest.approx(PLATE_HALF_THICKNESS)
+
+
 def test_the_robot_spawns_over_the_plate_not_half_a_metre_away(cfg):
     # The plate is 18x18cm and sits at the env origin; the base template's
     # ±0.5 m spawn scatter would drop the robot on the floor beside it.

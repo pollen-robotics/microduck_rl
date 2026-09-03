@@ -7202,7 +7202,7 @@ def roulade_lateral_velocity_penalty(
 #            accelerate the robot to launch speed inside one step, i.e. an
 #            impulsive infinite-jerk kick through the legs with an |a_z| spike
 #            that models nothing about a hand.
-#   GONE   — teleported to BACKFLIP_GONE_Z with zero velocity. Removal is
+#   GONE   — teleported to BACKFLIP_GONE_POS with zero velocity. Removal is
 #            TIME-based: a plate coasting at constant vz while the robot
 #            decelerates under gravity would keep pushing it forever, so
 #            waiting for contact loss would never fire.
@@ -7212,9 +7212,30 @@ BACKFLIP_PHASE_HOLD = 0
 BACKFLIP_PHASE_LAUNCH = 1
 BACKFLIP_PHASE_GONE = 2
 
-# Where the plate is parked once it is out of the episode: far enough below the
-# floor that no contact, sensor or critic observation can see it.
-BACKFLIP_GONE_Z = -3.0
+# Where the plate is parked once it is out of the episode, as an offset from the
+# env origin: (dx, dy, z).
+#
+# ABOVE the floor and off to one side — NOT below it. Parking below an infinite
+# ``terrain_type="plane"`` is not absence, it is maximal PENETRATION: a box 3 m
+# under the plane is 3 m inside the floor half-space, so MuJoCo generates a
+# contact for every plate corner on every substep. Measured on CPU with this
+# geometry, timestep and decimation: 4 spurious contacts per env for most of
+# every episode (4 of nconmax=50 burned), and the solver ejecting the 50 kg
+# plate from z=-3.000 to z=-1.950 at 59 m/s within a single control step before
+# the step event teleports it back. Nothing collided with the robot at 3 m of
+# clearance, but that margin shrinks with decimation, which is the wrong way for
+# a safety margin to scale.
+#
+# The z is the mechanism: at +5 m the plate's underside is ~5 m above the ground
+# plane and ~4.1 m above the apex of the measured flight envelope (0.9 m), so
+# nothing in any env can reach it and there is nothing beneath it to penetrate.
+# Gravity is the only force acting on it there, and it is re-zeroed every
+# control step (2 mm of free fall per step). The lateral offset is
+# defence-in-depth: on an infinite plane NO (x, y) is "off the terrain", so
+# lateral placement cannot be the safety argument — but 5 m puts the plate 7 m
+# diagonally from its own robot, and (with the usual env_spacing=2.0 grid) at
+# the CENTRE of a grid cell rather than over a neighbouring env's origin.
+BACKFLIP_GONE_POS = (5.0, 5.0, 5.0)
 
 
 def backflip_plate_kinematics(
@@ -7278,7 +7299,7 @@ def backflip_plate_kinematics(
     vz_t = torch.where(in_hold, zero, vz_ramp)
     w_t = torch.where(in_hold, zero, w_ramp)
 
-    z = torch.where(gone, torch.full_like(z, BACKFLIP_GONE_Z), z)
+    z = torch.where(gone, torch.full_like(z, BACKFLIP_GONE_POS[2]), z)
     pitch = torch.where(gone, zero, pitch)
     vz_t = torch.where(gone, zero, vz_t)
     w_t = torch.where(gone, zero, w_t)
@@ -7387,17 +7408,23 @@ def backflip_plate_step(
     The plate is a prop with a free joint; writing pose AND velocity each step
     makes its own dynamics irrelevant, so it acts like a stiff hand that does
     not sag under the robot and does not recoil when the robot pushes off.
+
+    In HOLD and LAUNCH the plate sits over its env origin. Once GONE it is also
+    moved LATERALLY by BACKFLIP_GONE_POS[:2]; see that constant for why the
+    parking spot is above and beside the floor rather than beneath it.
     """
     t_hold, t_launch, z0, vz, w0, *_ = _backflip_state(env)
-    z, pitch, vz_t, w_t, _ = backflip_plate_kinematics(
+    z, pitch, vz_t, w_t, phase = backflip_plate_kinematics(
         _backflip_time(env), t_hold, t_launch, z0, vz, w0
     )
     plate: Entity = env.scene[asset_name]
     n = env.num_envs
     all_ids = torch.arange(n, device=env.device)
 
+    gone = (phase == BACKFLIP_PHASE_GONE).to(z.dtype)
     pose = torch.zeros(n, 7, device=env.device)
-    pose[:, 0:2] = env.scene.terrain.env_origins[all_ids, 0:2]
+    pose[:, 0] = env.scene.terrain.env_origins[all_ids, 0] + gone * BACKFLIP_GONE_POS[0]
+    pose[:, 1] = env.scene.terrain.env_origins[all_ids, 1] + gone * BACKFLIP_GONE_POS[1]
     pose[:, 2] = env.scene.terrain.env_origins[all_ids, 2] + z
     # Rotation about the lateral (+y) axis by `pitch`.
     pose[:, 3] = torch.cos(pitch * 0.5)

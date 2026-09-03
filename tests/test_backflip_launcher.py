@@ -92,7 +92,12 @@ def test_plate_is_gone_after_the_ramp():
         torch.tensor([0.6001, 1.0]), **_params(2)
     )
     assert torch.all(phase == microduck_mdp.BACKFLIP_PHASE_GONE)
-    assert torch.allclose(z, torch.full((2,), microduck_mdp.BACKFLIP_GONE_Z))
+    # The parked height is ABOVE the floor, not below it: terrain_type="plane"
+    # is an INFINITE half-space, so a negative parking z is 3 m of penetration
+    # (4 spurious contacts per env per step, measured), not absence. This
+    # assertion used to pin BACKFLIP_GONE_Z = -3.0.
+    assert torch.allclose(z, torch.full((2,), microduck_mdp.BACKFLIP_GONE_POS[2]))
+    assert microduck_mdp.BACKFLIP_GONE_POS[2] > 0.0
     assert torch.allclose(vz_t, torch.zeros(2))
     assert torch.allclose(w_t, torch.zeros(2))
 

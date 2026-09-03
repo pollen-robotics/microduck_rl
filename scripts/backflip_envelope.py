@@ -119,17 +119,18 @@ def run_cell(model, data, vz, w0, tuck_factor, z0, t_hold=0.3, t_launch=0.12,
 
         trunk_z = float(data.qpos[2])
         apex = max(apex, trunk_z)
-        # Airborne = no contact between the ROBOT and the floor geom. Excluding
-        # plate_geom here is load-bearing, not cosmetic: BACKFLIP_GONE_Z=-3.0
-        # teleports the plate into MuJoCo's infinite floor half-space (a
-        # type="plane" geom has no lower bound), so the parked plate is
-        # permanently "touching" floor from the instant phase goes GONE. An
-        # unfiltered floor-contact check makes `touching` always True in GONE,
-        # so `not touching` never holds and accum_pitch never accumulates —
-        # this was caught by the step-3 sanity check (rot_deg was 0.0 in
-        # every cell) and traced with mj_id2name on data.contact before this
-        # fix. The bug is in this probe script, not in
-        # backflip_plate_kinematics or the scene.
+        # Airborne = no contact between the ROBOT and the floor geom.
+        # HISTORY (kept because it explains the plate_gid filter): the parked
+        # plate used to be teleported to BACKFLIP_GONE_Z=-3.0, i.e. INSIDE
+        # MuJoCo's infinite floor half-space (a type="plane" geom has no lower
+        # bound), so it was permanently "touching" floor from the instant phase
+        # went GONE. An unfiltered floor-contact check made `touching` always
+        # True in GONE, `not touching` never held, and accum_pitch never
+        # accumulated — caught by the step-3 sanity check (rot_deg 0.0 in every
+        # cell) and traced with mj_id2name on data.contact. The parking spot is
+        # now ABOVE and beside the floor (BACKFLIP_GONE_POS), which removes the
+        # spurious contacts at the source; this filter is kept as cheap
+        # belt-and-braces so the probe measures ROBOT-floor contact only.
         touching = any(
             (data.contact.geom1[i] == floor_gid and data.contact.geom2[i] != plate_gid)
             or (data.contact.geom2[i] == floor_gid and data.contact.geom1[i] != plate_gid)

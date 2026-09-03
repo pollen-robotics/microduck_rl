@@ -109,6 +109,15 @@ revision:
    `type="plane"` floor half-space, so the parked plate is itself
    permanently "touching" `floor`. Fixed by excluding `plate_geom` from the
    floor-contact test.
+   > **Superseded (Task 6 review):** the *root cause* was fixed later — the
+   > plate no longer parks below the floor at all. `BACKFLIP_GONE_Z = -3.0`
+   > was not "out of the way" but 3 m of PENETRATION into the infinite plane:
+   > 4 spurious contacts per env every step, and the solver ejecting the 50 kg
+   > plate at 59 m/s between step-event writes. It is replaced by
+   > `BACKFLIP_GONE_POS = (5.0, 5.0, 5.0)` — above and beside the floor, where
+   > it touches nothing. The probe's `plate_geom` filter is kept as
+   > belt-and-braces; none of the measurements in this document are affected
+   > (the filter made the probe correct under the old parking).
 2. **Spawn offset floats/interpenetrates.** The brief's
    `z0 + 0.01 + 0.10` either interpenetrates (`z0=0.10`) or leaves the robot
    still falling at `t_hold` end (`z0=0.15`/`0.20`), and at full tuck is
