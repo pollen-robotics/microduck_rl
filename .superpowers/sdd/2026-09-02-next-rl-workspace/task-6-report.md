@@ -430,3 +430,80 @@ uv run --with pytest pytest -q
 - Ruff remains unavailable; focused, Next RL, and full tests passed.
 - No live SSH/network operation, Nitro start/cancel, training, upload, or
   publishing was performed.
+
+## Fix round 5 — Windows OpenSSH to WSL bridge
+
+### RED evidence
+
+The configuration and production-shaped adapter slice first failed because no
+WSL distribution option or streaming transport existed:
+
+```text
+FAILED test_wsl_ssh_prefixes_every_linux_command_with_exact_bridge_argv
+FAILED test_wsl_distribution_rejects_shell_and_path_syntax[--help]
+FAILED test_wsl_distribution_rejects_shell_and_path_syntax[../Ubuntu]
+FAILED test_wsl_distribution_rejects_shell_and_path_syntax[Ubuntu;whoami]
+FAILED test_wsl_distribution_rejects_shell_and_path_syntax[Ubuntu x]
+FAILED test_open_ssh_adapter_streams_binary_upload_and_download_without_shell
+6 failed, 69 deselected
+```
+
+The orchestration slice then demonstrated that prepare, start, and checkpoint
+sync still attempted direct SCP instead of crossing the Windows-to-WSL
+boundary:
+
+```text
+FAILED test_wsl_prepare_streams_each_file_to_fixed_tee_path_and_retries
+FAILED test_wsl_start_streams_request_instead_of_using_scp
+FAILED test_wsl_checkpoint_download_streams_cat_and_retries_digest_mismatch
+3 failed, 1 passed, 75 deselected
+```
+
+### GREEN evidence
+
+```text
+uv run --with pytest pytest -q tests/test_next_rl_runner.py tests/test_next_rl_remote_job.py
+114 passed in 6.23s
+
+uv run --with pytest pytest -q tests/test_next_rl*.py
+252 passed in 8.51s
+
+uv run --with pytest pytest -q
+448 passed, 1 skipped in 16.31s
+
+.venv/bin/python -m compileall -q src/mjlab_microduck/next_rl/runner.py scripts/next_rl_remote_job.py
+exit 0
+
+git diff --check
+exit 0
+```
+
+### Fixes
+
+- `NitroConfig` now accepts the hyphenated Windows OpenSSH login and an
+  optional narrowly validated WSL distribution. In WSL mode every Linux
+  command is prefixed with the exact argument sequence
+  `wsl.exe -d <distribution> --`, after the existing noninteractive,
+  host-verified SSH prefix.
+- The injected transport boundary now supports binary upload and download.
+  `OpenSSHAdapter` streams from and to files with `shell=False`, discards
+  `tee` stdout, and bounds captured stderr to 64 KiB.
+- WSL preparation and lifecycle requests stream only to validated fixed job
+  paths via `tee -- <path>`; checkpoint sync streams from the validated job
+  path via `cat -- <path>`. Existing preparation and download retry, staging,
+  digest verification, and fail-closed behavior remain in force.
+- Direct-Linux mode retains its grouped SCP preparation/request transfer and
+  SCP checkpoint download behavior.
+
+### Commit
+
+`fix(next-rl): bridge Nitro transport through WSL`
+
+### Concerns
+
+- Ruff remains unavailable; syntax compilation, whitespace validation,
+  focused tests, the complete Next RL suite, and the full repository suite
+  passed.
+- No live SSH/network operation, Nitro start/cancel, training, upload, or
+  publishing was performed. All transport behavior was exercised through
+  injected fakes or mocked subprocess calls.

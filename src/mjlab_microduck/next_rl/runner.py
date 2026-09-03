@@ -26,7 +26,9 @@ _CHECKPOINT = re.compile(r"^model_[0-9]+\.pt$")
 _FINGERPRINT = re.compile(r"^[0-9a-f]{6,64}$")
 _SSH_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*$")
 _SSH_USER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_WSL_DISTRIBUTION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _REMOTE_ROOT = PurePosixPath("/home/aif_eng/microduck-training/runs")
+_STDERR_LIMIT = 64 * 1024
 _SECRET_FILENAMES = frozenset(
     {
         ".env",
@@ -91,6 +93,12 @@ class CommandAdapter(Protocol):
     def run(self, argv: tuple[str, ...]) -> CommandResult:
         """Run *argv* without a shell and return captured text output."""
 
+    def upload(self, source: Path, argv: tuple[str, ...]) -> CommandResult:
+        """Stream one local binary file to the stdin of *argv*."""
+
+    def download(self, argv: tuple[str, ...], destination: Path) -> CommandResult:
+        """Stream stdout from *argv* into one local binary file."""
+
 
 class OpenSSHAdapter:
     """Execute OpenSSH argv and return every process exit status as data."""
@@ -105,6 +113,43 @@ class OpenSSHAdapter:
         )
         return CommandResult(completed.stdout, completed.stderr, completed.returncode)
 
+    @staticmethod
+    def _stderr(error_file) -> str:
+        error_file.seek(0)
+        return error_file.read(_STDERR_LIMIT).decode("utf-8", errors="replace")
+
+    def upload(self, source: Path, argv: tuple[str, ...]) -> CommandResult:
+        with Path(source).open("rb") as input_file, tempfile.TemporaryFile() as error_file:
+            completed = subprocess.run(
+                argv,
+                check=False,
+                stdin=input_file,
+                stdout=subprocess.DEVNULL,
+                stderr=error_file,
+                text=False,
+                shell=False,
+            )
+            return CommandResult(
+                stderr=self._stderr(error_file),
+                returncode=completed.returncode,
+            )
+
+    def download(self, argv: tuple[str, ...], destination: Path) -> CommandResult:
+        with Path(destination).open("wb") as output_file, tempfile.TemporaryFile() as error_file:
+            completed = subprocess.run(
+                argv,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=output_file,
+                stderr=error_file,
+                text=False,
+                shell=False,
+            )
+            return CommandResult(
+                stderr=self._stderr(error_file),
+                returncode=completed.returncode,
+            )
+
 
 @dataclass(frozen=True)
 class NitroConfig:
@@ -114,6 +159,7 @@ class NitroConfig:
     repository: Path
     bundle_root: Path
     ssh_user: str = "aif_eng"
+    wsl_distribution: str | None = None
 
     def __post_init__(self) -> None:
         for value, name, pattern in (
@@ -122,6 +168,12 @@ class NitroConfig:
         ):
             if not isinstance(value, str) or not pattern.fullmatch(value):
                 raise RunnerError(f"{name} uses unsafe syntax")
+        if self.wsl_distribution is not None and (
+            not isinstance(self.wsl_distribution, str)
+            or ".." in self.wsl_distribution
+            or not _WSL_DISTRIBUTION.fullmatch(self.wsl_distribution)
+        ):
+            raise RunnerError("WSL distribution uses unsafe syntax")
         object.__setattr__(self, "repository", Path(self.repository).resolve())
         object.__setattr__(self, "bundle_root", Path(self.bundle_root).resolve())
 
@@ -351,7 +403,12 @@ class NitroRunner:
         return _REMOTE_ROOT / fingerprint
 
     def _ssh(self, *remote_argv: str) -> tuple[str, ...]:
-        return ("ssh", "-o", "BatchMode=yes", self._target, *remote_argv)
+        bridge = (
+            ("wsl.exe", "-d", self.config.wsl_distribution, "--")
+            if self.config.wsl_distribution is not None
+            else ()
+        )
+        return ("ssh", "-o", "BatchMode=yes", self._target, *bridge, *remote_argv)
 
     def _scp(self, sources: Sequence[Path], remote_directory: PurePosixPath) -> tuple[str, ...]:
         return (
@@ -364,12 +421,54 @@ class NitroRunner:
 
     def _run(self, argv: tuple[str, ...]) -> CommandResult:
         result = self.adapter.run(argv)
+        return self._require_success(result)
+
+    @staticmethod
+    def _require_success(result: CommandResult) -> CommandResult:
         if result.returncode:
             raise RunnerError(
                 f"transport command failed with exit code {result.returncode}: "
                 f"{result.stderr.strip()}"
             )
         return result
+
+    def _upload_files(
+        self,
+        sources: Sequence[Path],
+        remote_directory: PurePosixPath,
+    ) -> tuple[tuple[str, ...], ...]:
+        if self.config.wsl_distribution is None:
+            argv = self._scp(sources, remote_directory)
+            self._run(argv)
+            return (argv,)
+        calls: list[tuple[str, ...]] = []
+        for source in sources:
+            if not source.is_file() or source.is_symlink() or not _SAFE_PATH_PART.fullmatch(
+                source.name
+            ):
+                raise RunnerError("local upload source must be a safe regular file")
+            destination = remote_directory / source.name
+            if (
+                not destination.is_relative_to(_REMOTE_ROOT)
+                or len(destination.relative_to(_REMOTE_ROOT).parts) < 2
+            ):
+                raise RunnerError("remote upload destination escaped the fingerprint root")
+            argv = self._ssh("tee", "--", str(destination))
+            self._require_success(self.adapter.upload(source, argv))
+            calls.append(argv)
+        return tuple(calls)
+
+    def _upload_argvs(
+        self,
+        sources: Sequence[Path],
+        remote_directory: PurePosixPath,
+    ) -> tuple[tuple[str, ...], ...]:
+        if self.config.wsl_distribution is None:
+            return (self._scp(sources, remote_directory),)
+        return tuple(
+            self._ssh("tee", "--", str(remote_directory / source.name))
+            for source in sources
+        )
 
     def _existing_preparation_matches(
         self,
@@ -501,6 +600,7 @@ class NitroRunner:
         destination = destination_directory / name
         temporary = destination.with_name(f".{name}.part")
         source = f"{self._target}:{remote_directory / relative_path}"
+        download_argv = self._ssh("cat", "--", str(remote_directory / relative_path))
         last_result = "not downloaded"
         for _ in range(attempts):
             try:
@@ -508,7 +608,10 @@ class NitroRunner:
             except FileNotFoundError:
                 pass
             try:
-                self._run(("scp", "-o", "BatchMode=yes", source, str(temporary)))
+                if self.config.wsl_distribution is None:
+                    self._run(("scp", "-o", "BatchMode=yes", source, str(temporary)))
+                else:
+                    self._require_success(self.adapter.download(download_argv, temporary))
             except Exception as error:
                 last_result = str(error)
                 continue
@@ -680,10 +783,7 @@ class NitroRunner:
         staging_directory = remote_directory / f".incoming-{bundle_sha256}"
         mkdir_argv = self._ssh("mkdir", "--", str(remote_directory))
         staging_mkdir_argv = self._ssh("mkdir", "--", str(staging_directory))
-        transfer_argv = self._scp(
-            sources,
-            staging_directory,
-        )
+        transfer_argvs = self._upload_argvs(sources, staging_directory)
         finalize_argv = self._ssh(
             "python3",
             str(staging_directory / "next_rl_remote_job.py"),
@@ -711,7 +811,7 @@ class NitroRunner:
                 if stage_claim.returncode:
                     self._reset_staging_directory(remote_directory, staging_directory)
                     self._run(staging_mkdir_argv)
-                self._run(transfer_argv)
+                self._upload_files(sources, staging_directory)
             except Exception as error:
                 last_error = error
                 self._reset_staging_directory(remote_directory, staging_directory)
@@ -741,7 +841,12 @@ class NitroRunner:
             source_commit=commit,
             source_tree=tree,
             train_argv=train_argv,
-            dry_run_argv=(mkdir_argv, staging_mkdir_argv, transfer_argv, finalize_argv),
+            dry_run_argv=(
+                mkdir_argv,
+                staging_mkdir_argv,
+                *transfer_argvs,
+                finalize_argv,
+            ),
         )
 
     def _invoke_wrapper(
@@ -780,7 +885,7 @@ class NitroRunner:
             request_path,
             {"action": "start", "request_id": f"start-{prepared.fingerprint}"},
         )
-        self._run(self._scp((request_path,), expected))
+        self._upload_files((request_path,), expected)
         return self._state(self._invoke_wrapper(expected))
 
     def status(self, fingerprint: str) -> dict[str, object]:
@@ -807,7 +912,7 @@ class NitroRunner:
         local_directory.mkdir(parents=True, exist_ok=True)
         request_path = local_directory / "cancel-request.json"
         atomic_write_json(request_path, {"action": "cancel", **expected})
-        self._run(self._scp((request_path,), remote_directory))
+        self._upload_files((request_path,), remote_directory)
         return self._state(self._invoke_wrapper(remote_directory))
 
     def sync_checkpoint(self, fingerprint: str, *, attempts: int = 3) -> Path:

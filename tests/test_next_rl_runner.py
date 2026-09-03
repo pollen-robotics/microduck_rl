@@ -206,6 +206,16 @@ def config(repository: Path, tmp_path: Path) -> NitroConfig:
     )
 
 
+def wsl_config(repository: Path, tmp_path: Path) -> NitroConfig:
+    return NitroConfig(
+        ssh_alias="108.61.217.115",
+        ssh_user="aif-engineering",
+        wsl_distribution="Ubuntu",
+        repository=repository,
+        bundle_root=tmp_path / "bundles",
+    )
+
+
 def test_ssh_enforces_noninteractive_host_checked_access(repository: Path, tmp_path: Path):
     adapter = FakeAdapter(outputs=[CommandResult(stdout='{"status":"running"}')])
 
@@ -215,6 +225,82 @@ def test_ssh_enforces_noninteractive_host_checked_access(repository: Path, tmp_p
     assert argv[:3] == ("ssh", "-o", "BatchMode=yes")
     assert "StrictHostKeyChecking=no" not in argv
     assert "aif_eng@nitro" in argv
+
+
+def test_wsl_ssh_prefixes_every_linux_command_with_exact_bridge_argv(
+    repository: Path,
+    tmp_path: Path,
+):
+    adapter = FakeAdapter(outputs=[CommandResult(stdout='{"status":"running"}')])
+
+    NitroRunner(wsl_config(repository, tmp_path), adapter).status("abc123")
+
+    assert adapter.calls[0] == (
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "aif-engineering@108.61.217.115",
+        "wsl.exe",
+        "-d",
+        "Ubuntu",
+        "--",
+        "env",
+        "NEXT_RL_REMOTE_INSPECT=1",
+        "python3",
+        "/home/aif_eng/microduck-training/runs/abc123/next_rl_remote_job.py",
+        "/home/aif_eng/microduck-training/runs/abc123",
+    )
+
+
+@pytest.mark.parametrize("distribution", ("--help", "../Ubuntu", "Ubuntu;whoami", "Ubuntu x"))
+def test_wsl_distribution_rejects_shell_and_path_syntax(
+    repository: Path,
+    tmp_path: Path,
+    distribution: str,
+):
+    with pytest.raises(RunnerError, match="WSL distribution"):
+        NitroConfig(
+            ssh_alias="108.61.217.115",
+            ssh_user="aif-engineering",
+            wsl_distribution=distribution,
+            repository=repository,
+            bundle_root=tmp_path / "bundles",
+        )
+
+
+def test_open_ssh_adapter_streams_binary_upload_and_download_without_shell(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    payload = bytes(range(256)) * 32
+    source = tmp_path / "source.bin"
+    destination = tmp_path / "destination.bin"
+    source.write_bytes(payload)
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((tuple(argv), kwargs))
+        if kwargs["stdin"] == subprocess.DEVNULL:
+            kwargs["stdout"].write(payload)
+            kwargs["stderr"].write(b"x" * 70_000)
+        else:
+            assert kwargs["stdin"].read() == payload
+            assert kwargs["stdout"] == subprocess.DEVNULL
+            kwargs["stderr"].write(b"warning")
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    adapter = OpenSSHAdapter()
+
+    upload = adapter.upload(source, ("ssh", "host", "tee", "--", "/safe/path"))
+    download = adapter.download(
+        ("ssh", "host", "cat", "--", "/safe/path"), destination
+    )
+
+    assert upload == CommandResult(stderr="warning")
+    assert len(download.stderr.encode()) == 65_536
+    assert destination.read_bytes() == payload
+    assert all(call[1]["shell"] is False and call[1]["text"] is False for call in calls)
 
 
 def test_open_ssh_adapter_returns_nonzero_result_for_expected_probe(
@@ -536,7 +622,8 @@ class PrepareAdapter(FakeAdapter):
 
     def run(self, argv: tuple[str, ...]) -> CommandResult:
         self.calls.append(tuple(argv))
-        joined = " ".join(argv)
+        remote = argv[8:] if len(argv) > 8 and argv[4] == "wsl.exe" else argv[4:]
+        joined = " ".join(remote)
         if argv[0] == "scp" and self.fail_upload:
             self.fail_upload = False
             raise ConnectionError("partial scp disconnect")
@@ -554,29 +641,29 @@ class PrepareAdapter(FakeAdapter):
                 return CommandResult(returncode=1, stderr="already exists")
             self.existing = "incomplete"
             return CommandResult()
-        if argv[0] == "ssh" and "test" in argv:
-            tested_path = argv[-1]
+        if argv[0] == "ssh" and "test" in remote:
+            tested_path = remote[-1]
             is_stage = "/.incoming-" in tested_path
-            if "!" in argv and "-L" in argv:
+            if "!" in remote and "-L" in remote:
                 mode = "directory" if is_stage else self.existing
                 return CommandResult(returncode=1 if mode == "symlink" else 0)
-            if "-d" in argv:
+            if "-d" in remote:
                 mode = ("directory" if self.stage_exists else None) if is_stage else self.existing
                 return CommandResult(
                     returncode=0
                     if mode not in (None, "file", "fifo", "socket")
                     else 1
                 )
-            if "!" in argv and "-e" in argv:
+            if "!" in remote and "-e" in remote:
                 exists = self.stage_exists if is_stage else self.existing is not None
                 return CommandResult(returncode=1 if exists else 0)
-            if "-O" in argv:
+            if "-O" in remote:
                 return CommandResult(returncode=0 if is_stage and self.stage_exists else 1)
         if argv[0] == "ssh" and "rm" in argv:
             assert "/.incoming-" in argv[-1]
             self.stage_exists = False
             return CommandResult()
-        if argv[0] == "ssh" and "NEXT_RL_REMOTE_INSPECT=1" in argv:
+        if argv[0] == "ssh" and "NEXT_RL_REMOTE_INSPECT=1" in remote:
             self.inspections += 1
             if (
                 self.existing in ("transient_complete", "transient_running")
@@ -617,7 +704,7 @@ class PrepareAdapter(FakeAdapter):
                     )
                 )
             return CommandResult(stdout=json.dumps({"preparation_status": "incomplete"}))
-        if argv[0] == "ssh" and "python3" in argv and "/.incoming-" not in joined:
+        if argv[0] == "ssh" and "python3" in remote and "/.incoming-" not in joined:
             if self.existing == "matching":
                 return CommandResult(
                     stdout=json.dumps({"prepared_bundle_sha256": self._bundle_digest()})
@@ -625,7 +712,7 @@ class PrepareAdapter(FakeAdapter):
             if self.existing == "conflicting":
                 return CommandResult(stdout=json.dumps({"prepared_bundle_sha256": "f" * 64}))
             return CommandResult(returncode=2, stderr="incomplete")
-        if argv[0] == "ssh" and "python3" in argv and "/.incoming-" in joined:
+        if argv[0] == "ssh" and "python3" in remote and "/.incoming-" in joined:
             self.stage_exists = False
             self.existing = "matching"
             if self.fail_finalize_response:
@@ -635,6 +722,67 @@ class PrepareAdapter(FakeAdapter):
                 stdout=json.dumps({"prepared_bundle_sha256": self._bundle_digest()})
             )
         return CommandResult()
+
+
+class WSLPrepareAdapter(PrepareAdapter):
+    def __init__(self, bundle_root: Path, *, failed_uploads: int = 0):
+        super().__init__(bundle_root)
+        self.failed_uploads = failed_uploads
+        self.uploads: list[tuple[Path, tuple[str, ...]]] = []
+
+    def upload(self, source: Path, argv: tuple[str, ...]) -> CommandResult:
+        self.calls.append(tuple(argv))
+        self.uploads.append((Path(source), tuple(argv)))
+        if self.failed_uploads:
+            self.failed_uploads -= 1
+            return CommandResult(returncode=1, stderr="tee disconnected")
+        return CommandResult()
+
+
+def test_wsl_prepare_streams_each_file_to_fixed_tee_path_and_retries(
+    repository: Path,
+    tmp_path: Path,
+):
+    runner_config = wsl_config(repository, tmp_path)
+    adapter = WSLPrepareAdapter(runner_config.bundle_root, failed_uploads=1)
+
+    prepared = NitroRunner(runner_config, adapter).prepare(job())
+
+    assert len(adapter.uploads) > 6
+    assert not any(call[0] == "scp" for call in adapter.calls)
+    for source, argv in adapter.uploads:
+        assert argv[:8] == (
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "aif-engineering@108.61.217.115",
+            "wsl.exe",
+            "-d",
+            "Ubuntu",
+            "--",
+        )
+        assert argv[8:10] == ("tee", "--")
+        assert argv[-1].startswith(f"{prepared.remote_directory}/.incoming-")
+        assert argv[-1].endswith(f"/{source.name}")
+    removals = [call for call in adapter.calls if call[0] == "ssh" and "rm" in call]
+    assert removals and all("/.incoming-" in call[-1] for call in removals)
+
+
+def test_wsl_start_streams_request_instead_of_using_scp(
+    repository: Path,
+    tmp_path: Path,
+):
+    runner_config = wsl_config(repository, tmp_path)
+    adapter = WSLPrepareAdapter(runner_config.bundle_root)
+    runner = NitroRunner(runner_config, adapter)
+    prepared = runner.prepare(job())
+    scp_before = sum(call[0] == "scp" for call in adapter.calls)
+
+    runner.start(prepared)
+
+    assert adapter.uploads[-1][0].name == "start-request.json"
+    assert adapter.uploads[-1][1][-3:-1] == ("tee", "--")
+    assert sum(call[0] == "scp" for call in adapter.calls) == scp_before
 
 
 @pytest.mark.parametrize("failure", ("before_copy", "partial_copy"))
@@ -828,6 +976,98 @@ class CheckpointAdapter(FakeAdapter):
             return payload
         destination.write_bytes(payload)
         return CommandResult()
+
+
+class WSLCheckpointAdapter(FakeAdapter):
+    def __init__(
+        self,
+        state: dict[str, object],
+        payloads: list[bytes | CommandResult | BaseException],
+    ):
+        super().__init__()
+        self.state = state
+        self.payloads = payloads
+        self.downloads: list[tuple[tuple[str, ...], Path]] = []
+
+    def run(self, argv: tuple[str, ...]) -> CommandResult:
+        self.calls.append(tuple(argv))
+        return CommandResult(stdout=json.dumps(self.state))
+
+    def download(self, argv: tuple[str, ...], destination: Path) -> CommandResult:
+        self.downloads.append((tuple(argv), Path(destination)))
+        payload = self.payloads.pop(0)
+        if isinstance(payload, BaseException):
+            raise payload
+        if isinstance(payload, CommandResult):
+            Path(destination).write_bytes(b"partial")
+            return payload
+        Path(destination).write_bytes(payload)
+        return CommandResult()
+
+
+def test_wsl_checkpoint_download_streams_cat_and_retries_digest_mismatch(
+    repository: Path,
+    tmp_path: Path,
+):
+    payload = b"verified checkpoint"
+    checkpoint = {
+        "name": "model_1000.pt",
+        "relative_path": "source/logs/velocity/run/model_1000.pt",
+        "size": len(payload),
+        "mtime_ns": 100,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    adapter = WSLCheckpointAdapter(
+        {"status": "running", "last_stable_checkpoint": checkpoint},
+        [CommandResult(returncode=1, stderr="cat disconnected"), payload],
+    )
+
+    local = NitroRunner(wsl_config(repository, tmp_path), adapter).sync_checkpoint(
+        "abc123", attempts=2
+    )
+
+    assert local.read_bytes() == payload
+    assert len(adapter.downloads) == 2
+    assert all(
+        argv[:8]
+        == (
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "aif-engineering@108.61.217.115",
+            "wsl.exe",
+            "-d",
+            "Ubuntu",
+            "--",
+        )
+        and argv[8:10] == ("cat", "--")
+        for argv, _ in adapter.downloads
+    )
+
+
+def test_wsl_checkpoint_digest_failure_cleans_partial_file(
+    repository: Path,
+    tmp_path: Path,
+):
+    checkpoint = {
+        "name": "model_1000.pt",
+        "relative_path": "source/logs/velocity/run/model_1000.pt",
+        "size": 10,
+        "mtime_ns": 100,
+        "sha256": "a" * 64,
+    }
+    adapter = WSLCheckpointAdapter(
+        {"status": "running", "last_stable_checkpoint": checkpoint},
+        [b"bad", b"bad-again"],
+    )
+    runner_config = wsl_config(repository, tmp_path)
+
+    with pytest.raises(RunnerError, match="digest verification"):
+        NitroRunner(runner_config, adapter).sync_checkpoint("abc123", attempts=2)
+
+    part = runner_config.bundle_root / "abc123" / "checkpoints" / ".model_1000.pt.part"
+    assert len(adapter.downloads) == 2
+    assert not part.exists()
 
 
 def test_checkpoint_transfer_retries_until_download_digest_matches(
