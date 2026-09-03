@@ -242,3 +242,78 @@ def test_plate_step_once_gone_parks_far_below_floor_with_zero_velocity():
     assert torch.allclose(pose[:, 3], torch.tensor([1.0]))  # identity: no rotation once gone
     assert torch.allclose(pose[:, 5], torch.tensor([0.0]))
     assert torch.equal(vel, torch.zeros(1, 6))
+
+
+def test_completion_gate_is_closed_below_and_open_above():
+    env = _FakeEnv(num_envs=3)
+    microduck_mdp._backflip_state(env)
+    env._backflip_max = torch.tensor(
+        [math.radians(90.0), math.radians(322.5), math.radians(359.0)]
+    )
+    gate = microduck_mdp._backflip_completion_gate(
+        env,
+        microduck_mdp.BACKFLIP_LANDING_GATE_LO,
+        microduck_mdp.BACKFLIP_LANDING_GATE_HI,
+    )
+    assert gate[0] == 0.0                      # a quarter turn earns no landing
+    assert 0.4 < float(gate[1]) < 0.6          # mid-gate smoothstep
+    assert gate[2] == 1.0                      # a full flip opens it
+
+
+def test_progress_pays_only_new_frontier():
+    # Potential-based: re-reaching an angle already paid for earns nothing, so
+    # rocking back and forth cannot farm it.
+    env = _FakeEnv(num_envs=1)
+    microduck_mdp._backflip_state(env)
+    env._backflip_max = torch.tensor([1.0])
+    first = microduck_mdp._backflip_pay(env, target_angle=2 * math.pi, max_paid_rate=14.0)
+    second = microduck_mdp._backflip_pay(env, target_angle=2 * math.pi, max_paid_rate=14.0)
+    assert float(first) > 0.0
+    assert float(second) == 0.0
+
+
+def test_progress_is_rate_capped():
+    # Spinning faster than the cap FORFEITS the excess: a more violent flip
+    # collects less, not the same amount sooner.
+    env = _FakeEnv(num_envs=1)
+    microduck_mdp._backflip_state(env)
+    env._backflip_max = torch.tensor([6.0])   # huge jump in one step
+    paid = microduck_mdp._backflip_pay(env, target_angle=2 * math.pi, max_paid_rate=14.0)
+    # capped at max_paid_rate * step_dt = 14 * 0.02 = 0.28 rad of paid rotation
+    assert float(paid) <= 0.28 / (env.step_dt * 2 * math.pi) + 1e-6
+
+
+def test_progress_never_exceeds_one_full_turn_in_total():
+    env = _FakeEnv(num_envs=1)
+    microduck_mdp._backflip_state(env)
+    total = 0.0
+    for _ in range(500):
+        env._backflip_max += 0.05
+        total += float(
+            microduck_mdp._backflip_pay(env, target_angle=2 * math.pi, max_paid_rate=1e9)
+        ) * env.step_dt
+    assert total <= 1.0 + 1e-6   # normalized: a full flip pays 1.0 in total
+
+
+def test_landing_pays_nothing_before_the_flip_is_complete():
+    # The anti-jackpot rule: an upright robot that never flipped must earn 0
+    # from the landing term, or "stand still on the plate" becomes the argmax.
+    env = _FakeEnv(num_envs=1)
+    microduck_mdp._backflip_state(env)
+    env._backflip_max = torch.tensor([math.radians(45.0)])
+    gate = microduck_mdp._backflip_completion_gate(
+        env,
+        microduck_mdp.BACKFLIP_LANDING_GATE_LO,
+        microduck_mdp.BACKFLIP_LANDING_GATE_HI,
+    )
+    assert float(gate) == 0.0
+
+
+def test_ready_stance_window_is_hold_only():
+    env = _FakeEnv(num_envs=3)
+    microduck_mdp.reset_backflip_launch_params(
+        env, torch.arange(3), hold_range=(0.5, 0.5), launch_range=(0.1, 0.1)
+    )
+    env.episode_length_buf = torch.tensor([5, 27, 40])
+    window = microduck_mdp.backflip_hold_window(env)
+    assert window.tolist() == [1.0, 0.0, 0.0]

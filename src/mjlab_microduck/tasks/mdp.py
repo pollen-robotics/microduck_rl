@@ -7409,3 +7409,162 @@ def backflip_plate_step(
 
     plate.write_root_link_pose_to_sim(pose, all_ids)
     plate.write_root_link_velocity_to_sim(vel, all_ids)
+
+
+# Backward pitch sign: roulade's forward roll is POSITIVE body-frame omega_y
+# (_ROULADE_FWD_SIGN), so a BACKflip is the negative of it. Verified by direct
+# orientation measurement (docs/backflip_envelope_results.md) and pinned by
+# the plate-kinematics sign tests above -- do not "fix" this sign again.
+_BACKFLIP_BWD_SIGN = -1.0
+
+# Sensor read by the airborne gate (must match the env cfg's sensor name).
+_BACKFLIP_GROUND_SENSOR = "robot_ground_contact"
+
+# Landing gate: ~300 deg starts opening it, ~345 deg opens it fully. Below a
+# near-complete flip the landing annuity pays nothing, so neither the pre-launch
+# stance nor a face-plant halfway round can collect it.
+BACKFLIP_LANDING_GATE_LO = math.radians(300.0)
+BACKFLIP_LANDING_GATE_HI = math.radians(345.0)
+
+
+def _update_backflip_accum(env: ManagerBasedRlEnv, asset: Entity) -> None:
+    """Integrate BACKWARD pitch rate while AIRBORNE, step-guarded.
+
+    Airborne gate (the mirror of roulade's support gate): rotation only counts
+    while nothing touches the terrain. Without it the cheapest way to collect
+    2*pi is to flop onto the back and roll along the floor, which is not a
+    backflip. The frontier (max) only moves forward, so rocking neither pays
+    nor un-pays. Step-guarded via _backflip_last_update_step so that multiple
+    reward terms reading the accumulator in the same control step don't
+    double-integrate.
+    """
+    _backflip_state(env)
+    step = int(env.common_step_counter)
+    if step == env._backflip_last_update_step:
+        return
+    omega_bwd = _BACKFLIP_BWD_SIGN * asset.data.root_link_ang_vel_b[:, 1]
+    delta = torch.nan_to_num(omega_bwd, nan=0.0) * env.step_dt
+    contact = _sensor_any_contact(env, _BACKFLIP_GROUND_SENSOR)
+    if contact is not None:
+        delta = delta * (~contact).float()
+    # Sagittal flatness gate: a sideways tumble is not a backflip.
+    y_z = torch.nan_to_num(_lateral_axis_z(asset.data.root_link_quat_w), nan=1.0).abs()
+    t = torch.clamp((_FLAT_ZERO - y_z) / (_FLAT_ZERO - _FLAT_FULL), 0.0, 1.0)
+    delta = delta * (t * t * (3.0 - 2.0 * t))
+    env._backflip_accum = env._backflip_accum + delta
+    env._backflip_max = torch.maximum(env._backflip_max, env._backflip_accum)
+    env._backflip_last_update_step = step
+
+
+def _backflip_completion_gate(
+    env: ManagerBasedRlEnv, gate_lo: float, gate_hi: float
+) -> torch.Tensor:
+    """Smoothstep on the rotation frontier: 0 below gate_lo, 1 above gate_hi."""
+    *_, max_accum, _ = _backflip_state(env)
+    t = torch.clamp((max_accum - gate_lo) / max(gate_hi - gate_lo, 1e-6), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _backflip_pay(
+    env: ManagerBasedRlEnv, target_angle: float, max_paid_rate: float
+) -> torch.Tensor:
+    """Pay the unpaid part of the frontier, rate-capped. Normalized to 1.0 per flip."""
+    *_, max_accum, paid = _backflip_state(env)
+    new_paid = torch.clamp(max_accum, max=target_angle)
+    delta = torch.clamp(new_paid - torch.clamp(paid, max=target_angle), min=0.0)
+    delta = torch.clamp(delta, max=max_paid_rate * env.step_dt)
+    env._backflip_paid = torch.maximum(paid, new_paid)
+    return delta / (env.step_dt * target_angle)
+
+
+def backflip_progress(
+    env: ManagerBasedRlEnv,
+    target_angle: float = 2 * math.pi,
+    max_paid_rate: float = 25.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """The single dense signal: paid increments of the airborne rotation frontier.
+
+    Potential-based, so a full flip pays 1.0 worth in total however it is flown,
+    and camping pays 0/step. max_paid_rate forfeits rotation faster than the
+    envelope requires — set it from the measured envelope, not from intuition
+    (a 25 cm robot tumbles fast NATURALLY; the cap prices violence, not speed).
+
+    max_paid_rate=25.0 (not the original placeholder of 14.0): the measured
+    envelope (docs/backflip_envelope_results.md) closes 377-455 deg over a
+    ~0.5-0.6 s airborne window, i.e. ~13-16 rad/s on AVERAGE with a higher
+    peak while tucked. A 14 rad/s cap would forfeit rotation during a
+    perfectly good flip and blunt the only dense learning signal in the task.
+    25 rad/s still prices genuinely violent spins above the measured envelope.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_backflip_accum(env, asset)
+    return _backflip_pay(env, target_angle, max_paid_rate)
+
+
+def backflip_hold_window(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """1.0 while the robot is still on the parked plate, 0.0 from launch on."""
+    return (backflip_phase(env) == BACKFLIP_PHASE_HOLD).float()
+
+
+def backflip_ready_stance(
+    env: ManagerBasedRlEnv,
+    stand_z: float = 0.115,
+    height_std: float = 0.03,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Small upright+height payout, HOLD phase only.
+
+    Keeps the robot standing still on the operator's hands instead of squirming
+    off before the flick. It is NOT gated on a bad state — standing on the plate
+    is the good state here — and it dies at launch so it cannot oppose the flip.
+
+    Upright factor reuses ``body_upright_linear`` (cos(tilt), clamped to
+    [0, 1]) rather than adding a fourth upright primitive to this file: it is
+    exactly "1 when vertical, 0 when on its side" with no extra height gating
+    baked in, which is what a multiplicative composite that ALSO carries its
+    own explicit height factor needs.
+    """
+    up = torch.clamp(body_upright_linear(env, asset_cfg=asset_cfg), min=0.0)
+    z_err = (
+        env.scene[asset_cfg.name].data.root_link_pos_w[:, 2]
+        - (env.scene.terrain.env_origins[:, 2] + env._backflip_z0 + stand_z)
+    )
+    height = torch.exp(-(z_err**2) / (height_std**2))
+    return backflip_hold_window(env) * up * height
+
+
+def backflip_landing(
+    env: ManagerBasedRlEnv,
+    stand_z: float = 0.115,
+    height_std: float = 0.04,
+    omega_std: float = 3.0,
+    sensor_name: str = "feet_ground_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Landing annuity, gated on a near-complete flip AND feet contact.
+
+    Multiplicative composite (gate x feet x upright x height x calm): any single
+    deficient factor collapses the term, so there is no compromise basin where a
+    lean scores 80% of everything. Stds are deliberately wide enough that a
+    mediocre first landing still scores visibly, or the gradient is invisible.
+
+    The completion gate (~330 deg midpoint) is what stops an upright robot
+    that never flipped from earning anything here — without it "stand still
+    on the plate" (which already trivially satisfies feet-contact/upright/
+    height/calm) becomes the argmax and the flip itself never gets learned.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    gate = _backflip_completion_gate(
+        env, BACKFLIP_LANDING_GATE_LO, BACKFLIP_LANDING_GATE_HI
+    )
+    feet = _sensor_any_contact(env, sensor_name)
+    feet_f = feet.float() if feet is not None else torch.ones_like(gate)
+    up = torch.clamp(body_upright_linear(env, asset_cfg=asset_cfg), min=0.0)
+    z_err = asset.data.root_link_pos_w[:, 2] - (
+        env.scene.terrain.env_origins[:, 2] + stand_z
+    )
+    height = torch.exp(-(z_err**2) / (height_std**2))
+    omega = torch.norm(asset.data.root_link_ang_vel_b, dim=-1)
+    calm = torch.exp(-(omega**2) / (omega_std**2))
+    return gate * feet_f * up * height * calm
