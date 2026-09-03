@@ -104,3 +104,94 @@
 - Live OpenSSH/Nitro behavior and real training were intentionally not exercised;
   transport and lifecycle behavior were verified with injected adapters and
   temporary local fixtures, as required.
+
+## Fix round 1 — lifecycle ownership and real resume staging
+
+### RED evidence
+
+The first review regression slice failed on every missing lifecycle boundary:
+
+```text
+FAILED test_job_directory_rejects_symlink_even_when_target_stays_under_root
+AttributeError: module 'next_rl_remote_job' has no attribute 'verified_train_argv'
+TypeError: cancel_job() got an unexpected keyword argument 'wait_for_exit'
+TypeError: inspect_or_control() got an unexpected keyword argument 'supervisor_popen'
+AttributeError: module 'next_rl_remote_job' has no attribute 'finalize_training_state'
+9 failed, 11 passed
+```
+
+The runner-facing slice then proved command binding, credential filtering,
+atomic remote creation, transport retry, and cross-fingerprint resume staging
+were absent:
+
+```text
+KeyError: 'command'
+FAILED test_prepare_rejects_secret_like_tracked_paths[.git-credentials]
+FAILED test_prepared_manifest_recursively_removes_credential_like_keys
+FAILED test_prepare_atomically_creates_remote_job_before_any_transfer
+ConnectionError: scp disconnected
+FileNotFoundError: resume-checkpoint.pt
+13 failed, 57 passed
+```
+
+Finally, focused edge mutations failed before failed spawn claims rolled back,
+claimed launches became idempotent, cleanup stopped relying on `poll()`, and
+cancellation merged late checkpoint evidence:
+
+```text
+FAILED test_prepare_rejects_local_fingerprint_directory_symlink
+FAILED test_failed_detached_spawn_keeps_start_request_retryable
+FAILED test_claimed_start_is_idempotently_left_for_spawned_supervisor
+FAILED test_cleanup_terminates_and_reaps_without_relying_on_poll
+FAILED test_prepared_manifest_recursively_removes_credential_like_keys
+FAILED test_cancel_merges_checkpoint_evidence_written_while_waiting
+```
+
+### GREEN evidence
+
+```text
+uv run --with pytest pytest tests/test_next_rl_runner.py tests/test_next_rl_remote_job.py -q
+76 passed in 3.11s
+
+uv run --with pytest pytest tests/test_next_rl_*.py -q
+185 passed in 5.45s
+
+uv run --with pytest pytest tests/ -q
+381 passed, 1 skipped in 13.09s
+```
+
+### Fixes
+
+- Start requests now carry a deterministic ID and are claimed under an
+  `fcntl.flock` lifecycle lock before spawning. Concurrent and repeated starts
+  are idempotent; failed spawns restore pending state, while a recorded spawned
+  supervisor survives a wrapper crash without a duplicate launch.
+- Every post-spawn supervisor failure invokes exact new-session process-group
+  termination and bounded reap before durable failure state. Cancellation
+  validates PID/start/command identity, waits, escalates to `SIGKILL` only while
+  identity still matches, confirms exit, and merges checkpoint evidence so the
+  supervisor cannot erase the cancelled terminal record.
+- Resume preparation requires a distinct source fingerprint plus the expected
+  checkpoint digest, accepts only the named stable checkpoint, retries and
+  verifies SCP, records the complete resume binding, and transfers a staged
+  checkpoint. The remote wrapper verifies it again and hard-links it into the
+  original `source/logs/<experiment>/<run>/model_N.pt` path before training.
+- Remote job creation uses atomic non-following `mkdir` before any SCP, and both
+  local and remote fingerprint directories reject symlinks. The wrapper also
+  compares `train-argv.json` to its immutable prepared-manifest digest before
+  spawning.
+- Tracked paths and serialized learning inputs now detect credential words and
+  compound `api-key`/`private-key`/token variants recursively, including
+  `.git-credentials` and `wandb_api_key`, while retaining `tokenizer`,
+  `token_budget`, `passwordless`, and `monkey` names.
+
+### Commit
+
+`fix(next-rl): harden Nitro resume lifecycle`
+
+### Concerns
+
+- Ruff remains unavailable. Syntax compilation and focused, Next RL, and full
+  tests are the available verification evidence.
+- No live SSH/network operation, Nitro start/cancel, training, upload, or
+  publishing was performed.

@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from mjlab_microduck.next_rl.artifacts import canonical_json, sha256_file
+from mjlab_microduck.next_rl.experiments import experiment_fingerprint
 from mjlab_microduck.next_rl.runner import (
     CommandResult,
     NitroConfig,
@@ -48,6 +49,8 @@ def resume_job(
     run: str,
     checkpoint: str,
     additional_iterations: int,
+    source_fingerprint: str | None = None,
+    checkpoint_sha256: str | None = None,
 ) -> ExperimentManifest:
     raw = job().as_dict()
     raw["agent_config"] = {
@@ -57,6 +60,10 @@ def resume_job(
         "load_checkpoint": checkpoint,
         "additional_iterations": additional_iterations,
     }
+    if source_fingerprint is not None:
+        raw["agent_config"]["resume_source_fingerprint"] = source_fingerprint
+    if checkpoint_sha256 is not None:
+        raw["agent_config"]["resume_checkpoint_sha256"] = checkpoint_sha256
     return ExperimentManifest.from_dict(raw)
 
 
@@ -226,6 +233,12 @@ def test_prepare_archives_only_the_pinned_tracked_tree(repository: Path, tmp_pat
     assert prepared.source_tree == _git(repository, "rev-parse", "HEAD^{tree}")
     assert prepared.archive_sha256 == sha256_file(prepared.archive_path)
     assert prepared.manifest["source"]["archive_sha256"] == prepared.archive_sha256
+    assert prepared.manifest["command"] == {
+        "argv_file": "train-argv.json",
+        "sha256": hashlib.sha256(
+            canonical_json(list(prepared.train_argv)).encode("utf-8")
+        ).hexdigest(),
+    }
     assert "untracked.txt" not in prepared.archive_path.read_bytes().decode(
         "utf-8", errors="ignore"
     )
@@ -247,6 +260,23 @@ def test_prepare_archive_is_deterministic(repository: Path, tmp_path: Path):
     second = runner.prepare(job()).archive_path.read_bytes()
 
     assert second == first
+
+
+def test_prepare_rejects_local_fingerprint_directory_symlink(
+    repository: Path,
+    tmp_path: Path,
+):
+    runner_config = config(repository, tmp_path)
+    fingerprint = experiment_fingerprint(job())
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    runner_config.bundle_root.mkdir()
+    (runner_config.bundle_root / fingerprint).symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RunnerError, match="symlink"):
+        NitroRunner(runner_config, FakeAdapter()).prepare(job())
+
+    assert list(outside.iterdir()) == []
 
 
 def test_prepare_transfers_only_into_fingerprint_directory(repository: Path, tmp_path: Path):
@@ -295,10 +325,14 @@ def test_prepare_rejects_tracked_symlink(repository: Path, tmp_path: Path):
     "secret_path",
     (
         ".env",
+        ".git-credentials",
         ".netrc",
         "keys/deploy.pem",
+        "config/api-key.yaml",
         "config/password.txt",
+        "config/private-key-backup.json",
         "private_key",
+        "wandb_api_key.txt",
     ),
 )
 def test_prepare_rejects_secret_like_tracked_paths(
@@ -314,6 +348,47 @@ def test_prepare_rejects_secret_like_tracked_paths(
 
     with pytest.raises(RunnerError, match="secret-like"):
         NitroRunner(config(repository, tmp_path), FakeAdapter()).prepare(job())
+
+
+def test_secret_path_filter_does_not_reject_unrelated_words(repository: Path, tmp_path: Path):
+    for name in ("tokenizer.py", "passwordless.py", "monkey.py"):
+        (repository / "src" / name).write_text("SAFE = True\n")
+    _git(repository, "add", "src")
+    _git(repository, "commit", "-qm", "track safe names")
+
+    prepared = NitroRunner(config(repository, tmp_path), FakeAdapter()).prepare(job())
+
+    with tarfile.open(prepared.archive_path, "r") as archive:
+        assert all(f"src/{name}" in archive.getnames() for name in ("tokenizer.py", "passwordless.py", "monkey.py"))
+
+
+def test_prepared_manifest_recursively_removes_credential_like_keys(
+    repository: Path,
+    tmp_path: Path,
+):
+    raw = job().as_dict()
+    raw["environment_config"]["telemetry"] = {
+        "wandb_api_key": "wandb-secret",
+        "tokenizer": "kept-learning-setting",
+        "token_budget": 128,
+    }
+    raw["agent_config"]["nested"] = {
+        "private-key-backup": "private-secret",
+        "monkey": "kept-agent-setting",
+    }
+
+    prepared = NitroRunner(config(repository, tmp_path), FakeAdapter()).prepare(
+        ExperimentManifest.from_dict(raw)
+    )
+    serialized = canonical_json(prepared.manifest)
+
+    assert "wandb_api_key" not in serialized
+    assert "wandb-secret" not in serialized
+    assert "private-key-backup" not in serialized
+    assert "private-secret" not in serialized
+    assert "tokenizer" in serialized
+    assert '"token_budget":128' in serialized
+    assert "monkey" in serialized
 
 
 def test_prepare_rejects_control_characters_in_tracked_paths(repository: Path, tmp_path: Path):
@@ -338,6 +413,20 @@ def test_disconnect_does_not_cancel_remote_process(repository: Path, tmp_path: P
     assert adapter.cancel_calls == []
 
 
+def test_prepare_atomically_creates_remote_job_before_any_transfer(
+    repository: Path,
+    tmp_path: Path,
+):
+    adapter = FakeAdapter(outputs=[CommandResult(returncode=1, stderr="already exists")])
+
+    with pytest.raises(RunnerError, match="transport"):
+        NitroRunner(config(repository, tmp_path), adapter).prepare(job())
+
+    assert adapter.calls[0][-3:-1] == ("mkdir", "--")
+    assert "-p" not in adapter.calls[0]
+    assert not any(call[0] == "scp" for call in adapter.calls)
+
+
 def test_cancel_refuses_reused_pid(repository: Path, tmp_path: Path):
     state = {
         "status": "running",
@@ -359,7 +448,11 @@ def test_cancel_refuses_reused_pid(repository: Path, tmp_path: Path):
 
 
 class CheckpointAdapter(FakeAdapter):
-    def __init__(self, state: dict[str, object], payloads: list[bytes]):
+    def __init__(
+        self,
+        state: dict[str, object],
+        payloads: list[bytes | BaseException | CommandResult],
+    ):
         super().__init__()
         self.state = state
         self.payloads = payloads
@@ -369,7 +462,14 @@ class CheckpointAdapter(FakeAdapter):
         if argv[0] == "ssh":
             return CommandResult(stdout=json.dumps(self.state))
         destination = Path(argv[-1])
-        destination.write_bytes(self.payloads.pop(0))
+        payload = self.payloads.pop(0)
+        if isinstance(payload, BaseException):
+            destination.write_bytes(b"partial")
+            raise payload
+        if isinstance(payload, CommandResult):
+            destination.write_bytes(b"partial")
+            return payload
+        destination.write_bytes(payload)
         return CommandResult()
 
 
@@ -397,6 +497,56 @@ def test_checkpoint_transfer_retries_until_download_digest_matches(
     assert not local.with_name(f".{local.name}.part").exists()
 
 
+def test_checkpoint_transfer_retries_transport_exception_and_cleans_partial(
+    repository: Path,
+    tmp_path: Path,
+):
+    payload = b"verified checkpoint"
+    checkpoint = {
+        "name": "model_1000.pt",
+        "relative_path": "source/logs/velocity/run/model_1000.pt",
+        "size": len(payload),
+        "mtime_ns": 100,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    adapter = CheckpointAdapter(
+        {"status": "running", "last_stable_checkpoint": checkpoint},
+        [ConnectionError("scp disconnected"), payload],
+    )
+
+    local = NitroRunner(config(repository, tmp_path), adapter).sync_checkpoint(
+        "abc123", attempts=2
+    )
+
+    assert local.read_bytes() == payload
+    assert not local.with_name(f".{local.name}.part").exists()
+
+
+def test_checkpoint_transfer_retries_nonzero_scp_result(
+    repository: Path,
+    tmp_path: Path,
+):
+    payload = b"verified checkpoint"
+    checkpoint = {
+        "name": "model_1000.pt",
+        "relative_path": "source/logs/velocity/run/model_1000.pt",
+        "size": len(payload),
+        "mtime_ns": 100,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    adapter = CheckpointAdapter(
+        {"status": "running", "last_stable_checkpoint": checkpoint},
+        [CommandResult(returncode=1, stderr="scp failed"), payload],
+    )
+
+    local = NitroRunner(config(repository, tmp_path), adapter).sync_checkpoint(
+        "abc123", attempts=2
+    )
+
+    assert local.read_bytes() == payload
+    assert not local.with_name(f".{local.name}.part").exists()
+
+
 def test_checkpoint_transfer_rejects_remote_shell_syntax_in_parent_path(
     repository: Path,
     tmp_path: Path,
@@ -418,3 +568,94 @@ def test_checkpoint_transfer_rejects_remote_shell_syntax_in_parent_path(
         NitroRunner(config(repository, tmp_path), adapter).sync_checkpoint("abc123")
 
     assert not any(call[0] == "scp" for call in adapter.calls)
+
+
+class ResumeAdapter(FakeAdapter):
+    def __init__(self, state: dict[str, object], payload: bytes):
+        super().__init__()
+        self.state = state
+        self.payload = payload
+
+    def run(self, argv: tuple[str, ...]) -> CommandResult:
+        self.calls.append(tuple(argv))
+        if argv[0] == "ssh" and "next_rl_remote_job.py" in " ".join(argv):
+            return CommandResult(stdout=json.dumps(self.state))
+        if argv[0] == "scp" and not argv[-1].endswith("/"):
+            Path(argv[-1]).write_bytes(self.payload)
+        return CommandResult()
+
+
+def test_resume_stages_digest_verified_checkpoint_from_explicit_prior_job(
+    repository: Path,
+    tmp_path: Path,
+):
+    payload = b"stable prior checkpoint"
+    digest = hashlib.sha256(payload).hexdigest()
+    source_fingerprint = "b" * 64
+    checkpoint = {
+        "name": "model_250.pt",
+        "relative_path": "source/logs/velocity/2026-09-02_hello/model_250.pt",
+        "size": len(payload),
+        "mtime_ns": 100,
+        "sha256": digest,
+    }
+    adapter = ResumeAdapter(
+        {"status": "failed", "last_stable_checkpoint": checkpoint},
+        payload,
+    )
+    manifest = resume_job(
+        run="2026-09-02_hello",
+        checkpoint="model_250.pt",
+        additional_iterations=500,
+        source_fingerprint=source_fingerprint,
+        checkpoint_sha256=digest,
+    )
+
+    prepared = NitroRunner(config(repository, tmp_path), adapter).prepare(manifest)
+
+    assert (prepared.local_directory / "resume-checkpoint.pt").read_bytes() == payload
+    assert prepared.manifest["resume"] == {
+        "checkpoint": "model_250.pt",
+        "sha256": digest,
+        "size": len(payload),
+        "source_fingerprint": source_fingerprint,
+        "target_relative_path": "source/logs/velocity/2026-09-02_hello/model_250.pt",
+    }
+    final_upload = [call for call in adapter.calls if call[0] == "scp"][-1]
+    assert str(prepared.local_directory / "resume-checkpoint.pt") in final_upload
+
+
+@pytest.mark.parametrize("problem", ("missing", "digest", "checkpoint"))
+def test_resume_rejects_missing_unstable_or_mismatched_prior_checkpoint(
+    repository: Path,
+    tmp_path: Path,
+    problem: str,
+):
+    payload = b"stable prior checkpoint"
+    digest = hashlib.sha256(payload).hexdigest()
+    checkpoint = {
+        "name": "model_250.pt" if problem != "checkpoint" else "model_251.pt",
+        "relative_path": "source/logs/velocity/2026-09-02_hello/"
+        + ("model_250.pt" if problem != "checkpoint" else "model_251.pt"),
+        "size": len(payload),
+        "mtime_ns": 100,
+        "sha256": digest,
+    }
+    state = {
+        "status": "failed",
+        "last_stable_checkpoint": None if problem == "missing" else checkpoint,
+    }
+    expected_digest = "c" * 64 if problem == "digest" else digest
+    adapter = ResumeAdapter(state, payload)
+    manifest = resume_job(
+        run="2026-09-02_hello",
+        checkpoint="model_250.pt",
+        additional_iterations=500,
+        source_fingerprint="b" * 64,
+        checkpoint_sha256=expected_digest,
+    )
+
+    with pytest.raises(RunnerError, match="resume|stable|digest|checkpoint"):
+        NitroRunner(config(repository, tmp_path), adapter).prepare(manifest)
+
+    assert not any(call[0] == "scp" and call[-1].endswith("/") for call in adapter.calls)

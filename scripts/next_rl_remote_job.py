@@ -8,14 +8,18 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, NamedTuple
+
+import fcntl
 
 REMOTE_ROOT = Path("/home/aif_eng/microduck-training/runs")
 _FINGERPRINT = re.compile(r"^[0-9a-f]{6,64}$")
@@ -25,6 +29,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SUPERVISOR_ENV = "NEXT_RL_REMOTE_SUPERVISOR"
 _POLL_SECONDS = 2.0
 _CHECKPOINT_PROBE_SECONDS = 1.0
+_TERMINATE_TIMEOUT_SECONDS = 5.0
 
 
 class RemoteJobError(RuntimeError):
@@ -92,7 +97,10 @@ def validate_job_directory(
 ) -> Path:
     """Resolve one immediate fingerprint directory beneath the fixed root."""
     root_path = Path(root).resolve()
-    candidate = Path(value).resolve()
+    unresolved = Path(value)
+    if unresolved.is_symlink():
+        raise RemoteJobError("job directory itself must not be a symlink")
+    candidate = unresolved.resolve()
     try:
         relative = candidate.relative_to(root_path)
     except ValueError as error:
@@ -104,6 +112,26 @@ def validate_job_directory(
     if not candidate.is_dir():
         raise RemoteJobError("job directory does not exist")
     return candidate
+
+
+@contextmanager
+def lifecycle_lock(job_directory: str | Path):
+    """Serialize lifecycle decisions using a non-symlink advisory lockfile."""
+    path = Path(job_directory) / ".lifecycle.lock"
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        raise RemoteJobError("cannot open lifecycle lock safely") from error
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise RemoteJobError("lifecycle lock must be a regular file")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
 
 
 def load_train_argv(job_directory: str | Path) -> tuple[str, ...]:
@@ -128,6 +156,24 @@ def load_train_argv(job_directory: str | Path) -> tuple[str, ...]:
 
 def command_digest(argv: Sequence[str]) -> str:
     return hashlib.sha256(canonical_json(list(argv)).encode("utf-8")).hexdigest()
+
+
+def verified_train_argv(job_directory: str | Path) -> tuple[str, ...]:
+    """Load argv only when it matches the immutable prepared command digest."""
+    job = Path(job_directory)
+    manifest = _load_object(job / "prepared-manifest.json", "prepared manifest")
+    command = manifest.get("command")
+    if not isinstance(command, Mapping):
+        raise RemoteJobError("prepared manifest has no command digest")
+    if command.get("argv_file") != "train-argv.json":
+        raise RemoteJobError("prepared command argv file is invalid")
+    expected = command.get("sha256")
+    if not isinstance(expected, str) or not _SHA256.fullmatch(expected):
+        raise RemoteJobError("prepared command digest is invalid")
+    argv = load_train_argv(job)
+    if command_digest(argv) != expected:
+        raise RemoteJobError("train argv digest does not match prepared manifest")
+    return argv
 
 
 def sha256_file(path: str | Path) -> str:
@@ -250,10 +296,31 @@ def _identity_from(value: Mapping[str, object]) -> ProcessIdentity:
     return ProcessIdentity(pid, start, digest)
 
 
+def wait_for_identity_exit(
+    identity: ProcessIdentity,
+    timeout: float,
+    *,
+    identity_fn: Callable[[int], ProcessIdentity] = live_process_identity,
+    sleep: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Wait until the exact recorded process is gone (PID reuse counts as gone)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            current = identity_fn(identity.pid)
+        except RemoteJobError:
+            return True
+        if current != identity:
+            return True
+        sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    return False
+
+
 def cancel_job(
     job_directory: str | Path,
     *,
     killpg: Callable[[int, int], None] = os.killpg,
+    wait_for_exit: Callable[[ProcessIdentity, float], bool] | None = None,
 ) -> dict[str, object]:
     """Signal only the process group whose complete live identity still matches."""
     job = Path(job_directory)
@@ -266,12 +333,29 @@ def cancel_job(
         raise RemoteJobError("live process identity does not match the cancellation request")
     if os.getpgid(expected.pid) != expected.pid:
         raise RemoteJobError("trainer is not the leader of its recorded process group")
+    wait = wait_for_exit or wait_for_identity_exit
     killpg(expected.pid, signal.SIGTERM)
+    if not wait(expected, _TERMINATE_TIMEOUT_SECONDS):
+        if live_process_identity(expected.pid) != expected:
+            terminated = True
+        else:
+            if os.getpgid(expected.pid) != expected.pid:
+                raise RemoteJobError("trainer process group identity changed during cancellation")
+            killpg(expected.pid, signal.SIGKILL)
+            terminated = wait(expected, _TERMINATE_TIMEOUT_SECONDS)
+    else:
+        terminated = True
+    if not terminated:
+        raise RemoteJobError("trainer process group did not terminate within the bounded timeout")
+    latest = _load_object(job / "status.json", "status")
     result = {
         **state,
+        **latest,
+        **expected.as_dict(),
         "status": "failed",
         "cancelled": True,
         "exit_code": None,
+        "termination_confirmed": True,
     }
     atomic_write_json(job / "status.json", result)
     try:
@@ -296,99 +380,283 @@ def _verified_source(job: Path) -> Path:
     destination = job / "source"
     marker = destination / ".next-rl-archive-sha256"
     if destination.exists():
-        if destination.is_dir() and not destination.is_symlink() and marker.read_text().strip() == expected:
-            return destination
-        raise RemoteJobError("existing source directory does not match the prepared archive")
-    temporary = Path(tempfile.mkdtemp(prefix=".source.", dir=job))
-    try:
-        with tarfile.open(archive_path, "r") as archive:
-            for member in archive.getmembers():
-                member_path = Path(member.name)
-                if (
-                    not member.isfile()
-                    or member_path.is_absolute()
-                    or any(part in ("", ".", "..") for part in member_path.parts)
-                ):
-                    raise RemoteJobError("source archive contains an unsafe entry")
-                target = temporary.joinpath(*member_path.parts)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                extracted = archive.extractfile(member)
-                if extracted is None:
-                    raise RemoteJobError("source archive regular file has no payload")
-                with target.open("wb") as output:
-                    while block := extracted.read(1024 * 1024):
-                        output.write(block)
-                target.chmod(member.mode & 0o755)
-        marker_path = temporary / marker.name
-        marker_path.write_text(expected, encoding="ascii")
-        os.replace(temporary, destination)
-    except BaseException:
-        # The temporary directory is fingerprint-local and contains only archive output.
-        import shutil
+        try:
+            matches = (
+                destination.is_dir()
+                and not destination.is_symlink()
+                and marker.read_text(encoding="ascii").strip() == expected
+            )
+        except OSError:
+            matches = False
+        if not matches:
+            raise RemoteJobError("existing source directory does not match the prepared archive")
+    else:
+        temporary = Path(tempfile.mkdtemp(prefix=".source.", dir=job))
+        try:
+            with tarfile.open(archive_path, "r") as archive:
+                for member in archive.getmembers():
+                    member_path = Path(member.name)
+                    if (
+                        not member.isfile()
+                        or member_path.is_absolute()
+                        or any(part in ("", ".", "..") for part in member_path.parts)
+                    ):
+                        raise RemoteJobError("source archive contains an unsafe entry")
+                    target = temporary.joinpath(*member_path.parts)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    extracted = archive.extractfile(member)
+                    if extracted is None:
+                        raise RemoteJobError("source archive regular file has no payload")
+                    with target.open("wb") as output:
+                        while block := extracted.read(1024 * 1024):
+                            output.write(block)
+                    target.chmod(member.mode & 0o755)
+            marker_path = temporary / marker.name
+            marker_path.write_text(expected, encoding="ascii")
+            os.replace(temporary, destination)
+        except BaseException:
+            # The temporary directory is fingerprint-local and contains only archive output.
+            import shutil
 
-        shutil.rmtree(temporary, ignore_errors=True)
-        raise
+            shutil.rmtree(temporary, ignore_errors=True)
+            raise
+    _stage_resume_checkpoint(job, destination, manifest.get("resume"))
     return destination
+
+
+def _stage_resume_checkpoint(job: Path, source: Path, raw: object) -> None:
+    if raw is None:
+        return
+    if not isinstance(raw, Mapping):
+        raise RemoteJobError("resume record must be a JSON object")
+    expected_fields = {
+        "checkpoint",
+        "sha256",
+        "size",
+        "source_fingerprint",
+        "target_relative_path",
+    }
+    if set(raw) != expected_fields:
+        raise RemoteJobError("resume record fields are invalid")
+    checkpoint = raw.get("checkpoint")
+    digest = raw.get("sha256")
+    size = raw.get("size")
+    source_fingerprint = raw.get("source_fingerprint")
+    relative = raw.get("target_relative_path")
+    if (
+        not isinstance(checkpoint, str)
+        or not _CHECKPOINT.fullmatch(checkpoint)
+        or not isinstance(digest, str)
+        or not _SHA256.fullmatch(digest)
+        or isinstance(size, bool)
+        or not isinstance(size, int)
+        or size <= 0
+        or not isinstance(source_fingerprint, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", source_fingerprint)
+        or not isinstance(relative, str)
+    ):
+        raise RemoteJobError("resume record values are invalid")
+    relative_path = Path(relative)
+    if (
+        relative_path.is_absolute()
+        or relative_path.parts[:2] != ("source", "logs")
+        or any(part in ("", ".", "..") for part in relative_path.parts)
+        or relative_path.name != checkpoint
+    ):
+        raise RemoteJobError("resume target path is invalid")
+    staged = job / "resume-checkpoint.pt"
+    if (
+        not staged.is_file()
+        or staged.is_symlink()
+        or staged.stat().st_size != size
+        or sha256_file(staged) != digest
+    ):
+        raise RemoteJobError("resume checkpoint digest or size mismatch")
+    target = job.joinpath(*relative_path.parts)
+    try:
+        target.relative_to(source)
+    except ValueError as error:
+        raise RemoteJobError("resume target must stay beneath extracted source") from error
+    target.parent.mkdir(parents=True, exist_ok=True)
+    current = target.parent
+    while current != source:
+        if current.is_symlink():
+            raise RemoteJobError("resume target parent must not be a symlink")
+        current = current.parent
+    if target.exists():
+        if target.is_symlink() or target.stat().st_size != size or sha256_file(target) != digest:
+            raise RemoteJobError("existing resume target does not match prepared checkpoint")
+        return
+    temporary = target.with_name(f".{target.name}.staging")
+    try:
+        temporary.unlink()
+    except FileNotFoundError:
+        pass
+    os.link(staged, temporary, follow_symlinks=False)
+    os.replace(temporary, target)
 
 
 def _checkpoint_paths(source: Path) -> Iterable[Path]:
     return source.glob("logs/**/model_*.pt")
 
 
-def supervise(job_directory: str | Path) -> dict[str, object]:
-    """Run and monitor one trainer, atomically recording every lifecycle state."""
+def terminate_and_reap(
+    process: subprocess.Popen[bytes],
+    identity: ProcessIdentity | None = None,
+    *,
+    killpg: Callable[[int, int], None] = os.killpg,
+) -> None:
+    """Terminate the exact new-session group and reap its leader."""
+    if process.returncode is not None:
+        process.wait()
+        return
+    if os.getpgid(process.pid) != process.pid:
+        raise RemoteJobError("spawned trainer is not its process-group leader")
+    if identity is not None and live_process_identity(process.pid) != identity:
+        raise RemoteJobError("spawned trainer identity changed before cleanup")
+    killpg(process.pid, signal.SIGTERM)
+    try:
+        process.wait(timeout=_TERMINATE_TIMEOUT_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    if identity is not None:
+        try:
+            if live_process_identity(process.pid) != identity:
+                process.wait(timeout=_TERMINATE_TIMEOUT_SECONDS)
+                return
+        except RemoteJobError:
+            process.wait(timeout=_TERMINATE_TIMEOUT_SECONDS)
+            return
+    killpg(process.pid, signal.SIGKILL)
+    try:
+        process.wait(timeout=_TERMINATE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        raise RemoteJobError("spawned trainer could not be reaped") from error
+
+
+def finalize_training_state(
+    job_directory: str | Path,
+    state: Mapping[str, object],
+    *,
+    exit_code: int,
+    last_checkpoint: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Persist terminal state without overwriting a confirmed cancellation."""
     job = Path(job_directory)
-    source = _verified_source(job)
-    argv = load_train_argv(job)
-    digest = command_digest(argv)
-    stdout_path = job / "stdout.log"
-    tracker = StableCheckpointTracker(job)
-    last_checkpoint: dict[str, object] | None = None
-    with stdout_path.open("ab", buffering=0) as output:
-        process = launch_training(job, cwd=source, stdout=output)
-        identity = live_process_identity(process.pid)
-        if identity.command_digest != digest:
-            process.terminate()
-            raise RemoteJobError("launched trainer command identity mismatch")
-        state: dict[str, object] = {
-            "artifact_status": "pending",
-            **identity.as_dict(),
-            "exit_code": None,
-            "last_stable_checkpoint": None,
-            "status": "running",
-            "stdout_path": str(stdout_path),
+    try:
+        persisted = _load_object(job / "status.json", "status")
+    except RemoteJobError:
+        persisted = {}
+    if persisted.get("cancelled") is True and persisted.get("termination_confirmed") is True:
+        final = {**state, **persisted, "exit_code": exit_code, "status": "failed"}
+    else:
+        final = {
+            **state,
+            "artifact_status": "stable_checkpoint" if last_checkpoint else "missing",
+            "exit_code": exit_code,
+            "last_stable_checkpoint": last_checkpoint,
+            "status": "succeeded" if exit_code == 0 else "failed",
         }
-        atomic_write_json(job / "status.json", state)
-        while process.poll() is None:
-            stable = tracker.observe(_checkpoint_paths(source))
-            if stable is not None and stable != last_checkpoint:
-                last_checkpoint = stable
-                state = {
-                    **state,
-                    "artifact_status": "stable_checkpoint",
-                    "last_stable_checkpoint": stable,
-                }
-                atomic_write_json(job / "status.json", state)
-            time.sleep(_POLL_SECONDS)
-        tracker.observe(_checkpoint_paths(source))
-        time.sleep(_CHECKPOINT_PROBE_SECONDS)
-        stable = tracker.observe(_checkpoint_paths(source))
-        if stable is not None:
-            last_checkpoint = stable
-        exit_code = process.returncode
-    final = {
-        **state,
-        "artifact_status": "stable_checkpoint" if last_checkpoint else "missing",
-        "exit_code": exit_code,
-        "last_stable_checkpoint": last_checkpoint,
-        "status": "succeeded" if exit_code == 0 else "failed",
-    }
     atomic_write_json(job / "status.json", final)
     return final
 
 
+def supervise(
+    job_directory: str | Path,
+    *,
+    terminate_and_reap: Callable[
+        [subprocess.Popen[bytes], ProcessIdentity | None], None
+    ] = terminate_and_reap,
+) -> dict[str, object]:
+    """Run and monitor one trainer, atomically recording every lifecycle state."""
+    job = Path(job_directory)
+    source = _verified_source(job)
+    argv = verified_train_argv(job)
+    digest = command_digest(argv)
+    stdout_path = job / "stdout.log"
+    tracker = StableCheckpointTracker(job)
+    last_checkpoint: dict[str, object] | None = None
+    process: subprocess.Popen[bytes] | None = None
+    identity: ProcessIdentity | None = None
+    state: dict[str, object] = {
+        "artifact_status": "pending",
+        "command_digest": digest,
+        "exit_code": None,
+        "last_stable_checkpoint": None,
+        "pid": None,
+        "process_start": None,
+        "status": "pending",
+        "stdout_path": str(stdout_path),
+    }
+    try:
+        with stdout_path.open("ab", buffering=0) as output:
+            process = launch_training(job, cwd=source, stdout=output)
+            state = {**state, "pid": process.pid}
+            identity = live_process_identity(process.pid)
+            if identity.command_digest != digest:
+                raise RemoteJobError("launched trainer command identity mismatch")
+            state = {**state, **identity.as_dict(), "status": "running"}
+            atomic_write_json(job / "status.json", state)
+            while process.poll() is None:
+                stable = tracker.observe(_checkpoint_paths(source))
+                if stable is not None and stable != last_checkpoint:
+                    last_checkpoint = stable
+                    state = {
+                        **state,
+                        "artifact_status": "stable_checkpoint",
+                        "last_stable_checkpoint": stable,
+                    }
+                    atomic_write_json(job / "status.json", state)
+                time.sleep(_POLL_SECONDS)
+            tracker.observe(_checkpoint_paths(source))
+            time.sleep(_CHECKPOINT_PROBE_SECONDS)
+            stable = tracker.observe(_checkpoint_paths(source))
+            if stable is not None:
+                last_checkpoint = stable
+            exit_code = process.returncode
+        if exit_code is None:
+            raise RemoteJobError("trainer exited without a return code")
+        return finalize_training_state(
+            job,
+            state,
+            exit_code=exit_code,
+            last_checkpoint=last_checkpoint,
+        )
+    except BaseException as error:
+        terminated = process is None
+        if process is not None:
+            terminate_and_reap(process, identity)
+            terminated = True
+        try:
+            persisted = _load_object(job / "status.json", "status")
+        except RemoteJobError:
+            persisted = {}
+        if not (persisted.get("cancelled") is True and persisted.get("termination_confirmed") is True):
+            failed = {
+                **state,
+                **persisted,
+                "error": str(error),
+                "exit_code": process.returncode if process is not None else 1,
+                "status": "failed",
+                "termination_confirmed": terminated,
+            }
+            atomic_write_json(job / "status.json", failed)
+        raise
+
+
 def run_supervisor(job: Path) -> dict[str, object]:
     """Run the supervisor and make pre-launch failures durable."""
+    with lifecycle_lock(job):
+        state = _load_object(job / "status.json", "status")
+        if state.get("status") in ("running", "succeeded", "failed"):
+            return state
+        state = {
+            **state,
+            "launch_state": "supervising",
+            "supervisor_pid": os.getpid(),
+        }
+        atomic_write_json(job / "status.json", state)
     try:
         return supervise(job)
     except Exception as error:
@@ -407,44 +675,98 @@ def _start_supervisor(
     job: Path,
     *,
     popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+    after_spawn: Callable[[Mapping[str, object]], None] | None = None,
 ) -> dict[str, object]:
     request = _load_object(job / "start-request.json", "start request")
     state = _load_object(job / "status.json", "status")
-    if request != {"action": "start"} or state.get("status") != "pending":
+    request_id = request.get("request_id")
+    if (
+        request.get("action") != "start"
+        or set(request) != {"action", "request_id"}
+        or not isinstance(request_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", request_id)
+    ):
+        raise RemoteJobError("start request is invalid")
+    if state.get("launch_request_id") == request_id and state.get("launch_state") == "spawned":
+        try:
+            (job / "start-request.json").unlink()
+        except FileNotFoundError:
+            pass
+        return state
+    if state.get("launch_request_id") == request_id and state.get("launch_state") == "claimed":
+        return state
+    if state.get("status") != "pending":
+        if state.get("launch_request_id") == request_id:
+            try:
+                (job / "start-request.json").unlink()
+            except FileNotFoundError:
+                pass
+            return state
         raise RemoteJobError("start requires an exact request and pending state")
+    existing_request = state.get("launch_request_id")
+    if existing_request not in (None, request_id):
+        raise RemoteJobError("a different start request already owns this job")
+    claimed = {
+        **state,
+        "launch_request_id": request_id,
+        "launch_state": "claimed",
+    }
+    atomic_write_json(job / "status.json", claimed)
     environment = os.environ.copy()
     environment[_SUPERVISOR_ENV] = "1"
-    popen(
-        (sys.executable, str(Path(__file__).resolve()), str(job)),
-        cwd=job,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        shell=False,
-        start_new_session=True,
-        close_fds=True,
-        env=environment,
-    )
+    try:
+        supervisor = popen(
+            (sys.executable, str(Path(__file__).resolve()), str(job)),
+            cwd=job,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+            start_new_session=True,
+            close_fds=True,
+            env=environment,
+        )
+    except BaseException:
+        atomic_write_json(job / "status.json", state)
+        raise
+    spawned = {
+        **claimed,
+        "launch_state": "spawned",
+        "supervisor_pid": supervisor.pid,
+    }
+    atomic_write_json(job / "status.json", spawned)
+    if after_spawn is not None:
+        after_spawn(spawned)
     try:
         (job / "start-request.json").unlink()
     except FileNotFoundError:
         raise RemoteJobError("start request disappeared") from None
-    return state
+    return spawned
 
 
-def inspect_or_control(job: Path) -> dict[str, object]:
-    if (job / "cancel-request.json").exists():
-        return cancel_job(job)
-    if (job / "start-request.json").exists():
-        return _start_supervisor(job)
-    state = _load_object(job / "status.json", "status")
-    if state.get("status") == "running":
-        try:
-            live = live_process_identity(_identity_from(state).pid)
-        except RemoteJobError:
-            live = None
-        state = {**state, "live_identity": live.as_dict() if live else None}
-    return state
+def inspect_or_control(
+    job: Path,
+    *,
+    supervisor_popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+    after_spawn: Callable[[Mapping[str, object]], None] | None = None,
+) -> dict[str, object]:
+    with lifecycle_lock(job):
+        if (job / "cancel-request.json").exists():
+            return cancel_job(job)
+        if (job / "start-request.json").exists():
+            return _start_supervisor(
+                job,
+                popen=supervisor_popen,
+                after_spawn=after_spawn,
+            )
+        state = _load_object(job / "status.json", "status")
+        if state.get("status") == "running":
+            try:
+                live = live_process_identity(_identity_from(state).pid)
+            except RemoteJobError:
+                live = None
+            state = {**state, "live_identity": live.as_dict() if live else None}
+        return state
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -45,20 +46,23 @@ _SECRET_FILENAMES = frozenset(
     }
 )
 _SECRET_SUFFIXES = frozenset({".key", ".p12", ".pem", ".pfx"})
-_SECRET_STEMS = frozenset(
+_SAFE_PATH_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
+_SENSITIVE_WORDS = frozenset(
+    {"credential", "credentials", "passwd", "password", "secret", "secrets"}
+)
+_SENSITIVE_PAIRS = frozenset(
     {
-        "access_token",
-        "api_key",
-        "credential",
-        "credentials",
-        "password",
-        "passwd",
-        "private_key",
-        "secret",
-        "secrets",
+        ("access", "key"),
+        ("access", "token"),
+        ("api", "key"),
+        ("api", "token"),
+        ("auth", "token"),
+        ("client", "secret"),
+        ("private", "key"),
+        ("refresh", "token"),
+        ("session", "token"),
     }
 )
-_SAFE_PATH_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 class RunnerError(RuntimeError):
@@ -146,6 +150,38 @@ def _positive_integer(value: object, name: str) -> int:
 def _slug(value: object, name: str) -> str:
     if not isinstance(value, str) or ".." in value or not _RUN_SLUG.fullmatch(value):
         raise RunnerError(f"{name} uses unsafe syntax")
+    return value
+
+
+def _name_tokens(value: str) -> tuple[str, ...]:
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
+    stem = PurePosixPath(separated.lower()).stem
+    return tuple(part for part in re.split(r"[^a-z0-9]+", stem) if part)
+
+
+def _is_secret_like_name(value: str) -> bool:
+    lowered = value.lower()
+    if lowered in _SECRET_FILENAMES or lowered.startswith(".env."):
+        return True
+    if PurePosixPath(lowered).suffix in _SECRET_SUFFIXES:
+        return True
+    tokens = _name_tokens(value)
+    if any(token in _SENSITIVE_WORDS for token in tokens):
+        return True
+    if tokens == ("token",) or (len(tokens) > 1 and tokens[-1] == "token"):
+        return True
+    return any((left, right) in _SENSITIVE_PAIRS for left, right in zip(tokens, tokens[1:]))
+
+
+def _credential_free(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {
+            key: _credential_free(item)
+            for key, item in value.items()
+            if isinstance(key, str) and not _is_secret_like_name(key)
+        }
+    if isinstance(value, (tuple, list)):
+        return [_credential_free(item) for item in value]
     return value
 
 
@@ -243,14 +279,7 @@ def _safe_tracked_path(raw: bytes) -> str:
     if any(ord(character) < 32 or ord(character) == 127 for character in value):
         raise RunnerError(f"tracked path contains control characters: {value!r}")
     for part in path.parts:
-        lowered = part.lower()
-        stem = PurePosixPath(lowered).stem.replace("-", "_")
-        if (
-            lowered in _SECRET_FILENAMES
-            or lowered.startswith(".env.")
-            or PurePosixPath(lowered).suffix in _SECRET_SUFFIXES
-            or stem in _SECRET_STEMS
-        ):
+        if _is_secret_like_name(part):
             raise RunnerError(f"tracked path looks secret-like: {value!r}")
     return value
 
@@ -332,22 +361,170 @@ class NitroRunner:
             f"{self._target}:{remote_directory}/",
         )
 
+    def _run(self, argv: tuple[str, ...]) -> CommandResult:
+        result = self.adapter.run(argv)
+        if result.returncode:
+            raise RunnerError(
+                f"transport command failed with exit code {result.returncode}: "
+                f"{result.stderr.strip()}"
+            )
+        return result
+
+    @staticmethod
+    def _checkpoint_record(state: Mapping[str, object]) -> dict[str, object]:
+        checkpoint = state.get("last_stable_checkpoint")
+        if not isinstance(checkpoint, Mapping):
+            raise RunnerError("remote job has no stable checkpoint")
+        name = checkpoint.get("name")
+        relative = checkpoint.get("relative_path")
+        digest = checkpoint.get("sha256")
+        size = checkpoint.get("size")
+        mtime_ns = checkpoint.get("mtime_ns")
+        if not isinstance(name, str) or not _CHECKPOINT.fullmatch(name):
+            raise RunnerError("stable checkpoint name is invalid")
+        if not isinstance(relative, str):
+            raise RunnerError("stable checkpoint relative path is invalid")
+        relative_path = PurePosixPath(relative)
+        if (
+            relative_path.is_absolute()
+            or not relative_path.parts
+            or any(part in ("", ".", "..") for part in relative_path.parts)
+            or any(not _SAFE_PATH_PART.fullmatch(part) for part in relative_path.parts)
+            or relative_path.parts[:2] != ("source", "logs")
+            or relative_path.name != name
+        ):
+            raise RunnerError("stable checkpoint path is outside the job directory")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise RunnerError("stable checkpoint digest is invalid")
+        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+            raise RunnerError("stable checkpoint size is invalid")
+        if isinstance(mtime_ns, bool) or not isinstance(mtime_ns, int) or mtime_ns < 0:
+            raise RunnerError("stable checkpoint mtime is invalid")
+        return {
+            "name": name,
+            "relative_path": relative_path.as_posix(),
+            "sha256": digest,
+            "size": size,
+            "mtime_ns": mtime_ns,
+        }
+
+    def _download_checkpoint(
+        self,
+        fingerprint: str,
+        checkpoint: Mapping[str, object],
+        *,
+        attempts: int,
+    ) -> Path:
+        name = str(checkpoint["name"])
+        relative_path = PurePosixPath(str(checkpoint["relative_path"]))
+        digest = str(checkpoint["sha256"])
+        size = int(checkpoint["size"])
+        remote_directory = self._remote_directory(fingerprint)
+        destination_directory = self.config.bundle_root / fingerprint / "checkpoints"
+        destination_directory.mkdir(parents=True, exist_ok=True)
+        destination = destination_directory / name
+        temporary = destination.with_name(f".{name}.part")
+        source = f"{self._target}:{remote_directory / relative_path}"
+        last_result = "not downloaded"
+        for _ in range(attempts):
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+            try:
+                self._run(("scp", "-o", "BatchMode=yes", source, str(temporary)))
+            except Exception as error:
+                last_result = str(error)
+                continue
+            if not temporary.is_file() or temporary.is_symlink():
+                last_result = "missing file"
+                continue
+            actual_digest = sha256_file(temporary)
+            last_result = actual_digest
+            if temporary.stat().st_size == size and actual_digest == digest:
+                os.replace(temporary, destination)
+                return destination
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise RunnerError(
+            f"checkpoint transfer digest verification failed after {attempts} attempts "
+            f"(last result: {last_result})"
+        )
+
     def prepare(self, manifest: ExperimentManifest) -> PreparedJob:
         """Create and transfer a deterministic, credential-free source bundle."""
         train_argv = build_train_argv(manifest)
         fingerprint = experiment_fingerprint(manifest)
         local_directory = self.config.bundle_root / fingerprint
         remote_directory = self._remote_directory(fingerprint)
+        if local_directory.is_symlink():
+            raise RunnerError("local fingerprint directory must not be a symlink")
         local_directory.mkdir(parents=True, exist_ok=True)
+        if local_directory.resolve().parent != self.config.bundle_root:
+            raise RunnerError("local fingerprint directory escaped the configured bundle root")
+
+        resume_record: dict[str, object] | None = None
+        staged_checkpoint: Path | None = None
+        if manifest.agent_config.get("resume") is True:
+            source_fingerprint = manifest.agent_config.get("resume_source_fingerprint")
+            expected_digest = manifest.agent_config.get("resume_checkpoint_sha256")
+            load_run = manifest.agent_config.get("load_run")
+            load_checkpoint = manifest.agent_config.get("load_checkpoint")
+            if (
+                not isinstance(source_fingerprint, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", source_fingerprint)
+                or source_fingerprint == fingerprint
+            ):
+                raise RunnerError("resume source fingerprint must identify a distinct prepared job")
+            if not isinstance(expected_digest, str) or not re.fullmatch(
+                r"[0-9a-f]{64}", expected_digest
+            ):
+                raise RunnerError("resume checkpoint digest must be a lowercase SHA-256")
+            prior_state = self.status(source_fingerprint)
+            checkpoint = self._checkpoint_record(prior_state)
+            if checkpoint["name"] != load_checkpoint:
+                raise RunnerError("resume checkpoint does not match the prior stable checkpoint")
+            if checkpoint["sha256"] != expected_digest:
+                raise RunnerError("resume checkpoint digest does not match the prior stable checkpoint")
+            relative_path = PurePosixPath(str(checkpoint["relative_path"]))
+            if len(relative_path.parts) < 5 or relative_path.parts[-2] != load_run:
+                raise RunnerError("resume run does not match the prior checkpoint path")
+            downloaded = self._download_checkpoint(
+                source_fingerprint,
+                checkpoint,
+                attempts=3,
+            )
+            staged_checkpoint = local_directory / "resume-checkpoint.pt"
+            temporary_checkpoint = local_directory / ".resume-checkpoint.pt.tmp"
+            try:
+                temporary_checkpoint.unlink()
+            except FileNotFoundError:
+                pass
+            shutil.copyfile(downloaded, temporary_checkpoint)
+            if sha256_file(temporary_checkpoint) != expected_digest:
+                temporary_checkpoint.unlink()
+                raise RunnerError("resume checkpoint digest changed while staging")
+            os.replace(temporary_checkpoint, staged_checkpoint)
+            resume_record = {
+                "checkpoint": load_checkpoint,
+                "sha256": expected_digest,
+                "size": checkpoint["size"],
+                "source_fingerprint": source_fingerprint,
+                "target_relative_path": relative_path.as_posix(),
+            }
 
         archive_path = local_directory / "source.tar"
         commit, tree, archive_sha256 = _snapshot_source(
             self.config.repository,
             archive_path,
         )
+        digest = hashlib.sha256(canonical_json(list(train_argv)).encode("utf-8")).hexdigest()
         prepared_manifest: dict[str, object] = {
+            "command": {"argv_file": "train-argv.json", "sha256": digest},
             "fingerprint": fingerprint,
-            "learning_inputs": learning_inputs(manifest),
+            "learning_inputs": _credential_free(learning_inputs(manifest)),
             "source": {
                 "commit": commit,
                 "tree": tree,
@@ -355,6 +532,8 @@ class NitroRunner:
                 "archive_sha256": archive_sha256,
             },
         }
+        if resume_record is not None:
+            prepared_manifest["resume"] = resume_record
         manifest_path = local_directory / "prepared-manifest.json"
         argv_path = local_directory / "train-argv.json"
         status_path = local_directory / "status.json"
@@ -364,9 +543,7 @@ class NitroRunner:
             status_path,
             {
                 "artifact_status": "pending",
-                "command_digest": hashlib.sha256(
-                    canonical_json(list(train_argv)).encode("utf-8")
-                ).hexdigest(),
+                "command_digest": digest,
                 "exit_code": None,
                 "last_stable_checkpoint": None,
                 "pid": None,
@@ -401,13 +578,16 @@ class NitroRunner:
         except KeyError as error:
             raise RunnerError("remote wrapper must be a regular tracked source file") from error
 
-        mkdir_argv = self._ssh("mkdir", "-p", "--", str(remote_directory))
+        sources = [archive_path, manifest_path, argv_path, status_path, wrapper_path]
+        if staged_checkpoint is not None:
+            sources.append(staged_checkpoint)
+        mkdir_argv = self._ssh("mkdir", "--", str(remote_directory))
         transfer_argv = self._scp(
-            (archive_path, manifest_path, argv_path, status_path, wrapper_path),
+            sources,
             remote_directory,
         )
-        self.adapter.run(mkdir_argv)
-        self.adapter.run(transfer_argv)
+        self._run(mkdir_argv)
+        self._run(transfer_argv)
         return PreparedJob(
             fingerprint=fingerprint,
             manifest=prepared_manifest,
@@ -422,7 +602,7 @@ class NitroRunner:
         )
 
     def _invoke_wrapper(self, remote_directory: PurePosixPath) -> CommandResult:
-        return self.adapter.run(
+        return self._run(
             self._ssh(
                 "python3",
                 str(remote_directory / "next_rl_remote_job.py"),
@@ -446,8 +626,11 @@ class NitroRunner:
         if prepared.remote_directory != expected:
             raise RunnerError("prepared job remote directory is outside its fingerprint path")
         request_path = prepared.local_directory / "start-request.json"
-        atomic_write_json(request_path, {"action": "start"})
-        self.adapter.run(self._scp((request_path,), expected))
+        atomic_write_json(
+            request_path,
+            {"action": "start", "request_id": f"start-{prepared.fingerprint}"},
+        )
+        self._run(self._scp((request_path,), expected))
         return self._state(self._invoke_wrapper(expected))
 
     def status(self, fingerprint: str) -> dict[str, object]:
@@ -474,66 +657,12 @@ class NitroRunner:
         local_directory.mkdir(parents=True, exist_ok=True)
         request_path = local_directory / "cancel-request.json"
         atomic_write_json(request_path, {"action": "cancel", **expected})
-        self.adapter.run(self._scp((request_path,), remote_directory))
+        self._run(self._scp((request_path,), remote_directory))
         return self._state(self._invoke_wrapper(remote_directory))
 
     def sync_checkpoint(self, fingerprint: str, *, attempts: int = 3) -> Path:
         """Download one stable checkpoint and publish it only after digest verification."""
         attempts = _positive_integer(attempts, "checkpoint transfer attempts")
         state = self.status(fingerprint)
-        checkpoint = state.get("last_stable_checkpoint")
-        if not isinstance(checkpoint, Mapping):
-            raise RunnerError("remote job has no stable checkpoint")
-        name = checkpoint.get("name")
-        relative = checkpoint.get("relative_path")
-        digest = checkpoint.get("sha256")
-        size = checkpoint.get("size")
-        if not isinstance(name, str) or not _CHECKPOINT.fullmatch(name):
-            raise RunnerError("stable checkpoint name is invalid")
-        if not isinstance(relative, str):
-            raise RunnerError("stable checkpoint relative path is invalid")
-        relative_path = PurePosixPath(relative)
-        if (
-            relative_path.is_absolute()
-            or not relative_path.parts
-            or any(part in ("", ".", "..") for part in relative_path.parts)
-            or any(not _SAFE_PATH_PART.fullmatch(part) for part in relative_path.parts)
-            or relative_path.parts[:2] != ("source", "logs")
-            or relative_path.name != name
-        ):
-            raise RunnerError("stable checkpoint path is outside the job directory")
-        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
-            raise RunnerError("stable checkpoint digest is invalid")
-        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
-            raise RunnerError("stable checkpoint size is invalid")
-
-        remote_directory = self._remote_directory(fingerprint)
-        destination_directory = self.config.bundle_root / fingerprint / "checkpoints"
-        destination_directory.mkdir(parents=True, exist_ok=True)
-        destination = destination_directory / name
-        temporary = destination.with_name(f".{name}.part")
-        source = f"{self._target}:{remote_directory / relative_path}"
-        last_digest = "not downloaded"
-        for _ in range(attempts):
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
-            self.adapter.run(
-                ("scp", "-o", "BatchMode=yes", source, str(temporary))
-            )
-            if not temporary.is_file() or temporary.is_symlink():
-                last_digest = "missing file"
-                continue
-            last_digest = sha256_file(temporary)
-            if temporary.stat().st_size == size and last_digest == digest:
-                os.replace(temporary, destination)
-                return destination
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-        raise RunnerError(
-            f"checkpoint transfer digest verification failed after {attempts} attempts "
-            f"(last result: {last_digest})"
-        )
+        checkpoint = self._checkpoint_record(state)
+        return self._download_checkpoint(fingerprint, checkpoint, attempts=attempts)
