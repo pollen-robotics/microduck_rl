@@ -28,6 +28,7 @@ _TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 _CHECKPOINT = re.compile(r"^model_([0-9]+)\.pt$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SUPERVISOR_ENV = "NEXT_RL_REMOTE_SUPERVISOR"
+_INSPECT_ENV = "NEXT_RL_REMOTE_INSPECT"
 _POLL_SECONDS = 2.0
 _CHECKPOINT_PROBE_SECONDS = 1.0
 _TERMINATE_TIMEOUT_SECONDS = 5.0
@@ -317,16 +318,88 @@ def completed_preparation_state(job_directory: str | Path) -> dict[str, object]:
     marker = _load_object(job / ".complete.json", "completion marker")
     bundle = _load_object(job / "bundle-manifest.json", "bundle manifest")
     digest = marker.get("bundle_sha256")
+    files = bundle.get("files")
     if (
-        marker.get("fingerprint") != job.name
+        set(marker) != {"bundle_sha256", "fingerprint"}
+        or set(bundle) != {"bundle_sha256", "files", "fingerprint"}
+        or marker.get("fingerprint") != job.name
         or bundle.get("fingerprint") != job.name
         or bundle.get("bundle_sha256") != digest
         or not isinstance(digest, str)
         or not _SHA256.fullmatch(digest)
+        or not isinstance(files, Mapping)
     ):
         raise RemoteJobError("completed bundle identity is invalid")
+    unsigned = {"files": files, "fingerprint": job.name}
+    if hashlib.sha256(canonical_json(unsigned).encode("utf-8")).hexdigest() != digest:
+        raise RemoteJobError("completed bundle digest is invalid")
     state = _load_object(job / "status.json", "status")
     return {**state, "prepared_bundle_sha256": digest}
+
+
+def incomplete_preparation_state(job_directory: str | Path) -> dict[str, object]:
+    """Affirm a fully moved bundle whose final completion marker is absent."""
+    job = Path(job_directory)
+    marker = job / ".complete.json"
+    if marker.exists() or marker.is_symlink():
+        raise RemoteJobError("incomplete preparation must not have a completion marker")
+    bundle = _load_object(job / "bundle-manifest.json", "bundle manifest")
+    if set(bundle) != {"bundle_sha256", "files", "fingerprint"}:
+        raise RemoteJobError("bundle manifest fields are invalid")
+    digest = bundle.get("bundle_sha256")
+    files = bundle.get("files")
+    if (
+        not isinstance(digest, str)
+        or not _SHA256.fullmatch(digest)
+        or bundle.get("fingerprint") != job.name
+        or not isinstance(files, Mapping)
+    ):
+        raise RemoteJobError("incomplete bundle identity is invalid")
+    unsigned = {"files": files, "fingerprint": job.name}
+    if hashlib.sha256(canonical_json(unsigned).encode("utf-8")).hexdigest() != digest:
+        raise RemoteJobError("incomplete bundle manifest digest mismatch")
+    names = set(files)
+    if not _BUNDLE_REQUIRED_FILES.issubset(names) or not names.issubset(
+        _BUNDLE_REQUIRED_FILES | _BUNDLE_OPTIONAL_FILES
+    ):
+        raise RemoteJobError("incomplete bundle file set is invalid")
+    for name in sorted(names):
+        record = files.get(name)
+        path = job / name
+        if (
+            not isinstance(record, Mapping)
+            or set(record) != {"sha256", "size"}
+            or not isinstance(record.get("sha256"), str)
+            or not _SHA256.fullmatch(str(record.get("sha256")))
+            or isinstance(record.get("size"), bool)
+            or not isinstance(record.get("size"), int)
+            or int(record.get("size")) < 0
+            or not path.is_file()
+            or path.is_symlink()
+            or path.stat().st_size != record.get("size")
+            or sha256_file(path) != record.get("sha256")
+        ):
+            raise RemoteJobError(f"incomplete bundle file mismatch: {name}")
+    prepared = _load_object(job / "prepared-manifest.json", "prepared manifest")
+    source = prepared.get("source")
+    command = prepared.get("command")
+    argv = load_train_argv(job)
+    status = _load_object(job / "status.json", "status")
+    if (
+        prepared.get("fingerprint") != job.name
+        or not isinstance(source, Mapping)
+        or source.get("archive_sha256") != sha256_file(job / "source.tar")
+        or not isinstance(command, Mapping)
+        or command.get("argv_file") != "train-argv.json"
+        or command.get("sha256") != command_digest(argv)
+        or status.get("status") != "pending"
+    ):
+        raise RemoteJobError("incomplete prepared manifests are invalid")
+    return {
+        **status,
+        "incomplete_bundle_sha256": digest,
+        "preparation_status": "incomplete",
+    }
 
 
 def launch_training(
@@ -911,14 +984,34 @@ def inspect_or_control(
                 after_popen=after_popen,
                 after_spawn=after_spawn,
             )
-        state = _load_object(job / "status.json", "status")
-        if state.get("status") == "running":
-            try:
-                live = live_process_identity(_identity_from(state).pid)
-            except RemoteJobError:
-                live = None
-            state = {**state, "live_identity": live.as_dict() if live else None}
-        return state
+        return _inspection_state(job)
+
+
+def _inspection_state(job: Path) -> dict[str, object]:
+    state = _load_object(job / "status.json", "status")
+    if state.get("status") == "running":
+        try:
+            live = live_process_identity(_identity_from(state).pid)
+        except RemoteJobError:
+            live = None
+        state = {**state, "live_identity": live.as_dict() if live else None}
+    return state
+
+
+def inspect_read_only(job: Path) -> dict[str, object]:
+    """Read lifecycle state without consuming start or cancel requests."""
+    with lifecycle_lock(job):
+        return _inspection_state(job)
+
+
+def inspect_preparation_read_only(job: Path) -> dict[str, object]:
+    """Inspect complete or affirmatively incomplete preparation without mutation."""
+    try:
+        completed = completed_preparation_state(job)
+    except RemoteJobError:
+        return incomplete_preparation_state(job)
+    state = inspect_read_only(job)
+    return {**state, "prepared_bundle_sha256": completed["prepared_bundle_sha256"]}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -929,6 +1022,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     script_directory = Path(__file__).resolve().parent
     if script_directory.parent == job and script_directory.name.startswith(".incoming-"):
         print(canonical_json(finalize_preparation(job, script_directory)), flush=True)
+        return 0
+    if os.environ.get(_INSPECT_ENV) == "1":
+        print(canonical_json(inspect_preparation_read_only(job)), flush=True)
         return 0
     completed = completed_preparation_state(job)
     if os.environ.get(_SUPERVISOR_ENV) == "1":

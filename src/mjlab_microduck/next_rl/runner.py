@@ -55,7 +55,6 @@ _SENSITIVE_WORDS = frozenset(
         "password",
         "secret",
         "secrets",
-        "token",
     }
 )
 _SENSITIVE_PAIRS = frozenset(
@@ -175,6 +174,8 @@ def _is_secret_like_name(value: str) -> bool:
         return True
     tokens = _name_tokens(value)
     if any(token in _SENSITIVE_WORDS for token in tokens):
+        return True
+    if "token" in tokens and tokens not in {("token", "budget"), ("token", "count")}:
         return True
     return any((left, right) in _SENSITIVE_PAIRS for left, right in zip(tokens, tokens[1:]))
 
@@ -381,43 +382,75 @@ class NitroRunner:
         remote_directory: PurePosixPath,
         bundle_sha256: str,
     ) -> bool:
-        """Distinguish a valid complete bundle from an incomplete directory."""
-        check = self.adapter.run(self._ssh("test", "!", "-L", str(remote_directory)))
-        if check.returncode:
-            raise RunnerError("remote fingerprint job directory is a symlink")
-        try:
-            result = self.adapter.run(
-                self._ssh(
-                    "python3",
-                    str(remote_directory / "next_rl_remote_job.py"),
-                    str(remote_directory),
-                )
-            )
-        except Exception:
-            return False
-        if result.returncode:
-            return False
-        try:
-            state = self._state(result)
-        except RunnerError:
-            return False
+        """Inspect an existing directory without turning ambiguity into mutation."""
+        self._require_remote_directory(remote_directory, "fingerprint job")
+        last_error: BaseException | None = None
+        state: dict[str, object] | None = None
+        for _ in range(3):
+            try:
+                state = self._state(self._invoke_wrapper(remote_directory, read_only=True))
+                break
+            except Exception as error:
+                last_error = error
+        if state is None:
+            raise RunnerError(
+                f"remote preparation inspection remained ambiguous: {last_error}"
+            ) from last_error
         existing_digest = state.get("prepared_bundle_sha256")
-        if existing_digest is None:
+        if existing_digest is None and (
+            state.get("preparation_status") == "incomplete"
+            and state.get("incomplete_bundle_sha256") == bundle_sha256
+        ):
             return False
+        if existing_digest is None:
+            raise RunnerError("remote preparation inspection returned ambiguous state")
         if existing_digest != bundle_sha256:
             raise RunnerError("remote fingerprint directory contains a conflicting complete job")
         return True
 
-    def _remove_incomplete_preparation(self, remote_directory: PurePosixPath) -> None:
-        """Remove only one validated, non-symlink fingerprint directory."""
-        if remote_directory.parent != _REMOTE_ROOT or not _FINGERPRINT.fullmatch(
-            remote_directory.name
+    def _require_remote_directory(self, path: PurePosixPath, label: str) -> None:
+        """Affirm that a remote path is a real directory and not a symlink."""
+        try:
+            directory = self.adapter.run(self._ssh("test", "-d", str(path)))
+            non_symlink = self.adapter.run(self._ssh("test", "!", "-L", str(path)))
+        except Exception as error:
+            raise RunnerError(f"remote {label} type inspection failed") from error
+        if directory.returncode or non_symlink.returncode:
+            raise RunnerError(f"remote {label} path is not a non-symlink directory")
+
+    def _reset_staging_directory(
+        self,
+        remote_directory: PurePosixPath,
+        staging_directory: PurePosixPath,
+    ) -> None:
+        """Clean only an affirmatively owned, digest-named staging directory."""
+        if (
+            remote_directory.parent != _REMOTE_ROOT
+            or not _FINGERPRINT.fullmatch(remote_directory.name)
+            or staging_directory.parent != remote_directory
+            or not re.fullmatch(r"\.incoming-[0-9a-f]{64}", staging_directory.name)
         ):
-            raise RunnerError("refusing to clean an unsafe remote preparation path")
-        check = self.adapter.run(self._ssh("test", "!", "-L", str(remote_directory)))
-        if check.returncode:
-            raise RunnerError("remote fingerprint job directory is a symlink")
-        self._run(self._ssh("rm", "-rf", "--", str(remote_directory)))
+            raise RunnerError("refusing to clean an unsafe staging path")
+        self._require_remote_directory(remote_directory, "fingerprint job")
+        try:
+            non_symlink = self.adapter.run(
+                self._ssh("test", "!", "-L", str(staging_directory))
+            )
+            absent = self.adapter.run(self._ssh("test", "!", "-e", str(staging_directory)))
+        except Exception as error:
+            raise RunnerError("remote staging inspection failed") from error
+        if non_symlink.returncode:
+            raise RunnerError("remote staging path is a symlink")
+        if not absent.returncode:
+            return
+        self._require_remote_directory(staging_directory, "staging")
+        try:
+            owned = self.adapter.run(self._ssh("test", "-O", str(staging_directory)))
+        except Exception as error:
+            raise RunnerError("remote staging ownership inspection failed") from error
+        if owned.returncode:
+            raise RunnerError("remote staging directory is not owned by the SSH user")
+        self._run(self._ssh("rm", "-rf", "--", str(staging_directory)))
 
     @staticmethod
     def _checkpoint_record(state: Mapping[str, object]) -> dict[str, object]:
@@ -664,27 +697,42 @@ class NitroRunner:
         )
         last_error: BaseException | None = None
         complete = False
-        for _ in range(3):
-            try:
-                claim = self.adapter.run(mkdir_argv)
-                if claim.returncode:
-                    if self._existing_preparation_matches(remote_directory, bundle_sha256):
-                        complete = True
-                        break
-                    self._remove_incomplete_preparation(remote_directory)
-                    self._run(mkdir_argv)
-                self._run(self._ssh("test", "!", "-L", str(remote_directory)))
-                self._run(staging_mkdir_argv)
-                self._run(transfer_argv)
-                self._run(finalize_argv)
+        try:
+            claim = self.adapter.run(mkdir_argv)
+        except Exception as error:
+            if self._existing_preparation_matches(remote_directory, bundle_sha256):
                 complete = True
-                break
+            else:
+                raise RunnerError("remote fingerprint claim was ambiguous") from error
+        else:
+            if claim.returncode:
+                complete = self._existing_preparation_matches(
+                    remote_directory, bundle_sha256
+                )
+            else:
+                self._require_remote_directory(remote_directory, "fingerprint job")
+        for _ in range(3) if not complete else ():
+            try:
+                stage_claim = self.adapter.run(staging_mkdir_argv)
+                if stage_claim.returncode:
+                    self._reset_staging_directory(remote_directory, staging_directory)
+                    self._run(staging_mkdir_argv)
+                self._run(transfer_argv)
+            except Exception as error:
+                last_error = error
+                self._reset_staging_directory(remote_directory, staging_directory)
+                continue
+            try:
+                self._run(finalize_argv)
             except Exception as error:
                 last_error = error
                 if self._existing_preparation_matches(remote_directory, bundle_sha256):
                     complete = True
                     break
-                self._remove_incomplete_preparation(remote_directory)
+                self._reset_staging_directory(remote_directory, staging_directory)
+                continue
+            complete = True
+            break
         if not complete:
             raise RunnerError(
                 f"remote bundle preparation failed after 3 attempts: {last_error}"
@@ -702,9 +750,16 @@ class NitroRunner:
             dry_run_argv=(mkdir_argv, staging_mkdir_argv, transfer_argv, finalize_argv),
         )
 
-    def _invoke_wrapper(self, remote_directory: PurePosixPath) -> CommandResult:
+    def _invoke_wrapper(
+        self,
+        remote_directory: PurePosixPath,
+        *,
+        read_only: bool = False,
+    ) -> CommandResult:
+        prefix = ("env", "NEXT_RL_REMOTE_INSPECT=1") if read_only else ()
         return self._run(
             self._ssh(
+                *prefix,
                 "python3",
                 str(remote_directory / "next_rl_remote_job.py"),
                 str(remote_directory),
@@ -737,7 +792,7 @@ class NitroRunner:
     def status(self, fingerprint: str) -> dict[str, object]:
         """Return remote state plus a live process identity when applicable."""
         remote_directory = self._remote_directory(fingerprint)
-        return self._state(self._invoke_wrapper(remote_directory))
+        return self._state(self._invoke_wrapper(remote_directory, read_only=True))
 
     def cancel(self, fingerprint: str) -> dict[str, object]:
         """Cancel only when live PID, start time, and command digest all match."""

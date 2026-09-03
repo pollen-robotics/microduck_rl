@@ -196,6 +196,95 @@ uv run --with pytest pytest tests/ -q
 - No live SSH/network operation, Nitro start/cancel, training, upload, or
   publishing was performed.
 
+## Fix round 3 — fail-closed preparation recovery
+
+### RED evidence
+
+The benign-token slice failed while `token_budget` and `token_count` were still
+treated as credentials:
+
+```text
+FAILED test_secret_path_filter_does_not_reject_unrelated_words
+FAILED test_prepared_manifest_recursively_removes_credential_like_keys
+2 failed, 55 deselected
+```
+
+The preparation safety slice then showed the old recovery deleting the entire
+fingerprint path and lacking an explicit read-only inspection mode:
+
+```text
+FAILED test_prepare_cleans_only_incomplete_fingerprint_and_retries_transfer[before_copy]
+FAILED test_prepare_cleans_only_incomplete_fingerprint_and_retries_transfer[partial_copy]
+FAILED test_prepare_treats_non_directory_fingerprint_path_as_conflict[file]
+FAILED test_prepare_treats_non_directory_fingerprint_path_as_conflict[fifo]
+FAILED test_prepare_treats_non_directory_fingerprint_path_as_conflict[socket]
+FAILED test_transient_read_only_inspection_disconnect_never_authorizes_cleanup
+FAILED test_ambiguous_existing_preparation_fails_closed_without_cleanup[malformed_json]
+FAILED test_ambiguous_existing_preparation_fails_closed_without_cleanup[nonzero]
+FAILED test_lost_finalize_response_reinspects_complete_digest_without_cleanup
+FAILED test_read_only_inspection_ignores_pending_start_and_cancel_requests
+10 failed, 3 passed, 84 deselected
+```
+
+Affirmative incomplete-state and completed-bundle integrity tests independently
+failed before those states were cryptographically distinguished:
+
+```text
+FAILED test_prepare_reuses_real_directory_but_resets_only_owned_matching_stage
+FAILED test_completed_preparation_rejects_forged_marker_and_bundle_digest
+```
+
+### GREEN evidence
+
+```text
+uv run --with pytest pytest tests/test_next_rl_runner.py tests/test_next_rl_remote_job.py -q
+102 passed in 5.35s
+
+uv run --with pytest pytest tests/test_next_rl_*.py -q
+211 passed in 6.65s
+
+uv run --with pytest pytest -q
+407 passed, 1 skipped in 13.29s
+
+python3 -m compileall -q src/mjlab_microduck/next_rl/runner.py scripts/next_rl_remote_job.py
+exit 0
+
+git diff --check
+exit 0
+```
+
+### Fixes
+
+- Existing preparation inspection now uses the explicit
+  `NEXT_RL_REMOTE_INSPECT=1` wrapper action. It holds the lifecycle lock only to
+  read state, ignores pending start/cancel requests, retries transient reads,
+  and treats transport, nonzero, or parse ambiguity as a non-mutating error.
+- Fingerprint paths must affirmatively be directories and non-symlinks;
+  regular files, FIFOs, sockets, and symlinks are conflicts. Recovery never
+  deletes a fingerprint directory or its logs, sources, or checkpoints.
+- Only the exact digest-named staging child may be reset, after affirmative
+  non-symlink, directory, and SSH-user ownership checks. Lost finalize
+  responses are read-only inspected for the exact completed digest before any
+  stage cleanup. A fully moved but unmarked bundle is considered incomplete
+  only after all bundle/source/command digests validate.
+- Completed marker and bundle digests are recomputed before a job is accepted.
+  Forged matching strings therefore fail closed.
+- `token` remains sensitive when standalone or combined with vendor/context or
+  credential suffix tokens, while exact benign `token_budget` and
+  `token_count` names plus `tokenizer`/`tokenization` remain allowed.
+
+### Commit
+
+`fix(next-rl): make preparation recovery fail closed`
+
+### Concerns
+
+- Ruff remains unavailable; syntax compilation, whitespace validation,
+  focused tests, the complete Next RL suite, and the full repository suite
+  passed.
+- No live SSH/network operation, Nitro start/cancel, training, upload, or
+  publishing was performed.
+
 ## Fix round 2 — crash convergence and atomic preparation
 
 ### RED evidence

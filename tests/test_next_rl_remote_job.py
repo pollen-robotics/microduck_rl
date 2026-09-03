@@ -448,6 +448,27 @@ def test_cli_accepts_exactly_one_job_directory_argument(remote_job):
         remote_job.main(["abc123", "extra"])
 
 
+def test_read_only_inspection_ignores_pending_start_and_cancel_requests(
+    remote_job,
+    job_directory: Path,
+):
+    remote_job.atomic_write_json(job_directory / "status.json", {"status": "pending"})
+    remote_job.atomic_write_json(
+        job_directory / "start-request.json",
+        {"action": "start", "request_id": "start-abc123"},
+    )
+    remote_job.atomic_write_json(
+        job_directory / "cancel-request.json",
+        {"action": "cancel", "pid": 123},
+    )
+
+    state = remote_job.inspect_read_only(job_directory)
+
+    assert state == {"status": "pending"}
+    assert (job_directory / "start-request.json").exists()
+    assert (job_directory / "cancel-request.json").exists()
+
+
 def _staged_bundle(remote_job, job_directory: Path) -> tuple[Path, str]:
     argv = remote_job.load_train_argv(job_directory)
     archive = b"deterministic source archive"
@@ -515,6 +536,41 @@ def test_finalize_preparation_rejects_tampering_without_a_complete_directory(
 
     assert not (job_directory / ".complete.json").exists()
     assert not (job_directory / "source.tar").exists()
+
+
+def test_completed_preparation_rejects_forged_marker_and_bundle_digest(
+    remote_job,
+    job_directory: Path,
+):
+    stage, _ = _staged_bundle(remote_job, job_directory)
+    (job_directory / "train-argv.json").unlink()
+    remote_job.finalize_preparation(job_directory, stage)
+    bundle = json.loads((job_directory / "bundle-manifest.json").read_text())
+    bundle["bundle_sha256"] = "f" * 64
+    remote_job.atomic_write_json(job_directory / "bundle-manifest.json", bundle)
+    remote_job.atomic_write_json(
+        job_directory / ".complete.json",
+        {"bundle_sha256": "f" * 64, "fingerprint": job_directory.name},
+    )
+
+    with pytest.raises(remote_job.RemoteJobError, match="digest"):
+        remote_job.completed_preparation_state(job_directory)
+
+
+def test_read_only_preparation_inspection_affirms_digest_complete_content_without_marker(
+    remote_job,
+    job_directory: Path,
+):
+    stage, digest = _staged_bundle(remote_job, job_directory)
+    (job_directory / "train-argv.json").unlink()
+    for path in tuple(stage.iterdir()):
+        path.replace(job_directory / path.name)
+    stage.rmdir()
+
+    state = remote_job.inspect_preparation_read_only(job_directory)
+
+    assert state["preparation_status"] == "incomplete"
+    assert state["incomplete_bundle_sha256"] == digest
 
 
 def test_failed_supervisor_setup_records_a_complete_failed_state(

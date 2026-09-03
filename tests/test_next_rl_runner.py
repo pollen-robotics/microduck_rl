@@ -354,7 +354,14 @@ def test_prepare_rejects_secret_like_tracked_paths(
 
 
 def test_secret_path_filter_does_not_reject_unrelated_words(repository: Path, tmp_path: Path):
-    for name in ("tokenizer.py", "passwordless.py", "monkey.py"):
+    for name in (
+        "tokenizer.py",
+        "tokenization.py",
+        "token_budget.py",
+        "token_count.py",
+        "passwordless.py",
+        "monkey.py",
+    ):
         (repository / "src" / name).write_text("SAFE = True\n")
     _git(repository, "add", "src")
     _git(repository, "commit", "-qm", "track safe names")
@@ -362,7 +369,17 @@ def test_secret_path_filter_does_not_reject_unrelated_words(repository: Path, tm
     prepared = NitroRunner(config(repository, tmp_path), FakeAdapter()).prepare(job())
 
     with tarfile.open(prepared.archive_path, "r") as archive:
-        assert all(f"src/{name}" in archive.getnames() for name in ("tokenizer.py", "passwordless.py", "monkey.py"))
+        assert all(
+            f"src/{name}" in archive.getnames()
+            for name in (
+                "tokenizer.py",
+                "tokenization.py",
+                "token_budget.py",
+                "token_count.py",
+                "passwordless.py",
+                "monkey.py",
+            )
+        )
 
 
 def test_prepared_manifest_recursively_removes_credential_like_keys(
@@ -376,6 +393,8 @@ def test_prepared_manifest_recursively_removes_credential_like_keys(
         "github_token_backup": "github-token-secret",
         "tokenizer": "kept-learning-setting",
         "tokenization_budget": 128,
+        "token_budget": 256,
+        "token_count": 64,
     }
     raw["agent_config"]["nested"] = {
         "private-key-backup": "private-secret",
@@ -397,6 +416,8 @@ def test_prepared_manifest_recursively_removes_credential_like_keys(
     assert "oauth-token-secret" not in serialized
     assert "tokenizer" in serialized
     assert '"tokenization_budget":128' in serialized
+    assert '"token_budget":256' in serialized
+    assert '"token_count":64' in serialized
     assert "monkey" in serialized
 
 
@@ -429,13 +450,17 @@ class PrepareAdapter(FakeAdapter):
         *,
         fail_stage_mkdir: bool = False,
         fail_upload: bool = False,
+        fail_finalize_response: bool = False,
         existing: str | None = None,
     ):
         super().__init__()
         self.bundle_root = bundle_root
         self.fail_stage_mkdir = fail_stage_mkdir
         self.fail_upload = fail_upload
+        self.fail_finalize_response = fail_finalize_response
         self.existing = existing
+        self.stage_exists = False
+        self.inspections = 0
 
     def _bundle_digest(self) -> str:
         manifest = next(self.bundle_root.glob("*/bundle-manifest.json"))
@@ -450,14 +475,80 @@ class PrepareAdapter(FakeAdapter):
         if argv[0] == "ssh" and "mkdir --" in joined and "/.incoming-" in joined:
             if self.fail_stage_mkdir:
                 self.fail_stage_mkdir = False
+                self.stage_exists = True
                 raise ConnectionError("disconnect before scp")
+            if self.stage_exists:
+                return CommandResult(returncode=1, stderr="stage exists")
+            self.stage_exists = True
             return CommandResult()
         if argv[0] == "ssh" and "mkdir --" in joined and "/.incoming-" not in joined:
             if self.existing is not None:
                 return CommandResult(returncode=1, stderr="already exists")
+            self.existing = "incomplete"
             return CommandResult()
-        if argv[0] == "ssh" and "test ! -L" in joined and self.existing == "symlink":
-            return CommandResult(returncode=1, stderr="symlink")
+        if argv[0] == "ssh" and "test" in argv:
+            tested_path = argv[-1]
+            is_stage = "/.incoming-" in tested_path
+            if "!" in argv and "-L" in argv:
+                mode = "directory" if is_stage else self.existing
+                return CommandResult(returncode=1 if mode == "symlink" else 0)
+            if "-d" in argv:
+                mode = ("directory" if self.stage_exists else None) if is_stage else self.existing
+                return CommandResult(
+                    returncode=0
+                    if mode not in (None, "file", "fifo", "socket")
+                    else 1
+                )
+            if "!" in argv and "-e" in argv:
+                exists = self.stage_exists if is_stage else self.existing is not None
+                return CommandResult(returncode=1 if exists else 0)
+            if "-O" in argv:
+                return CommandResult(returncode=0 if is_stage and self.stage_exists else 1)
+        if argv[0] == "ssh" and "rm" in argv:
+            assert "/.incoming-" in argv[-1]
+            self.stage_exists = False
+            return CommandResult()
+        if argv[0] == "ssh" and "NEXT_RL_REMOTE_INSPECT=1" in argv:
+            self.inspections += 1
+            if (
+                self.existing in ("transient_complete", "transient_running")
+                and self.inspections == 1
+            ):
+                raise ConnectionError("inspection disconnected")
+            if self.existing == "disconnect":
+                raise ConnectionError("inspection disconnected")
+            if self.existing in (
+                "matching",
+                "transient_complete",
+                "transient_running",
+                "running",
+            ):
+                return CommandResult(
+                    stdout=json.dumps(
+                        {
+                            "status": "running"
+                            if self.existing in ("running", "transient_running")
+                            else "succeeded",
+                            "prepared_bundle_sha256": self._bundle_digest(),
+                        }
+                    )
+                )
+            if self.existing == "conflicting":
+                return CommandResult(stdout=json.dumps({"prepared_bundle_sha256": "f" * 64}))
+            if self.existing == "malformed_json":
+                return CommandResult(stdout="not json")
+            if self.existing == "nonzero":
+                return CommandResult(returncode=2, stderr="inspection failed")
+            if self.existing == "incomplete_owned":
+                return CommandResult(
+                    stdout=json.dumps(
+                        {
+                            "preparation_status": "incomplete",
+                            "incomplete_bundle_sha256": self._bundle_digest(),
+                        }
+                    )
+                )
+            return CommandResult(stdout=json.dumps({"preparation_status": "incomplete"}))
         if argv[0] == "ssh" and "python3" in argv and "/.incoming-" not in joined:
             if self.existing == "matching":
                 return CommandResult(
@@ -467,6 +558,11 @@ class PrepareAdapter(FakeAdapter):
                 return CommandResult(stdout=json.dumps({"prepared_bundle_sha256": "f" * 64}))
             return CommandResult(returncode=2, stderr="incomplete")
         if argv[0] == "ssh" and "python3" in argv and "/.incoming-" in joined:
+            self.stage_exists = False
+            self.existing = "matching"
+            if self.fail_finalize_response:
+                self.fail_finalize_response = False
+                raise ConnectionError("finalize response lost")
             return CommandResult(
                 stdout=json.dumps({"prepared_bundle_sha256": self._bundle_digest()})
             )
@@ -496,8 +592,11 @@ def test_prepare_cleans_only_incomplete_fingerprint_and_retries_transfer(
     )
     removals = [call for call in adapter.calls if call[0] == "ssh" and "rm" in call]
     assert removals
-    assert all(call[-1] == str(prepared.remote_directory) for call in removals)
-    assert not any(str(prepared.remote_directory.parent) == part for call in removals for part in call)
+    assert all(
+        call[-1].startswith(f"{prepared.remote_directory}/.incoming-")
+        for call in removals
+    )
+    assert not any(call[-1] == str(prepared.remote_directory) for call in removals)
 
 
 def test_prepare_reuses_only_matching_complete_job(repository: Path, tmp_path: Path):
@@ -531,6 +630,90 @@ def test_prepare_rejects_remote_job_directory_symlink(repository: Path, tmp_path
 
     assert not any(call[0] == "scp" for call in adapter.calls)
     assert not any("rm" in call for call in adapter.calls)
+
+
+@pytest.mark.parametrize("path_type", ("file", "fifo", "socket"))
+def test_prepare_treats_non_directory_fingerprint_path_as_conflict(
+    repository: Path,
+    tmp_path: Path,
+    path_type: str,
+):
+    runner_config = config(repository, tmp_path)
+    adapter = PrepareAdapter(runner_config.bundle_root, existing=path_type)
+
+    with pytest.raises(RunnerError, match="directory|conflict"):
+        NitroRunner(runner_config, adapter).prepare(job())
+
+    assert not any(call[0] == "scp" or "rm" in call for call in adapter.calls)
+
+
+@pytest.mark.parametrize("existing", ("transient_complete", "transient_running"))
+def test_transient_read_only_inspection_disconnect_never_authorizes_cleanup(
+    repository: Path,
+    tmp_path: Path,
+    existing: str,
+):
+    runner_config = config(repository, tmp_path)
+    adapter = PrepareAdapter(runner_config.bundle_root, existing=existing)
+
+    prepared = NitroRunner(runner_config, adapter).prepare(job())
+
+    assert prepared.fingerprint
+    assert adapter.inspections == 2
+    assert not any(call[0] == "scp" or "rm" in call for call in adapter.calls)
+    assert all(
+        "NEXT_RL_REMOTE_INSPECT=1" in call
+        for call in adapter.calls
+        if "python3" in call
+    )
+
+
+@pytest.mark.parametrize("ambiguous", ("disconnect", "malformed_json", "nonzero"))
+def test_ambiguous_existing_preparation_fails_closed_without_cleanup(
+    repository: Path,
+    tmp_path: Path,
+    ambiguous: str,
+):
+    runner_config = config(repository, tmp_path)
+    adapter = PrepareAdapter(runner_config.bundle_root, existing=ambiguous)
+
+    with pytest.raises(RunnerError, match="inspect|JSON|transport"):
+        NitroRunner(runner_config, adapter).prepare(job())
+
+    assert not any(call[0] == "scp" or "rm" in call for call in adapter.calls)
+
+
+def test_lost_finalize_response_reinspects_complete_digest_without_cleanup(
+    repository: Path,
+    tmp_path: Path,
+):
+    runner_config = config(repository, tmp_path)
+    adapter = PrepareAdapter(runner_config.bundle_root, fail_finalize_response=True)
+
+    prepared = NitroRunner(runner_config, adapter).prepare(job())
+
+    assert prepared.fingerprint
+    assert adapter.inspections == 1
+    assert not any("rm" in call for call in adapter.calls)
+
+
+def test_prepare_reuses_real_directory_but_resets_only_owned_matching_stage(
+    repository: Path,
+    tmp_path: Path,
+):
+    runner_config = config(repository, tmp_path)
+    adapter = PrepareAdapter(runner_config.bundle_root, existing="incomplete_owned")
+    adapter.stage_exists = True
+
+    prepared = NitroRunner(runner_config, adapter).prepare(job())
+
+    removals = [call for call in adapter.calls if call[0] == "ssh" and "rm" in call]
+    assert removals
+    assert all(
+        call[-1].startswith(f"{prepared.remote_directory}/.incoming-")
+        for call in removals
+    )
+    assert not any(call[-1] == str(prepared.remote_directory) for call in removals)
 
 
 def test_cancel_refuses_reused_pid(repository: Path, tmp_path: Path):
