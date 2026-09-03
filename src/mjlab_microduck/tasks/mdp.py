@@ -7293,3 +7293,119 @@ def backflip_plate_kinematics(
         ),
     )
     return z, pitch, vz_t, w_t, phase
+
+
+def _backflip_state(env: ManagerBasedRlEnv) -> tuple:
+    """Per-env launch parameters and rotation accounting (lazily created).
+
+    Mirrors _roulade_state: buffers hang off the env, are created on first use,
+    and are cleared per-env on reset (reset_backflip_launch_params). Nothing
+    here may survive an episode boundary.
+    """
+    if not hasattr(env, "_backflip_t_hold"):
+        z = torch.zeros(env.num_envs, device=env.device)
+        env._backflip_t_hold = z.clone()
+        env._backflip_t_launch = torch.full_like(z, 0.1)
+        env._backflip_z0 = torch.full_like(z, 0.15)
+        env._backflip_vz = z.clone()
+        env._backflip_w0 = z.clone()
+        env._backflip_accum = z.clone()
+        env._backflip_max = z.clone()
+        env._backflip_paid = z.clone()
+        env._backflip_last_update_step = -1
+    return (
+        env._backflip_t_hold,
+        env._backflip_t_launch,
+        env._backflip_z0,
+        env._backflip_vz,
+        env._backflip_w0,
+        env._backflip_accum,
+        env._backflip_max,
+        env._backflip_paid,
+    )
+
+
+def _uniform(env, env_ids, rng: tuple) -> torch.Tensor:
+    lo, hi = rng
+    return torch.rand(len(env_ids), device=env.device) * (hi - lo) + lo
+
+
+def reset_backflip_launch_params(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    hold_range: tuple = (0.1, 0.4),
+    launch_range: tuple = (0.08, 0.15),
+    z0_range: tuple = (0.10, 0.20),
+    vz_range: tuple = (2.00, 2.25),
+    w0_range: tuple = (24.0, 30.0),
+) -> None:
+    """Sample this episode's toss and clear the rotation accounting.
+
+    Defaults for ``vz_range``/``w0_range`` are the MEASURED launch envelope
+    (``docs/backflip_envelope_results.md``, from the Task 3 CPU probe), not
+    placeholders: ``z0 in [0.10, 0.20]`` m, ``vz in [2.00, 2.25]`` m/s,
+    ``w0 in [24, 30]`` rad/s closes a full 360 deg backward flip with landing
+    speeds of 1.46-2.59 m/s. Earlier placeholder ranges (``vz in [2, 3]``,
+    ``w0 in [8, 14]``) do not close a flip at all — don't copy them into a new
+    env without re-checking the probe.
+    """
+    if env_ids is None or len(env_ids) == 0:
+        return
+    _backflip_state(env)
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    env._backflip_t_hold[env_ids] = _uniform(env, env_ids, hold_range)
+    env._backflip_t_launch[env_ids] = _uniform(env, env_ids, launch_range)
+    env._backflip_z0[env_ids] = _uniform(env, env_ids, z0_range)
+    env._backflip_vz[env_ids] = _uniform(env, env_ids, vz_range)
+    env._backflip_w0[env_ids] = _uniform(env, env_ids, w0_range)
+    env._backflip_accum[env_ids] = 0.0
+    env._backflip_max[env_ids] = 0.0
+    env._backflip_paid[env_ids] = 0.0
+
+
+def _backflip_time(env: ManagerBasedRlEnv) -> torch.Tensor:
+    return env.episode_length_buf.to(torch.float32) * env.step_dt
+
+
+def backflip_phase(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """HOLD / LAUNCH / GONE for every env, from episode time."""
+    t_hold, t_launch, z0, vz, w0, *_ = _backflip_state(env)
+    _, _, _, _, phase = backflip_plate_kinematics(
+        _backflip_time(env), t_hold, t_launch, z0, vz, w0
+    )
+    return phase
+
+
+def backflip_plate_step(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None = None,
+    asset_name: str = "plate",
+) -> None:
+    """mode="step" event: rewrite the plate's prescribed pose and velocity.
+
+    Registered with mode="step" so it runs every control step on every env.
+    The plate is a prop with a free joint; writing pose AND velocity each step
+    makes its own dynamics irrelevant, so it acts like a stiff hand that does
+    not sag under the robot and does not recoil when the robot pushes off.
+    """
+    t_hold, t_launch, z0, vz, w0, *_ = _backflip_state(env)
+    z, pitch, vz_t, w_t, _ = backflip_plate_kinematics(
+        _backflip_time(env), t_hold, t_launch, z0, vz, w0
+    )
+    plate: Entity = env.scene[asset_name]
+    n = env.num_envs
+    all_ids = torch.arange(n, device=env.device)
+
+    pose = torch.zeros(n, 7, device=env.device)
+    pose[:, 0:2] = env.scene.terrain.env_origins[all_ids, 0:2]
+    pose[:, 2] = env.scene.terrain.env_origins[all_ids, 2] + z
+    # Rotation about the lateral (+y) axis by `pitch`.
+    pose[:, 3] = torch.cos(pitch * 0.5)
+    pose[:, 5] = torch.sin(pitch * 0.5)
+
+    vel = torch.zeros(n, 6, device=env.device)
+    vel[:, 2] = vz_t
+    vel[:, 4] = w_t
+
+    plate.write_root_link_pose_to_sim(pose, all_ids)
+    plate.write_root_link_velocity_to_sim(vel, all_ids)
