@@ -25,6 +25,8 @@ MICRODUCK_GROUNDCONTACT_XML: Path = _ROBOT_DIR / "robot_groundcontact.xml"
 MICRODUCK_ALLCOLLISIONS_XML: Path = _ROBOT_DIR / "robot_allcollisions.xml"
 # 70mm / 15g ball prop for the BallKick task.
 MICRODUCK_BALL_XML: Path = _ROBOT_DIR / "ball.xml"
+# Launcher plate prop for the Backflip task (see launcher.xml).
+MICRODUCK_LAUNCHER_XML: Path = _ROBOT_DIR / "launcher.xml"
 # Roller-skate model: 14 actuated joints + passive wheel hinges (passive_*wheel).
 MICRODUCK_GROUNDCONTACT_ROLLERS_XML: Path = _ROBOT_DIR / "robot_groundcontact_rollers.xml"
 # Backlash models: every servo joint gets an unactuated passive_<joint>_backlash
@@ -38,6 +40,7 @@ assert MICRODUCK_WALK_XML.exists(), f"XML not found: {MICRODUCK_WALK_XML}"
 assert MICRODUCK_GROUNDCONTACT_XML.exists(), f"XML not found: {MICRODUCK_GROUNDCONTACT_XML}"
 assert MICRODUCK_ALLCOLLISIONS_XML.exists(), f"XML not found: {MICRODUCK_ALLCOLLISIONS_XML}"
 assert MICRODUCK_BALL_XML.exists(), f"XML not found: {MICRODUCK_BALL_XML}"
+assert MICRODUCK_LAUNCHER_XML.exists(), f"XML not found: {MICRODUCK_LAUNCHER_XML}"
 assert MICRODUCK_GROUNDCONTACT_ROLLERS_XML.exists(), f"XML not found: {MICRODUCK_GROUNDCONTACT_ROLLERS_XML}"
 assert MICRODUCK_GROUNDCONTACT_BACKLASH_XML.exists(), f"XML not found: {MICRODUCK_GROUNDCONTACT_BACKLASH_XML}"
 assert MICRODUCK_WALK_BACKLASH_XML.exists(), f"XML not found: {MICRODUCK_WALK_BACKLASH_XML}"
@@ -68,6 +71,10 @@ def get_allcollisions_spec() -> mujoco.MjSpec:
 
 def get_ball_spec() -> mujoco.MjSpec:
     return mujoco.MjSpec.from_file(str(MICRODUCK_BALL_XML))
+
+
+def get_launcher_spec() -> mujoco.MjSpec:
+    return mujoco.MjSpec.from_file(str(MICRODUCK_LAUNCHER_XML))
 
 
 def get_backlash_spec() -> mujoco.MjSpec:
@@ -244,6 +251,14 @@ MICRODUCK_ROLLERS_BACKLASH_ROBOT_CFG = EntityCfg(
 MICRODUCK_BALL_CFG = EntityCfg(
     spec_fn=get_ball_spec,
     init_state=EntityCfg.InitialStateCfg(pos=(0.3, 0.0, 0.035)),
+)
+
+# Launcher plate prop for the Backflip task. Its pose/velocity are rewritten
+# every control step by the backflip_plate step event; the init pos here only
+# matters for the pristine pre-first-reset state.
+MICRODUCK_LAUNCHER_CFG = EntityCfg(
+    spec_fn=get_launcher_spec,
+    init_state=EntityCfg.InitialStateCfg(pos=(0.0, 0.0, 0.15)),
 )
 
 # Roller skate robot: the 4 passive wheel joints (passive_*wheel) have no XML
