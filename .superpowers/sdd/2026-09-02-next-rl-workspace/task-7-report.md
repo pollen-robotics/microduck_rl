@@ -145,3 +145,57 @@ syntax compilation and whitespace checks passed.
 ### Commit
 
 `fix(next-rl): harden review package workflow`
+
+## Fix round 2/5 — evidence and workspace boundary hardening
+
+### RED evidence
+
+New regressions failed before the fix, covering all three review findings:
+
+```text
+9 failed, 12 passed
+```
+
+They demonstrated that nested checkpoint data and missing lifecycle state could
+still yield success, secret-like capability/SkillSpec/evaluation/baseline
+metadata could reach durable review state, and a symlinked `NEXT_RL_HOME` child
+could redirect review or preparation state outside the workspace.
+
+### Changes
+
+- Recursively reject secret-like JSON keys at each CLI evidence boundary before
+  any persistence. The tokenization matches runner credential safety while
+  retaining `token_budget`, `token_count`, and `tokenizer`; rejected documents
+  produce only the stable `invalid_request` response and are never redacted or
+  persisted.
+- Resolve `review-bundles`, `promotions`, `experiments`, and `bundles` through
+  one direct-child guard. It rejects workspace/home symlinks and non-directory
+  roots, then proves the resolved child remains directly below `NEXT_RL_HOME`
+  before state writes or injectable factories run.
+- Make `status` fail closed: a lifecycle status is mandatory and all supplied
+  artifact, exit-code, and checkpoint data must conform to strict primitive
+  schemas. Nested or arbitrary checkpoint fields cannot be emitted.
+
+### GREEN evidence
+
+```text
+uv sync
+Resolved 154 packages in 2ms
+Audited 126 packages in 2ms
+
+uv run --with pytest pytest tests/test_next_rl_cli.py -q
+23 passed in 0.14s
+
+uv run --with pytest pytest tests/test_next_rl_*.py -q
+236 passed in 6.70s
+
+uv run --with pytest pytest tests/ -q
+432 passed, 1 skipped in 13.43s
+```
+
+`py_compile` and whitespace checks also passed. No start, publish, rendering,
+browser automation, live Nitro, training, or network action was invoked.
+
+### Commit
+
+`fix(next-rl): harden CLI state boundaries`

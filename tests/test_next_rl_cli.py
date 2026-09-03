@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import tomllib
 
+import pytest
+
 from mjlab_microduck.next_rl.artifacts import canonical_json
 from mjlab_microduck.next_rl.cli import CliDependencies, main
 from mjlab_microduck.next_rl.evaluation import EvaluationReport, MetricResult, ScenarioResult, select_worst_case
@@ -122,8 +124,8 @@ def test_status_uses_injected_runner_and_redacts_transport_data(tmp_path: Path, 
     assert output == {"fingerprint": fingerprint, "status": "pending"}
 
 
-def test_status_allowlists_only_validated_checkpoint_primitives(tmp_path: Path, monkeypatch, capsys):
-    """Catch nested runner data or malformed checkpoint fields reaching JSON output."""
+def test_status_rejects_nested_checkpoint_data(tmp_path: Path, monkeypatch, capsys):
+    """Catch nested runner data that violates the stable checkpoint schema."""
     runner = _FakeRunner()
     runner.status = lambda fingerprint: {
         "status": "running",
@@ -140,32 +142,18 @@ def test_status_allowlists_only_validated_checkpoint_primitives(tmp_path: Path, 
     }
     monkeypatch.setenv("NEXT_RL_HOME", str(tmp_path / "state"))
 
-    assert main(["status", "c" * 64], dependencies=CliDependencies(runner_factory=lambda home: runner)) == 0
-
-    assert json.loads(capsys.readouterr().out) == {
-        "fingerprint": "c" * 64,
-        "last_stable_checkpoint": {
-            "mtime_ns": 34,
-            "name": "model_100.pt",
-            "sha256": "c" * 64,
-            "size": 12,
-        },
-        "status": "running",
-    }
+    assert main(["status", "c" * 64], dependencies=CliDependencies(runner_factory=lambda home: runner)) == 2
+    assert json.loads(capsys.readouterr().out) == {"error": "invalid_request"}
 
 
-def test_status_drops_malformed_checkpoint_values(tmp_path: Path, monkeypatch, capsys):
-    """Catch a checkpoint field that bypasses the primitive type allowlist."""
+def test_status_rejects_malformed_or_missing_lifecycle_state(tmp_path: Path, monkeypatch, capsys):
+    """Catch malformed lifecycle state that would otherwise be silently omitted."""
     runner = _FakeRunner()
-    runner.status = lambda fingerprint: {
-        "status": "running",
-        "last_stable_checkpoint": {"name": "model_1.pt", "sha256": "bad", "size": True, "mtime_ns": -1},
-    }
+    runner.status = lambda fingerprint: {"last_stable_checkpoint": {"name": "model_1.pt", "sha256": "bad", "size": True, "mtime_ns": -1}}
     monkeypatch.setenv("NEXT_RL_HOME", str(tmp_path / "state"))
 
-    assert main(["status", "d" * 64], dependencies=CliDependencies(runner_factory=lambda home: runner)) == 0
-
-    assert json.loads(capsys.readouterr().out) == {"fingerprint": "d" * 64, "status": "running"}
+    assert main(["status", "d" * 64], dependencies=CliDependencies(runner_factory=lambda home: runner)) == 2
+    assert json.loads(capsys.readouterr().out) == {"error": "invalid_request"}
 
 
 def _review_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path, dict[str, Path]]:
@@ -219,6 +207,90 @@ def _review_args(inputs: tuple[Path, Path, Path, Path, dict[str, Path]]) -> list
         "--stress-clip", str(clips["stress"]),
         "--worst-case-clip", str(clips["worst_case"]),
     ]
+
+
+@pytest.mark.parametrize("document", ("capability", "skill", "evaluation", "baseline"))
+def test_review_rejects_secret_like_evidence_before_any_persistence(tmp_path: Path, monkeypatch, capsys, document: str):
+    """Catch secret-bearing review input before it can alter any durable digest."""
+    case = tmp_path / document
+    case.mkdir()
+    inputs = _review_inputs(case)
+    capability, skill, evaluation, policy, clips = inputs
+    if document == "capability":
+        raw = json.loads(capability.read_text())
+        raw["metadata"] = {"private_key": "capability-secret"}
+        capability.write_text(canonical_json(raw))
+    elif document == "skill":
+        raw = json.loads(skill.read_text())
+        raw["metadata"] = {"api_key": "skill-secret"}
+        skill.write_text(canonical_json(raw))
+    else:
+        target = evaluation if document == "evaluation" else case / "baseline.json"
+        raw = json.loads(evaluation.read_text())
+        raw["policy"]["metadata"] = {"vendor_token_backup": "policy-metadata-secret"}
+        target.write_text(canonical_json(raw))
+    home = case / "state"
+    monkeypatch.setenv("NEXT_RL_HOME", str(home))
+    arguments = _review_args((capability, skill, evaluation, policy, clips))
+    if document == "baseline":
+        arguments.extend(("--baseline", str(case / "baseline.json")))
+
+    assert main(arguments) == 2
+
+    assert json.loads(capsys.readouterr().out) == {"error": "invalid_request"}
+    assert "policy-metadata-secret" not in "".join(
+        path.read_text(errors="ignore") for path in home.rglob("*") if path.is_file()
+    )
+
+
+def test_review_allows_benign_token_keys(tmp_path: Path, monkeypatch, capsys):
+    """Catch credential filtering that rejects ordinary learning metadata."""
+    inputs = _review_inputs(tmp_path)
+    raw = json.loads(inputs[1].read_text())
+    raw["metadata"] = {"token_budget": 32, "token_count": 4, "tokenizer": "v1"}
+    inputs[1].write_text(canonical_json(raw))
+    monkeypatch.setenv("NEXT_RL_HOME", str(tmp_path / "state"))
+
+    assert main(_review_args(inputs)) == 0
+
+    assert json.loads(capsys.readouterr().out)["status"] == "review_pending"
+
+
+@pytest.mark.parametrize("child,command", (("review-bundles", "review"), ("promotions", "review"), ("experiments", "prepare"), ("bundles", "prepare")))
+def test_workspace_child_symlink_is_rejected_before_factory_or_write(tmp_path: Path, monkeypatch, capsys, child: str, command: str):
+    """Catch a workspace child that redirects durable CLI state outside NEXT_RL_HOME."""
+    home = tmp_path / "state"
+    outside = tmp_path / "outside"
+    home.mkdir()
+    outside.mkdir()
+    (home / child).symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("NEXT_RL_HOME", str(home))
+    if command == "review":
+        fixture = tmp_path / f"inputs-{child}"
+        fixture.mkdir()
+        inputs = _review_inputs(fixture)
+        arguments = _review_args(inputs)
+    else:
+        skill = _write_skill(tmp_path / "new.json", "new-skill")
+        arguments = ["prepare", str(skill)]
+
+    assert main(arguments, dependencies=CliDependencies(runner_factory=lambda home: _FakeRunner())) == 2
+
+    assert json.loads(capsys.readouterr().out) == {"error": "invalid_request"}
+    assert list(outside.iterdir()) == []
+
+
+def test_workspace_child_file_is_rejected_before_promotion_factory(tmp_path: Path, monkeypatch, capsys):
+    """Catch a non-directory promotion root before it can be interpreted as state."""
+    home = tmp_path / "state"
+    home.mkdir()
+    (home / "promotions").write_text("not a directory")
+    monkeypatch.setenv("NEXT_RL_HOME", str(home))
+    skill = _write_skill(tmp_path / "walking.json", "walking")
+
+    assert main(["plan", str(skill)]) == 2
+
+    assert json.loads(capsys.readouterr().out) == {"error": "invalid_request"}
 
 
 def test_review_then_approval_requires_a_persisted_record_and_reviewer(tmp_path: Path, monkeypatch, capsys):

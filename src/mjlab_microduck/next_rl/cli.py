@@ -38,7 +38,7 @@ def _default_runner(home: Path) -> NitroRunner:
             ssh_alias=os.environ["NEXT_RL_NITRO_SSH_ALIAS"],
             ssh_user=os.environ.get("NEXT_RL_NITRO_SSH_USER", "aif_eng"),
             repository=Path.cwd(),
-            bundle_root=home / "bundles",
+            bundle_root=_workspace_child(home, "bundles"),
         )
     )
 
@@ -57,8 +57,34 @@ def _emit(value: dict[str, Any]) -> None:
 
 
 def _skill(path: str) -> SkillSpec:
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
-    return SkillSpec.from_dict(raw)
+    return SkillSpec.from_dict(_object(path))
+
+
+def _name_tokens(value: str) -> tuple[str, ...]:
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
+    return tuple(part for part in re.split(r"[^a-z0-9]+", separated.lower()) if part)
+
+
+def _is_secret_like_key(key: str) -> bool:
+    """Use the runner's conservative credential-name policy at JSON boundaries."""
+    tokens = _name_tokens(key)
+    if any(token in {"password", "passwd", "credential", "credentials", "secret", "secrets"} for token in tokens):
+        return True
+    if any(pair in {("private", "key"), ("api", "key"), ("access", "key"), ("client", "secret")} for pair in zip(tokens, tokens[1:])):
+        return True
+    return "token" in tokens and tokens not in {("token", "budget"), ("token", "count")}
+
+
+def _reject_secret_keys(value: object) -> None:
+    """Reject rather than redact evidence so persisted digests always describe inputs."""
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str) or _is_secret_like_key(key):
+                raise ValueError("secret-like evidence key")
+            _reject_secret_keys(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _reject_secret_keys(item)
 
 
 def _decision_json(decision: Any) -> dict[str, Any]:
@@ -76,13 +102,34 @@ def _decision_json(decision: Any) -> dict[str, Any]:
 
 
 def _home() -> Path:
-    return Path(os.environ.get("NEXT_RL_HOME", ".next-rl")).resolve()
+    return Path(os.environ.get("NEXT_RL_HOME", ".next-rl")).absolute()
+
+
+def _workspace_child(home: Path, name: str) -> Path:
+    """Return a direct, non-symlink workspace child safe for state or factories."""
+    if home.is_symlink():
+        raise ValueError("workspace home must not be a symlink")
+    if home.exists():
+        if not home.is_dir():
+            raise ValueError("workspace home must be a directory")
+    else:
+        home.mkdir(parents=True, exist_ok=True)
+    root = home.resolve(strict=True)
+    child = home / name
+    if child.is_symlink() or (child.exists() and not child.is_dir()):
+        raise ValueError("workspace child must be a directory")
+    if not child.exists():
+        child.mkdir()
+    resolved = child.resolve(strict=True)
+    if resolved.parent != root:
+        raise ValueError("workspace child escaped home")
+    return resolved
 
 
 def _inventory(home: Path, dependencies: CliDependencies) -> CapabilityInventory:
     """Overlay persisted promotion state over the shipped capability catalogue."""
     builtin = CapabilityInventory.load_builtin()
-    persisted = dependencies.promotion_store_factory(home / "promotions").inventory()
+    persisted = dependencies.promotion_store_factory(_workspace_child(home, "promotions")).inventory()
     capabilities = {
         (capability.id, capability.version): capability
         for capability in getattr(builtin, "_capabilities")
@@ -145,33 +192,48 @@ def _prepare(args: argparse.Namespace, dependencies: CliDependencies) -> tuple[i
         },
         parent_policy=(decision.capability.policy if decision.disposition == Disposition.WARM_START and decision.capability else None),
     )
-    store = dependencies.experiment_store_factory(home / "experiments")
+    store = dependencies.experiment_store_factory(_workspace_child(home, "experiments"))
     fingerprint = store.create(manifest)
+    _workspace_child(home, "bundles")
     prepared = dependencies.runner_factory(home).prepare(manifest)
     return 0, {"fingerprint": fingerprint, "prepared_fingerprint": prepared.fingerprint, "status": "planned"}
 
 
 def _status(fingerprint: str, dependencies: CliDependencies) -> dict[str, Any]:
     """Expose only durable, credential-free state returned by the runner."""
-    state = dependencies.runner_factory(_home()).status(fingerprint)
+    home = _home()
+    _workspace_child(home, "bundles")
+    state = dependencies.runner_factory(home).status(fingerprint)
+    if not isinstance(state, Mapping) or state.get("status") not in {"pending", "running", "succeeded", "failed"}:
+        raise ValueError("runner lifecycle state is invalid")
     result: dict[str, Any] = {"fingerprint": fingerprint}
-    if state.get("status") in {"pending", "running", "succeeded", "failed"}:
-        result["status"] = state["status"]
-    if state.get("artifact_status") in {"pending", "stable_checkpoint", "missing"}:
+    result["status"] = state["status"]
+    if "artifact_status" in state:
+        if state["artifact_status"] not in {"pending", "stable_checkpoint", "missing"}:
+            raise ValueError("runner artifact state is invalid")
         result["artifact_status"] = state["artifact_status"]
     if "exit_code" in state:
         exit_code = state["exit_code"]
-        if exit_code is None or (isinstance(exit_code, int) and not isinstance(exit_code, bool)):
-            result["exit_code"] = exit_code
-    checkpoint = state.get("last_stable_checkpoint")
-    if isinstance(checkpoint, Mapping):
+        if exit_code is not None and (isinstance(exit_code, bool) or not isinstance(exit_code, int) or exit_code < 0):
+            raise ValueError("runner exit code is invalid")
+        result["exit_code"] = exit_code
+    if "last_stable_checkpoint" in state and state["last_stable_checkpoint"] is not None:
+        checkpoint = state["last_stable_checkpoint"]
+        if not isinstance(checkpoint, Mapping) or set(checkpoint) != {
+            "name", "relative_path", "sha256", "size", "mtime_ns",
+        }:
+            raise ValueError("runner checkpoint is invalid")
         name = checkpoint.get("name")
+        relative = checkpoint.get("relative_path")
         digest = checkpoint.get("sha256")
         size = checkpoint.get("size")
         mtime = checkpoint.get("mtime_ns")
-        if (
+        if not (
             isinstance(name, str)
             and re.fullmatch(r"model_[0-9]+\.pt", name)
+            and isinstance(relative, str)
+            and re.fullmatch(r"source/logs/(?:[A-Za-z0-9_.-]+/)+model_[0-9]+\.pt", relative)
+            and relative.endswith(f"/{name}")
             and isinstance(digest, str)
             and re.fullmatch(r"[0-9a-f]{64}", digest)
             and isinstance(size, int)
@@ -181,12 +243,13 @@ def _status(fingerprint: str, dependencies: CliDependencies) -> dict[str, Any]:
             and not isinstance(mtime, bool)
             and mtime >= 0
         ):
-            result["last_stable_checkpoint"] = {
-                "mtime_ns": mtime,
-                "name": name,
-                "sha256": digest,
-                "size": size,
-            }
+            raise ValueError("runner checkpoint is invalid")
+        result["last_stable_checkpoint"] = {
+            "mtime_ns": mtime,
+            "name": name,
+            "sha256": digest,
+            "size": size,
+        }
     return result
 
 
@@ -194,6 +257,7 @@ def _object(path: str) -> dict[str, Any]:
     value = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise ValueError("JSON document must be an object")
+    _reject_secret_keys(value)
     return value
 
 
@@ -274,16 +338,17 @@ def _review_clips(report: EvaluationReport, args: argparse.Namespace) -> dict[st
     }
 
 
-def _persist_bundle(home: Path, bundle: ReviewBundle) -> Path:
+def _persist_bundle(root: Path, bundle: ReviewBundle) -> Path:
     """Persist the exact canonical bundle once under workspace-owned state."""
-    target = home / "review-bundles" / f"{bundle.digest}.json"
-    serialized = canonical_json(bundle.as_dict())
-    target.parent.mkdir(parents=True, exist_ok=True)
+    raw = bundle.as_dict()
+    _reject_secret_keys(raw)
+    target = root / f"{bundle.digest}.json"
+    serialized = canonical_json(raw)
     if target.exists():
         if target.read_text(encoding="utf-8") != serialized:
             raise ValueError("persisted review bundle differs")
         return target
-    atomic_write_json(target, bundle.as_dict())
+    atomic_write_json(target, raw)
     return target
 
 
@@ -297,9 +362,9 @@ def _persisted_capability(store: PromotionStore, capability: Capability) -> Capa
     )
 
 
-def _require_exact_validated_bundle(home: Path, capability: Capability, bundle: ReviewBundle) -> None:
+def _require_exact_validated_bundle(promotion_root: Path, capability: Capability, bundle: ReviewBundle) -> None:
     """Refuse a rejected candidate whose new review inputs differ by one byte."""
-    state = _object(str(home / "promotions" / "state.json"))
+    state = _object(str(promotion_root / "state.json"))
     records = state.get("records")
     if not isinstance(records, Mapping):
         raise ValueError("promotion state is invalid")
@@ -323,16 +388,18 @@ def _review(args: argparse.Namespace, dependencies: CliDependencies) -> dict[str
     baseline = _evaluation(args.baseline) if args.baseline is not None else None
     bundle = ReviewBundle.build(report, _review_clips(report, args), spec=spec, baseline=baseline)
     home = _home()
-    store = dependencies.promotion_store_factory(home / "promotions")
+    review_root = _workspace_child(home, "review-bundles")
+    promotion_root = _workspace_child(home, "promotions")
+    store = dependencies.promotion_store_factory(promotion_root)
     persisted = _persisted_capability(store, capability)
     if persisted is not None and persisted.status == "validated":
-        _require_exact_validated_bundle(home, capability, bundle)
-        bundle_path = _persist_bundle(home, bundle)
+        _require_exact_validated_bundle(promotion_root, capability, bundle)
+        bundle_path = _persist_bundle(review_root, bundle)
         record = store.request_review(capability, bundle)
     else:
         if persisted is not None and persisted.status != "available":
             raise PromotionError("review requires an available or exact validated candidate")
-        bundle_path = _persist_bundle(home, bundle)
+        bundle_path = _persist_bundle(review_root, bundle)
         store.validate(capability, bundle)
         record = store.request_review(capability, bundle)
     return {
@@ -344,12 +411,12 @@ def _review(args: argparse.Namespace, dependencies: CliDependencies) -> dict[str
 
 
 def _approval(record_id: str, reviewer: str, dependencies: CliDependencies) -> dict[str, Any]:
-    record = dependencies.promotion_store_factory(_home() / "promotions").approve(record_id, reviewer=reviewer)
+    record = dependencies.promotion_store_factory(_workspace_child(_home(), "promotions")).approve(record_id, reviewer=reviewer)
     return {"record_id": record.id, "status": record.status}
 
 
 def _rejection(record_id: str, reviewer: str, reason: str, dependencies: CliDependencies) -> dict[str, Any]:
-    record = dependencies.promotion_store_factory(_home() / "promotions").reject(
+    record = dependencies.promotion_store_factory(_workspace_child(_home(), "promotions")).reject(
         record_id, reviewer=reviewer, reason=reason
     )
     return {"record_id": record.id, "status": record.status}
