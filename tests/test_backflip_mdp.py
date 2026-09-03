@@ -35,24 +35,63 @@ class _FakeTerrain:
         self.env_origins = env_origins
 
 
+class _FakeAssetData:
+    """Minimal root-state view: only the fields the backflip mdp functions read.
+
+    Identity quaternion (upright, sagittally flat) and zero velocity by
+    default, so a test only has to set the one or two fields it cares about.
+    """
+
+    def __init__(self, num_envs):
+        self.root_link_ang_vel_b = torch.zeros(num_envs, 3)
+        self.root_link_lin_vel_w = torch.zeros(num_envs, 3)
+        self.root_link_quat_w = torch.tensor([[1.0, 0.0, 0.0, 0.0]] * num_envs)
+        self.root_link_pos_w = torch.zeros(num_envs, 3)
+
+
+class _FakeAsset:
+    """Stand-in for `env.scene["robot"]`: just carries `.data`."""
+
+    def __init__(self, num_envs):
+        self.data = _FakeAssetData(num_envs)
+
+
+class _FakeSensorData:
+    def __init__(self, found):
+        self.found = found
+
+
+class _FakeSensor:
+    """Stand-in for a contact sensor: `found` is (num_envs, K), >0 = contact."""
+
+    def __init__(self, found):
+        self.data = _FakeSensorData(found)
+
+
 class _FakeScene:
-    def __init__(self, entities, env_origins):
+    def __init__(self, entities, env_origins, sensors=None):
         self._entities = entities
         self.terrain = _FakeTerrain(env_origins)
+        self.sensors = sensors if sensors is not None else {}
 
     def __getitem__(self, name):
         return self._entities[name]
 
 
 class _FakeEnvWithScene(_FakeEnv):
-    """_FakeEnv plus a scene/plate, for tests that exercise backflip_plate_step."""
+    """_FakeEnv plus a scene with plate/robot entities and (optional) sensors,
+    for tests that exercise backflip_plate_step, the rotation accumulator,
+    and the reward functions that read root state / contact sensors."""
 
-    def __init__(self, num_envs=1, env_origins=None):
+    def __init__(self, num_envs=1, env_origins=None, sensors=None):
         super().__init__(num_envs=num_envs)
         if env_origins is None:
             env_origins = torch.zeros(num_envs, 3)
         self.plate = _FakeEntity()
-        self.scene = _FakeScene({"plate": self.plate}, env_origins)
+        self.robot = _FakeAsset(num_envs)
+        self.scene = _FakeScene(
+            {"plate": self.plate, "robot": self.robot}, env_origins, sensors=sensors
+        )
 
 
 def test_state_buffers_are_created_lazily_and_sized_per_env():
@@ -317,3 +356,120 @@ def test_ready_stance_window_is_hold_only():
     env.episode_length_buf = torch.tensor([5, 27, 40])
     window = microduck_mdp.backflip_hold_window(env)
     assert window.tolist() == [1.0, 0.0, 0.0]
+
+
+# --- Anti-farming mechanisms, pinned end-to-end through the public/private
+# accumulator and reward entry points (not just via hand-set _backflip_max). ---
+
+
+def test_accum_backward_rotation_airborne_accumulates_but_grounded_does_not():
+    # The floor-roll farm: without the airborne gate, flopping onto the back
+    # and rolling along the floor would pay exactly like an honest airborne
+    # flip. omega_y = -10 body-frame -> _BACKFLIP_BWD_SIGN(-1) * (-10) = +10,
+    # i.e. a genuine backward rotation.
+    airborne = _FakeEnvWithScene(
+        num_envs=1,
+        sensors={"robot_ground_contact": _FakeSensor(torch.zeros(1, 1))},
+    )
+    microduck_mdp._backflip_state(airborne)
+    airborne.robot.data.root_link_ang_vel_b[:, 1] = -10.0
+    microduck_mdp._update_backflip_accum(airborne, airborne.robot)
+    assert float(airborne._backflip_accum[0]) > 0.0
+
+    grounded = _FakeEnvWithScene(
+        num_envs=1,
+        sensors={"robot_ground_contact": _FakeSensor(torch.ones(1, 1))},
+    )
+    microduck_mdp._backflip_state(grounded)
+    grounded.robot.data.root_link_ang_vel_b[:, 1] = -10.0
+    microduck_mdp._update_backflip_accum(grounded, grounded.robot)
+    assert float(grounded._backflip_accum[0]) == 0.0
+
+
+def test_accum_forward_rotation_does_not_move_the_frontier():
+    # omega_y = +10 body-frame -> _BACKFLIP_BWD_SIGN(-1) * 10 = -10: a
+    # forward roll must not advance the paid-rotation high-water mark.
+    env = _FakeEnvWithScene(
+        num_envs=1,
+        sensors={"robot_ground_contact": _FakeSensor(torch.zeros(1, 1))},
+    )
+    microduck_mdp._backflip_state(env)
+    env.robot.data.root_link_ang_vel_b[:, 1] = 10.0
+    microduck_mdp._update_backflip_accum(env, env.robot)
+    assert float(env._backflip_max[0]) == 0.0
+
+
+def test_accum_sagittal_flatness_gates_a_sideways_tumble_to_zero():
+    # Same backward rate, two orientations: identity (sagittally flat) must
+    # accumulate fully; rotated 90 deg about the body's own +x (a sideways
+    # tumble -- the lateral/y body axis now points along world z) must be
+    # gated to nothing, or a shoulder-roll counts as a backflip.
+    flat = _FakeEnvWithScene(
+        num_envs=1, sensors={"robot_ground_contact": _FakeSensor(torch.zeros(1, 1))}
+    )
+    microduck_mdp._backflip_state(flat)
+    flat.robot.data.root_link_ang_vel_b[:, 1] = -10.0
+    microduck_mdp._update_backflip_accum(flat, flat.robot)
+    flat_delta = float(flat._backflip_accum[0])
+    assert flat_delta > 0.0
+
+    tumble = _FakeEnvWithScene(
+        num_envs=1, sensors={"robot_ground_contact": _FakeSensor(torch.zeros(1, 1))}
+    )
+    microduck_mdp._backflip_state(tumble)
+    tumble.robot.data.root_link_ang_vel_b[:, 1] = -10.0
+    tumble.robot.data.root_link_quat_w[:] = torch.tensor(
+        [[math.cos(math.pi / 4), math.sin(math.pi / 4), 0.0, 0.0]]
+    )
+    microduck_mdp._update_backflip_accum(tumble, tumble.robot)
+    assert float(tumble._backflip_accum[0]) == 0.0
+
+
+def test_progress_pays_zero_camping_and_positive_once_the_frontier_advances():
+    env = _FakeEnvWithScene(
+        num_envs=1, sensors={"robot_ground_contact": _FakeSensor(torch.zeros(1, 1))}
+    )
+    microduck_mdp._backflip_state(env)
+    # Camping: zero angular velocity, any pose -- no rotation, so no pay.
+    camped = microduck_mdp.backflip_progress(env)
+    assert float(camped[0]) == 0.0
+
+    env.common_step_counter += 1  # new control step: lift the step-guard
+    env.robot.data.root_link_ang_vel_b[:, 1] = -10.0
+    advancing = microduck_mdp.backflip_progress(env)
+    assert float(advancing[0]) > 0.0
+
+
+def test_landing_pays_zero_when_gate_closed_however_upright_and_well_placed():
+    # However good the pose, the completion gate at max_accum=0 must still
+    # zero the whole multiplicative composite.
+    env = _FakeEnvWithScene(
+        num_envs=1,
+        sensors={"feet_ground_contact": _FakeSensor(torch.ones(1, 1))},
+    )
+    microduck_mdp._backflip_state(env)
+    env._backflip_max[:] = 0.0
+    env.robot.data.root_link_pos_w[:, 2] = 0.115  # exactly at stand_z
+    reward = microduck_mdp.backflip_landing(env)
+    assert float(reward[0]) == 0.0
+
+
+def test_landing_does_not_pay_on_a_bounce_with_high_linear_velocity():
+    # Anti-bounce-farming: gate x feet x upright x height can all be
+    # satisfied momentarily during a hard-landing rebound while the trunk is
+    # still carrying several m/s of translational velocity (the "omega" calm
+    # factor alone is blind to this -- angular rate can be near zero while
+    # the robot is bouncing). Without a linear-velocity factor, bouncing
+    # collects close to full reward on every bounce, which is cheaper for a
+    # policy to discover than actually settling into a stand -- and it's
+    # also exactly the kind of landing that damages the real hardware.
+    env = _FakeEnvWithScene(
+        num_envs=1,
+        sensors={"feet_ground_contact": _FakeSensor(torch.ones(1, 1))},
+    )
+    microduck_mdp._backflip_state(env)
+    env._backflip_max[:] = math.radians(360.0)  # gate fully open
+    env.robot.data.root_link_pos_w[:, 2] = 0.115  # exactly at stand_z
+    env.robot.data.root_link_lin_vel_w[:, 2] = 3.0  # m/s: mid-bounce rebound
+    reward = microduck_mdp.backflip_landing(env)
+    assert float(reward[0]) < 0.05

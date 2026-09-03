@@ -7539,21 +7539,43 @@ def backflip_landing(
     stand_z: float = 0.115,
     height_std: float = 0.04,
     omega_std: float = 3.0,
+    lin_vel_std: float = 0.5,
     sensor_name: str = "feet_ground_contact",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Landing annuity, gated on a near-complete flip AND feet contact.
 
-    Multiplicative composite (gate x feet x upright x height x calm): any single
-    deficient factor collapses the term, so there is no compromise basin where a
-    lean scores 80% of everything. Stds are deliberately wide enough that a
-    mediocre first landing still scores visibly, or the gradient is invisible.
+    Multiplicative composite (gate x feet x upright x height x calm x settle):
+    any single deficient factor collapses the term, so there is no compromise
+    basin where a lean scores 80% of everything. Stds are deliberately wide
+    enough that a mediocre first landing still scores visibly, or the
+    gradient is invisible.
 
     The completion gate (0 below ~300 deg, 1 above ~345 deg) is what stops an
     upright robot that never flipped from earning anything here — without it
     "stand still on the plate" (which already trivially satisfies
     feet-contact/upright/height/calm) becomes the argmax and the flip itself
     never gets learned.
+
+    BOUNCE-FARMING TRAP: gate x feet x upright x height can all be satisfied
+    momentarily mid-rebound off a hard landing, at near-zero ANGULAR rate
+    (`calm` alone is blind to this — a bounce apex can be perfectly still in
+    rotation while the trunk is still carrying several m/s of translational
+    velocity). Without a translational-velocity factor, bouncing collects
+    close to full reward on every bounce — cheaper for a policy to discover
+    than actually settling into a stand, and this repo's own lesson is that a
+    farmable positive term costs whole runs. `settle` extends the same idea
+    to the root's WORLD linear velocity, so the annuity only pays once the
+    robot has genuinely stopped moving, not merely passed through a good
+    orientation+height window between bounces. `lin_vel_std=0.5` m/s is wide
+    enough that a real first landing that hasn't fully zeroed its residual
+    settling velocity (order of a few tenths of a m/s) still scores visibly,
+    while the measured envelope's touchdown speeds (3-4 m/s,
+    docs/backflip_envelope_results.md) are heavily suppressed. This also
+    points the same direction as the hardware concern: a hard-landing bounce
+    is exactly the kind of impact that damages the real robot, so pricing
+    settling instead of bouncing helps both sim reward shape and hardware
+    safety.
     """
     asset: Entity = env.scene[asset_cfg.name]
     gate = _backflip_completion_gate(
@@ -7568,4 +7590,8 @@ def backflip_landing(
     height = torch.exp(-(z_err**2) / (height_std**2))
     omega = torch.norm(asset.data.root_link_ang_vel_b, dim=-1)
     calm = torch.exp(-(omega**2) / (omega_std**2))
-    return gate * feet_f * up * height * calm
+    lin_vel = torch.norm(
+        torch.nan_to_num(asset.data.root_link_lin_vel_w, nan=0.0), dim=-1
+    )
+    settle = torch.exp(-(lin_vel**2) / (lin_vel_std**2))
+    return gate * feet_f * up * height * calm * settle
