@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from test_next_rl_support import (
     write_renderer_sidecar,
+    write_test_image,
     write_test_video,
     write_tiny_policy,
 )
@@ -383,6 +384,23 @@ def test_review_rejects_text_named_mp4_before_workspace_persistence(tmp_path: Pa
     video = Path(raw["video_path"])
     video.write_text("not a video", encoding="utf-8")
     raw["video_sha256"] = hashlib.sha256(video.read_bytes()).hexdigest()
+    sidecar.write_text(canonical_json(raw), encoding="utf-8")
+
+    _assert_invalid_without_workspace(_review_args(inputs), tmp_path / "state", monkeypatch, capsys)
+
+
+def test_review_rejects_static_image_evidence_before_workspace_persistence(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+):
+    """Catch generic image decoding being mistaken for renderer video evidence."""
+    inputs = _review_inputs(tmp_path)
+    sidecar = inputs[4]["entry"]
+    raw = json.loads(sidecar.read_text(encoding="utf-8"))
+    image = write_test_image(tmp_path / "entry.png")
+    raw["video_path"] = str(image)
+    raw["video_sha256"] = hashlib.sha256(image.read_bytes()).hexdigest()
     sidecar.write_text(canonical_json(raw), encoding="utf-8")
 
     _assert_invalid_without_workspace(_review_args(inputs), tmp_path / "state", monkeypatch, capsys)

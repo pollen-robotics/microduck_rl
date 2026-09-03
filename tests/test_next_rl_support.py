@@ -39,6 +39,21 @@ def write_test_video(path: Path) -> Path:
     return path
 
 
+def write_test_image(path: Path) -> Path:
+    """Write a static image that a generic image reader can decode."""
+    frame = np.zeros((16, 16, 3), dtype=np.uint8)
+    frame[:, :, 1] = 255
+    iio.imwrite(path, frame)
+    return path
+
+
+def write_one_frame_video(path: Path) -> Path:
+    """Write a valid MP4 that cannot prove temporal video evidence."""
+    frames = np.zeros((1, 16, 16, 3), dtype=np.uint8)
+    iio.imwrite(path, frames, fps=10)
+    return path
+
+
 def write_renderer_sidecar(
     path: Path,
     *,

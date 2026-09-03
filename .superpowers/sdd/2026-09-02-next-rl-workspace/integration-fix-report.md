@@ -8,6 +8,8 @@ Baseline: `e0f8393`
 
 Commit: `fix(next-rl): close integration provenance gaps`
 
+Follow-up: `fix(next-rl): reject static evidence and recover lost starts`
+
 ## Outcome
 
 All eight final integration findings are closed without adding dependencies,
@@ -20,8 +22,9 @@ publishing/deploying a policy.
 2. Review accepts five renderer-authored immutable JSON sidecars rather than
    caller-invented clip bindings. Each sidecar binds role, scenario, seed,
    policy, evaluation, renderer revision, video path, and video SHA-256; the
-   video must decode at least one frame. Sidecars are written create-once and
-   atomically by `write_renderer_evidence`.
+   payload must be an MP4 with at least two decodable temporal frames. Static
+   images, one-frame MP4 files, and non-video payloads are rejected. Sidecars
+   are written create-once and atomically by `write_renderer_evidence`.
 3. `NitroRunner.prepare` compares the manifest code digest with
    `sha256(captured_commit.encode("ascii"))` immediately after source snapshot
    and before adapter/network interaction.
@@ -36,7 +39,10 @@ publishing/deploying a policy.
 6. Detached supervisor state persists PID, Linux process start identity, and
    exact supervisor command/job digest. Exact live identities remain
    idempotent; dead, reused, mismatched, and legacy PID-only records recover
-   under the existing singleton locks.
+   under the existing singleton locks. Status inspection revalidates a
+   pending/spawned supervisor even after its start request was acknowledged and
+   removed; a lost identity becomes an explicit retryable failure, allowing a
+   newly reserved start to recover exactly once.
 7. Metric summaries now retain the direction-aware worst scenario: minimum for
    minimum thresholds and maximum for maximum thresholds. Promoted capability
    evidence uses those conservative values.
@@ -61,17 +67,20 @@ publishing/deploying a policy.
   `uv run --with pytest pytest tests/test_next_rl_*.py tests/test_next_rl_readiness.py -q`
   — 258 passed.
 - Focused RED/GREEN tests covered fake ONNX, text/tampered/unbound video
-  evidence, source-digest mismatch with zero transport, semantic-version
-  lifecycle, truthful train-new planning, dead/reused/legacy supervisor PID
-  recovery, direction-aware aggregation, concurrent experiment reservation,
+  evidence, static images and one-frame MP4 files, source-digest mismatch with
+  zero transport, semantic-version lifecycle, truthful train-new planning,
+  dead/reused/legacy supervisor PID recovery before and after request removal,
+  direction-aware aggregation, concurrent experiment reservation,
   response-loss retry, and lifecycle synchronization.
 - Final required suite:
   `uv run --with pytest pytest tests/test_next_rl_*.py tests/test_next_rl_readiness.py -q`
-  — 299 passed in 46.55 seconds.
+  — 305 passed in 76.73 seconds after the scoped follow-up review corrections.
 - Compilation:
   `uv run python -m compileall -q src/mjlab_microduck/next_rl scripts/next_rl_remote_job.py tests/test_next_rl_*.py`
   — passed.
-- Import/unused checks: Ruff `I,F401` — passed.
+- Import/unused checks: Ruff `I,F401` passed on the original integration fix.
+  Ruff was not installed for the scoped follow-up, so it was not fetched or
+  added; compilation and the full suite exercised the new imports instead.
 - `git diff --check` — passed.
 
 ## Residual risk and explicit boundaries

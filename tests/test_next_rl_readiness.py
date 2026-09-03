@@ -256,9 +256,12 @@ def test_operator_guide_documents_provenance_and_internal_start_boundaries():
     assert "--nominal-evidence nominal.render.json" in normalized
     assert "--worst-case-evidence worst-case.render.json" in normalized
     assert "decodable video" in normalized
+    assert "at least two temporal frames" in normalized
+    assert "Static PNG/JPEG/GIF images" in normalized
     assert "exact policy and evaluation digests" in normalized
     assert "reserves the experiment fingerprint" in normalized
     assert "synchronizes pending, running, succeeded, or failed status" in normalized
+    assert "marks that launch failed and retryable" in normalized
     assert "does not expose a `start` subcommand" in normalized
     assert "does not publish" in normalized
 

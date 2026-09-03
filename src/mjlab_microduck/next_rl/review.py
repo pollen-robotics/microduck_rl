@@ -60,12 +60,22 @@ def _text(value: object, label: str) -> str:
 
 
 def _decode_video(path: Path, label: str) -> None:
+    if path.suffix.lower() != ".mp4":
+        raise ReviewError(f"{label} video must be an MP4 container")
     try:
-        frame = iio.imread(path, index=0)
+        with path.open("rb") as video:
+            container_header = video.read(12)
+    except OSError as error:
+        raise ReviewError(f"{label} video must be a readable MP4 container") from error
+    if len(container_header) < 12 or container_header[4:8] != b"ftyp":
+        raise ReviewError(f"{label} video must be an MP4 container")
+    try:
+        first_frame = iio.imread(path, index=0, plugin="FFMPEG")
+        second_frame = iio.imread(path, index=1, plugin="FFMPEG")
     except Exception as error:
-        raise ReviewError(f"{label} video must decode at least one frame") from error
-    if getattr(frame, "size", 0) <= 0:
-        raise ReviewError(f"{label} video must decode at least one frame")
+        raise ReviewError(f"{label} video must decode at least two temporal frames") from error
+    if any(getattr(frame, "size", 0) <= 0 for frame in (first_frame, second_frame)):
+        raise ReviewError(f"{label} video must decode at least two temporal frames")
 
 
 def _write_json_once(path: Path, value: object) -> None:

@@ -927,6 +927,28 @@ def _start_supervisor(
         raise RemoteJobError("start request is invalid")
     supervisor_argv = _supervisor_argv(job)
     supervisor_command_sha256 = command_digest(supervisor_argv)
+    if (
+        state.get("status") == "failed"
+        and state.get("launch_state") == "supervisor_lost"
+        and state.get("retryable_start") is True
+    ):
+        state = {
+            **{
+                key: value
+                for key, value in state.items()
+                if key
+                not in {
+                    "error",
+                    "exit_code",
+                    "launch_request_id",
+                    "launch_state",
+                    "retryable_start",
+                    "supervisor_identity",
+                    "supervisor_pid",
+                }
+            },
+            "status": "pending",
+        }
     if state.get("launch_request_id") == request_id and state.get("launch_state") == "spawned":
         if _spawned_supervisor_is_live(
             state,
@@ -1022,6 +1044,26 @@ def inspect_or_control(
 
 def _inspection_state(job: Path) -> dict[str, object]:
     state = _load_object(job / "status.json", "status")
+    if state.get("status") == "pending" and state.get("launch_state") == "spawned":
+        supervisor_command_sha256 = command_digest(_supervisor_argv(job))
+        if not _spawned_supervisor_is_live(
+            state,
+            command_sha256=supervisor_command_sha256,
+        ):
+            state = {
+                **{
+                    key: value
+                    for key, value in state.items()
+                    if key != "launch_request_id"
+                },
+                "error": "detached supervisor identity is no longer live",
+                "exit_code": 1,
+                "launch_state": "supervisor_lost",
+                "retryable_start": True,
+                "status": "failed",
+            }
+            atomic_write_json(job / "status.json", state)
+            return state
     if state.get("status") == "running":
         try:
             live = live_process_identity(_identity_from(state).pid)

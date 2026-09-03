@@ -954,6 +954,90 @@ def test_legacy_pid_only_spawn_record_is_untrusted_and_recovered(
     assert result["supervisor_identity"]["pid"] == 457
 
 
+def test_acknowledged_dead_supervisor_status_allows_exactly_one_restart(
+    remote_job,
+    job_directory: Path,
+    monkeypatch,
+):
+    """Recover after the start request was consumed but its supervisor died."""
+    _pending_start(remote_job, job_directory)
+    spawned = []
+    live_pids = {456, 457}
+
+    def popen(*args, **kwargs):
+        process = SpawnedSupervisor(456 + len(spawned))
+        spawned.append(process)
+        return process
+
+    def identity(pid):
+        if pid not in live_pids:
+            raise remote_job.RemoteJobError("dead supervisor")
+        return _supervisor_identity(remote_job, job_directory, pid)
+
+    monkeypatch.setattr(remote_job, "live_process_identity", identity)
+    acknowledged = remote_job.inspect_or_control(job_directory, supervisor_popen=popen)
+    assert acknowledged["status"] == "pending"
+    assert acknowledged["launch_state"] == "spawned"
+    assert not (job_directory / "start-request.json").exists()
+    assert remote_job.inspect_read_only(job_directory)["status"] == "pending"
+
+    live_pids.remove(456)
+    lost = remote_job.inspect_read_only(job_directory)
+    assert lost["status"] == "failed"
+    assert lost["launch_state"] == "supervisor_lost"
+    assert lost["retryable_start"] is True
+    assert "launch_request_id" not in lost
+
+    remote_job.atomic_write_json(
+        job_directory / "start-request.json",
+        {"action": "start", "request_id": "start-abc123"},
+    )
+    barrier = threading.Barrier(2)
+
+    def restart():
+        barrier.wait()
+        return remote_job.inspect_or_control(job_directory, supervisor_popen=popen)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: restart(), range(2)))
+
+    assert [process.pid for process in spawned] == [456, 457]
+    assert all(result["status"] == "pending" for result in results)
+    assert all(result["supervisor_pid"] == 457 for result in results)
+    assert not (job_directory / "start-request.json").exists()
+
+
+@pytest.mark.parametrize("legacy", (False, True))
+def test_spawned_status_rejects_reused_or_legacy_supervisor_identity_without_request(
+    remote_job,
+    job_directory: Path,
+    monkeypatch,
+    legacy: bool,
+):
+    identity = _supervisor_identity(remote_job, job_directory, 456)
+    state = {
+        "status": "pending",
+        "launch_request_id": "start-abc123",
+        "launch_state": "spawned",
+        "supervisor_pid": 456,
+    }
+    if not legacy:
+        state["supervisor_identity"] = identity.as_dict()
+    remote_job.atomic_write_json(job_directory / "status.json", state)
+    monkeypatch.setattr(
+        remote_job,
+        "live_process_identity",
+        lambda pid: _supervisor_identity(remote_job, job_directory, pid, start="reused"),
+    )
+
+    result = remote_job.inspect_read_only(job_directory)
+
+    assert result["status"] == "failed"
+    assert result["launch_state"] == "supervisor_lost"
+    assert result["retryable_start"] is True
+    assert "launch_request_id" not in result
+
+
 class LaunchedTrainer:
     pid = 789
     returncode = None

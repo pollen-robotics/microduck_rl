@@ -721,6 +721,39 @@ def test_status_advances_pending_through_running_to_a_terminal_state(
     }
 
 
+def test_acknowledged_lost_supervisor_status_permits_one_reserved_restart(
+    repository: Path,
+    tmp_path: Path,
+):
+    adapter = FakeAdapter()
+    runner, store, manifest = stored_runner(repository, tmp_path, adapter)
+    prepared = runner.prepare(manifest)
+    adapter.calls.clear()
+    adapter.outputs.extend((CommandResult(), CommandResult(stdout='{"status":"pending"}')))
+
+    assert runner.start(prepared, owner="operator-a")["status"] == "pending"
+    adapter.outputs.append(
+        CommandResult(
+            stdout=json.dumps(
+                {
+                    "status": "failed",
+                    "launch_state": "supervisor_lost",
+                    "retryable_start": True,
+                }
+            )
+        )
+    )
+    assert runner.status(prepared.fingerprint)["status"] == "failed"
+    assert store.status(prepared.fingerprint)["status"] == "failed"
+
+    adapter.outputs.extend((CommandResult(), CommandResult(stdout='{"status":"pending"}')))
+    assert runner.start(prepared, owner="operator-b")["status"] == "pending"
+    calls_after_restart = tuple(adapter.calls)
+    with pytest.raises(DuplicateExperimentError, match="already pending"):
+        runner.start(prepared, owner="operator-c")
+    assert tuple(adapter.calls) == calls_after_restart
+
+
 class PrepareAdapter(FakeAdapter):
     def __init__(
         self,

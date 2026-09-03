@@ -81,7 +81,10 @@ experiment fingerprint before transport, rejects another launch of the same
 inputs, releases only its own reservation if transfer fails before launch,
 retains the same-owner claim when the launch response is uncertain, and
 synchronizes pending, running, succeeded, or failed status as the remote
-lifecycle advances.
+lifecycle advances. Status inspection also revalidates the recorded detached
+supervisor PID, Linux start time, and exact command/job digest. If an
+acknowledged supervisor disappears before launching the trainer, inspection
+marks that launch failed and retryable so a newly reserved start can recover it.
 None of this creates a public `start` command, and the runner does not publish
 or deploy a policy.
 
@@ -198,14 +201,16 @@ uv run next-rl review \
   --worst-case-evidence worst-case.render.json
 ```
 
-Each renderer writes its sidecar only after producing a decodable video. The
-canonical sidecar records role, scenario ID, evaluation seed, video path and
-SHA-256, renderer revision, and the exact policy and evaluation digests. The
-five roles cover nominal behavior, ordinary-standing entry, safe exit,
-held-out stress, and the worst observed rollout. `next-rl review` loads these
-renderer-authored bindings; it does not infer provenance from filenames or
-invent scenario, seed, policy, or report bindings. The resulting review bundle
-is not a replacement for a human reviewer.
+Each renderer writes its sidecar only after producing a decodable video: an MP4
+with at least two temporal frames. Static PNG/JPEG/GIF images, one-frame MP4
+files, and non-video payloads are rejected. The canonical sidecar records role,
+scenario ID, evaluation seed, video path and SHA-256, renderer revision, and
+the exact policy and evaluation digests. The five roles cover nominal behavior,
+ordinary-standing entry, safe exit, held-out stress, and the worst observed
+rollout. `next-rl review` loads these renderer-authored bindings; it does not
+infer provenance from filenames or invent scenario, seed, policy, or report
+bindings. The resulting review bundle is not a replacement for a human
+reviewer.
 
 Before approving or rejecting, retain the returned `bundle_path` and
 `bundle_digest`, then inspect the canonical manifest and metrics and verify its
@@ -242,10 +247,10 @@ PY
 
 `bundle.verify()` repeats ONNX preflight and checks the exact evaluation,
 policy, sidecar, and video digests, the renderer revision, each role's evaluated
-scenario and seed, and that every video still decodes. Open all five printed
-videos—nominal, entry, exit, stress, and worst case—and inspect the printed
-metrics before making the human decision. Use the returned record ID only after
-that inspection:
+scenario and seed, and that every file remains an MP4 with at least two
+decodable temporal frames. Open all five printed videos—nominal, entry, exit,
+stress, and worst case—and inspect the printed metrics before making the human
+decision. Use the returned record ID only after that inspection:
 
 ```bash
 uv run next-rl approve <record-id> --reviewer "operator-name"

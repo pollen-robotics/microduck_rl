@@ -8,6 +8,7 @@ from dataclasses import replace
 
 import pytest
 from test_next_rl_support import (
+    write_one_frame_video,
     write_renderer_sidecar,
     write_test_video,
     write_tiny_policy,
@@ -215,6 +216,27 @@ def test_plain_text_named_mp4_fails_review_video_decode(
     )
 
     with pytest.raises(ReviewError, match="decode|video"):
+        RendererEvidence.load(sidecar)
+
+
+def test_one_frame_mp4_fails_temporal_video_evidence(
+    tmp_path,
+    passing_report,
+    clip_files,
+):
+    original = clip_files["nominal"]
+    video = write_one_frame_video(tmp_path / "still-frame.mp4")
+    sidecar = write_renderer_sidecar(
+        tmp_path / "still-frame.render.json",
+        role=original.role,
+        scenario_id=original.scenario_id,
+        seed=original.seed,
+        policy_sha256=passing_report.policy.sha256,
+        evaluation_digest=original.evaluation_digest,
+        video_path=video,
+    )
+
+    with pytest.raises(ReviewError, match="two temporal frames"):
         RendererEvidence.load(sidecar)
 
 
