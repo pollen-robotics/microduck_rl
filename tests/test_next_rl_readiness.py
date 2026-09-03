@@ -247,9 +247,12 @@ def test_operator_guide_records_the_dated_live_readiness_boundary_and_evidence()
     assert "b60c85c6569bfe9767ef565333bdd9aed0052c1a" in normalized
     assert "110b84b16b24d45cb6bdbb4ca81f29ede6a5a5ca" in normalized
     assert "bf220169cd67449688a97cdf9d5c3dcc3e20aa983f9af9e91ca193707435fd29" in normalized
+    assert "`next-rl prepare` returned `planned`" in normalized
     assert "55e80206a875e7acc2c06593dfe7f375b74f3bf2a1400b894adaedf527afb3a0" in normalized
     assert "matched the local and remote copies" in normalized
-    assert "RTX 5050" in normalized and "cuda:0" in normalized
+    assert "separate registered `Mjlab-Velocity-Flat-MicroDuck` smoke" in normalized
+    assert "WANDB_MODE=disabled" in normalized
+    assert "RTX 5050" in normalized and "cuda:0" in normalized and "8 GiB" in normalized
     assert "64 environments" in normalized
     assert "5 iterations" in normalized
     assert "actor 61→14" in normalized
@@ -261,6 +264,7 @@ def test_operator_guide_records_the_dated_live_readiness_boundary_and_evidence()
     assert "pgrep -af train" in normalized and "exited 1 with no output" in normalized
     assert "No hello start, promotion, or publish occurred" in normalized
     assert "later documentation-only commits were not gpu tested" in normalized.casefold()
+    assert f"parent `{parent}` already existed before root creation" in normalized
 
 
 def test_public_cli_readiness_flow_stays_local_until_human_approval(tmp_path: Path):

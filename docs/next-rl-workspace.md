@@ -119,8 +119,8 @@ remote sync or bounded Nitro smoke. The required documentation commit is:
 docs(next-rl): document guarded training workflow
 ```
 
-The separately registered Velocity task is the only bounded workspace/GPU smoke
-shown here:
+The separately registered `Mjlab-Velocity-Flat-MicroDuck` task is the only
+bounded workspace/GPU smoke shown here:
 
 ```bash
 WANDB_MODE=disabled uv run train Mjlab-Velocity-Flat-MicroDuck \
@@ -137,19 +137,20 @@ The following evidence was collected for source commit
 `b60c85c6569bfe9767ef565333bdd9aed0052c1a` only. Later documentation-only
 commits were not GPU tested.
 
-- The fixed runner root was absent once. The historical root creation followed
-  prior evidence that its parent existed, so it created only the missing fixed
-  root; the checked-parent procedure above is the safe documented procedure.
-  Afterwards, `next-rl prepare` returned `planned` for fingerprint
+- The fixed runner root was absent once. Its parent
+  `/home/aif_eng/microduck-training` already existed before root creation, so
+  historical creation made only the missing fixed root; the checked-parent
+  procedure above is the safe documented procedure. Afterwards, `next-rl
+  prepare` returned `planned` for fingerprint
   `bf220169cd67449688a97cdf9d5c3dcc3e20aa983f9af9e91ca193707435fd29`.
   Its source tree was `110b84b16b24d45cb6bdbb4ca81f29ede6a5a5ca`, and archive
   SHA-256 `55e80206a875e7acc2c06593dfe7f375b74f3bf2a1400b894adaedf527afb3a0`
   matched the local and remote copies.
-- A separate registered Velocity smoke used W&B disabled, 64 environments, and
-  5 iterations on RTX 5050 `cuda:0` with 8 GiB. It reported actor 61→14 and
-  critic 76→1, displayed finite losses and rewards, exited 0, and produced
-  `model_0.pt`, `model_4.pt`, and an ONNX export. Afterwards, `pgrep -af train`
-  exited 1 with no output.
+- A separate registered `Mjlab-Velocity-Flat-MicroDuck` smoke used
+  `WANDB_MODE=disabled`, 64 environments, and 5 iterations on RTX 5050
+  `cuda:0` with 8 GiB. It reported actor 61→14 and critic 76→1, displayed
+  finite losses and rewards, exited 0, and produced `model_0.pt`, `model_4.pt`,
+  and an ONNX export. Afterwards, `pgrep -af train` exited 1 with no output.
 - No hello start, promotion, or publish occurred. The staged hello preparation
   is not a task registration, learned-policy claim, or deployment authorization.
 

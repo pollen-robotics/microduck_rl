@@ -211,6 +211,49 @@ Fresh staged whitespace and status checks precede this round's distinct commit.
 
 `docs(next-rl): harden Nitro bootstrap guidance`
 
+## Fix round 5/5 — complete live-evidence contract
+
+### RED evidence
+
+The live-evidence contract failed before the guide named the registered smoke
+task explicitly:
+
+```text
+FAILED test_operator_guide_records_the_dated_live_readiness_boundary_and_evidence
+assert 'separate registered `Mjlab-Velocity-Flat-MicroDuck` smoke' in normalized
+```
+
+### Changes
+
+- Added contract assertions for preparation returning `planned`, the exact
+  registered `Mjlab-Velocity-Flat-MicroDuck` smoke task,
+  `WANDB_MODE=disabled`, RTX 5050 `cuda:0` with 8 GiB, and the historical fact
+  that `/home/aif_eng/microduck-training` already existed before fixed-root
+  creation.
+- Kept the guide evidence aligned: the staged prepare is recorded as `planned`;
+  the separate authorized registered Velocity smoke is the operation that
+  contacted Nitro and trained. The hello task remained unregistered and was
+  never trained or Nitro-started.
+
+### Verification
+
+```text
+uv run --with pytest pytest tests/test_next_rl_readiness.py -q
+4 passed in 0.86s
+
+uv run --with pytest pytest tests/test_next_rl_*.py -q
+258 passed in 8.11s
+
+uv run --with pytest pytest tests/ -q
+454 passed, 1 skipped in 15.00s
+```
+
+Fresh staged whitespace and status checks precede this round's distinct commit.
+
+### Commit
+
+`docs(next-rl): complete live readiness evidence`
+
 ## Concerns / handoff
 
 The phase-qualified numeric values remain simulation acceptance defaults, not
