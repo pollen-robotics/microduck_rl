@@ -2,22 +2,21 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import tempfile
 import time
 import uuid
-import fcntl
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from .artifacts import atomic_write_json, canonical_json
+from .artifacts import atomic_write_json
 from .capabilities import CapabilityInventory
 from .review import ReviewBundle, ReviewError
 from .schema import ArtifactRef, Capability, EvaluationRef
-
 
 _LOCK_TIMEOUT_SECONDS = 10.0
 
@@ -30,6 +29,11 @@ def _text(value: str, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise PromotionError(f"{label} must be non-empty")
     return value.strip()
+
+
+def _semantic_version(value: str) -> tuple[int, int, int]:
+    major, minor, patch = value.split(".")
+    return int(major), int(minor), int(patch)
 
 
 @dataclass(frozen=True)
@@ -169,6 +173,42 @@ class PromotionStore:
         state["capabilities"] = [cls._serialize_capability(item) for item in (*items, value)]
 
     @staticmethod
+    def _active_learned(
+        state: dict[str, Any], skill_id: str
+    ) -> tuple[PromotionRecord, Capability] | None:
+        records = [
+            PromotionRecord.from_dict(raw)
+            for raw in state["records"].values()
+            if raw["skill_id"] == skill_id and raw["status"] == "learned"
+        ]
+        capabilities = [
+            Capability.from_dict(raw)
+            for raw in state["capabilities"]
+            if raw["id"] == skill_id and raw["status"] == "learned"
+        ]
+        if len(records) > 1 or len(capabilities) > 1:
+            raise PromotionError(
+                f"multiple active learned entries exist for capability {skill_id!r}"
+            )
+        if bool(records) != bool(capabilities):
+            raise PromotionError(
+                f"active learned promotion state is inconsistent for capability {skill_id!r}"
+            )
+        if not records:
+            return None
+        record = records[0]
+        capability = capabilities[0]
+        if (
+            record.spec_version != capability.version
+            or capability.policy is None
+            or record.policy_digest != capability.policy.sha256
+        ):
+            raise PromotionError(
+                f"active learned promotion state is inconsistent for capability {skill_id!r}"
+            )
+        return record, capability
+
+    @staticmethod
     def _capability(template: Capability, bundle: ReviewBundle, status: str, report_path: Path, approval: str | None = None) -> Capability:
         evidence = EvaluationRef(
             "evaluation_report", bundle.policy_digest, str(report_path), True,
@@ -204,6 +244,16 @@ class PromotionStore:
             raise PromotionError("validation requires an available capability")
         with self._lock():
             state = self._load()
+            active = self._active_learned(state, capability.id)
+            if (
+                active is not None
+                and _semantic_version(capability.version)
+                <= _semantic_version(active[0].spec_version)
+            ):
+                raise PromotionError(
+                    "an available improvement requires a higher semantic version "
+                    "than the active learned capability"
+                )
             existing = next((Capability.from_dict(raw) for raw in state["capabilities"] if raw["id"] == capability.id and raw["version"] == capability.version), None)
             if existing is not None and existing.status != "available":
                 raise PromotionError(f"validation cannot start from {existing.status!r}")
@@ -249,6 +299,8 @@ class PromotionStore:
             bundle = ReviewBundle.from_dict(state["bundles"][record_id])
         except KeyError as error:
             raise PromotionError(f"unknown promotion record {record_id!r}") from error
+        except ReviewError as error:
+            raise PromotionError(str(error)) from error
         if record.status != "review_pending":
             raise PromotionError(f"cannot review a candidate in {record.status!r} state")
         source = Capability.from_dict(next(raw for raw in state["capabilities"] if raw["id"] == record.skill_id and raw["version"] == record.spec_version))
@@ -273,17 +325,37 @@ class PromotionStore:
         with self._lock():
             state = self._load()
             record, bundle = self._pending(state, record_id)
+            active = self._active_learned(state, record.skill_id)
+            if active is not None:
+                prior, prior_capability = active
+                if _semantic_version(record.spec_version) <= _semantic_version(
+                    prior.spec_version
+                ):
+                    raise PromotionError(
+                        "approval requires a higher semantic version than the current "
+                        "learned capability"
+                    )
+                if bundle.baseline is None:
+                    raise PromotionError(
+                        "improvement approval requires a baseline bound to the current "
+                        "learned policy"
+                    )
+                if bundle.baseline.policy_digest != prior.policy_digest:
+                    raise PromotionError(
+                        "improvement baseline policy digest does not match the current "
+                        "learned policy"
+                    )
             records = {key: PromotionRecord.from_dict(raw) for key, raw in state["records"].items()}
-            for key, item in records.items():
-                if item.skill_id == record.skill_id and item.status == "learned":
-                    records[key] = replace(item, status="superseded")
+            if active is not None:
+                records[prior.id] = replace(prior, status="superseded")
             learned = replace(record, status="learned", approval=ReviewApproval(reviewer, bundle.digest), audit=record.audit + (PromotionAudit("approved", reviewer, None, bundle.digest),))
             records[record.id] = learned
             state["records"] = {key: item.as_dict() for key, item in records.items()}
-            for index, raw in enumerate(state["capabilities"]):
-                item = Capability.from_dict(raw)
-                if item.id == record.skill_id and item.status == "learned":
-                    state["capabilities"][index] = self._serialize_capability(replace(item, status="superseded"))
+            if active is not None:
+                self._replace_capability(
+                    state,
+                    replace(prior_capability, status="superseded"),
+                )
             source = Capability.from_dict(next(raw for raw in state["capabilities"] if raw["id"] == record.skill_id and raw["version"] == record.spec_version))
             report_path = Path(source.evaluation.report_path)
             self._replace_capability(state, self._capability(source, bundle, "learned", report_path, bundle.digest))
@@ -307,8 +379,8 @@ class PromotionStore:
     def current_learned(self, skill_id: str) -> PromotionRecord | None:
         skill_id = _text(skill_id, "skill_id")
         with self._lock():
-            records = [PromotionRecord.from_dict(raw) for raw in self._load()["records"].values()]
-        return next((record for record in records if record.skill_id == skill_id and record.status == "learned"), None)
+            active = self._active_learned(self._load(), skill_id)
+        return None if active is None else active[0]
 
     def inventory(self) -> CapabilityInventory:
         with self._lock():

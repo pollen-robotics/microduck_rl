@@ -12,7 +12,11 @@ from pathlib import Path
 import pytest
 
 from mjlab_microduck.next_rl.artifacts import canonical_json, sha256_file
-from mjlab_microduck.next_rl.experiments import experiment_fingerprint
+from mjlab_microduck.next_rl.experiments import (
+    DuplicateExperimentError,
+    ExperimentStore,
+    experiment_fingerprint,
+)
 from mjlab_microduck.next_rl.runner import (
     CommandResult,
     NitroConfig,
@@ -28,6 +32,7 @@ def job(
     *,
     task_id: str = "Mjlab-Velocity-Flat-MicroDuck",
     run_name: str = "hello-a1b2c3",
+    code_digest: str = "a" * 64,
 ) -> ExperimentManifest:
     return ExperimentManifest.from_dict(
         {
@@ -35,7 +40,7 @@ def job(
             "spec_version": "1.0.0",
             "task_id": task_id,
             "contract": PolicyContract.microduck().as_dict(),
-            "code_digest": "a" * 64,
+            "code_digest": code_digest,
             "seed": 42,
             "runner_id": "nitro",
             "status": "planned",
@@ -52,8 +57,9 @@ def resume_job(
     additional_iterations: int,
     source_fingerprint: str | None = None,
     checkpoint_sha256: str | None = None,
+    code_digest: str = "a" * 64,
 ) -> ExperimentManifest:
-    raw = job().as_dict()
+    raw = job(code_digest=code_digest).as_dict()
     raw["agent_config"] = {
         "run_name": "hello-a1b2c3",
         "resume": True,
@@ -181,6 +187,15 @@ def _git(repository: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+def source_code_digest(repository: Path) -> str:
+    commit = _git(repository, "rev-parse", "HEAD")
+    return hashlib.sha256(commit.encode("ascii")).hexdigest()
+
+
+def source_job(repository: Path, **overrides: str) -> ExperimentManifest:
+    return job(code_digest=source_code_digest(repository), **overrides)
+
+
 @pytest.fixture
 def repository(tmp_path: Path) -> Path:
     root = tmp_path / "repository"
@@ -214,6 +229,20 @@ def wsl_config(repository: Path, tmp_path: Path) -> NitroConfig:
         repository=repository,
         bundle_root=tmp_path / "bundles",
     )
+
+
+def stored_runner(
+    repository: Path,
+    tmp_path: Path,
+    adapter: FakeAdapter,
+    *,
+    wsl: bool = False,
+) -> tuple[NitroRunner, ExperimentStore, ExperimentManifest]:
+    manifest = source_job(repository)
+    store = ExperimentStore(tmp_path / "experiments")
+    store.create(manifest)
+    runner_config = wsl_config(repository, tmp_path) if wsl else config(repository, tmp_path)
+    return NitroRunner(runner_config, adapter, experiment_store=store), store, manifest
 
 
 def test_ssh_enforces_noninteractive_host_checked_access(repository: Path, tmp_path: Path):
@@ -360,7 +389,7 @@ def test_real_open_ssh_adapter_nonzero_probe_allows_staging_only_retry(
 
     monkeypatch.setattr(subprocess, "run", run)
 
-    prepared = NitroRunner(config(repository, tmp_path), OpenSSHAdapter()).prepare(job())
+    prepared = NitroRunner(config(repository, tmp_path), OpenSSHAdapter()).prepare(source_job(repository))
 
     assert upload_attempts == 2
     removals = [call for call in calls if call[0] == "ssh" and "rm" in call]
@@ -376,7 +405,7 @@ def test_prepare_archives_only_the_pinned_tracked_tree(repository: Path, tmp_pat
     (repository / "src" / "module.py").write_text("VERSION = 'worktree'\n")
     (repository / "untracked.txt").write_text("not in archive\n")
 
-    prepared = runner.prepare(job())
+    prepared = runner.prepare(source_job(repository))
 
     with tarfile.open(prepared.archive_path, "r") as archive:
         assert archive.getnames() == ["scripts/next_rl_remote_job.py", "src/module.py"]
@@ -398,11 +427,23 @@ def test_prepare_archives_only_the_pinned_tracked_tree(repository: Path, tmp_pat
     )
 
 
+def test_prepare_rejects_a_stale_declared_head_before_transport(
+    repository: Path,
+    tmp_path: Path,
+):
+    adapter = FakeAdapter()
+
+    with pytest.raises(RunnerError, match="code digest.*captured source"):
+        NitroRunner(config(repository, tmp_path), adapter).prepare(job())
+
+    assert adapter.calls == []
+
+
 def test_prepare_wrapper_comes_from_the_same_pinned_tree(repository: Path, tmp_path: Path):
     wrapper = repository / "scripts" / "next_rl_remote_job.py"
     wrapper.write_text("# mutable worktree wrapper\n")
 
-    prepared = NitroRunner(config(repository, tmp_path), FakeAdapter()).prepare(job())
+    prepared = NitroRunner(config(repository, tmp_path), FakeAdapter()).prepare(source_job(repository))
 
     assert (prepared.local_directory / "next_rl_remote_job.py").read_text() == "# wrapper\n"
 
@@ -410,8 +451,8 @@ def test_prepare_wrapper_comes_from_the_same_pinned_tree(repository: Path, tmp_p
 def test_prepare_archive_is_deterministic(repository: Path, tmp_path: Path):
     runner = NitroRunner(config(repository, tmp_path), FakeAdapter())
 
-    first = runner.prepare(job()).archive_path.read_bytes()
-    second = runner.prepare(job()).archive_path.read_bytes()
+    first = runner.prepare(source_job(repository)).archive_path.read_bytes()
+    second = runner.prepare(source_job(repository)).archive_path.read_bytes()
 
     assert second == first
 
@@ -421,14 +462,15 @@ def test_prepare_rejects_local_fingerprint_directory_symlink(
     tmp_path: Path,
 ):
     runner_config = config(repository, tmp_path)
-    fingerprint = experiment_fingerprint(job())
+    manifest = source_job(repository)
+    fingerprint = experiment_fingerprint(manifest)
     outside = tmp_path / "outside"
     outside.mkdir()
     runner_config.bundle_root.mkdir()
     (runner_config.bundle_root / fingerprint).symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(RunnerError, match="symlink"):
-        NitroRunner(runner_config, FakeAdapter()).prepare(job())
+        NitroRunner(runner_config, FakeAdapter()).prepare(manifest)
 
     assert list(outside.iterdir()) == []
 
@@ -436,7 +478,7 @@ def test_prepare_rejects_local_fingerprint_directory_symlink(
 def test_prepare_transfers_only_into_fingerprint_directory(repository: Path, tmp_path: Path):
     adapter = FakeAdapter()
 
-    prepared = NitroRunner(config(repository, tmp_path), adapter).prepare(job())
+    prepared = NitroRunner(config(repository, tmp_path), adapter).prepare(source_job(repository))
 
     expected_prefix = f"aif_eng@nitro:{prepared.remote_directory}/"
     scp_calls = [call for call in adapter.calls if call[0] == "scp"]
@@ -448,7 +490,7 @@ def test_prepare_transfers_only_into_fingerprint_directory(repository: Path, tmp
 
 
 def test_manifest_and_dry_run_contain_no_credentials(repository: Path, tmp_path: Path):
-    raw = job().as_dict()
+    raw = source_job(repository).as_dict()
     raw["environment_config"]["password"] = "environment-secret"
     raw["agent_config"]["private_key"] = "private-key-secret"
     prepared = NitroRunner(config(repository, tmp_path), FakeAdapter()).prepare(
@@ -472,7 +514,7 @@ def test_prepare_rejects_tracked_symlink(repository: Path, tmp_path: Path):
     _git(repository, "commit", "-qm", "track symlink")
 
     with pytest.raises(RunnerError, match="regular file"):
-        NitroRunner(config(repository, tmp_path), FakeAdapter()).prepare(job())
+        NitroRunner(config(repository, tmp_path), FakeAdapter()).prepare(source_job(repository))
 
 
 @pytest.mark.parametrize(
@@ -504,7 +546,7 @@ def test_prepare_rejects_secret_like_tracked_paths(
     _git(repository, "commit", "-qm", "track unsafe secret")
 
     with pytest.raises(RunnerError, match="secret-like"):
-        NitroRunner(config(repository, tmp_path), FakeAdapter()).prepare(job())
+        NitroRunner(config(repository, tmp_path), FakeAdapter()).prepare(source_job(repository))
 
 
 def test_secret_path_filter_does_not_reject_unrelated_words(repository: Path, tmp_path: Path):
@@ -520,7 +562,7 @@ def test_secret_path_filter_does_not_reject_unrelated_words(repository: Path, tm
     _git(repository, "add", "src")
     _git(repository, "commit", "-qm", "track safe names")
 
-    prepared = NitroRunner(config(repository, tmp_path), FakeAdapter()).prepare(job())
+    prepared = NitroRunner(config(repository, tmp_path), FakeAdapter()).prepare(source_job(repository))
 
     with tarfile.open(prepared.archive_path, "r") as archive:
         assert all(
@@ -540,7 +582,7 @@ def test_prepared_manifest_recursively_removes_credential_like_keys(
     repository: Path,
     tmp_path: Path,
 ):
-    raw = job().as_dict()
+    raw = source_job(repository).as_dict()
     raw["environment_config"]["telemetry"] = {
         "wandb_api_key": "wandb-secret",
         "wandb_token_value": "wandb-token-secret",
@@ -582,19 +624,101 @@ def test_prepare_rejects_control_characters_in_tracked_paths(repository: Path, t
     _git(repository, "commit", "-qm", "track unsafe path")
 
     with pytest.raises(RunnerError, match="control"):
-        NitroRunner(config(repository, tmp_path), FakeAdapter()).prepare(job())
+        NitroRunner(config(repository, tmp_path), FakeAdapter()).prepare(source_job(repository))
 
 
-def test_disconnect_does_not_cancel_remote_process(repository: Path, tmp_path: Path):
+def test_start_requires_an_experiment_store_before_transport(repository: Path, tmp_path: Path):
     adapter = FakeAdapter()
     runner = NitroRunner(config(repository, tmp_path), adapter)
-    prepared = runner.prepare(job())
+    prepared = runner.prepare(source_job(repository))
+    adapter.calls.clear()
+
+    with pytest.raises(RunnerError, match="experiment store"):
+        runner.start(prepared)
+
+    assert adapter.calls == []
+
+
+def test_start_reserves_once_and_syncs_the_returned_runner_status(
+    repository: Path,
+    tmp_path: Path,
+):
+    adapter = FakeAdapter()
+    runner, store, manifest = stored_runner(repository, tmp_path, adapter)
+    prepared = runner.prepare(manifest)
+    adapter.calls.clear()
+    adapter.outputs.extend((CommandResult(), CommandResult(stdout='{"status":"running"}')))
+
+    state = runner.start(prepared, owner="operator-a")
+
+    assert state["status"] == "running"
+    assert store.status(prepared.fingerprint)["status"] == "running"
+    calls_after_first_start = tuple(adapter.calls)
+    with pytest.raises(DuplicateExperimentError, match="already running"):
+        runner.start(prepared, owner="operator-b")
+    assert tuple(adapter.calls) == calls_after_first_start
+
+
+def test_start_transport_error_releases_only_its_reservation_for_safe_retry(
+    repository: Path,
+    tmp_path: Path,
+):
+    adapter = FakeAdapter()
+    runner, store, manifest = stored_runner(repository, tmp_path, adapter)
+    prepared = runner.prepare(manifest)
     adapter.outputs.append(ConnectionError("ssh disconnected"))
 
     with pytest.raises(ConnectionError, match="disconnected"):
-        runner.start(prepared)
+        runner.start(prepared, owner="operator-a")
 
-    assert adapter.cancel_calls == []
+    assert store.status(prepared.fingerprint)["status"] == "planned"
+    adapter.outputs.extend((CommandResult(), CommandResult(stdout='{"status":"pending"}')))
+    assert runner.start(prepared, owner="operator-b")["status"] == "pending"
+
+
+def test_start_response_loss_keeps_the_claim_for_same_owner_idempotent_retry(
+    repository: Path,
+    tmp_path: Path,
+):
+    adapter = FakeAdapter()
+    runner, store, manifest = stored_runner(repository, tmp_path, adapter)
+    prepared = runner.prepare(manifest)
+    adapter.outputs.extend((CommandResult(), ConnectionError("response lost")))
+
+    with pytest.raises(ConnectionError, match="response lost"):
+        runner.start(prepared, owner="operator-a")
+
+    assert store.status(prepared.fingerprint)["status"] == "pending"
+    calls_after_loss = tuple(adapter.calls)
+    with pytest.raises(DuplicateExperimentError, match="reserved"):
+        runner.start(prepared, owner="operator-b")
+    assert tuple(adapter.calls) == calls_after_loss
+
+    adapter.outputs.extend((CommandResult(), CommandResult(stdout='{"status":"running"}')))
+    assert runner.start(prepared, owner="operator-a")["status"] == "running"
+
+
+def test_status_advances_pending_through_running_to_a_terminal_state(
+    repository: Path,
+    tmp_path: Path,
+):
+    adapter = FakeAdapter()
+    runner, store, manifest = stored_runner(repository, tmp_path, adapter)
+    fingerprint = experiment_fingerprint(manifest)
+    store.reserve(fingerprint, owner="operator-a")
+    adapter.outputs.append(CommandResult(stdout='{"status":"succeeded"}'))
+
+    assert runner.status(fingerprint)["status"] == "succeeded"
+
+    assert store.status(fingerprint) == {
+        "history": [
+            {"status": "planned"},
+            {"status": "pending"},
+            {"status": "running"},
+            {"status": "succeeded"},
+        ],
+        "status": "succeeded",
+    }
 
 
 class PrepareAdapter(FakeAdapter):
@@ -707,7 +831,12 @@ class PrepareAdapter(FakeAdapter):
         if argv[0] == "ssh" and "python3" in remote and "/.incoming-" not in joined:
             if self.existing == "matching":
                 return CommandResult(
-                    stdout=json.dumps({"prepared_bundle_sha256": self._bundle_digest()})
+                    stdout=json.dumps(
+                        {
+                            "prepared_bundle_sha256": self._bundle_digest(),
+                            "status": "pending",
+                        }
+                    )
                 )
             if self.existing == "conflicting":
                 return CommandResult(stdout=json.dumps({"prepared_bundle_sha256": "f" * 64}))
@@ -746,7 +875,7 @@ def test_wsl_prepare_streams_each_file_to_fixed_tee_path_and_retries(
     runner_config = wsl_config(repository, tmp_path)
     adapter = WSLPrepareAdapter(runner_config.bundle_root, failed_uploads=1)
 
-    prepared = NitroRunner(runner_config, adapter).prepare(job())
+    prepared = NitroRunner(runner_config, adapter).prepare(source_job(repository))
 
     assert len(adapter.uploads) > 6
     assert not any(call[0] == "scp" for call in adapter.calls)
@@ -774,8 +903,8 @@ def test_wsl_start_streams_request_instead_of_using_scp(
 ):
     runner_config = wsl_config(repository, tmp_path)
     adapter = WSLPrepareAdapter(runner_config.bundle_root)
-    runner = NitroRunner(runner_config, adapter)
-    prepared = runner.prepare(job())
+    runner, _store, manifest = stored_runner(repository, tmp_path, adapter, wsl=True)
+    prepared = runner.prepare(manifest)
     scp_before = sum(call[0] == "scp" for call in adapter.calls)
 
     runner.start(prepared)
@@ -798,7 +927,7 @@ def test_prepare_cleans_only_incomplete_fingerprint_and_retries_transfer(
         fail_upload=failure == "partial_copy",
     )
 
-    prepared = NitroRunner(runner_config, adapter).prepare(job())
+    prepared = NitroRunner(runner_config, adapter).prepare(source_job(repository))
 
     uploads = [call for call in adapter.calls if call[0] == "scp"]
     assert len(uploads) == (1 if failure == "before_copy" else 2)
@@ -819,7 +948,7 @@ def test_prepare_reuses_only_matching_complete_job(repository: Path, tmp_path: P
     runner_config = config(repository, tmp_path)
     adapter = PrepareAdapter(runner_config.bundle_root, existing="matching")
 
-    prepared = NitroRunner(runner_config, adapter).prepare(job())
+    prepared = NitroRunner(runner_config, adapter).prepare(source_job(repository))
 
     assert prepared.fingerprint
     assert not any(call[0] == "scp" for call in adapter.calls)
@@ -831,7 +960,7 @@ def test_prepare_rejects_conflicting_complete_job(repository: Path, tmp_path: Pa
     adapter = PrepareAdapter(runner_config.bundle_root, existing="conflicting")
 
     with pytest.raises(RunnerError, match="conflicting"):
-        NitroRunner(runner_config, adapter).prepare(job())
+        NitroRunner(runner_config, adapter).prepare(source_job(repository))
 
     assert not any(call[0] == "scp" for call in adapter.calls)
     assert not any("rm" in call for call in adapter.calls)
@@ -842,7 +971,7 @@ def test_prepare_rejects_remote_job_directory_symlink(repository: Path, tmp_path
     adapter = PrepareAdapter(runner_config.bundle_root, existing="symlink")
 
     with pytest.raises(RunnerError, match="symlink"):
-        NitroRunner(runner_config, adapter).prepare(job())
+        NitroRunner(runner_config, adapter).prepare(source_job(repository))
 
     assert not any(call[0] == "scp" for call in adapter.calls)
     assert not any("rm" in call for call in adapter.calls)
@@ -858,7 +987,7 @@ def test_prepare_treats_non_directory_fingerprint_path_as_conflict(
     adapter = PrepareAdapter(runner_config.bundle_root, existing=path_type)
 
     with pytest.raises(RunnerError, match="directory|conflict"):
-        NitroRunner(runner_config, adapter).prepare(job())
+        NitroRunner(runner_config, adapter).prepare(source_job(repository))
 
     assert not any(call[0] == "scp" or "rm" in call for call in adapter.calls)
 
@@ -872,7 +1001,7 @@ def test_transient_read_only_inspection_disconnect_never_authorizes_cleanup(
     runner_config = config(repository, tmp_path)
     adapter = PrepareAdapter(runner_config.bundle_root, existing=existing)
 
-    prepared = NitroRunner(runner_config, adapter).prepare(job())
+    prepared = NitroRunner(runner_config, adapter).prepare(source_job(repository))
 
     assert prepared.fingerprint
     assert adapter.inspections == 2
@@ -894,7 +1023,7 @@ def test_ambiguous_existing_preparation_fails_closed_without_cleanup(
     adapter = PrepareAdapter(runner_config.bundle_root, existing=ambiguous)
 
     with pytest.raises(RunnerError, match="inspect|JSON|transport"):
-        NitroRunner(runner_config, adapter).prepare(job())
+        NitroRunner(runner_config, adapter).prepare(source_job(repository))
 
     assert not any(call[0] == "scp" or "rm" in call for call in adapter.calls)
 
@@ -906,7 +1035,7 @@ def test_lost_finalize_response_reinspects_complete_digest_without_cleanup(
     runner_config = config(repository, tmp_path)
     adapter = PrepareAdapter(runner_config.bundle_root, fail_finalize_response=True)
 
-    prepared = NitroRunner(runner_config, adapter).prepare(job())
+    prepared = NitroRunner(runner_config, adapter).prepare(source_job(repository))
 
     assert prepared.fingerprint
     assert adapter.inspections == 1
@@ -921,7 +1050,7 @@ def test_prepare_reuses_real_directory_but_resets_only_owned_matching_stage(
     adapter = PrepareAdapter(runner_config.bundle_root, existing="incomplete_owned")
     adapter.stage_exists = True
 
-    prepared = NitroRunner(runner_config, adapter).prepare(job())
+    prepared = NitroRunner(runner_config, adapter).prepare(source_job(repository))
 
     removals = [call for call in adapter.calls if call[0] == "ssh" and "rm" in call]
     assert removals
@@ -1206,6 +1335,7 @@ def test_resume_stages_digest_verified_checkpoint_from_explicit_prior_job(
         additional_iterations=500,
         source_fingerprint=source_fingerprint,
         checkpoint_sha256=digest,
+        code_digest=source_code_digest(repository),
     )
 
     prepared = NitroRunner(config(repository, tmp_path), adapter).prepare(manifest)
@@ -1250,6 +1380,7 @@ def test_resume_rejects_missing_unstable_or_mismatched_prior_checkpoint(
         additional_iterations=500,
         source_fingerprint="b" * 64,
         checkpoint_sha256=expected_digest,
+        code_digest=source_code_digest(repository),
     )
 
     with pytest.raises(RunnerError, match="resume|stable|digest|checkpoint"):

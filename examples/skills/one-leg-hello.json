@@ -125,6 +125,8 @@
     "worst_case"
   ],
   "metadata": {
+    "training_initialization": "new_policy",
+    "parent_policy_usage": "evaluation_reference_only",
     "simulation_acceptance_defaults": {
       "evaluation_duration_s": 4.0,
       "raised_wave_left_foot_support_ratio_min": 0.98,

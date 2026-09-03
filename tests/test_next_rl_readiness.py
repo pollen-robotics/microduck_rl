@@ -6,9 +6,22 @@ import hashlib
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
+from test_next_rl_support import (
+    write_renderer_sidecar,
+    write_test_video,
+    write_tiny_policy,
+)
+
+from mjlab_microduck.next_rl.artifacts import canonical_json
+from mjlab_microduck.next_rl.evaluation import (
+    EvaluationReport,
+    MetricResult,
+    ScenarioResult,
+    select_worst_case,
+)
+from mjlab_microduck.next_rl.schema import ArtifactRef
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "examples" / "skills" / "one-leg-hello.json"
@@ -82,49 +95,44 @@ raise SystemExit(main(sys.argv[1:], dependencies=CliDependencies(
 def _review_inputs(temporary: Path) -> tuple[Path, Path, dict[str, Path]]:
     """Create genuine CLI evidence files that meet the example's numeric contract."""
     skill = json.loads(EXAMPLE.read_text(encoding="utf-8"))
-    policy = temporary / "evaluated-policy.onnx"
-    policy.write_bytes(b"example evaluation evidence")
+    policy = write_tiny_policy(temporary / "evaluated-policy.onnx")
     policy_digest = hashlib.sha256(policy.read_bytes()).hexdigest()
     scenarios = []
     for family, seed in zip(skill["held_out_scenarios"], skill["evaluation_seeds"], strict=True):
-        thresholds = [
-            {
-                "scenario_id": f"{family}-seed-{seed}",
-                "metric_name": metric["name"],
-                "unit": metric["unit"],
-                "direction": metric["direction"],
-                "limit": metric["limit"],
-                "value": metric["limit"],
-                "mandatory": metric.get("mandatory", True),
-                "passed": True,
-                "normalized_violation": 0.0,
-            }
-            for metric in skill["metrics"]
-        ]
+        scenario_id = f"{family}-seed-{seed}"
         scenarios.append(
-            {
-                "scenario_id": f"{family}-seed-{seed}",
-                "family": family,
-                "seed": seed,
-                "metrics": {metric["name"]: metric["limit"] for metric in skill["metrics"]},
-                "policy_sha256": policy_digest,
-                "threshold_results": thresholds,
-            }
+            ScenarioResult(
+                scenario_id,
+                family,
+                seed,
+                {metric["name"]: float(metric["limit"]) for metric in skill["metrics"]},
+                policy_digest,
+                tuple(
+                    MetricResult(
+                        scenario_id,
+                        metric["name"],
+                        metric["unit"],
+                        metric["direction"],
+                        float(metric["limit"]),
+                        float(metric["limit"]),
+                        metric.get("mandatory", True),
+                        True,
+                        0.0,
+                    )
+                    for metric in skill["metrics"]
+                ),
+            )
         )
-    evaluation = temporary / "evaluation.json"
-    evaluation.write_text(
-        json.dumps(
-            {
-                "skill_id": skill["id"],
-                "spec_version": skill["version"],
-                "evaluator_revision": "readiness-fixture",
-                "scenarios": scenarios,
-                "passed": True,
-                "policy": {"path": str(policy), "kind": "onnx", "sha256": policy_digest},
-            }
-        ),
-        encoding="utf-8",
+    report = EvaluationReport(
+        skill["id"],
+        skill["version"],
+        "readiness-fixture",
+        tuple(scenarios),
+        True,
+        ArtifactRef(str(policy), "onnx", policy_digest),
     )
+    evaluation = temporary / "evaluation.json"
+    evaluation.write_text(canonical_json(report.as_dict()), encoding="utf-8")
     capability = temporary / "capability.json"
     capability.write_text(
         json.dumps(
@@ -139,40 +147,52 @@ def _review_inputs(temporary: Path) -> tuple[Path, Path, dict[str, Path]]:
         ),
         encoding="utf-8",
     )
-    clips = {}
-    for role in ("nominal", "entry", "exit", "stress", "worst_case"):
-        clip = temporary / f"{role}.mp4"
-        clip.write_bytes(f"{role} visual evidence".encode())
-        clips[role] = clip
-    return capability, evaluation, clips
+    by_family = {scenario.family: scenario for scenario in report.scenarios}
+    selected = {**by_family, "worst_case": select_worst_case(report.scenarios)}
+    evaluation_digest = hashlib.sha256(evaluation.read_bytes()).hexdigest()
+    evidence = {}
+    for role, scenario in selected.items():
+        clip = write_test_video(temporary / f"{role}.mp4")
+        evidence[role] = write_renderer_sidecar(
+            temporary / f"{role}.render.json",
+            role=role,
+            scenario_id=scenario.scenario_id,
+            seed=scenario.seed,
+            policy_sha256=policy_digest,
+            evaluation_digest=evaluation_digest,
+            video_path=clip,
+            renderer_revision="readiness-renderer-v1",
+        )
+    return capability, evaluation, evidence
 
 
-def _review_arguments(capability: Path, evaluation: Path, clips: dict[str, Path]) -> tuple[str, ...]:
+def _review_arguments(capability: Path, evaluation: Path, evidence: dict[str, Path]) -> tuple[str, ...]:
     return (
         "review",
         "--capability", str(capability),
         "--skill", str(EXAMPLE),
         "--evaluation", str(evaluation),
-        "--nominal-clip", str(clips["nominal"]),
-        "--entry-clip", str(clips["entry"]),
-        "--exit-clip", str(clips["exit"]),
-        "--stress-clip", str(clips["stress"]),
-        "--worst-case-clip", str(clips["worst_case"]),
+        "--nominal-evidence", str(evidence["nominal"]),
+        "--entry-evidence", str(evidence["entry"]),
+        "--exit-evidence", str(evidence["exit"]),
+        "--stress-evidence", str(evidence["stress"]),
+        "--worst-case-evidence", str(evidence["worst_case"]),
     )
 
 
-def test_example_skill_is_a_numeric_warm_start_plan_without_training(tmp_path: Path):
+def test_example_skill_is_a_numeric_train_new_plan_without_training(tmp_path: Path):
     """Catch an example that omits phase-scoped contact and acceptance semantics."""
     home = tmp_path / "workspace"
     inventory = _run_cli("inventory", home=home)
     assert any(item["id"] == "standing" for item in inventory["capabilities"])
 
     plan = _run_cli("plan", str(EXAMPLE), home=home)
-    assert plan == {
-        "disposition": "warm_start",
-        "parent_capability_id": "standing",
-        "reason": "Compatible allowed parent capability 'standing' can warm-start training.",
-    }
+    assert plan["disposition"] == "train_new"
+    assert "parent_capability_id" not in plan
+    if "reference_capability_id" in plan:
+        assert plan["reference_capability_id"] == "standing"
+    else:
+        assert plan["reason"] == "No matching existing capability was found."
     skill = json.loads(EXAMPLE.read_text(encoding="utf-8"))
     metric_names = {metric["name"] for metric in skill["metrics"]}
     assert {
@@ -205,6 +225,8 @@ def test_example_skill_is_a_numeric_warm_start_plan_without_training(tmp_path: P
         "raised_wave_forbidden_contact_count",
     }
     assert skill["metadata"]["hardware_deployment"]["calibration_required"] is True
+    assert skill["metadata"]["training_initialization"] == "new_policy"
+    assert skill["metadata"]["parent_policy_usage"] == "evaluation_reference_only"
     assert not list(home.rglob("model_*.pt"))
 
 
@@ -223,6 +245,22 @@ def test_operator_guide_documents_the_current_safe_nitro_connection_contract():
     assert "Never include a password" in normalized
     assert "StrictHostKeyChecking=no" not in guide
     assert "UserKnownHostsFile=/dev/null" not in guide
+
+
+def test_operator_guide_documents_provenance_and_internal_start_boundaries():
+    """Catch guidance that treats clips as provenance or exposes implicit launches."""
+    guide = GUIDE.read_text(encoding="utf-8")
+    normalized = " ".join(guide.split())
+
+    assert "five immutable renderer evidence sidecars" in normalized
+    assert "--nominal-evidence nominal.render.json" in normalized
+    assert "--worst-case-evidence worst-case.render.json" in normalized
+    assert "decodable video" in normalized
+    assert "exact policy and evaluation digests" in normalized
+    assert "reserves the experiment fingerprint" in normalized
+    assert "synchronizes pending, running, succeeded, or failed status" in normalized
+    assert "does not expose a `start` subcommand" in normalized
+    assert "does not publish" in normalized
 
 
 def test_operator_guide_records_the_dated_live_readiness_boundary_and_evidence():

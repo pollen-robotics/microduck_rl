@@ -5,17 +5,33 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-import tomllib
 
 import pytest
+from test_next_rl_support import (
+    write_renderer_sidecar,
+    write_test_video,
+    write_tiny_policy,
+)
 
 from mjlab_microduck.next_rl.artifacts import canonical_json
+from mjlab_microduck.next_rl.capabilities import CapabilityInventory
 from mjlab_microduck.next_rl.cli import CliDependencies, _default_runner, main
-from mjlab_microduck.next_rl.evaluation import EvaluationReport, MetricResult, ScenarioResult, select_worst_case
-from mjlab_microduck.next_rl.review import ReviewClip
-from mjlab_microduck.next_rl.schema import ArtifactRef, Capability, MetricThreshold, PolicyContract, SkillSpec
+from mjlab_microduck.next_rl.evaluation import (
+    EvaluationReport,
+    MetricResult,
+    ScenarioResult,
+    select_worst_case,
+)
+from mjlab_microduck.next_rl.schema import (
+    ArtifactRef,
+    Capability,
+    MetricThreshold,
+    PolicyContract,
+    SkillSpec,
+)
 
 
 def test_next_rl_is_a_declared_script():
@@ -252,23 +268,30 @@ def _review_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path, dict[str, Pa
         (MetricThreshold("falls", "count", "maximum", 0),), (1,), (2, 3, 4, 5),
         held_out_scenarios=("nominal", "entry", "exit", "stress"),
     )
-    policy = tmp_path / "policy.onnx"
-    policy.write_bytes(b"evaluated policy")
+    policy = write_tiny_policy(tmp_path / "policy.onnx")
     digest = hashlib.sha256(policy.read_bytes()).hexdigest()
     scenarios = tuple(
         ScenarioResult(
             f"{family}-1", family, seed, {"falls": 0.0}, digest,
-            (MetricResult(f"{family}-1", "falls", "count", "maximum", 0, 0, True, True, 0),),
+            (MetricResult(f"{family}-1", "falls", "count", "maximum", 0.0, 0.0, True, True, 0.0),),
         )
         for family, seed in (("nominal", 2), ("entry", 3), ("exit", 4), ("stress", 5))
     )
     report = EvaluationReport("new-skill", "1.0.0", "eval-test", scenarios, True, ArtifactRef(str(policy), "onnx", digest))
     by_family = {scenario.family: scenario for scenario in scenarios}
-    clips = {}
+    evaluation_digest = hashlib.sha256(canonical_json(report.as_dict()).encode("utf-8")).hexdigest()
+    evidence = {}
     for role, scenario in {**by_family, "worst_case": select_worst_case(scenarios)}.items():
-        clip = tmp_path / f"{role}.mp4"
-        clip.write_bytes(role.encode())
-        clips[role] = ReviewClip(role, scenario.scenario_id, scenario.seed, clip, digest)
+        clip = write_test_video(tmp_path / f"{role}.mp4")
+        evidence[role] = write_renderer_sidecar(
+            tmp_path / f"{role}.render.json",
+            role=role,
+            scenario_id=scenario.scenario_id,
+            seed=scenario.seed,
+            policy_sha256=digest,
+            evaluation_digest=evaluation_digest,
+            video_path=clip,
+        )
     capability = Capability.from_dict({
         "id": "new-skill", "version": "1.0.0", "aliases": [], "robot_model": "microduck",
         "contract": PolicyContract.microduck().as_dict(), "status": "available",
@@ -279,24 +302,117 @@ def _review_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path, dict[str, Pa
     capability_path.write_text(json.dumps(capability.as_dict()))
     spec_path.write_text(canonical_json(spec.as_dict()))
     evaluation_path.write_text(canonical_json(report.as_dict()))
-    return capability_path, spec_path, evaluation_path, policy, {
-        role: clip.path for role, clip in clips.items()
-    }
+    return capability_path, spec_path, evaluation_path, policy, evidence
 
 
 def _review_args(inputs: tuple[Path, Path, Path, Path, dict[str, Path]]) -> list[str]:
-    capability, spec, evaluation, _policy, clips = inputs
+    capability, spec, evaluation, _policy, evidence = inputs
     return [
         "review",
         "--capability", str(capability),
         "--skill", str(spec),
         "--evaluation", str(evaluation),
-        "--nominal-clip", str(clips["nominal"]),
-        "--entry-clip", str(clips["entry"]),
-        "--exit-clip", str(clips["exit"]),
-        "--stress-clip", str(clips["stress"]),
-        "--worst-case-clip", str(clips["worst_case"]),
+        "--nominal-evidence", str(evidence["nominal"]),
+        "--entry-evidence", str(evidence["entry"]),
+        "--exit-evidence", str(evidence["exit"]),
+        "--stress-evidence", str(evidence["stress"]),
+        "--worst-case-evidence", str(evidence["worst_case"]),
     ]
+
+
+def _assert_invalid_without_workspace(arguments: list[str], home: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("NEXT_RL_HOME", str(home))
+
+    assert main(arguments) == 2
+
+    assert json.loads(capsys.readouterr().out) == {"error": "invalid_request"}
+    assert not home.exists()
+
+
+def test_review_requires_five_renderer_evidence_sidecars_not_raw_clip_paths(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+):
+    """Catch the CLI inventing provenance from five otherwise-unbound video paths."""
+    inputs = _review_inputs(tmp_path)
+    capability, spec, evaluation, _policy, evidence = inputs
+    arguments = [
+        "review",
+        "--capability", str(capability),
+        "--skill", str(spec),
+        "--evaluation", str(evaluation),
+    ]
+    for role in ("nominal", "entry", "exit", "stress", "worst_case"):
+        video = json.loads(evidence[role].read_text(encoding="utf-8"))["video_path"]
+        arguments.extend((f"--{role.replace('_', '-')}-clip", video))
+
+    _assert_invalid_without_workspace(arguments, tmp_path / "state", monkeypatch, capsys)
+
+
+def test_review_rejects_a_well_hashed_fake_onnx_before_workspace_persistence(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+):
+    """Catch extension-and-digest-only policy validation at the CLI trust boundary."""
+    inputs = _review_inputs(tmp_path)
+    _capability, _spec, evaluation, policy, evidence = inputs
+    policy.write_bytes(b"not an ONNX graph")
+    policy_digest = hashlib.sha256(policy.read_bytes()).hexdigest()
+    report = json.loads(evaluation.read_text(encoding="utf-8"))
+    report["policy"]["sha256"] = policy_digest
+    for scenario in report["scenarios"]:
+        scenario["policy_sha256"] = policy_digest
+    evaluation.write_text(canonical_json(report), encoding="utf-8")
+    evaluation_digest = hashlib.sha256(evaluation.read_bytes()).hexdigest()
+    for sidecar in evidence.values():
+        raw = json.loads(sidecar.read_text(encoding="utf-8"))
+        raw["policy_sha256"] = policy_digest
+        raw["evaluation_digest"] = evaluation_digest
+        sidecar.write_text(canonical_json(raw), encoding="utf-8")
+
+    _assert_invalid_without_workspace(_review_args(inputs), tmp_path / "state", monkeypatch, capsys)
+
+
+def test_review_rejects_text_named_mp4_before_workspace_persistence(tmp_path: Path, monkeypatch, capsys):
+    """Catch renderer evidence whose exact recorded bytes are not a decodable video."""
+    inputs = _review_inputs(tmp_path)
+    sidecar = inputs[4]["entry"]
+    raw = json.loads(sidecar.read_text(encoding="utf-8"))
+    video = Path(raw["video_path"])
+    video.write_text("not a video", encoding="utf-8")
+    raw["video_sha256"] = hashlib.sha256(video.read_bytes()).hexdigest()
+    sidecar.write_text(canonical_json(raw), encoding="utf-8")
+
+    _assert_invalid_without_workspace(_review_args(inputs), tmp_path / "state", monkeypatch, capsys)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("policy_sha256", "f" * 64),
+        ("evaluation_digest", "e" * 64),
+        ("scenario_id", "different-scenario"),
+        ("seed", 999),
+        ("video_sha256", "d" * 64),
+    ),
+)
+def test_review_rejects_unbound_renderer_evidence_before_workspace_persistence(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    field: str,
+    value: object,
+):
+    """Catch any renderer-sidecar binding being trusted without exact verification."""
+    inputs = _review_inputs(tmp_path)
+    sidecar = inputs[4]["stress"]
+    raw = json.loads(sidecar.read_text(encoding="utf-8"))
+    raw[field] = value
+    sidecar.write_text(canonical_json(raw), encoding="utf-8")
+
+    _assert_invalid_without_workspace(_review_args(inputs), tmp_path / "state", monkeypatch, capsys)
 
 
 @pytest.mark.parametrize("document", ("capability", "skill", "evaluation", "baseline"))
@@ -500,11 +616,37 @@ def test_inventory_combines_shipped_and_promoted_capabilities(tmp_path: Path, mo
     assert any(item["id"] == "walking" for item in capabilities)
 
 
-def test_warm_start_plan_uses_task8_parent_capability_json(tmp_path: Path, monkeypatch, capsys):
-    """Catch warm-start output that loses the selected parent capability identity."""
+def test_train_new_plan_labels_onnx_parent_as_a_reference_only(tmp_path: Path, monkeypatch, capsys):
+    """Catch an ONNX evaluation reference being mislabeled as a training checkpoint."""
     monkeypatch.setenv("NEXT_RL_HOME", str(tmp_path / "state"))
+    policy = write_tiny_policy(tmp_path / "standing.onnx")
+    digest = hashlib.sha256(policy.read_bytes()).hexdigest()
+    standing = Capability.from_dict({
+        "id": "standing",
+        "version": "1.0.0",
+        "aliases": ["stand"],
+        "robot_model": "microduck",
+        "contract": PolicyContract.microduck().as_dict(),
+        "status": "validated",
+        "policy": {"path": str(policy), "kind": "onnx", "sha256": digest},
+    })
+
+    class ReferenceStore:
+        def inventory(self) -> CapabilityInventory:
+            return CapabilityInventory((standing,))
+
     skill = _write_skill(tmp_path / "hello.json", "one-leg-hello", allowed_parent_capabilities=["standing"])
 
-    assert main(["plan", str(skill)]) == 0
+    assert main(
+        ["plan", str(skill)],
+        dependencies=CliDependencies(promotion_store_factory=lambda root: ReferenceStore()),
+    ) == 0
 
-    assert json.loads(capsys.readouterr().out)["parent_capability_id"] == "standing"
+    assert json.loads(capsys.readouterr().out) == {
+        "disposition": "train_new",
+        "reason": (
+            "Compatible allowed parent capability 'standing' is an evaluation reference, "
+            "not a staged training checkpoint; start new training."
+        ),
+        "reference_capability_id": "standing",
+    }

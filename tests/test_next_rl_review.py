@@ -7,10 +7,27 @@ import json
 from dataclasses import replace
 
 import pytest
+from test_next_rl_support import (
+    write_renderer_sidecar,
+    write_test_video,
+    write_tiny_policy,
+)
 
-from mjlab_microduck.next_rl.evaluation import EvaluationReport, MetricResult, ScenarioResult, select_worst_case
-from mjlab_microduck.next_rl.review import ReviewBundle, ReviewClip, ReviewError
-from mjlab_microduck.next_rl.schema import ArtifactRef, MetricThreshold, PolicyContract, SkillSpec
+import mjlab_microduck.next_rl.review as review_module
+from mjlab_microduck.next_rl.artifacts import canonical_json
+from mjlab_microduck.next_rl.evaluation import (
+    EvaluationReport,
+    MetricResult,
+    ScenarioResult,
+    select_worst_case,
+)
+from mjlab_microduck.next_rl.review import RendererEvidence, ReviewBundle, ReviewError
+from mjlab_microduck.next_rl.schema import (
+    ArtifactRef,
+    MetricThreshold,
+    PolicyContract,
+    SkillSpec,
+)
 
 
 @pytest.fixture
@@ -24,8 +41,7 @@ def passing_spec() -> SkillSpec:
 
 @pytest.fixture
 def passing_report(tmp_path) -> EvaluationReport:
-    policy = tmp_path / "policy.onnx"
-    policy.write_bytes(b"evaluated policy")
+    policy = write_tiny_policy(tmp_path / "policy.onnx")
     digest = hashlib.sha256(policy.read_bytes()).hexdigest()
     scenarios = tuple(
         ScenarioResult(
@@ -46,14 +62,33 @@ def expected_scenarios(report: EvaluationReport) -> dict[str, ScenarioResult]:
     }
 
 
-@pytest.fixture
-def clip_files(tmp_path, passing_report) -> dict[str, ReviewClip]:
-    clips: dict[str, ReviewClip] = {}
-    for role, scenario in expected_scenarios(passing_report).items():
-        path = tmp_path / f"{role}.mp4"
-        path.write_bytes(f"{role} visual evidence".encode())
-        clips[role] = ReviewClip(role, scenario.scenario_id, scenario.seed, path, passing_report.policy.sha256)
+def renderer_evidence(
+    tmp_path,
+    report: EvaluationReport,
+    *,
+    prefix: str = "",
+) -> dict[str, RendererEvidence]:
+    evaluation_digest = hashlib.sha256(canonical_json(report.as_dict()).encode()).hexdigest()
+    clips: dict[str, RendererEvidence] = {}
+    for role, scenario in expected_scenarios(report).items():
+        stem = f"{prefix}-{role}" if prefix else role
+        video = write_test_video(tmp_path / f"{stem}.mp4")
+        sidecar = write_renderer_sidecar(
+            tmp_path / f"{stem}.render.json",
+            role=role,
+            scenario_id=scenario.scenario_id,
+            seed=scenario.seed,
+            policy_sha256=report.policy.sha256,
+            evaluation_digest=evaluation_digest,
+            video_path=video,
+        )
+        clips[role] = RendererEvidence.load(sidecar)
     return clips
+
+
+@pytest.fixture
+def clip_files(tmp_path, passing_report) -> dict[str, RendererEvidence]:
+    return renderer_evidence(tmp_path, passing_report)
 
 
 @pytest.mark.parametrize("missing", ["nominal", "entry", "exit", "stress", "worst_case"])
@@ -63,17 +98,154 @@ def test_review_requires_every_mandatory_clip(missing, passing_spec, passing_rep
         ReviewBundle.build(passing_report, clip_files, spec=passing_spec)
 
 
-def test_every_clip_is_bound_to_the_evaluated_policy(passing_spec, passing_report, clip_files):
-    clip_files["stress"].policy_digest = "b" * 64
+def test_every_clip_is_bound_to_the_evaluated_policy(
+    tmp_path,
+    passing_spec,
+    passing_report,
+    clip_files,
+):
+    original = clip_files["stress"]
+    sidecar = write_renderer_sidecar(
+        tmp_path / "wrong-policy.render.json",
+        role=original.role,
+        scenario_id=original.scenario_id,
+        seed=original.seed,
+        policy_sha256="b" * 64,
+        evaluation_digest=original.evaluation_digest,
+        video_path=original.video_path,
+    )
+    clip_files["stress"] = RendererEvidence.load(sidecar)
     with pytest.raises(ReviewError, match="policy digest"):
         ReviewBundle.build(passing_report, clip_files, spec=passing_spec)
 
 
-def test_every_clip_role_is_bound_to_its_deterministic_evaluated_scenario(passing_spec, passing_report, clip_files):
-    clip_files["entry"].scenario_id = "nominal-1"
-    clip_files["entry"].seed = 7
+def test_every_clip_role_is_bound_to_its_deterministic_evaluated_scenario(
+    tmp_path,
+    passing_spec,
+    passing_report,
+    clip_files,
+):
+    original = clip_files["entry"]
+    sidecar = write_renderer_sidecar(
+        tmp_path / "wrong-scenario.render.json",
+        role="entry",
+        scenario_id="nominal-1",
+        seed=7,
+        policy_sha256=original.policy_sha256,
+        evaluation_digest=original.evaluation_digest,
+        video_path=original.video_path,
+    )
+    clip_files["entry"] = RendererEvidence.load(sidecar)
     with pytest.raises(ReviewError, match="entry.*scenario"):
         ReviewBundle.build(passing_report, clip_files, spec=passing_spec)
+
+
+def test_every_clip_is_bound_to_the_exact_evaluation(
+    tmp_path,
+    passing_spec,
+    passing_report,
+    clip_files,
+):
+    original = clip_files["exit"]
+    sidecar = write_renderer_sidecar(
+        tmp_path / "wrong-evaluation.render.json",
+        role=original.role,
+        scenario_id=original.scenario_id,
+        seed=original.seed,
+        policy_sha256=original.policy_sha256,
+        evaluation_digest="e" * 64,
+        video_path=original.video_path,
+    )
+    clip_files["exit"] = RendererEvidence.load(sidecar)
+
+    with pytest.raises(ReviewError, match="evaluation digest"):
+        ReviewBundle.build(passing_report, clip_files, spec=passing_spec)
+
+
+def test_plain_bytes_named_onnx_fail_review_before_any_bundle_is_built(
+    tmp_path,
+    passing_spec,
+    passing_report,
+    clip_files,
+):
+    policy = tmp_path / "fake.onnx"
+    policy.write_bytes(b"not an ONNX graph")
+    digest = hashlib.sha256(policy.read_bytes()).hexdigest()
+    report = replace(
+        passing_report,
+        policy=ArtifactRef(str(policy), "onnx", digest),
+        scenarios=tuple(
+            replace(scenario, policy_sha256=digest)
+            for scenario in passing_report.scenarios
+        ),
+    )
+    with pytest.raises(ReviewError, match="ONNX preflight"):
+        ReviewBundle.build(report, clip_files, spec=passing_spec)
+
+
+def test_deserialized_review_bundle_preflights_the_bound_onnx(
+    passing_spec,
+    passing_report,
+    clip_files,
+):
+    bundle = ReviewBundle.build(passing_report, clip_files, spec=passing_spec)
+    bundle.policy_path.write_bytes(b"not an ONNX graph")
+
+    with pytest.raises(ReviewError, match="ONNX preflight"):
+        ReviewBundle.from_dict(bundle.as_dict())
+
+
+def test_plain_text_named_mp4_fails_review_video_decode(
+    tmp_path,
+    passing_spec,
+    passing_report,
+    clip_files,
+):
+    original = clip_files["nominal"]
+    video = tmp_path / "text.mp4"
+    video.write_text("not a video", encoding="utf-8")
+    sidecar = write_renderer_sidecar(
+        tmp_path / "text.render.json",
+        role=original.role,
+        scenario_id=original.scenario_id,
+        seed=original.seed,
+        policy_sha256=original.policy_sha256,
+        evaluation_digest=original.evaluation_digest,
+        video_path=video,
+    )
+
+    with pytest.raises(ReviewError, match="decode|video"):
+        RendererEvidence.load(sidecar)
+
+
+def test_renderer_evidence_helper_writes_a_create_once_bound_sidecar(tmp_path):
+    video = write_test_video(tmp_path / "nominal.mp4")
+    sidecar = tmp_path / "nominal.render.json"
+
+    evidence = review_module.write_renderer_evidence(
+        sidecar,
+        role="nominal",
+        scenario_id="nominal-1",
+        seed=7,
+        policy_sha256="a" * 64,
+        evaluation_digest="b" * 64,
+        video_path=video,
+        renderer_revision="renderer-v1",
+    )
+
+    assert evidence.video_sha256 == hashlib.sha256(video.read_bytes()).hexdigest()
+    assert json.loads(sidecar.read_text()) == evidence.contract_dict()
+    with pytest.raises(FileExistsError, match="immutable"):
+        review_module.write_renderer_evidence(
+            sidecar,
+            role="nominal",
+            scenario_id="nominal-1",
+            seed=7,
+            policy_sha256="a" * 64,
+            evaluation_digest="b" * 64,
+            video_path=video,
+            renderer_revision="renderer-v1",
+        )
 
 
 def test_bundle_verification_is_a_complete_boundary_for_direct_construction(passing_spec, passing_report, clip_files):
@@ -88,8 +260,23 @@ def test_bundle_verification_is_a_complete_boundary_for_direct_construction(pass
 
 def test_bundle_verification_detects_a_clip_changed_after_review(passing_spec, passing_report, clip_files):
     bundle = ReviewBundle.build(passing_report, clip_files, spec=passing_spec)
-    clip_files["entry"].path.write_bytes(b"replaced video")
+    clip_files["entry"].video_path.write_bytes(b"replaced video")
     with pytest.raises(ReviewError, match="clip digest"):
+        bundle.verify()
+
+
+def test_bundle_verification_detects_renderer_sidecar_tampering(
+    passing_spec,
+    passing_report,
+    clip_files,
+):
+    bundle = ReviewBundle.build(passing_report, clip_files, spec=passing_spec)
+    sidecar = clip_files["stress"].evidence_path
+    raw = json.loads(sidecar.read_text(encoding="utf-8"))
+    raw["renderer_revision"] = "tampered-renderer"
+    sidecar.write_text(canonical_json(raw), encoding="utf-8")
+
+    with pytest.raises(ReviewError, match="sidecar binding|sidecar digest"):
         bundle.verify()
 
 
@@ -130,6 +317,44 @@ def test_bundle_records_canonical_evaluation_and_clip_evidence(passing_spec, pas
     assert all(clip.digest == hashlib.sha256(clip.path.read_bytes()).hexdigest() for clip in bundle.clips)
 
 
+def test_metric_summary_keeps_the_direction_aware_worst_scenario(
+    tmp_path,
+    passing_spec,
+    passing_report,
+):
+    minimum = MetricThreshold("support", "ratio", "minimum", 0.5)
+    spec = replace(passing_spec, metrics=(*passing_spec.metrics, minimum))
+    scenarios = []
+    for index, scenario in enumerate(passing_report.scenarios):
+        support = 0.5 if index == 0 else 1.0
+        scenarios.append(
+            replace(
+                scenario,
+                metrics={**scenario.metrics, "support": support},
+                threshold_results=(
+                    *scenario.threshold_results,
+                    MetricResult(
+                        scenario.scenario_id,
+                        "support",
+                        "ratio",
+                        "minimum",
+                        0.5,
+                        support,
+                        True,
+                        True,
+                        0.0,
+                    ),
+                ),
+            )
+        )
+    report = replace(passing_report, scenarios=tuple(scenarios))
+    clip_files = renderer_evidence(tmp_path, report, prefix="metric")
+
+    bundle = ReviewBundle.build(report, clip_files, spec=spec)
+
+    assert bundle.metric_summary == {"falls": 0.0, "support": 0.5}
+
+
 def test_baseline_requires_identical_evaluation_identity_and_scenario_multiset(passing_spec, passing_report, clip_files):
     baseline = replace(passing_report, evaluator_revision="different-evaluator")
     with pytest.raises(ReviewError, match="identity"):
@@ -140,8 +365,7 @@ def test_baseline_requires_identical_evaluation_identity_and_scenario_multiset(p
 
 
 def test_bundle_reverifies_retained_baseline_evidence(passing_spec, passing_report, clip_files, tmp_path):
-    baseline_policy = tmp_path / "baseline.onnx"
-    baseline_policy.write_bytes(b"baseline policy")
+    baseline_policy = write_tiny_policy(tmp_path / "baseline.onnx", weight=0.2)
     baseline_digest = hashlib.sha256(baseline_policy.read_bytes()).hexdigest()
     baseline = replace(
         passing_report, policy=ArtifactRef(str(baseline_policy), "onnx", baseline_digest),
@@ -170,7 +394,11 @@ def test_failed_baseline_is_allowed_only_when_its_thresholds_agree(passing_spec,
         ReviewBundle.build(passing_report, clip_files, baseline=inconsistent, spec=passing_spec)
 
 
-def test_multi_seed_family_clips_choose_the_stable_lowest_seed(passing_spec, passing_report, clip_files):
+def test_multi_seed_family_clips_choose_the_stable_lowest_seed(
+    tmp_path,
+    passing_spec,
+    passing_report,
+):
     original = passing_report.scenarios[0]
     extra = replace(
         original,
@@ -179,13 +407,16 @@ def test_multi_seed_family_clips_choose_the_stable_lowest_seed(passing_spec, pas
         threshold_results=(replace(original.threshold_results[0], scenario_id="nominal-0"),),
     )
     report = replace(passing_report, scenarios=(*passing_report.scenarios, extra))
-    path = clip_files["nominal"].path
-    clip_files["nominal"] = ReviewClip("nominal", "nominal-0", 1, path, report.policy.sha256)
+    clip_files = renderer_evidence(tmp_path, report, prefix="multi-seed")
 
     assert ReviewBundle.build(report, clip_files, spec=passing_spec).clips[0].scenario_id == "nominal-0"
 
 
-def test_spec_binding_rejects_uniformly_deleted_failed_metric_and_duplicate_name(passing_spec, passing_report, clip_files):
+def test_spec_binding_rejects_uniformly_deleted_failed_metric_and_duplicate_name(
+    tmp_path,
+    passing_spec,
+    passing_report,
+):
     two_metric_spec = replace(passing_spec, metrics=(
         MetricThreshold("falls", "count", "maximum", 0),
         MetricThreshold("style", "score", "minimum", 1, mandatory=False),
@@ -201,6 +432,7 @@ def test_spec_binding_rejects_uniformly_deleted_failed_metric_and_duplicate_name
         )
         for scenario in passing_report.scenarios
     ))
+    clip_files = renderer_evidence(tmp_path, report, prefix="two-metric")
     bundle = ReviewBundle.build(report, clip_files, spec=two_metric_spec)
     evidence = json.loads(bundle.evaluation_json)
     for scenario in evidence["scenarios"]:

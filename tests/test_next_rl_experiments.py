@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import threading
 from queue import Empty
 from typing import Any
 
@@ -178,12 +179,73 @@ def test_reservation_claims_a_planned_experiment_once(tmp_path):
         store.reserve(fingerprint)
 
 
+def test_concurrent_reservations_allow_exactly_one_start_owner(tmp_path):
+    store = ExperimentStore(tmp_path)
+    fingerprint = store.create(manifest())
+    start = threading.Barrier(3)
+    outcomes: list[str] = []
+
+    def reserve(owner: str) -> None:
+        start.wait()
+        try:
+            store.reserve(fingerprint, owner=owner)
+        except DuplicateExperimentError:
+            outcomes.append("blocked")
+        else:
+            outcomes.append("reserved")
+
+    workers = [
+        threading.Thread(target=reserve, args=("starter-a",)),
+        threading.Thread(target=reserve, args=("starter-b",)),
+    ]
+    for worker in workers:
+        worker.start()
+    start.wait()
+    for worker in workers:
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+
+    assert sorted(outcomes) == ["blocked", "reserved"]
+    assert store.status(fingerprint)["status"] == "pending"
+
+
+def test_only_the_reservation_owner_can_release_a_failed_start(tmp_path):
+    store = ExperimentStore(tmp_path)
+    fingerprint = store.create(manifest())
+    store.reserve(fingerprint, owner="starter-a")
+
+    with pytest.raises(DuplicateExperimentError, match="owner"):
+        store.release(fingerprint, owner="starter-b")
+
+    assert store.status(fingerprint)["status"] == "pending"
+    store.release(fingerprint, owner="starter-a")
+    assert store.status(fingerprint)["status"] == "planned"
+    assert store.reserve(fingerprint, owner="starter-b").action == "reserved"
+
+
+def test_same_owner_can_retry_an_uncertain_start_but_another_owner_is_blocked(tmp_path):
+    store = ExperimentStore(tmp_path)
+    fingerprint = store.create(manifest())
+    store.reserve(fingerprint, owner="starter-a")
+
+    assert store.reserve(fingerprint, owner="starter-a").action == "confirmed"
+    with pytest.raises(DuplicateExperimentError, match="reserved"):
+        store.reserve(fingerprint, owner="starter-b")
+
+    store.confirm(fingerprint, owner="starter-a")
+    with pytest.raises(DuplicateExperimentError, match="pending"):
+        store.reserve(fingerprint, owner="starter-a")
+
+
 @pytest.mark.parametrize(("status", "action"), [("failed", "retry"), ("interrupted", "resume")])
 def test_terminal_unsuccessful_experiment_returns_an_explicit_next_action(tmp_path, status: str, action: str):
     store = ExperimentStore(tmp_path)
     fingerprint = store.create(manifest(status=status))
 
-    assert store.reserve(fingerprint).action == action
+    assert store.reserve(fingerprint, owner="retry-owner").action == action
+    assert store.status(fingerprint)["status"] == "pending"
+    store.release(fingerprint, owner="retry-owner")
+    assert store.status(fingerprint)["status"] == status
 
 
 def test_lifecycle_is_linear_and_status_history_is_atomic(tmp_path):
@@ -205,6 +267,16 @@ def test_lifecycle_is_linear_and_status_history_is_atomic(tmp_path):
     }
     with pytest.raises(ValueError, match="cannot transition"):
         store.update_status(fingerprint, "running")
+
+
+def test_confirmed_remote_start_clears_claim_so_a_failed_run_can_be_retried(tmp_path):
+    store = ExperimentStore(tmp_path)
+    fingerprint = store.create(manifest())
+    store.reserve(fingerprint, owner="first-owner")
+    store.update_status(fingerprint, "running")
+    store.update_status(fingerprint, "failed")
+
+    assert store.reserve(fingerprint, owner="retry-owner").action == "retry"
 
 
 def test_simultaneous_terminal_transitions_allow_exactly_one_and_preserve_history(tmp_path):

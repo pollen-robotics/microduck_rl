@@ -30,18 +30,19 @@ uv run next-rl plan examples/skills/one-leg-hello.json
 ```
 
 `plan` returns a JSON disposition. `reuse` means an approved learned policy
-has the requested, evidenced contract and metrics. `warm_start` names a
-compatible parent policy; the `one-leg-hello` example can use `standing` as
-that parent. `train_new` means the catalogue has no matching evidence.
-`blocked` means the request is ambiguous, incompatible, or has insufficient
-evidence.
+has the requested, evidenced contract and metrics. `train_new` means training
+must start from a new policy; when a compatible, loadable ONNX exists, the
+result can name it as `reference_capability_id` for evaluation and comparison.
+An ONNX policy is not a resumable training checkpoint and therefore is never
+presented as a warm start. `blocked` means the request is ambiguous,
+incompatible, or has insufficient evidence.
 
 An overlapping shipped capability is evaluated before any retraining decision.
 Shipped or otherwise validated capability records are not automatically proof
 that they satisfy a new skill's numeric acceptance thresholds. Do not turn a
 blocked/evaluate-first result into a train command; evaluate the exact existing
 policy first. A deliberate improvement of a learned matching capability needs
-an auditable reason:
+a higher semantic spec version and an auditable reason:
 
 ```bash
 uv run next-rl plan examples/skills/one-leg-hello.json \
@@ -67,12 +68,22 @@ turn the placeholder into a runnable hello task and must never be followed by a
 hello start on Nitro.
 
 `prepare` records an immutable manifest and stages a safe, tracked-source
-bundle for the configured Nitro runner. It does **not** expose a `start`
+bundle for the configured Nitro runner. It does not expose a `start`
 subcommand. A real runner preparation requires
 `NEXT_RL_NITRO_SSH_ALIAS` (and optionally `NEXT_RL_NITRO_SSH_USER`); it uses
 host-key-checked transport. The displayed fingerprint is the value to pass to
 `status`, which reports lifecycle state and any stable checkpoint metadata
 without transport credentials.
+
+`NitroRunner.start` remains an internal API for a separately authorized
+launcher. That API requires the same durable experiment store: it reserves the
+experiment fingerprint before transport, rejects another launch of the same
+inputs, releases only its own reservation if transfer fails before launch,
+retains the same-owner claim when the launch response is uncertain, and
+synchronizes pending, running, succeeded, or failed status as the remote
+lifecycle advances.
+None of this creates a public `start` command, and the runner does not publish
+or deploy a policy.
 
 ### Current Nitro connection configuration
 
@@ -170,25 +181,31 @@ prepared.
 Evaluation is supplied by the simulation/evaluator workflow as a canonical
 JSON report bound to the exported ONNX digest. The workspace does not invent
 physics metrics or evaluate a checkpoint solely because training completed.
-Once the report passes, provide the capability document, skill specification,
-evaluation report, and all five required video inputs:
+The CLI preflights the actual 61-input/14-output ONNX and verifies the recorded
+digest before creating workspace state. Once the report passes, provide the
+capability document, skill specification, evaluation report, and five immutable
+renderer evidence sidecars:
 
 ```bash
 uv run next-rl review \
   --capability capability.json \
   --skill examples/skills/one-leg-hello.json \
   --evaluation evaluation.json \
-  --nominal-clip nominal.mp4 \
-  --entry-clip entry.mp4 \
-  --exit-clip exit.mp4 \
-  --stress-clip stress.mp4 \
-  --worst-case-clip worst-case.mp4
+  --nominal-evidence nominal.render.json \
+  --entry-evidence entry.render.json \
+  --exit-evidence exit.render.json \
+  --stress-evidence stress.render.json \
+  --worst-case-evidence worst-case.render.json
 ```
 
-Those clips are required evidence for nominal behavior, ordinary-standing
-entry, safe exit, held-out stress, and the worst observed rollout. The review
-bundle binds each clip and the report to the exact ONNX digest. It is not a
-replacement for a human reviewer.
+Each renderer writes its sidecar only after producing a decodable video. The
+canonical sidecar records role, scenario ID, evaluation seed, video path and
+SHA-256, renderer revision, and the exact policy and evaluation digests. The
+five roles cover nominal behavior, ordinary-standing entry, safe exit,
+held-out stress, and the worst observed rollout. `next-rl review` loads these
+renderer-authored bindings; it does not infer provenance from filenames or
+invent scenario, seed, policy, or report bindings. The resulting review bundle
+is not a replacement for a human reviewer.
 
 Before approving or rejecting, retain the returned `bundle_path` and
 `bundle_digest`, then inspect the canonical manifest and metrics and verify its
@@ -215,13 +232,18 @@ assert bundle.digest == expected_digest
 bundle.verify()
 print(json.dumps(json.loads(bundle.evaluation_json)["scenarios"], indent=2))
 for clip in bundle.clips:
-    print(clip.role, clip.path, clip.digest, clip.policy_digest)
+    print(
+        clip.role, clip.path, clip.digest, clip.policy_digest,
+        clip.evaluation_digest, clip.renderer_revision,
+        clip.evidence_path, clip.evidence_digest,
+    )
 PY
 ```
 
-`bundle.verify()` checks the exact evaluation and policy digest plus every
-referenced clip's role, scenario, path, and SHA-256. Open all five printed
-clips—nominal, entry, exit, stress, and worst case—and inspect the printed
+`bundle.verify()` repeats ONNX preflight and checks the exact evaluation,
+policy, sidecar, and video digests, the renderer revision, each role's evaluated
+scenario and seed, and that every video still decodes. Open all five printed
+videos—nominal, entry, exit, stress, and worst case—and inspect the printed
 metrics before making the human decision. Use the returned record ID only after
 that inspection:
 
@@ -252,8 +274,10 @@ is planning data for a small, non-training acceptance contract. It specifies:
 - explicit, unit-labelled simulation acceptance defaults and disjoint training
   and evaluation seeds.
 
-Its allowed parent is `standing`. Its `hardware_deployment.calibration_required`
-flag is deliberately true: approval never waives hardware calibration.
+Its allowed reference is `standing`, but the shipped ONNX is evaluation and
+comparison evidence only, not a checkpoint warm start; training initialization
+remains a new policy. Its `hardware_deployment.calibration_required` flag is
+deliberately true: approval never waives hardware calibration.
 
 ## Learned is not published or deployed
 

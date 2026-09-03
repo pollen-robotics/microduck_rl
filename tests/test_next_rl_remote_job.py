@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import importlib.util
 import hashlib
+import importlib.util
 import io
 import json
 import os
-import threading
 import tarfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -635,8 +635,14 @@ def test_failed_detached_spawn_keeps_start_request_retryable(
 def test_claimed_start_is_idempotently_left_for_spawned_supervisor(
     remote_job,
     job_directory: Path,
+    monkeypatch,
 ):
     _pending_start(remote_job, job_directory)
+    monkeypatch.setattr(
+        remote_job,
+        "live_process_identity",
+        lambda pid: _supervisor_identity(remote_job, job_directory, pid),
+    )
     remote_job.atomic_write_json(
         job_directory / "status.json",
         {
@@ -661,8 +667,14 @@ def test_claimed_start_is_idempotently_left_for_spawned_supervisor(
 def test_crash_after_claim_before_popen_self_heals_on_retry(
     remote_job,
     job_directory: Path,
+    monkeypatch,
 ):
     _pending_start(remote_job, job_directory)
+    monkeypatch.setattr(
+        remote_job,
+        "live_process_identity",
+        lambda pid: _supervisor_identity(remote_job, job_directory, pid),
+    )
 
     with pytest.raises(RuntimeError, match="claimed"):
         remote_job.inspect_or_control(
@@ -683,9 +695,15 @@ def test_crash_after_claim_before_popen_self_heals_on_retry(
 def test_crash_after_popen_before_spawn_record_converges_via_duplicate_supervisors(
     remote_job,
     job_directory: Path,
+    monkeypatch,
 ):
     _pending_start(remote_job, job_directory)
     spawned = []
+    monkeypatch.setattr(
+        remote_job,
+        "live_process_identity",
+        lambda pid: _supervisor_identity(remote_job, job_directory, pid),
+    )
 
     def popen(*args, **kwargs):
         spawned.append(SpawnedSupervisor())
@@ -740,7 +758,17 @@ def test_duplicate_supervisors_use_singleton_lock_to_launch_one_trainer(
 
 
 class SpawnedSupervisor:
-    pid = 456
+    def __init__(self, pid: int = 456):
+        self.pid = pid
+
+
+def _supervisor_identity(remote_job, job_directory: Path, pid: int, *, start: str = "100"):
+    argv = (
+        remote_job.sys.executable,
+        str(Path(remote_job.__file__).resolve()),
+        str(job_directory),
+    )
+    return remote_job.ProcessIdentity(pid, start, remote_job.command_digest(argv))
 
 
 def _pending_start(remote_job, job_directory: Path) -> None:
@@ -754,10 +782,19 @@ def _pending_start(remote_job, job_directory: Path) -> None:
     )
 
 
-def test_concurrent_starts_atomically_claim_and_spawn_once(remote_job, job_directory: Path):
+def test_concurrent_starts_atomically_claim_and_spawn_once(
+    remote_job,
+    job_directory: Path,
+    monkeypatch,
+):
     _pending_start(remote_job, job_directory)
     calls = []
     barrier = threading.Barrier(2)
+    monkeypatch.setattr(
+        remote_job,
+        "live_process_identity",
+        lambda pid: _supervisor_identity(remote_job, job_directory, pid),
+    )
 
     def popen(*args, **kwargs):
         state = json.loads((job_directory / "status.json").read_text())
@@ -776,9 +813,15 @@ def test_concurrent_starts_atomically_claim_and_spawn_once(remote_job, job_direc
     assert not (job_directory / "start-request.json").exists()
 
 
-def test_post_spawn_crash_retry_is_idempotent(remote_job, job_directory: Path):
+def test_live_post_spawn_crash_retry_is_idempotent(
+    remote_job,
+    job_directory: Path,
+    monkeypatch,
+):
     _pending_start(remote_job, job_directory)
     spawned = []
+    identity = _supervisor_identity(remote_job, job_directory, 456)
+    monkeypatch.setattr(remote_job, "live_process_identity", lambda pid: identity)
 
     def popen(*args, **kwargs):
         spawned.append(SpawnedSupervisor())
@@ -797,6 +840,7 @@ def test_post_spawn_crash_retry_is_idempotent(remote_job, job_directory: Path):
     recorded = json.loads((job_directory / "status.json").read_text())
     assert recorded["launch_state"] == "spawned"
     assert recorded["supervisor_pid"] == 456
+    assert recorded["supervisor_identity"] == identity.as_dict()
     assert (job_directory / "start-request.json").exists()
 
     result = remote_job.inspect_or_control(
@@ -806,6 +850,108 @@ def test_post_spawn_crash_retry_is_idempotent(remote_job, job_directory: Path):
     assert result["launch_state"] == "spawned"
     assert len(spawned) == 1
     assert not (job_directory / "start-request.json").exists()
+
+
+def test_dead_spawned_supervisor_is_recovered_by_one_new_spawn(
+    remote_job,
+    job_directory: Path,
+    monkeypatch,
+):
+    _pending_start(remote_job, job_directory)
+    spawned = []
+    alive = True
+
+    def popen(*args, **kwargs):
+        process = SpawnedSupervisor(456 + len(spawned))
+        spawned.append(process)
+        return process
+
+    def identity(pid):
+        if pid == 456 and not alive:
+            raise remote_job.RemoteJobError("dead supervisor")
+        return _supervisor_identity(remote_job, job_directory, pid)
+
+    monkeypatch.setattr(remote_job, "live_process_identity", identity)
+    with pytest.raises(RuntimeError, match="after spawn"):
+        remote_job.inspect_or_control(
+            job_directory,
+            supervisor_popen=popen,
+            after_spawn=lambda state: (_ for _ in ()).throw(RuntimeError("after spawn")),
+        )
+    alive = False
+
+    recovered = remote_job.inspect_or_control(job_directory, supervisor_popen=popen)
+
+    assert [process.pid for process in spawned] == [456, 457]
+    assert recovered["supervisor_identity"] == _supervisor_identity(
+        remote_job,
+        job_directory,
+        457,
+    ).as_dict()
+
+
+def test_reused_supervisor_pid_identity_is_untrusted_and_recovered(
+    remote_job,
+    job_directory: Path,
+    monkeypatch,
+):
+    _pending_start(remote_job, job_directory)
+    spawned = []
+    reused = False
+
+    def popen(*args, **kwargs):
+        process = SpawnedSupervisor(456 + len(spawned))
+        spawned.append(process)
+        return process
+
+    def identity(pid):
+        if pid == 456 and reused:
+            return _supervisor_identity(remote_job, job_directory, pid, start="reused")
+        return _supervisor_identity(remote_job, job_directory, pid)
+
+    monkeypatch.setattr(remote_job, "live_process_identity", identity)
+    with pytest.raises(RuntimeError, match="after spawn"):
+        remote_job.inspect_or_control(
+            job_directory,
+            supervisor_popen=popen,
+            after_spawn=lambda state: (_ for _ in ()).throw(RuntimeError("after spawn")),
+        )
+    reused = True
+
+    recovered = remote_job.inspect_or_control(job_directory, supervisor_popen=popen)
+
+    assert [process.pid for process in spawned] == [456, 457]
+    assert recovered["supervisor_identity"]["pid"] == 457
+
+
+def test_legacy_pid_only_spawn_record_is_untrusted_and_recovered(
+    remote_job,
+    job_directory: Path,
+    monkeypatch,
+):
+    _pending_start(remote_job, job_directory)
+    remote_job.atomic_write_json(
+        job_directory / "status.json",
+        {
+            "status": "pending",
+            "launch_request_id": "start-abc123",
+            "launch_state": "spawned",
+            "supervisor_pid": 456,
+        },
+    )
+    monkeypatch.setattr(
+        remote_job,
+        "live_process_identity",
+        lambda pid: _supervisor_identity(remote_job, job_directory, pid),
+    )
+
+    result = remote_job.inspect_or_control(
+        job_directory,
+        supervisor_popen=lambda *args, **kwargs: SpawnedSupervisor(457),
+    )
+
+    assert result["supervisor_pid"] == 457
+    assert result["supervisor_identity"]["pid"] == 457
 
 
 class LaunchedTrainer:

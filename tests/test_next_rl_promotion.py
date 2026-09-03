@@ -3,18 +3,135 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import threading
+from collections.abc import Mapping
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
+from test_next_rl_support import (
+    write_renderer_sidecar,
+    write_test_video,
+    write_tiny_policy,
+)
 
-from mjlab_microduck.next_rl.evaluation import EvaluationReport, MetricResult, ScenarioResult, select_worst_case
-from mjlab_microduck.next_rl.promotion import PromotionError, PromotionStore
-from mjlab_microduck.next_rl.review import ReviewBundle, ReviewClip
 from mjlab_microduck.next_rl.artifacts import canonical_json
-from mjlab_microduck.next_rl.schema import ArtifactRef, Capability, MetricThreshold, PolicyContract, SkillSpec
+from mjlab_microduck.next_rl.capabilities import Disposition, plan_skill
+from mjlab_microduck.next_rl.evaluation import (
+    EvaluationReport,
+    ScenarioResult,
+    evaluate_thresholds,
+    select_worst_case,
+)
+from mjlab_microduck.next_rl.promotion import PromotionError, PromotionStore
+from mjlab_microduck.next_rl.review import RendererEvidence, ReviewBundle
+from mjlab_microduck.next_rl.schema import (
+    ArtifactRef,
+    Capability,
+    MetricThreshold,
+    PolicyContract,
+    SkillSpec,
+)
+
+_SCENARIOS = (("nominal", 7), ("entry", 8), ("exit", 9), ("stress", 10))
+
+
+def skill_spec(
+    version: str,
+    *,
+    support_limit: float | None = None,
+    support_mandatory: bool = True,
+) -> SkillSpec:
+    metrics = [MetricThreshold("falls", "count", "maximum", 0)]
+    if support_limit is not None:
+        metrics.append(
+            MetricThreshold(
+                "support",
+                "ratio",
+                "minimum",
+                support_limit,
+                support_mandatory,
+            )
+        )
+    return SkillSpec(
+        "hello",
+        version,
+        "promotion contract",
+        PolicyContract.microduck(),
+        tuple(metrics),
+        (1,),
+        tuple(seed for _, seed in _SCENARIOS),
+        held_out_scenarios=tuple(family for family, _ in _SCENARIOS),
+    )
+
+
+def evaluation_report(
+    spec: SkillSpec,
+    policy: Path,
+    *,
+    support_values: Mapping[str, float] | None = None,
+) -> EvaluationReport:
+    digest = hashlib.sha256(policy.read_bytes()).hexdigest()
+    scenarios = []
+    for family, seed in _SCENARIOS:
+        metrics = {"falls": 0.0}
+        if support_values is not None:
+            metrics["support"] = support_values[family]
+        scenarios.append(
+            ScenarioResult(f"{family}-1", family, seed, metrics, digest)
+        )
+    return evaluate_thresholds(
+        spec,
+        scenarios,
+        evaluator_revision="eval-a",
+        policy=ArtifactRef(str(policy), "onnx", digest),
+    )
+
+
+def build_bundle(
+    root: Path,
+    *,
+    label: str,
+    version: str = "1.0.0",
+    weight: float = 0.1,
+    baseline_policy: Path | None = None,
+    support_values: Mapping[str, float] | None = None,
+    support_limit: float | None = None,
+    support_mandatory: bool = True,
+) -> ReviewBundle:
+    spec = skill_spec(
+        version,
+        support_limit=support_limit,
+        support_mandatory=support_mandatory,
+    )
+    policy = write_tiny_policy(root / f"{label}.onnx", weight=weight)
+    report = evaluation_report(spec, policy, support_values=support_values)
+    evaluation_json = canonical_json(report.as_dict())
+    evaluation_digest = hashlib.sha256(evaluation_json.encode()).hexdigest()
+    by_family = {scenario.family: scenario for scenario in report.scenarios}
+    expected = {**by_family, "worst_case": select_worst_case(report.scenarios)}
+    evidence = {}
+    for role, scenario in expected.items():
+        video = write_test_video(root / f"{label}-{role}.mp4")
+        sidecar = write_renderer_sidecar(
+            root / f"{label}-{role}.renderer.json",
+            role=role,
+            scenario_id=scenario.scenario_id,
+            seed=scenario.seed,
+            policy_sha256=report.policy.sha256,
+            evaluation_digest=evaluation_digest,
+            video_path=video,
+        )
+        evidence[role] = RendererEvidence.load(sidecar)
+    baseline = None
+    if baseline_policy is not None:
+        baseline = evaluation_report(
+            spec,
+            baseline_policy,
+            support_values=support_values,
+        )
+    return ReviewBundle.build(report, evidence, spec=spec, baseline=baseline)
 
 
 @pytest.fixture
@@ -27,30 +144,7 @@ def capability() -> Capability:
 
 @pytest.fixture
 def bundle(tmp_path) -> ReviewBundle:
-    policy = tmp_path / "policy.onnx"
-    policy.write_bytes(b"evaluated policy")
-    digest = hashlib.sha256(policy.read_bytes()).hexdigest()
-    scenarios = tuple(
-        ScenarioResult(
-            f"{family}-1", family, seed, {"falls": 0.0}, digest,
-            (MetricResult(f"{family}-1", "falls", "count", "maximum", 0, 0, True, True, 0),),
-        )
-        for family, seed in (("nominal", 7), ("entry", 8), ("exit", 9), ("stress", 10))
-    )
-    report = EvaluationReport("hello", "1.0.0", "eval-a", scenarios, True, ArtifactRef(str(policy), "onnx", digest))
-    by_family = {scenario.family: scenario for scenario in scenarios}
-    expected = {**by_family, "worst_case": select_worst_case(scenarios)}
-    clips = {}
-    for role, scenario in expected.items():
-        path = tmp_path / f"{role}.mp4"
-        path.write_bytes(role.encode())
-        clips[role] = ReviewClip(role, scenario.scenario_id, scenario.seed, path, digest)
-    spec = SkillSpec(
-        "hello", "1.0.0", "promotion contract", PolicyContract.microduck(),
-        (MetricThreshold("falls", "count", "maximum", 0),), (1,), (7, 8, 9, 10),
-        held_out_scenarios=("nominal", "entry", "exit", "stress"),
-    )
-    return ReviewBundle.build(report, clips, spec=spec)
+    return build_bundle(tmp_path, label="v1")
 
 
 @pytest.fixture
@@ -122,14 +216,16 @@ def test_approval_updates_durable_inventory_for_planner_observation(store, capab
     assert learned.evaluation.approval_provenance == bundle.digest
 
 
-def test_rejection_preserves_prior_learned_policy(store, capability, bundle, prior):
-    evidence = json.loads(bundle.evaluation_json)
-    evidence["spec_version"] = "1.0.1"
-    versioned_json = canonical_json(evidence)
-    spec_evidence = json.loads(bundle.spec_json)
-    spec_evidence["version"] = "1.0.1"
-    spec_json = canonical_json(spec_evidence)
-    candidate_bundle = replace(bundle, evaluation_json=versioned_json, evaluation_digest=hashlib.sha256(versioned_json.encode()).hexdigest(), spec_json=spec_json, spec_digest=hashlib.sha256(spec_json.encode()).hexdigest())
+def test_rejection_preserves_prior_learned_policy(
+    store, capability, bundle, prior, tmp_path
+):
+    candidate_bundle = build_bundle(
+        tmp_path,
+        label="rejected-v101",
+        version="1.0.1",
+        weight=0.2,
+        baseline_policy=bundle.policy_path,
+    )
     candidate = replace(capability, version="1.0.1")
     rejected = store.reject(pending(store, candidate, candidate_bundle).id, reviewer="rakesh", reason="leans")
     assert rejected.status == "validated"
@@ -213,22 +309,214 @@ def test_advisory_lock_releases_with_descriptor_and_does_not_break_live_owner(st
     store.validate(capability, bundle)
 
 
-def test_distinct_pending_versions_serialize_to_one_learned_policy(store, capability, bundle):
-    evidence = json.loads(bundle.evaluation_json)
-    evidence["spec_version"] = "1.0.1"
-    text = canonical_json(evidence)
-    spec_evidence = json.loads(bundle.spec_json)
-    spec_evidence["version"] = "1.0.1"
-    spec_json = canonical_json(spec_evidence)
-    candidate = replace(bundle, evaluation_json=text, evaluation_digest=hashlib.sha256(text.encode()).hexdigest(), spec_json=spec_json, spec_digest=hashlib.sha256(spec_json.encode()).hexdigest())
-    pending_a = pending(store, capability, bundle)
-    pending_b = pending(store, replace(capability, version="1.0.1"), candidate)
+@pytest.mark.parametrize("version", ("1.0.0", "0.9.9"))
+def test_available_improvement_must_bump_the_active_semantic_version(
+    store, capability, bundle, prior, tmp_path, version
+):
+    candidate_bundle = build_bundle(
+        tmp_path,
+        label=f"invalid-{version.replace('.', '-')}",
+        version=version,
+        weight=0.2,
+        baseline_policy=bundle.policy_path,
+    )
+
+    with pytest.raises(PromotionError, match="higher semantic version"):
+        store.validate(replace(capability, version=version), candidate_bundle)
+
+    assert store.current_learned("hello") == prior
+
+
+def test_approval_rejects_a_lower_candidate_that_was_already_pending(
+    store, capability, bundle, tmp_path
+):
+    lower_bundle = build_bundle(
+        tmp_path,
+        label="pending-v099",
+        version="0.9.9",
+        weight=0.2,
+    )
+    lower = pending(store, replace(capability, version="0.9.9"), lower_bundle)
+    current = pending(store, capability, bundle)
+    store.approve(current.id, reviewer="current-reviewer")
+
+    with pytest.raises(PromotionError, match="higher semantic version"):
+        store.approve(lower.id, reviewer="stale-reviewer")
+
+    assert store.current_learned("hello").id == current.id
+
+
+def test_approval_rejects_a_distinct_same_version_pending_record(
+    store, capability, bundle
+):
+    review = pending(store, capability, bundle)
+    state = store._load()
+    duplicate = replace(review, id="duplicate-pending-record")
+    state["records"][duplicate.id] = duplicate.as_dict()
+    state["bundles"][duplicate.id] = state["bundles"][review.id]
+    store._save(state)
+    store.approve(review.id, reviewer="first-reviewer")
+
+    with pytest.raises(PromotionError, match="higher semantic version"):
+        store.approve(duplicate.id, reviewer="second-reviewer")
+
+    assert store.current_learned("hello").id == review.id
+
+
+def test_improvement_approval_requires_a_baseline_bound_to_current_policy(
+    store, capability, bundle, prior, tmp_path
+):
+    candidate_bundle = build_bundle(
+        tmp_path,
+        label="v101-without-baseline",
+        version="1.0.1",
+        weight=0.2,
+    )
+    review = pending(store, replace(capability, version="1.0.1"), candidate_bundle)
+
+    with pytest.raises(PromotionError, match="baseline"):
+        store.approve(review.id, reviewer="rakesh")
+
+    assert store.current_learned("hello") == prior
+
+
+def test_approval_rejects_a_stale_improvement_baseline(
+    store, capability, bundle, prior, tmp_path
+):
+    stale_bundle = build_bundle(
+        tmp_path,
+        label="stale-v200",
+        version="2.0.0",
+        weight=0.3,
+        baseline_policy=bundle.policy_path,
+    )
+    stale = pending(store, replace(capability, version="2.0.0"), stale_bundle)
+    first_bundle = build_bundle(
+        tmp_path,
+        label="winner-v101",
+        version="1.0.1",
+        weight=0.2,
+        baseline_policy=bundle.policy_path,
+    )
+    first = pending(store, replace(capability, version="1.0.1"), first_bundle)
+    store.approve(first.id, reviewer="first-reviewer")
+
+    with pytest.raises(PromotionError, match="baseline policy digest"):
+        store.approve(stale.id, reviewer="stale-reviewer")
+
+    assert store.current_learned("hello").id == first.id
+    assert store._load()["records"][stale.id]["status"] == "review_pending"
+
+
+def test_improvement_lifecycle_requires_bump_then_promotes_and_resolves_new_version(
+    store, capability, bundle, prior, tmp_path
+):
+    same_version = plan_skill(
+        skill_spec("1.0.0"),
+        store.inventory(),
+        improve_reason="Improve the approved policy.",
+    )
+    assert same_version.disposition == Disposition.BLOCKED
+    assert "version bump" in same_version.reason
+
+    improvement = plan_skill(
+        skill_spec("1.0.1"),
+        store.inventory(),
+        improve_reason="Improve the approved policy.",
+    )
+    assert improvement.disposition == Disposition.TRAIN_NEW
+    assert improvement.capability is not None
+    assert improvement.capability.version == "1.0.0"
+
+    candidate_bundle = build_bundle(
+        tmp_path,
+        label="approved-v101",
+        version="1.0.1",
+        weight=0.2,
+        baseline_policy=bundle.policy_path,
+    )
+    review = pending(store, replace(capability, version="1.0.1"), candidate_bundle)
+    learned = store.approve(review.id, reviewer="upgrade-reviewer")
+
+    state = store._load()
+    capabilities = {
+        item["version"]: item
+        for item in state["capabilities"]
+        if item["id"] == "hello"
+    }
+    assert state["records"][prior.id]["status"] == "superseded"
+    assert state["records"][learned.id]["status"] == "learned"
+    assert capabilities["1.0.0"]["status"] == "superseded"
+    assert capabilities["1.0.1"]["status"] == "learned"
+    assert store.current_learned("hello") == learned
+    assert store.inventory().resolve("hello").capability.version == "1.0.1"
+    assert plan_skill(skill_spec("1.0.1"), store.inventory()).disposition == Disposition.REUSE
+
+
+def test_current_learned_rejects_multiple_active_records(
+    store, capability, bundle, prior
+):
+    state = store._load()
+    duplicate = dict(state["records"][prior.id])
+    duplicate["id"] = "unexpected-second-active"
+    state["records"][duplicate["id"]] = duplicate
+    store._save(state)
+
+    with pytest.raises(PromotionError, match="multiple active learned"):
+        store.current_learned("hello")
+
+
+def test_promoted_minimum_metric_retains_the_worst_scenario_for_reuse(
+    store, capability, tmp_path
+):
+    evidence = build_bundle(
+        tmp_path,
+        label="minimum-summary",
+        support_limit=0.9,
+        support_mandatory=False,
+        support_values={
+            "nominal": 1.0,
+            "entry": 0.5,
+            "exit": 1.0,
+            "stress": 1.0,
+        },
+    )
+    review = pending(store, capability, evidence)
+    store.approve(review.id, reviewer="metric-reviewer")
+
+    learned = store.inventory().resolve("hello").capability
+    assert learned.evaluation.metric_results["support"] == 0.5
+    assert plan_skill(evidence.skill_spec, store.inventory()).disposition == Disposition.BLOCKED
+
+
+def test_concurrent_improvement_approvals_leave_one_authoritative_learned_policy(
+    store, capability, bundle, prior, tmp_path
+):
+    candidate_a = build_bundle(
+        tmp_path,
+        label="concurrent-v101",
+        version="1.0.1",
+        weight=0.2,
+        baseline_policy=bundle.policy_path,
+    )
+    candidate_b = build_bundle(
+        tmp_path,
+        label="concurrent-v102",
+        version="1.0.2",
+        weight=0.3,
+        baseline_policy=bundle.policy_path,
+    )
+    pending_a = pending(store, replace(capability, version="1.0.1"), candidate_a)
+    pending_b = pending(store, replace(capability, version="1.0.2"), candidate_b)
     start = threading.Barrier(3)
     outcomes: list[object] = []
 
     def approve(record_id: str, reviewer: str) -> None:
         start.wait()
-        outcomes.append(PromotionStore(store.root).approve(record_id, reviewer=reviewer))
+        try:
+            outcomes.append(PromotionStore(store.root).approve(record_id, reviewer=reviewer))
+        except PromotionError as error:
+            outcomes.append(error)
 
     workers = [
         threading.Thread(target=approve, args=(pending_a.id, "a")),
@@ -242,11 +530,13 @@ def test_distinct_pending_versions_serialize_to_one_learned_policy(store, capabi
         assert not worker.is_alive()
 
     state = store._load()
-    records = state["records"].values()
+    records = list(state["records"].values())
     capabilities = [item for item in state["capabilities"] if item["id"] == "hello"]
 
     assert len(outcomes) == 2
+    assert sum(isinstance(outcome, PromotionError) for outcome in outcomes) == 1
     assert sum(record["status"] == "learned" for record in records) == 1
     assert sum(record["status"] == "superseded" for record in records) == 1
     assert sum(item["status"] == "learned" for item in capabilities) == 1
     assert sum(item["status"] == "superseded" for item in capabilities) == 1
+    assert state["records"][prior.id]["status"] == "superseded"

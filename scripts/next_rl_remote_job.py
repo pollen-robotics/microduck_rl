@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -19,8 +20,6 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, NamedTuple
-
-import fcntl
 
 REMOTE_ROOT = Path("/home/aif_eng/microduck-training/runs")
 _FINGERPRINT = re.compile(r"^[0-9a-f]{6,64}$")
@@ -888,6 +887,26 @@ def run_supervisor(job: Path) -> dict[str, object]:
             raise
 
 
+def _supervisor_argv(job: Path) -> tuple[str, ...]:
+    return (sys.executable, str(Path(__file__).resolve()), str(job))
+
+
+def _spawned_supervisor_is_live(
+    state: Mapping[str, object],
+    *,
+    command_sha256: str,
+) -> bool:
+    raw = state.get("supervisor_identity")
+    if not isinstance(raw, Mapping) or state.get("supervisor_pid") != raw.get("pid"):
+        return False
+    try:
+        recorded = _identity_from(raw)
+        current = live_process_identity(recorded.pid)
+    except RemoteJobError:
+        return False
+    return recorded == current and recorded.command_digest == command_sha256
+
+
 def _start_supervisor(
     job: Path,
     *,
@@ -906,12 +925,18 @@ def _start_supervisor(
         or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", request_id)
     ):
         raise RemoteJobError("start request is invalid")
+    supervisor_argv = _supervisor_argv(job)
+    supervisor_command_sha256 = command_digest(supervisor_argv)
     if state.get("launch_request_id") == request_id and state.get("launch_state") == "spawned":
-        try:
-            (job / "start-request.json").unlink()
-        except FileNotFoundError:
-            pass
-        return state
+        if _spawned_supervisor_is_live(
+            state,
+            command_sha256=supervisor_command_sha256,
+        ):
+            try:
+                (job / "start-request.json").unlink()
+            except FileNotFoundError:
+                pass
+            return state
     if state.get("status") != "pending":
         if state.get("launch_request_id") == request_id:
             try:
@@ -924,7 +949,11 @@ def _start_supervisor(
     if existing_request not in (None, request_id):
         raise RemoteJobError("a different start request already owns this job")
     claimed = {
-        **state,
+        **{
+            key: value
+            for key, value in state.items()
+            if key not in {"supervisor_identity", "supervisor_pid"}
+        },
         "launch_request_id": request_id,
         "launch_state": "claimed",
     }
@@ -935,7 +964,7 @@ def _start_supervisor(
     environment[_SUPERVISOR_ENV] = "1"
     try:
         supervisor = popen(
-            (sys.executable, str(Path(__file__).resolve()), str(job)),
+            supervisor_argv,
             cwd=job,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -950,10 +979,14 @@ def _start_supervisor(
         raise
     if after_popen is not None:
         after_popen(supervisor)
+    supervisor_identity = live_process_identity(supervisor.pid)
+    if supervisor_identity.command_digest != supervisor_command_sha256:
+        raise RemoteJobError("spawned supervisor command identity mismatch")
     spawned = {
         **claimed,
         "launch_state": "spawned",
         "supervisor_pid": supervisor.pid,
+        "supervisor_identity": supervisor_identity.as_dict(),
     }
     atomic_write_json(job / "status.json", spawned)
     if after_spawn is not None:

@@ -61,8 +61,11 @@ instead of locally (see [scripts/hf/README.md](scripts/hf/README.md)).
 existing trainer, exporter, publisher, or robot runtime. Start with the
 [Next RL workspace operator guide](docs/next-rl-workspace.md); it documents
 inventory, conservative planning, Nitro preparation and status, evaluation
-evidence, five-video human review, and explicit approval or rejection. A
-capability marked `learned` is not automatically published or deployed.
+evidence, five renderer-bound video sidecars, and explicit human approval or
+rejection. ONNX capabilities are evaluation references, not training
+checkpoints, so they do not authorize a warm start. The CLI exposes no training
+`start` command; a capability marked `learned` is not automatically published
+or deployed.
 The bundled `one-leg-hello` specification is planning-only: its
 `Mjlab-OneLegHello-MicroDuck` task ID is not registered and must not be started.
 The operator guide also records the current host-checked Nitro/WSL connection

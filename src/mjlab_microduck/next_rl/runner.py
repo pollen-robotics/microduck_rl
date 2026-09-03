@@ -11,13 +11,19 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from .artifacts import atomic_write_json, canonical_json, sha256_file
-from .experiments import experiment_fingerprint, learning_inputs
+from .experiments import (
+    DuplicateExperimentError,
+    ExperimentStore,
+    experiment_fingerprint,
+    learning_inputs,
+)
 from .schema import ExperimentManifest
 
 _TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
@@ -389,9 +395,12 @@ class NitroRunner:
         self,
         config: NitroConfig,
         adapter: CommandAdapter | None = None,
+        *,
+        experiment_store: ExperimentStore | None = None,
     ) -> None:
         self.config = config
         self.adapter = adapter or OpenSSHAdapter()
+        self.experiment_store = experiment_store
 
     @property
     def _target(self) -> str:
@@ -644,6 +653,15 @@ class NitroRunner:
         if local_directory.resolve().parent != self.config.bundle_root:
             raise RunnerError("local fingerprint directory escaped the configured bundle root")
 
+        archive_path = local_directory / "source.tar"
+        commit, tree, archive_sha256 = _snapshot_source(
+            self.config.repository,
+            archive_path,
+        )
+        captured_code_digest = hashlib.sha256(commit.encode("ascii")).hexdigest()
+        if manifest.code_digest != captured_code_digest:
+            raise RunnerError("manifest code digest does not match the captured source commit")
+
         resume_record: dict[str, object] | None = None
         staged_checkpoint: Path | None = None
         if manifest.agent_config.get("resume") is True:
@@ -694,11 +712,6 @@ class NitroRunner:
                 "target_relative_path": relative_path.as_posix(),
             }
 
-        archive_path = local_directory / "source.tar"
-        commit, tree, archive_sha256 = _snapshot_source(
-            self.config.repository,
-            archive_path,
-        )
         digest = hashlib.sha256(canonical_json(list(train_argv)).encode("utf-8")).hexdigest()
         prepared_manifest: dict[str, object] = {
             "command": {"argv_file": "train-argv.json", "sha256": digest},
@@ -875,23 +888,65 @@ class NitroRunner:
             raise RunnerError("remote wrapper state must be a JSON object")
         return state
 
-    def start(self, prepared: PreparedJob) -> dict[str, object]:
+    def _sync_experiment_status(self, fingerprint: str, state: Mapping[str, object]) -> None:
+        store = self.experiment_store
+        if store is None:
+            return
+        remote_status = state.get("status")
+        if remote_status not in {"pending", "running", "succeeded", "failed"}:
+            raise RunnerError("remote lifecycle state is invalid")
+        local_status = store.status(fingerprint).get("status")
+        if remote_status == "pending" or local_status == remote_status:
+            return
+        if local_status == "pending" and remote_status in {"succeeded", "failed"}:
+            store.update_status(fingerprint, "running")
+            local_status = "running"
+        if (local_status, remote_status) in {
+            ("pending", "running"),
+            ("running", "succeeded"),
+            ("running", "failed"),
+        }:
+            store.update_status(fingerprint, str(remote_status))
+            return
+        raise RunnerError(
+            f"remote lifecycle {remote_status!r} conflicts with local experiment {local_status!r}"
+        )
+
+    def start(self, prepared: PreparedJob, *, owner: str | None = None) -> dict[str, object]:
         """Request detached execution; a disconnect never triggers cancellation."""
+        store = self.experiment_store
+        if store is None:
+            raise RunnerError("an experiment store is required to reserve a start")
         expected = self._remote_directory(prepared.fingerprint)
         if prepared.remote_directory != expected:
             raise RunnerError("prepared job remote directory is outside its fingerprint path")
+        reservation_owner = owner or uuid.uuid4().hex
+        store.reserve(prepared.fingerprint, owner=reservation_owner)
         request_path = prepared.local_directory / "start-request.json"
         atomic_write_json(
             request_path,
             {"action": "start", "request_id": f"start-{prepared.fingerprint}"},
         )
-        self._upload_files((request_path,), expected)
-        return self._state(self._invoke_wrapper(expected))
+        try:
+            self._upload_files((request_path,), expected)
+        except BaseException:
+            try:
+                store.release(prepared.fingerprint, owner=reservation_owner)
+            except (DuplicateExperimentError, FileNotFoundError):
+                pass
+            raise
+        state = self._state(self._invoke_wrapper(expected))
+        self._sync_experiment_status(prepared.fingerprint, state)
+        if state.get("status") == "pending":
+            store.confirm(prepared.fingerprint, owner=reservation_owner)
+        return state
 
     def status(self, fingerprint: str) -> dict[str, object]:
         """Return remote state plus a live process identity when applicable."""
         remote_directory = self._remote_directory(fingerprint)
-        return self._state(self._invoke_wrapper(remote_directory, read_only=True))
+        state = self._state(self._invoke_wrapper(remote_directory, read_only=True))
+        self._sync_experiment_status(fingerprint, state)
+        return state
 
     def cancel(self, fingerprint: str) -> dict[str, object]:
         """Cancel only when live PID, start time, and command digest all match."""

@@ -290,9 +290,11 @@ def preflight_onnx(policy: str | Path) -> ArtifactRef:
             smoke_run_onnx(snapshot)
             if sha256_file(source) != digest:
                 raise ArtifactIntegrityError("policy source changed while preflighting its snapshot")
-    except ManifestError as error:
+    except ArtifactIntegrityError:
+        raise
+    except (ManifestError, OSError) as error:
         raise EvaluationError(f"ONNX preflight failed: {error}") from error
-    except OSError as error:
+    except Exception as error:
         raise EvaluationError(f"ONNX preflight failed: {error}") from error
     return ArtifactRef(str(source), "onnx", digest)
 

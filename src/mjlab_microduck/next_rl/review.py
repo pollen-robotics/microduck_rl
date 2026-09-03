@@ -5,14 +5,23 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import tempfile
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import imageio.v3 as iio
+
 from .artifacts import canonical_json, sha256_file
-from .evaluation import ArtifactIntegrityError, EvaluationReport
+from .evaluation import (
+    ArtifactIntegrityError,
+    EvaluationError,
+    EvaluationReport,
+    preflight_onnx,
+)
 from .schema import SkillSpec
 
 
@@ -34,6 +43,55 @@ def _file(path: Path | None, label: str) -> None:
         raise ReviewError(f"{label} must be a non-empty regular file")
 
 
+def _sha256(value: object, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ReviewError(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _text(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ReviewError(f"{label} must be a non-empty string")
+    return value
+
+
+def _decode_video(path: Path, label: str) -> None:
+    try:
+        frame = iio.imread(path, index=0)
+    except Exception as error:
+        raise ReviewError(f"{label} video must decode at least one frame") from error
+    if getattr(frame, "size", 0) <= 0:
+        raise ReviewError(f"{label} video must decode at least one frame")
+
+
+def _write_json_once(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(canonical_json(value).encode("utf-8"))
+            output.flush()
+            os.fsync(output.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError as error:
+            raise FileExistsError(f"refusing to overwrite immutable renderer evidence {path}") from error
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
 @dataclass
 class ReviewClip:
     role: str
@@ -44,6 +102,118 @@ class ReviewClip:
 
 
 @dataclass(frozen=True)
+class RendererEvidence:
+    """Create-once renderer sidecar bound to exact evaluation and video bytes."""
+
+    role: str
+    scenario_id: str
+    seed: int
+    policy_sha256: str
+    evaluation_digest: str
+    video_path: Path
+    video_sha256: str
+    renderer_revision: str
+    evidence_path: Path
+    evidence_sha256: str
+
+    def contract_dict(self) -> dict[str, object]:
+        return {
+            "evaluation_digest": self.evaluation_digest,
+            "policy_sha256": self.policy_sha256,
+            "renderer_revision": self.renderer_revision,
+            "role": self.role,
+            "scenario_id": self.scenario_id,
+            "seed": self.seed,
+            "video_path": str(self.video_path),
+            "video_sha256": self.video_sha256,
+        }
+
+    @classmethod
+    def load(cls, path: str | Path) -> RendererEvidence:
+        sidecar = Path(path)
+        _file(sidecar, "renderer evidence")
+        try:
+            raw = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ReviewError("renderer evidence must be canonical JSON") from error
+        fields = {
+            "evaluation_digest",
+            "policy_sha256",
+            "renderer_revision",
+            "role",
+            "scenario_id",
+            "seed",
+            "video_path",
+            "video_sha256",
+        }
+        if not isinstance(raw, dict) or set(raw) != fields or canonical_json(raw) != sidecar.read_text(encoding="utf-8"):
+            raise ReviewError("renderer evidence must be canonical JSON with exact fields")
+        seed = raw["seed"]
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise ReviewError("renderer evidence seed must be an integer")
+        evidence = cls(
+            _text(raw["role"], "renderer evidence role"),
+            _text(raw["scenario_id"], "renderer evidence scenario_id"),
+            seed,
+            _sha256(raw["policy_sha256"], "renderer evidence policy_sha256"),
+            _sha256(raw["evaluation_digest"], "renderer evidence evaluation_digest"),
+            Path(_text(raw["video_path"], "renderer evidence video_path")),
+            _sha256(raw["video_sha256"], "renderer evidence video_sha256"),
+            _text(raw["renderer_revision"], "renderer revision"),
+            sidecar,
+            sha256_file(sidecar),
+        )
+        evidence.verify()
+        return evidence
+
+    def verify(self) -> None:
+        _file(self.evidence_path, "renderer evidence")
+        try:
+            raw = json.loads(self.evidence_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ReviewError("renderer evidence must be canonical JSON") from error
+        if canonical_json(raw) != self.evidence_path.read_text(encoding="utf-8") or raw != self.contract_dict():
+            raise ReviewError("renderer evidence sidecar binding is invalid")
+        if sha256_file(self.evidence_path) != self.evidence_sha256:
+            raise ReviewError("renderer evidence sidecar digest mismatch")
+        _file(self.video_path, f"{self.role} clip")
+        if sha256_file(self.video_path) != self.video_sha256:
+            raise ReviewError(f"{self.role} clip digest mismatch")
+        _decode_video(self.video_path, f"{self.role} clip")
+
+
+def write_renderer_evidence(
+    path: str | Path,
+    *,
+    role: str,
+    scenario_id: str,
+    seed: int,
+    policy_sha256: str,
+    evaluation_digest: str,
+    video_path: str | Path,
+    renderer_revision: str,
+) -> RendererEvidence:
+    """Atomically create immutable evidence after a renderer has completed a video."""
+    video = Path(video_path)
+    _file(video, f"{role} clip")
+    _decode_video(video, f"{role} clip")
+    raw = {
+        "evaluation_digest": _sha256(evaluation_digest, "evaluation_digest"),
+        "policy_sha256": _sha256(policy_sha256, "policy_sha256"),
+        "renderer_revision": _text(renderer_revision, "renderer revision"),
+        "role": _text(role, "renderer evidence role"),
+        "scenario_id": _text(scenario_id, "renderer evidence scenario_id"),
+        "seed": seed,
+        "video_path": str(video),
+        "video_sha256": sha256_file(video),
+    }
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ReviewError("renderer evidence seed must be an integer")
+    _write_json_once(Path(path), raw)
+    return RendererEvidence.load(path)
+
+
+@dataclass(frozen=True)
 class BoundReviewClip:
     role: str
     scenario_id: str
@@ -51,10 +221,16 @@ class BoundReviewClip:
     path: Path
     digest: str
     policy_digest: str
+    evaluation_digest: str
+    renderer_revision: str
+    evidence_path: Path
+    evidence_digest: str
 
     def as_dict(self) -> dict[str, object]:
         return {"role": self.role, "scenario_id": self.scenario_id, "seed": self.seed,
-                "path": str(self.path), "sha256": self.digest, "policy_sha256": self.policy_digest}
+                "path": str(self.path), "sha256": self.digest, "policy_sha256": self.policy_digest,
+                "evaluation_digest": self.evaluation_digest, "renderer_revision": self.renderer_revision,
+                "evidence_path": str(self.evidence_path), "evidence_sha256": self.evidence_digest}
 
 
 @dataclass(frozen=True)
@@ -182,14 +358,25 @@ def _validate_spec(report: Mapping[str, Any], spec: SkillSpec) -> None:
 
 def _summary(report: Mapping[str, Any]) -> dict[str, float]:
     values: dict[str, float] = {}
+    directions: dict[str, str] = {}
     for scenario in report["scenarios"]:
         for result in scenario["threshold_results"]:
             if not isinstance(result, dict) or not isinstance(result.get("metric_name"), str):
                 raise ReviewError("evaluation threshold results are invalid")
+            direction = result.get("direction")
+            if direction not in {"minimum", "maximum"}:
+                raise ReviewError("evaluation metric direction is invalid")
+            previous_direction = directions.setdefault(result["metric_name"], direction)
+            if previous_direction != direction:
+                raise ReviewError("evaluation metric direction differs across scenarios")
             value = result.get("value")
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                 raise ReviewError("evaluation metric summary is invalid")
-            values[result["metric_name"]] = max(values.get(result["metric_name"], float(value)), float(value))
+            aggregate = min if direction == "minimum" else max
+            values[result["metric_name"]] = aggregate(
+                values.get(result["metric_name"], float(value)),
+                float(value),
+            )
     return dict(sorted(values.items()))
 
 
@@ -214,6 +401,15 @@ def _expected(report: Mapping[str, Any]) -> dict[str, tuple[str, int]]:
     return selected
 
 
+def _preflight_policy(path: Path, digest: str, label: str) -> None:
+    try:
+        artifact = preflight_onnx(path)
+    except (ArtifactIntegrityError, EvaluationError) as error:
+        raise ReviewError(f"{label} ONNX preflight failed: {error}") from error
+    if artifact.sha256 != digest:
+        raise ReviewError(f"{label} policy digest mismatch")
+
+
 @dataclass(frozen=True)
 class ReviewBundle:
     evaluation_json: str
@@ -228,32 +424,37 @@ class ReviewBundle:
     spec_digest: str
 
     @classmethod
-    def build(cls, report: EvaluationReport, clip_files: Mapping[str, ReviewClip], *, spec: SkillSpec, baseline: EvaluationReport | None = None) -> ReviewBundle:
+    def build(cls, report: EvaluationReport, clip_files: Mapping[str, RendererEvidence], *, spec: SkillSpec, baseline: EvaluationReport | None = None) -> ReviewBundle:
         if report.policy is None or report.passed is not True:
             raise ReviewError("review requires a passing evaluation bound to an ONNX policy")
-        try:
-            report.verify_policy(report.policy.path)
-        except ArtifactIntegrityError as error:
-            raise ReviewError(str(error)) from error
+        _preflight_policy(Path(report.policy.path), report.policy.sha256, "candidate")
         raw = _report(canonical_json(report.as_dict()), "candidate")
         spec_json = canonical_json(spec.as_dict())
         _validate_spec(raw, _spec(spec_json))
+        evaluation_json = canonical_json(report.as_dict())
+        evaluation_digest = _digest(evaluation_json)
         expected = _expected(raw)
         clips: list[BoundReviewClip] = []
         for role in _ROLES:
             if role not in clip_files:
                 raise ReviewError(f"missing mandatory {role} clip")
             clip = clip_files[role]
+            if not isinstance(clip, RendererEvidence):
+                raise ReviewError(f"{role} clip requires immutable renderer evidence sidecar")
+            clip.verify()
             if clip.role != role or (clip.scenario_id, clip.seed) != expected[role]:
                 raise ReviewError(f"{role} clip does not bind its evaluated scenario")
-            if clip.policy_digest != report.policy.sha256:
+            if clip.policy_sha256 != report.policy.sha256:
                 raise ReviewError(f"{role} clip policy digest does not match evaluated policy digest")
-            path = Path(clip.path)
-            _file(path, f"{role} clip")
-            clips.append(BoundReviewClip(role, clip.scenario_id, clip.seed, path, sha256_file(path), clip.policy_digest))
-        evaluation_json = canonical_json(report.as_dict())
+            if clip.evaluation_digest != evaluation_digest:
+                raise ReviewError(f"{role} clip evaluation digest does not match evaluated report")
+            clips.append(BoundReviewClip(
+                role, clip.scenario_id, clip.seed, clip.video_path, clip.video_sha256,
+                clip.policy_sha256, clip.evaluation_digest, clip.renderer_revision,
+                clip.evidence_path, clip.evidence_sha256,
+            ))
         baseline_data = cls._baseline(raw, baseline) if baseline else None
-        bundle = cls(evaluation_json, _digest(evaluation_json), report.policy.sha256, tuple(clips), _summary(raw), True, baseline_data, Path(report.policy.path), spec_json, _digest(spec_json))
+        bundle = cls(evaluation_json, evaluation_digest, report.policy.sha256, tuple(clips), _summary(raw), True, baseline_data, Path(report.policy.path), spec_json, _digest(spec_json))
         bundle.verify()
         return bundle
 
@@ -261,10 +462,7 @@ class ReviewBundle:
     def _baseline(candidate: Mapping[str, Any], baseline: EvaluationReport) -> BaselineComparison:
         if baseline.policy is None:
             raise ReviewError("baseline requires an ONNX policy")
-        try:
-            baseline.verify_policy(baseline.policy.path)
-        except ArtifactIntegrityError as error:
-            raise ReviewError(f"baseline {error}") from error
+        _preflight_policy(Path(baseline.policy.path), baseline.policy.sha256, "baseline")
         text = canonical_json(baseline.as_dict())
         raw = _report(text, "baseline", require_passing=False)
         if tuple(raw[key] for key in ("skill_id", "spec_version", "evaluator_revision")) != tuple(candidate[key] for key in ("skill_id", "spec_version", "evaluator_revision")):
@@ -301,10 +499,16 @@ class ReviewBundle:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> ReviewBundle:
-        clips = tuple(BoundReviewClip(item["role"], item["scenario_id"], item["seed"], Path(item["path"]), item["sha256"], item["policy_sha256"]) for item in raw["clips"])
+        clips = tuple(BoundReviewClip(
+            item["role"], item["scenario_id"], item["seed"], Path(item["path"]), item["sha256"],
+            item["policy_sha256"], item["evaluation_digest"], item["renderer_revision"],
+            Path(item["evidence_path"]), item["evidence_sha256"],
+        ) for item in raw["clips"])
         base = raw.get("baseline")
         baseline = None if base is None else BaselineComparison(base["evaluation"], base["evaluation_digest"], Path(base["policy_path"]), base["policy_sha256"], dict(base["metric_summary"]))
-        return cls(raw["evaluation"], raw["evaluation_digest"], raw["policy_sha256"], clips, dict(raw["metric_summary"]), raw["passed"], baseline, Path(raw["policy_path"]), raw["skill_spec"], raw["skill_spec_digest"])
+        bundle = cls(raw["evaluation"], raw["evaluation_digest"], raw["policy_sha256"], clips, dict(raw["metric_summary"]), raw["passed"], baseline, Path(raw["policy_path"]), raw["skill_spec"], raw["skill_spec_digest"])
+        bundle.verify()
+        return bundle
 
     @property
     def digest(self) -> str:
@@ -322,18 +526,24 @@ class ReviewBundle:
         if policy["sha256"] != self.policy_digest or policy["path"] != str(self.policy_path):
             raise ReviewError("evaluation policy binding does not match review bundle")
         _file(self.policy_path, "policy")
-        if sha256_file(self.policy_path) != self.policy_digest:
-            raise ReviewError("policy digest mismatch")
+        _preflight_policy(self.policy_path, self.policy_digest, "candidate")
         roles = [clip.role for clip in self.clips]
         if set(roles) != set(_ROLES) or len(roles) != len(_ROLES):
             raise ReviewError("mandatory clip roles must appear exactly once")
         expected = _expected(report)
         for clip in self.clips:
-            if (clip.scenario_id, clip.seed) != expected[clip.role] or clip.policy_digest != self.policy_digest:
+            if (
+                (clip.scenario_id, clip.seed) != expected[clip.role]
+                or clip.policy_digest != self.policy_digest
+                or clip.evaluation_digest != self.evaluation_digest
+            ):
                 raise ReviewError(f"{clip.role} clip scenario or policy binding is invalid")
-            _file(clip.path, f"{clip.role} clip")
-            if sha256_file(clip.path) != clip.digest:
-                raise ReviewError(f"{clip.role} clip digest mismatch")
+            evidence = RendererEvidence(
+                clip.role, clip.scenario_id, clip.seed, clip.policy_digest,
+                clip.evaluation_digest, clip.path, clip.digest, clip.renderer_revision,
+                clip.evidence_path, clip.evidence_digest,
+            )
+            evidence.verify()
         if self.metric_summary != _summary(report):
             raise ReviewError("metric summary does not match evaluation")
         if self.baseline is not None:
@@ -347,8 +557,7 @@ class ReviewBundle:
             if raw["policy"]["sha256"] != base.policy_digest or raw["policy"]["path"] != str(base.policy_path):
                 raise ReviewError("baseline policy binding is invalid")
             _file(base.policy_path, "baseline policy")
-            if sha256_file(base.policy_path) != base.policy_digest:
-                raise ReviewError("baseline policy digest mismatch")
+            _preflight_policy(base.policy_path, base.policy_digest, "baseline")
             identity = lambda item: (item["scenario_id"], item["family"], item["seed"])
             if tuple(raw[key] for key in ("skill_id", "spec_version", "evaluator_revision")) != tuple(report[key] for key in ("skill_id", "spec_version", "evaluator_revision")) or Counter(map(identity, raw["scenarios"])) != Counter(map(identity, report["scenarios"])):
                 raise ReviewError("baseline comparable evaluation evidence does not match")

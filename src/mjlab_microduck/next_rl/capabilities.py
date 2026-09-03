@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from .artifacts import sha256_file
+from .evaluation import EvaluationError, preflight_onnx
 from .schema import Capability, SkillSpec
-
 
 _IDENTIFIER_SEPARATORS = re.compile(r"[\s_]+")
 
@@ -82,10 +83,18 @@ class CapabilityInventory:
     def resolve(self, query: str) -> PlanDecision:
         """Resolve an exact ID before considering aliases; never guess an ambiguity."""
         normalized = normalize_identifier(query)
-        exact = self._ids.get(normalized, ())
+        exact = self._selectable(self._ids.get(normalized, ()))
         if exact:
             return self._decide_match(exact, "exact ID")
-        return self._decide_match(self._aliases.get(normalized, ()), "alias")
+        return self._decide_match(
+            self._selectable(self._aliases.get(normalized, ())),
+            "alias",
+        )
+
+    @staticmethod
+    def _selectable(matches: tuple[Capability, ...]) -> tuple[Capability, ...]:
+        active = tuple(capability for capability in matches if capability.status != "superseded")
+        return active or matches
 
     @staticmethod
     def _decide_match(matches: tuple[Capability, ...], source: str) -> PlanDecision:
@@ -108,7 +117,7 @@ class CapabilityInventory:
         )
 
     def _exact_matches(self, identifier: str) -> tuple[Capability, ...]:
-        return self._ids.get(normalize_identifier(identifier), ())
+        return self._selectable(self._ids.get(normalize_identifier(identifier), ()))
 
 
 def _contracts_match(spec: SkillSpec, capability: Capability) -> bool:
@@ -130,6 +139,24 @@ def _has_requested_metric_evidence(spec: SkillSpec, capability: Capability) -> b
     return True
 
 
+def _semantic_version(value: str) -> tuple[int, int, int]:
+    major, minor, patch = value.split(".")
+    return int(major), int(minor), int(patch)
+
+
+def _loadable_reference(capability: Capability) -> bool:
+    artifact = capability.policy
+    if artifact is None:
+        return False
+    path = Path(artifact.path)
+    try:
+        if artifact.kind == "onnx":
+            return preflight_onnx(path).sha256 == artifact.sha256
+        return artifact.kind == "checkpoint" and path.is_file() and sha256_file(path) == artifact.sha256
+    except (EvaluationError, OSError):
+        return False
+
+
 def _select_parent(spec: SkillSpec, inventory: CapabilityInventory) -> PlanDecision | None:
     for parent_id in spec.allowed_parent_capabilities:
         matches = inventory._exact_matches(parent_id)
@@ -141,10 +168,11 @@ def _select_parent(spec: SkillSpec, inventory: CapabilityInventory) -> PlanDecis
         if len(matches) != 1:
             continue
         parent = matches[0]
-        if parent.policy is not None and _contracts_match(spec, parent) and parent.status in {"validated", "learned"}:
+        if _loadable_reference(parent) and _contracts_match(spec, parent) and parent.status in {"validated", "learned"}:
             return PlanDecision(
-                Disposition.WARM_START,
-                f"Compatible allowed parent capability {parent.id!r} can warm-start training.",
+                Disposition.TRAIN_NEW,
+                f"Compatible allowed parent capability {parent.id!r} is an evaluation reference, "
+                "not a staged training checkpoint; start new training.",
                 parent,
             )
     return None
@@ -207,9 +235,34 @@ def plan_skill(
         if capability.status == "available":
             return direct
         if capability.version != spec.version:
+            if improve_reason is not None:
+                if _semantic_version(spec.version) <= _semantic_version(capability.version):
+                    return PlanDecision(
+                        Disposition.BLOCKED,
+                        "Improving a learned capability requires a higher semantic version bump.",
+                        capability,
+                    )
+                if not _loadable_reference(capability):
+                    return PlanDecision(
+                        Disposition.BLOCKED,
+                        "Matching learned capability has no loadable policy reference for improvement comparison.",
+                        capability,
+                    )
+                return PlanDecision(
+                    Disposition.TRAIN_NEW,
+                    "A higher-version improvement was explicitly requested; train new and compare against the learned reference.",
+                    capability,
+                    improve_reason,
+                )
             return PlanDecision(
                 Disposition.BLOCKED,
                 "Matching learned capability version differs from the requested spec; evaluate existing policy first.",
+                capability,
+            )
+        if improve_reason is not None:
+            return PlanDecision(
+                Disposition.BLOCKED,
+                "Improving a learned capability requires a semantic version bump.",
                 capability,
             )
         if not _has_requested_metric_evidence(spec, capability):
@@ -217,13 +270,6 @@ def plan_skill(
                 Disposition.BLOCKED,
                 "Matching learned capability lacks requested metric evidence; evaluate existing policy first.",
                 capability,
-            )
-        if improve_reason is not None:
-            return PlanDecision(
-                Disposition.TRAIN_NEW,
-                "Approved learned capability satisfies the request; improvement training was explicitly requested.",
-                capability,
-                improve_reason,
             )
         return direct
 

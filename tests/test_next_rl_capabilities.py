@@ -7,17 +7,24 @@ import importlib.util
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from test_next_rl_support import write_tiny_policy
 
 from mjlab_microduck.next_rl.capabilities import (
     CapabilityInventory,
     Disposition,
     plan_skill,
 )
-from mjlab_microduck.next_rl.schema import Capability, MetricThreshold, PolicyContract, SkillSpec
-
+from mjlab_microduck.next_rl.schema import (
+    ArtifactRef,
+    Capability,
+    MetricThreshold,
+    PolicyContract,
+    SkillSpec,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/build_next_rl_catalog.py"
@@ -225,24 +232,95 @@ def test_spec_version_mismatch_requires_evaluation_before_reuse():
     assert "evaluate existing policy" in decision.reason
 
 
-def test_allowed_compatible_parent_warm_starts_a_new_skill():
+def test_onnx_parent_is_only_a_reference_and_training_starts_new(tmp_path: Path):
+    policy = write_tiny_policy(tmp_path / "walking.onnx")
+    digest = hashlib.sha256(policy.read_bytes()).hexdigest()
+    parent = replace(
+        capability("walking"),
+        policy=ArtifactRef(str(policy), "onnx", digest),
+    )
     decision = plan_skill(
         spec("running", allowed_parent_capabilities=("walking",)),
-        inventory_with(capability_ids=("walking",)),
+        CapabilityInventory((parent,)),
     )
-    assert decision.disposition == Disposition.WARM_START
+    assert decision.disposition == Disposition.TRAIN_NEW
     assert decision.capability is not None
     assert decision.capability.id == "walking"
+    assert "training checkpoint" in decision.reason
 
 
-def test_improvement_reason_trains_after_approved_reuse():
+def test_same_version_improvement_is_blocked_until_the_spec_version_is_bumped():
     decision = plan_skill(
         spec("walking"),
         inventory_with(capability_ids=("walking",)),
         improve_reason="Reduce energy consumption under the approved contract.",
     )
+    assert decision.disposition == Disposition.BLOCKED
+    assert "version bump" in decision.reason
+
+
+def test_higher_version_improvement_uses_only_a_loadable_learned_reference(tmp_path: Path):
+    policy = write_tiny_policy(tmp_path / "walking.onnx")
+    digest = hashlib.sha256(policy.read_bytes()).hexdigest()
+    learned = replace(
+        capability("walking"),
+        policy=ArtifactRef(str(policy), "onnx", digest),
+    )
+
+    decision = plan_skill(
+        spec("walking", version="1.0.1"),
+        CapabilityInventory((learned,)),
+        improve_reason="Reduce energy consumption under the approved contract.",
+    )
+
     assert decision.disposition == Disposition.TRAIN_NEW
+    assert decision.capability == learned
     assert decision.improve_reason == "Reduce energy consumption under the approved contract."
+
+
+def test_higher_version_improvement_can_add_a_metric_missing_from_prior_evidence(
+    tmp_path: Path,
+):
+    policy = write_tiny_policy(tmp_path / "walking.onnx")
+    digest = hashlib.sha256(policy.read_bytes()).hexdigest()
+    learned = replace(
+        capability("walking"),
+        policy=ArtifactRef(str(policy), "onnx", digest),
+    )
+
+    decision = plan_skill(
+        spec(
+            "walking",
+            version="1.0.1",
+            metrics=(metric("falls"), metric("new_accuracy", direction="minimum", limit=1)),
+        ),
+        CapabilityInventory((learned,)),
+        improve_reason="Add an explicitly evaluated accuracy target.",
+    )
+
+    assert decision.disposition == Disposition.TRAIN_NEW
+    assert decision.capability == learned
+
+
+def test_higher_version_improvement_blocks_an_unloadable_learned_reference():
+    decision = plan_skill(
+        spec("walking", version="1.0.1"),
+        inventory_with(capability_ids=("walking",)),
+        improve_reason="Reduce energy consumption under the approved contract.",
+    )
+
+    assert decision.disposition == Disposition.BLOCKED
+    assert "loadable" in decision.reason
+
+
+def test_active_learned_version_outranks_its_superseded_history():
+    previous = replace(capability("walking"), status="superseded")
+    current = capability("walking", version="1.0.1")
+
+    decision = CapabilityInventory((previous, current)).resolve("walking")
+
+    assert decision.disposition == Disposition.REUSE
+    assert decision.capability == current
 
 
 def test_catalog_generator_hashes_tracked_head_policy_bytes(runtime_repo: Path, tmp_path: Path):

@@ -14,12 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .capabilities import CapabilityInventory, Disposition, plan_skill
 from .artifacts import atomic_write_json, canonical_json
-from .evaluation import EvaluationReport, MetricResult, ScenarioResult
+from .capabilities import CapabilityInventory, Disposition, plan_skill
+from .evaluation import EvaluationReport, MetricResult, ScenarioResult, preflight_onnx
 from .experiments import ExperimentStore, build_experiment_manifest
 from .promotion import PromotionError, PromotionStore
-from .review import ReviewBundle, ReviewClip
+from .review import RendererEvidence, ReviewBundle
 from .runner import NitroConfig, NitroRunner
 from .schema import ArtifactRef, Capability, SkillSpec
 
@@ -40,7 +40,8 @@ def _default_runner(home: Path) -> NitroRunner:
             wsl_distribution=os.environ.get("NEXT_RL_NITRO_WSL_DISTRIBUTION") or None,
             repository=Path.cwd(),
             bundle_root=_workspace_child(home, "bundles"),
-        )
+        ),
+        experiment_store=ExperimentStore(_workspace_child(home, "experiments")),
     )
 
 
@@ -97,6 +98,12 @@ def _decision_json(decision: Any) -> dict[str, Any]:
     }
     if decision.disposition == Disposition.WARM_START and decision.capability is not None:
         result["parent_capability_id"] = decision.capability.id
+    elif (
+        decision.disposition == Disposition.TRAIN_NEW
+        and decision.capability is not None
+        and decision.capability.policy is not None
+    ):
+        result["reference_capability_id"] = decision.capability.id
     elif decision.capability is not None:
         result["capability_id"] = decision.capability.id
     if decision.improve_reason is not None:
@@ -292,32 +299,16 @@ def _evaluation(path: str) -> EvaluationReport:
     report = EvaluationReport(raw["skill_id"], raw["spec_version"], raw["evaluator_revision"], tuple(scenarios), raw["passed"], policy)
     if policy.sha256 != report.scenarios[0].policy_sha256 or any(item.policy_sha256 != policy.sha256 for item in report.scenarios):
         raise ValueError("evaluation policy binding is invalid")
+    if preflight_onnx(policy.path).sha256 != policy.sha256:
+        raise ValueError("evaluation policy digest is invalid")
     return report
 
 
-def _review_clips(report: EvaluationReport, args: argparse.Namespace) -> dict[str, ReviewClip]:
-    if report.policy is None:
-        raise ValueError("evaluation policy is required")
-    paths = {
-        "nominal": args.nominal_clip,
-        "entry": args.entry_clip,
-        "exit": args.exit_clip,
-        "stress": args.stress_clip,
-        "worst_case": args.worst_case_clip,
-    }
-    selected: dict[str, ScenarioResult] = {}
-    for role in ("nominal", "entry", "exit", "stress"):
-        candidates = [scenario for scenario in report.scenarios if scenario.family == role]
-        if not candidates:
-            raise ValueError(f"evaluation lacks {role} scenario")
-        selected[role] = min(candidates, key=lambda scenario: (scenario.seed, scenario.scenario_id))
-    selected["worst_case"] = min(
-        report.scenarios,
-        key=lambda scenario: (-scenario.normalized_violation, scenario.scenario_id),
-    )
+def _review_evidence(args: argparse.Namespace) -> dict[str, RendererEvidence]:
+    """Load renderer-authored bindings; the CLI must not synthesize provenance."""
     return {
-        role: ReviewClip(role, scenario.scenario_id, scenario.seed, Path(paths[role]), report.policy.sha256)
-        for role, scenario in selected.items()
+        role: RendererEvidence.load(getattr(args, f"{role}_evidence"))
+        for role in ("nominal", "entry", "exit", "stress", "worst_case")
     }
 
 
@@ -369,7 +360,7 @@ def _review(args: argparse.Namespace, dependencies: CliDependencies) -> dict[str
     spec = _skill(args.skill)
     report = _evaluation(args.evaluation)
     baseline = _evaluation(args.baseline) if args.baseline is not None else None
-    bundle = ReviewBundle.build(report, _review_clips(report, args), spec=spec, baseline=baseline)
+    bundle = ReviewBundle.build(report, _review_evidence(args), spec=spec, baseline=baseline)
     home = _home()
     review_root = _workspace_child(home, "review-bundles")
     promotion_root = _workspace_child(home, "promotions")
@@ -425,11 +416,11 @@ def _parser() -> _Parser:
     review.add_argument("--capability", required=True)
     review.add_argument("--skill", required=True)
     review.add_argument("--evaluation", required=True)
-    review.add_argument("--nominal-clip", required=True)
-    review.add_argument("--entry-clip", required=True)
-    review.add_argument("--exit-clip", required=True)
-    review.add_argument("--stress-clip", required=True)
-    review.add_argument("--worst-case-clip", required=True)
+    review.add_argument("--nominal-evidence", required=True)
+    review.add_argument("--entry-evidence", required=True)
+    review.add_argument("--exit-evidence", required=True)
+    review.add_argument("--stress-evidence", required=True)
+    review.add_argument("--worst-case-evidence", required=True)
     review.add_argument("--baseline")
     approve = commands.add_parser("approve")
     approve.add_argument("record_id")

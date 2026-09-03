@@ -77,6 +77,8 @@ _TRANSITIONS = {
     "planned": frozenset(("pending",)),
     "pending": frozenset(("running",)),
     "running": frozenset(("succeeded", "failed", "interrupted")),
+    "failed": frozenset(("pending",)),
+    "interrupted": frozenset(("pending",)),
 }
 _LOCK_TIMEOUT_SECONDS = 10
 _STALE_LOCK_SECONDS = 300
@@ -285,27 +287,94 @@ class ExperimentStore:
                 atomic_write_json(status_path, {"status": parsed.status, "history": [{"status": parsed.status}]})
         return target
 
-    def reserve(self, fingerprint: str) -> ReservationDecision:
+    def reserve(self, fingerprint: str, *, owner: str | None = None) -> ReservationDecision:
         """Claim a planned run exactly once or return the safe next action."""
+        reservation_owner = owner or uuid.uuid4().hex
+        if not isinstance(reservation_owner, str) or not reservation_owner.strip():
+            raise ValueError("reservation owner must be a non-empty string")
         with self._lock(fingerprint):
             manifest_path = self._manifest_path(fingerprint)
             if not manifest_path.exists():
                 raise FileNotFoundError(f"no experiment exists for fingerprint {fingerprint}")
             current = self._read_json(self._status_path(fingerprint))["status"]
+            if current == "pending":
+                try:
+                    reservation = self._read_json(self._reservation_path(fingerprint))
+                except FileNotFoundError:
+                    raise DuplicateExperimentError(
+                        f"experiment {fingerprint} is already pending"
+                    ) from None
+                if reservation.get("owner") == reservation_owner:
+                    return ReservationDecision(fingerprint, "confirmed")
+                raise DuplicateExperimentError(
+                    f"experiment {fingerprint} is already reserved"
+                )
             if current in _ACTIVE_STATUSES:
                 raise DuplicateExperimentError(f"experiment {fingerprint} is already {current}")
-            if current == "failed":
-                return ReservationDecision(fingerprint, "retry")
-            if current == "interrupted":
-                return ReservationDecision(fingerprint, "resume")
-            if current != "planned":
+            actions = {"planned": "reserved", "failed": "retry", "interrupted": "resume"}
+            action = actions.get(current)
+            if action is None:
                 raise ValueError(f"unknown experiment status {current!r}")
             try:
-                _exclusive_write_json(self._reservation_path(fingerprint), {"fingerprint": fingerprint})
+                _exclusive_write_json(
+                    self._reservation_path(fingerprint),
+                    {
+                        "fingerprint": fingerprint,
+                        "owner": reservation_owner,
+                        "previous_status": current,
+                    },
+                )
             except FileExistsError:
                 raise DuplicateExperimentError(f"experiment {fingerprint} is already reserved") from None
             self._update_status_locked(fingerprint, "pending")
-            return ReservationDecision(fingerprint, "reserved")
+            return ReservationDecision(fingerprint, action)
+
+    def confirm(self, fingerprint: str, *, owner: str) -> None:
+        """Finish an accepted start claim without changing its lifecycle state."""
+        if not isinstance(owner, str) or not owner.strip():
+            raise ValueError("reservation owner must be a non-empty string")
+        with self._lock(fingerprint):
+            reservation_path = self._reservation_path(fingerprint)
+            reservation = self._read_json(reservation_path)
+            if reservation.get("owner") != owner:
+                raise DuplicateExperimentError("experiment reservation belongs to another owner")
+            reservation_path.unlink()
+
+    def release(self, fingerprint: str, *, owner: str) -> None:
+        """Return an unlaunched reservation to its prior state for its exact owner."""
+        if not isinstance(owner, str) or not owner.strip():
+            raise ValueError("reservation owner must be a non-empty string")
+        with self._lock(fingerprint):
+            reservation_path = self._reservation_path(fingerprint)
+            reservation = self._read_json(reservation_path)
+            if reservation.get("owner") != owner:
+                raise DuplicateExperimentError("experiment reservation belongs to another owner")
+            status_path = self._status_path(fingerprint)
+            current_record = self._read_json(status_path)
+            if current_record.get("status") != "pending":
+                raise DuplicateExperimentError("experiment reservation is no longer pending")
+            previous_status = reservation.get("previous_status", "planned")
+            if previous_status not in {"planned", "failed", "interrupted"}:
+                raise ValueError("experiment reservation previous status is invalid")
+            history = current_record.get("history")
+            if not isinstance(history, list):
+                raise TypeError("experiment status history must be a list")
+            reservation_path.unlink()
+            atomic_write_json(
+                status_path,
+                {
+                    "status": previous_status,
+                    "history": [
+                        *history,
+                        {"status": previous_status, "reason": "start_failed"},
+                    ],
+                },
+            )
+
+    def status(self, fingerprint: str) -> dict[str, Any]:
+        """Return a copy of the durable local lifecycle record."""
+        with self._lock(fingerprint):
+            return dict(self._read_json(self._status_path(fingerprint)))
 
     def update_status(self, fingerprint: str, status: str) -> None:
         """Atomically advance operational state without ever rewriting the manifest."""
@@ -322,4 +391,9 @@ class ExperimentStore:
         history = current_record.get("history")
         if not isinstance(history, list):
             raise TypeError("experiment status history must be a list")
+        if current == "pending" and status == "running":
+            try:
+                self._reservation_path(fingerprint).unlink()
+            except FileNotFoundError:
+                pass
         atomic_write_json(status_path, {"status": status, "history": [*history, {"status": status}]})
