@@ -95,16 +95,19 @@ documentation. Do not disable host checking or replace the known-hosts file.
 ### One-time remote root bootstrap
 
 The fixed runner root is `/home/aif_eng/microduck-training/runs`. If that exact
-directory is absent, bootstrap it once with the same host-checked, public-key
-transport boundary:
+directory is absent, first prove its parent exists, then create only the fixed
+child with the same host-checked, public-key transport boundary:
 
 ```bash
 ssh -o BatchMode=yes aif-engineering@108.61.217.115 \
-  wsl.exe -d Ubuntu -- mkdir -p /home/aif_eng/microduck-training/runs
+  wsl.exe -d Ubuntu -- test -d /home/aif_eng/microduck-training
+ssh -o BatchMode=yes aif-engineering@108.61.217.115 \
+  wsl.exe -d Ubuntu -- mkdir -- /home/aif_eng/microduck-training/runs
 ```
 
-This command creates only the fixed runner root. The runner intentionally will
-not create the broader parent, so do not substitute a broader path, use a
+The second command is permitted only after the first succeeds and creates only
+the fixed runner root. The runner intentionally will not create the broader
+parent, so do not substitute a broader path, use a recursive create,
 host-check bypass, or put a password in the command. Once the root exists,
 normal guarded `prepare` operations own only their fingerprint directory.
 
@@ -134,8 +137,10 @@ The following evidence was collected for source commit
 `b60c85c6569bfe9767ef565333bdd9aed0052c1a` only. Later documentation-only
 commits were not GPU tested.
 
-- The fixed runner root was absent once; the host-checked bootstrap above
-  created it. Afterwards, `next-rl prepare` returned `planned` for fingerprint
+- The fixed runner root was absent once. The historical root creation followed
+  prior evidence that its parent existed, so it created only the missing fixed
+  root; the checked-parent procedure above is the safe documented procedure.
+  Afterwards, `next-rl prepare` returned `planned` for fingerprint
   `bf220169cd67449688a97cdf9d5c3dcc3e20aa983f9af9e91ca193707435fd29`.
   Its source tree was `110b84b16b24d45cb6bdbb4ca81f29ede6a5a5ca`, and archive
   SHA-256 `55e80206a875e7acc2c06593dfe7f375b74f3bf2a1400b894adaedf527afb3a0`

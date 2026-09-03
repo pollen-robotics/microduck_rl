@@ -230,17 +230,37 @@ def test_operator_guide_records_the_dated_live_readiness_boundary_and_evidence()
     guide = GUIDE.read_text(encoding="utf-8")
     normalized = " ".join(guide.split())
 
-    assert "/home/aif_eng/microduck-training/runs" in normalized
+    parent = "/home/aif_eng/microduck-training"
+    root = f"{parent}/runs"
+    assert (
+        "ssh -o BatchMode=yes aif-engineering@108.61.217.115 \\ "
+        "wsl.exe -d Ubuntu -- test -d /home/aif_eng/microduck-training"
+    ) in normalized
+    assert (
+        "ssh -o BatchMode=yes aif-engineering@108.61.217.115 \\ "
+        "wsl.exe -d Ubuntu -- mkdir -- /home/aif_eng/microduck-training/runs"
+    ) in normalized
+    assert guide.index(f"test -d {parent}") < guide.index(f"mkdir -- {root}")
+    assert "mkdir -p" not in guide
     assert "runner intentionally will not create the broader parent" in normalized
     assert "2026-09-02" in normalized
     assert "b60c85c6569bfe9767ef565333bdd9aed0052c1a" in normalized
+    assert "110b84b16b24d45cb6bdbb4ca81f29ede6a5a5ca" in normalized
     assert "bf220169cd67449688a97cdf9d5c3dcc3e20aa983f9af9e91ca193707435fd29" in normalized
     assert "55e80206a875e7acc2c06593dfe7f375b74f3bf2a1400b894adaedf527afb3a0" in normalized
+    assert "matched the local and remote copies" in normalized
+    assert "RTX 5050" in normalized and "cuda:0" in normalized
+    assert "64 environments" in normalized
+    assert "5 iterations" in normalized
     assert "actor 61→14" in normalized
     assert "critic 76→1" in normalized
+    assert "finite losses and rewards" in normalized
+    assert "exited 0" in normalized
     assert "model_0.pt" in normalized and "model_4.pt" in normalized
+    assert "ONNX export" in normalized
+    assert "pgrep -af train" in normalized and "exited 1 with no output" in normalized
     assert "No hello start, promotion, or publish occurred" in normalized
-    assert "later documentation-only commits were GPU tested" not in normalized
+    assert "later documentation-only commits were not gpu tested" in normalized.casefold()
 
 
 def test_public_cli_readiness_flow_stays_local_until_human_approval(tmp_path: Path):

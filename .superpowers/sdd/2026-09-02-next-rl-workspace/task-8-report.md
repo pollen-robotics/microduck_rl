@@ -4,8 +4,10 @@
 
 Task 8 adds only planning data, operator documentation, a README entry point,
 and isolated subprocess readiness tests. It does not implement a task or
-reward, create a model artifact, start training, contact Nitro, publish, or
-deploy hardware.
+reward, register, train, or Nitro-start the hello task, publish, or deploy
+hardware. The separately authorized primary-agent Velocity smoke did contact
+Nitro and train; this report records that evidence without treating it as hello
+training.
 
 ## Original RED → GREEN
 
@@ -160,6 +162,54 @@ Fresh staged whitespace and status checks precede this round's distinct commit.
 ### Commit
 
 `docs(next-rl): record verified Nitro readiness`
+
+## Fix round 4/5 — non-recursive bootstrap boundary
+
+### RED evidence
+
+The strengthened readiness documentation contract rejected the former recursive
+root creation procedure before this fix:
+
+```text
+FAILED test_operator_guide_records_the_dated_live_readiness_boundary_and_evidence
+assert safe host-checked test -d command is present before mkdir --
+```
+
+### Changes
+
+- Replaced the recommended recursive bootstrap with a host-checked
+  `test -d /home/aif_eng/microduck-training` followed by non-recursive
+  `mkdir -- /home/aif_eng/microduck-training/runs`, in that exact order.
+- Explicitly prohibited recursive creation, broad-path substitution, host-check
+  bypasses, and passwords. The historical root evidence says only that the
+  parent had already been confirmed, so only the missing fixed root was made;
+  it does not present the historical command as the safe procedure.
+- Expanded the documentation contract over every supplied evidence field:
+  source commit/tree, fingerprint, local/remote archive match, RTX/cuda, 64
+  environments, 5 iterations, finite values, exit, checkpoints/ONNX, post-run
+  process check, and the case-insensitive later-commit GPU-test boundary.
+- Corrected the report scope: hello was never trained or Nitro-started, while
+  the separately authorized primary-agent Velocity smoke did contact Nitro and
+  train.
+
+### Verification
+
+```text
+uv run --with pytest pytest tests/test_next_rl_readiness.py -q
+4 passed in 0.66s
+
+uv run --with pytest pytest tests/test_next_rl_*.py -q
+258 passed in 8.04s
+
+uv run --with pytest pytest tests/ -q
+454 passed, 1 skipped in 15.01s
+```
+
+Fresh staged whitespace and status checks precede this round's distinct commit.
+
+### Commit
+
+`docs(next-rl): harden Nitro bootstrap guidance`
 
 ## Concerns / handoff
 
