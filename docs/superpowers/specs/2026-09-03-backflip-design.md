@@ -65,12 +65,22 @@ its `qpos`/`qvel` every control step. The consequences are all wanted:
 | Phase | Plate | Robot |
 |---|---|---|
 | HOLD, duration `t_hold` | parked at `z0`, zero velocity | stands on it; no cue that launch is coming |
-| LAUNCH, ~0.1 s window | prescribed constant `vz` and pitch rate `ω0` | rides it; may add energy by extending legs |
+| LAUNCH, `t_launch` ≈ 0.08–0.15 s | prescribed constant *acceleration* — linear velocity ramps 0 → `vz`, pitch rate 0 → `ω0` | rides it; may add energy by extending legs |
 | GONE | teleported to z = −3, velocities zeroed | ballistic; lands on bare floor |
 
-Release (LAUNCH → GONE) fires when the foot↔plate contact sensor reports loss
-of contact, with a fixed timeout as a backstop so a robot that never leaves the
-plate cannot keep it in the scene.
+The launch prescribes an acceleration ramp, not a step change in velocity. A
+plate that jumped straight to `vz` would drive the contact solver to accelerate
+the robot to launch speed within a single step — an impulsive, effectively
+infinite-jerk kick through the legs, and a |a_z| spike that has nothing to do
+with the hand it is meant to model. The ramp is what a hand does, and
+`a = vz / t_launch` keeps contact continuous throughout.
+
+Release (LAUNCH → GONE) is primarily **time-based**: the plate is removed the
+step the ramp completes. Removal cannot wait for contact loss, because a plate
+coasting at constant `vz` while the robot decelerates under gravity keeps
+pushing indefinitely. Loss of foot↔plate contact is the *secondary* trigger,
+covering the case where the robot pushes off hard enough to leave the plate
+before the ramp ends.
 
 State lives in lazily-created per-env buffers on `env`, updated under a step
 guard — the pattern `_roulade_state` / `_update_roulade_accum` already use.
@@ -79,8 +89,9 @@ across resets, the same rule DR follows.
 
 ### Randomized per episode
 
-`z0` ∈ [0.10, 0.20] m (DR tail to 0.30), `t_hold`, `vz`, `ω0`, plus small
-lateral and yaw asymmetry so the policy cannot assume a perfectly clean toss.
+`z0` ∈ [0.10, 0.20] m (DR tail to 0.30), `t_hold`, `t_launch`, `vz`, `ω0`, plus
+small lateral and yaw asymmetry so the policy cannot assume a perfectly clean
+toss.
 
 ### Flip envelope — measured before training
 
