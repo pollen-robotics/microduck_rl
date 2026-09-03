@@ -15,6 +15,18 @@ the reward stack should be tuned before this table exists.
 Run: uv run python scripts/backflip_envelope.py
 Direction sanity check (see check_direction() below):
   uv run python scripts/backflip_envelope.py --check-direction
+Direction check on a specific cell:
+  uv run python scripts/backflip_envelope.py --check-direction --check-vz 2.25 --check-w0 30.0 --check-tuck 1.0 --z0 0.10
+
+Extended sweep (Task 3 addendum): the default grid below pushes w0 well past
+the original 6-15 rad/s range (up to 54) and vz down to 1.0, at a finer 0.25
+step, than the original 32-cell grid — because an initial push to w0<=30
+still put every new-best cell at the edge of that range. IMPORTANT: cells
+with w0 above roughly 33-36 rad/s report large "backward rotation" numbers
+that a --check-direction trace shows are actually FORWARD rolls (see
+docs/backflip_envelope_results.md "The reversal") — do not trust rot_deg /
+land_m/s from this sweep for w0 past that point without directly verifying
+direction first. Override the grid with --vz/--w0/--tuck; --z0 is unchanged.
 """
 
 import argparse
@@ -197,14 +209,54 @@ def check_direction(model, data, vz=3.0, w0=15.0, tuck_factor=1.0, z0=0.15):
     return rot, land, apex
 
 
+# Extended default grid (Task 3 addendum). vz now starts at 1.0 (was 1.5) at
+# a finer 0.25 step (was 0.5) so the vz side of the trade-off is resolved as
+# finely as the original grid's coarsest dimension used to be.
+#
+# w0 now runs to 54.0, not the ~25-30 the brief suggested as a starting
+# point: an initial push to 30 found every new-best cell sitting AT w0=30,
+# the same edge-of-grid symptom the original 15-rad/s ceiling had, so it was
+# pushed further until the trend actually turned over. It does — landing
+# speed at fixed vz/tuck falls as w0 rises, bottoms out around w0=39-48
+# rad/s (depends on vz), then rises sharply as 360 deg stops closing at all
+# (feet separate from the plate before the flick finishes). w0=54 is past
+# that reversal at every vz/tuck in this grid, so the default now safely
+# brackets the true (interior) optimum instead of chasing a moving edge.
+# Uniform 3 rad/s step throughout — see docs/backflip_envelope_results.md
+# "Extended sweep" for the finer-step valley probe that established this.
+DEFAULT_VZ = (1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0)
+DEFAULT_W0 = tuple(float(w) for w in range(6, 55, 3))
+DEFAULT_TUCK = (0.5, 0.75, 1.0)
+
+
+def _float_list(s):
+    return tuple(float(x) for x in s.split(","))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--z0", type=float, default=0.15)
     ap.add_argument(
         "--check-direction", action="store_true",
         help="Trace the local +z axis in world coords at ~90deg of accumulated "
-             "rotation for one representative cell (vz=3.0, w0=15.0, tuck=1.0), "
-             "to verify a backward flip and not a mislabeled forward roll.",
+             "rotation for one cell, to verify a backward flip and not a "
+             "mislabeled forward roll. Cell defaults to vz=3.0, w0=15.0, "
+             "tuck=1.0; override with --check-vz/--check-w0/--check-tuck.",
+    )
+    ap.add_argument("--check-vz", type=float, default=3.0)
+    ap.add_argument("--check-w0", type=float, default=15.0)
+    ap.add_argument("--check-tuck", type=float, default=1.0)
+    ap.add_argument(
+        "--vz", type=_float_list, default=DEFAULT_VZ,
+        help="Comma-separated launch-speed grid (m/s), e.g. 1.0,1.5,2.0",
+    )
+    ap.add_argument(
+        "--w0", type=_float_list, default=DEFAULT_W0,
+        help="Comma-separated flick-rate grid (rad/s), e.g. 6,12,18,24,30",
+    )
+    ap.add_argument(
+        "--tuck", type=_float_list, default=DEFAULT_TUCK,
+        help="Comma-separated tuck-factor grid, e.g. 0.5,0.75,1.0",
     )
     args = ap.parse_args()
 
@@ -213,15 +265,17 @@ def main():
 
     if args.check_direction:
         print(f"Direction check (z0={args.z0}):")
-        check_direction(model, data, z0=args.z0)
+        check_direction(
+            model, data,
+            vz=args.check_vz, w0=args.check_w0, tuck_factor=args.check_tuck,
+            z0=args.z0,
+        )
         return
 
     print(f"{'vz':>5} {'w0':>6} {'tuck':>5} {'rot_deg':>8} {'land_m/s':>9} {'apex_m':>7}")
-    for vz, w0, tuck in itertools.product(
-        (1.5, 2.0, 2.5, 3.0), (6.0, 9.0, 12.0, 15.0), (0.5, 1.0)
-    ):
+    for vz, w0, tuck in itertools.product(args.vz, args.w0, args.tuck):
         rot, land, apex = run_cell(model, data, vz, w0, tuck, args.z0)
-        print(f"{vz:5.1f} {w0:6.1f} {tuck:5.2f} {rot:8.1f} {land:9.2f} {apex:7.3f}")
+        print(f"{vz:5.2f} {w0:6.1f} {tuck:5.2f} {rot:8.1f} {land:9.2f} {apex:7.3f}")
 
 
 if __name__ == "__main__":
