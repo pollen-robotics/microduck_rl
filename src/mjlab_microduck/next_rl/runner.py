@@ -93,7 +93,7 @@ class CommandAdapter(Protocol):
 
 
 class OpenSSHAdapter:
-    """Execute OpenSSH client commands as argument arrays without a shell."""
+    """Execute OpenSSH argv and return every process exit status as data."""
 
     def run(self, argv: tuple[str, ...]) -> CommandResult:
         completed = subprocess.run(
@@ -103,13 +103,7 @@ class OpenSSHAdapter:
             text=True,
             shell=False,
         )
-        result = CommandResult(completed.stdout, completed.stderr, completed.returncode)
-        if completed.returncode:
-            raise RunnerError(
-                f"transport command failed with exit code {completed.returncode}: "
-                f"{completed.stderr.strip()}"
-            )
-        return result
+        return CommandResult(completed.stdout, completed.stderr, completed.returncode)
 
 
 @dataclass(frozen=True)

@@ -17,6 +17,7 @@ from mjlab_microduck.next_rl.runner import (
     CommandResult,
     NitroConfig,
     NitroRunner,
+    OpenSSHAdapter,
     RunnerError,
     build_train_argv,
 )
@@ -214,6 +215,73 @@ def test_ssh_enforces_noninteractive_host_checked_access(repository: Path, tmp_p
     assert argv[:3] == ("ssh", "-o", "BatchMode=yes")
     assert "StrictHostKeyChecking=no" not in argv
     assert "aif_eng@nitro" in argv
+
+
+def test_open_ssh_adapter_returns_nonzero_result_for_expected_probe(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="not found")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    result = OpenSSHAdapter().run(("ssh", "host", "test", "-d", "/job"))
+
+    assert result == CommandResult(stdout="", stderr="not found", returncode=1)
+
+
+def test_real_open_ssh_adapter_nonzero_probe_allows_staging_only_retry(
+    repository: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    real_run = subprocess.run
+    calls: list[tuple[str, ...]] = []
+    stage_exists = False
+    upload_attempts = 0
+
+    def run(argv, **kwargs):
+        nonlocal stage_exists, upload_attempts
+        command = tuple(argv)
+        if command[0] == "git":
+            return real_run(argv, **kwargs)
+        calls.append(command)
+        if command[0] == "scp":
+            upload_attempts += 1
+            return subprocess.CompletedProcess(
+                argv,
+                1 if upload_attempts == 1 else 0,
+                stdout="",
+                stderr="partial copy" if upload_attempts == 1 else "",
+            )
+        remote = command[4:]
+        target = remote[-1]
+        is_stage = "/.incoming-" in target
+        if remote[:2] == ("mkdir", "--") and is_stage:
+            if stage_exists:
+                return subprocess.CompletedProcess(argv, 1, stdout="", stderr="exists")
+            stage_exists = True
+        elif remote[:2] == ("test", "!") and remote[2] == "-e":
+            return subprocess.CompletedProcess(
+                argv, 1 if stage_exists else 0, stdout="", stderr=""
+            )
+        elif remote[:2] == ("rm", "-rf"):
+            assert is_stage
+            stage_exists = False
+        elif remote[:2] == ("python3", target) and is_stage:
+            stage_exists = False
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    prepared = NitroRunner(config(repository, tmp_path), OpenSSHAdapter()).prepare(job())
+
+    assert upload_attempts == 2
+    removals = [call for call in calls if call[0] == "ssh" and "rm" in call]
+    assert removals and all(
+        call[-1].startswith(f"{prepared.remote_directory}/.incoming-")
+        for call in removals
+    )
 
 
 def test_prepare_archives_only_the_pinned_tracked_tree(repository: Path, tmp_path: Path):

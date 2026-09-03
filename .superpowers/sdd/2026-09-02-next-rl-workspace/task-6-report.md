@@ -377,3 +377,56 @@ exit 0
   full repository suite passed.
 - No live SSH/network operation, Nitro start/cancel, training, upload, or
   publishing was performed.
+
+## Fix round 4 — normalized transport exit handling
+
+### RED evidence
+
+Production-shaped tests exposed that `OpenSSHAdapter` raised before expected
+nonzero probe results could reach the recovery state machine:
+
+```text
+FAILED test_open_ssh_adapter_returns_nonzero_result_for_expected_probe
+FAILED test_real_open_ssh_adapter_nonzero_probe_allows_staging_only_retry
+2 failed, 67 deselected
+```
+
+The integration-shaped failure occurred specifically when the real adapter
+converted the expected `test ! -e` exit status 1 into `RunnerError`, while the
+same path passed under the permissive fake adapter.
+
+### GREEN evidence
+
+```text
+uv run --with pytest pytest tests/test_next_rl_runner.py tests/test_next_rl_remote_job.py -q
+104 passed in 6.06s
+
+uv run --with pytest pytest tests/test_next_rl_*.py -q
+213 passed in 7.52s
+
+uv run --with pytest pytest -q
+409 passed, 1 skipped in 15.05s
+```
+
+### Fixes
+
+- `CommandAdapter.run` and `OpenSSHAdapter.run` now consistently return
+  `CommandResult` for both zero and nonzero process exits. OS/process-launch
+  exceptions still propagate as transport failures.
+- `_run` remains the explicit require-success boundary. Every direct adapter
+  call was audited: directory, symlink, existence, ownership, and atomic-mkdir
+  probes interpret expected nonzero results explicitly and fail closed for
+  unexpected or ambiguous states.
+- A subprocess-backed preparation test exercises the actual adapter behavior,
+  including a nonzero partial SCP, a nonzero `test ! -e` probe, exact staging
+  cleanup, and successful retry without any full fingerprint deletion.
+
+### Commit
+
+`fix(next-rl): normalize transport exit handling`
+
+### Concerns
+
+- Ruff remains unavailable; focused, Next RL, and full tests passed.
+- No live SSH/network operation, Nitro start/cancel, training, upload, or
+  publishing was performed.
