@@ -101,11 +101,26 @@ def fake_submit(monkeypatch):
     return calls
 
 
-def test_hook_submits_and_strips_the_flag(monkeypatch, fake_submit):
+# argv[0] is however the OS spells the installed console script. Windows
+# writes `train.exe`, so a bare `== "train"` check silently declined to
+# intercept and the flag fell through to tyro's `Unrecognized options:
+# --hf-jobs` — the exact failure this hook exists to prevent, one platform
+# over (2026-09-02). Forward slashes so the paths split on both platforms.
+_TRAIN_ARGV0 = [
+    "/x/.venv/bin/train",  # posix console script
+    "C:/x/.venv/Scripts/train.exe",  # windows console script
+    "train",  # bare name, invoked from PATH
+    "train.exe",
+    "train-script.py",  # setuptools-style wrapper
+]
+
+
+@pytest.mark.parametrize("argv0", _TRAIN_ARGV0)
+def test_hook_submits_and_strips_the_flag(monkeypatch, fake_submit, argv0):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["/x/.venv/bin/train", _TASK, "--env.scene.num-envs", "4096", "--hf-jobs"],
+        [argv0, _TASK, "--env.scene.num-envs", "4096", "--hf-jobs"],
     )
     with pytest.raises(SystemExit) as exc:
         train_hook.maybe_submit_to_hf_jobs()
@@ -128,9 +143,14 @@ def test_no_flag_trains_locally(monkeypatch, fake_submit):
     assert fake_submit == []
 
 
-def test_other_commands_do_not_submit(monkeypatch, fake_submit):
-    """`play --hf-jobs` must reach play's parser, not submit a training job."""
-    monkeypatch.setattr(sys, "argv", ["/x/.venv/bin/play", _TASK, "--hf-jobs"])
+@pytest.mark.parametrize("argv0", ["/x/.venv/bin/play", "C:/x/.venv/Scripts/play.exe"])
+def test_other_commands_do_not_submit(monkeypatch, fake_submit, argv0):
+    """`play --hf-jobs` must reach play's parser, not submit a training job.
+
+    Guards the fix above from over-reaching: stripping the suffix must not
+    make every `*.exe` look like the trainer.
+    """
+    monkeypatch.setattr(sys, "argv", [argv0, _TASK, "--hf-jobs"])
     assert train_hook.maybe_submit_to_hf_jobs() is None
     assert fake_submit == []
 
