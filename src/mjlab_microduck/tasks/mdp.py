@@ -7549,10 +7549,11 @@ def backflip_landing(
     lean scores 80% of everything. Stds are deliberately wide enough that a
     mediocre first landing still scores visibly, or the gradient is invisible.
 
-    The completion gate (~330 deg midpoint) is what stops an upright robot
-    that never flipped from earning anything here — without it "stand still
-    on the plate" (which already trivially satisfies feet-contact/upright/
-    height/calm) becomes the argmax and the flip itself never gets learned.
+    The completion gate (0 below ~300 deg, 1 above ~345 deg) is what stops an
+    upright robot that never flipped from earning anything here — without it
+    "stand still on the plate" (which already trivially satisfies
+    feet-contact/upright/height/calm) becomes the argmax and the flip itself
+    never gets learned.
     """
     asset: Entity = env.scene[asset_cfg.name]
     gate = _backflip_completion_gate(
