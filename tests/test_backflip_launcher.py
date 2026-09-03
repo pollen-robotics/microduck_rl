@@ -35,3 +35,68 @@ def test_plate_geom_is_a_box_wide_enough_to_stand_on():
 def test_launcher_entity_cfg_has_no_articulation():
     # A prop, not a robot: no actuators, no articulation info (cf. the ball).
     assert MICRODUCK_LAUNCHER_CFG.articulation is None
+
+
+import torch
+
+from mjlab_microduck.tasks import mdp as microduck_mdp
+
+
+def _params(n=1, t_hold=0.5, t_launch=0.1, z0=0.15, vz=3.0, w0=10.0):
+    f = lambda v: torch.full((n,), float(v))
+    return dict(t_hold=f(t_hold), t_launch=f(t_launch), z0=f(z0), vz=f(vz), w0=f(w0))
+
+
+def test_plate_is_parked_and_still_during_hold():
+    z, pitch, vz_t, w_t, phase = microduck_mdp.backflip_plate_kinematics(
+        torch.tensor([0.0, 0.25, 0.499]), **_params(3)
+    )
+    assert torch.allclose(z, torch.full((3,), 0.15))
+    assert torch.allclose(pitch, torch.zeros(3))
+    assert torch.allclose(vz_t, torch.zeros(3))
+    assert torch.allclose(w_t, torch.zeros(3))
+    assert torch.all(phase == microduck_mdp.BACKFLIP_PHASE_HOLD)
+
+
+def test_launch_is_a_ramp_not_a_step():
+    # THE point of the ramp: velocity rises linearly through the window, so the
+    # contact solver never has to absorb a step change in plate velocity.
+    t = torch.tensor([0.5, 0.55, 0.6])
+    _, _, vz_t, w_t, phase = microduck_mdp.backflip_plate_kinematics(t, **_params(3))
+    assert torch.allclose(vz_t, torch.tensor([0.0, 1.5, 3.0]), atol=1e-5)
+    assert torch.allclose(w_t, torch.tensor([0.0, 5.0, 10.0]), atol=1e-5)
+    assert torch.all(phase[:2] == microduck_mdp.BACKFLIP_PHASE_LAUNCH)
+
+
+def test_launch_position_is_the_integral_of_the_ramp():
+    # z(t_hold + t_launch) = z0 + 0.5 * vz * t_launch
+    z, pitch, _, _, _ = microduck_mdp.backflip_plate_kinematics(
+        torch.tensor([0.6]), **_params()
+    )
+    assert torch.allclose(z, torch.tensor([0.15 + 0.5 * 3.0 * 0.1]), atol=1e-5)
+    assert torch.allclose(pitch, torch.tensor([0.5 * 10.0 * 0.1]), atol=1e-5)
+
+
+def test_plate_is_gone_after_the_ramp():
+    z, _, vz_t, w_t, phase = microduck_mdp.backflip_plate_kinematics(
+        torch.tensor([0.6001, 1.0]), **_params(2)
+    )
+    assert torch.all(phase == microduck_mdp.BACKFLIP_PHASE_GONE)
+    assert torch.allclose(z, torch.full((2,), microduck_mdp.BACKFLIP_GONE_Z))
+    assert torch.allclose(vz_t, torch.zeros(2))
+    assert torch.allclose(w_t, torch.zeros(2))
+
+
+def test_kinematics_are_batched_per_env():
+    n = 4
+    t = torch.tensor([0.0, 0.55, 0.7, 0.05])
+    p = _params(n)
+    p["t_hold"] = torch.tensor([0.5, 0.5, 0.5, 0.5])
+    z, _, _, _, phase = microduck_mdp.backflip_plate_kinematics(t, **p)
+    assert z.shape == (n,)
+    assert phase.tolist() == [
+        microduck_mdp.BACKFLIP_PHASE_HOLD,
+        microduck_mdp.BACKFLIP_PHASE_LAUNCH,
+        microduck_mdp.BACKFLIP_PHASE_GONE,
+        microduck_mdp.BACKFLIP_PHASE_HOLD,
+    ]

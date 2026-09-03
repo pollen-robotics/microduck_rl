@@ -7186,3 +7186,85 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BACKFLIP — launcher plate ("the operator's hands")
+#
+# The plate is a prop whose motion is PRESCRIBED, not simulated: a mode="step"
+# event rewrites its root pose and velocity every control step from these
+# kinematics. Three phases per env:
+#   HOLD   — parked at z0, still; the robot stands on it, with no cue that the
+#            launch is coming (the policy must react to what it feels).
+#   LAUNCH — constant acceleration: vertical velocity ramps 0 → vz and pitch
+#            rate 0 → w0 over t_launch. A ramp, NOT a step change in velocity:
+#            a plate that jumped straight to vz would make the contact solver
+#            accelerate the robot to launch speed inside one step, i.e. an
+#            impulsive infinite-jerk kick through the legs with an |a_z| spike
+#            that models nothing about a hand.
+#   GONE   — teleported to BACKFLIP_GONE_Z with zero velocity. Removal is
+#            TIME-based: a plate coasting at constant vz while the robot
+#            decelerates under gravity would keep pushing it forever, so
+#            waiting for contact loss would never fire.
+# ─────────────────────────────────────────────────────────────────────────────
+
+BACKFLIP_PHASE_HOLD = 0
+BACKFLIP_PHASE_LAUNCH = 1
+BACKFLIP_PHASE_GONE = 2
+
+# Where the plate is parked once it is out of the episode: far enough below the
+# floor that no contact, sensor or critic observation can see it.
+BACKFLIP_GONE_Z = -3.0
+
+
+def backflip_plate_kinematics(
+    t: torch.Tensor,
+    t_hold: torch.Tensor,
+    t_launch: torch.Tensor,
+    z0: torch.Tensor,
+    vz: torch.Tensor,
+    w0: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prescribed plate motion at time ``t`` (seconds since episode start).
+
+    Returns ``(z, pitch, vz_t, w_t, phase)``, each shaped like ``t``. ``pitch``
+    is the plate's rotation about the lateral (+y) axis, positive = the flick
+    that drives the robot BACKWARD. ``phase`` is one of the BACKFLIP_PHASE_*
+    constants.
+    """
+    t_launch = torch.clamp(t_launch, min=1e-4)
+    t_rel = t - t_hold                      # < 0 during hold
+    in_hold = t_rel < 0.0
+    in_launch = (~in_hold) & (t_rel < t_launch + 1e-6)
+    gone = ~(in_hold | in_launch)
+
+    # Constant-acceleration ramp over [0, t_launch].
+    tau = torch.minimum(torch.maximum(t_rel, torch.zeros_like(t_rel)), t_launch)
+    a_lin = vz / t_launch
+    a_ang = w0 / t_launch
+    z_ramp = z0 + 0.5 * a_lin * tau * tau
+    pitch_ramp = 0.5 * a_ang * tau * tau
+    vz_ramp = a_lin * tau
+    w_ramp = a_ang * tau
+
+    zero = torch.zeros_like(t)
+    z = torch.where(in_hold, z0, z_ramp)
+    pitch = torch.where(in_hold, zero, pitch_ramp)
+    vz_t = torch.where(in_hold, zero, vz_ramp)
+    w_t = torch.where(in_hold, zero, w_ramp)
+
+    z = torch.where(gone, torch.full_like(z, BACKFLIP_GONE_Z), z)
+    pitch = torch.where(gone, zero, pitch)
+    vz_t = torch.where(gone, zero, vz_t)
+    w_t = torch.where(gone, zero, w_t)
+
+    phase = torch.where(
+        in_hold,
+        torch.full_like(t, BACKFLIP_PHASE_HOLD, dtype=torch.long),
+        torch.where(
+            in_launch,
+            torch.full_like(t, BACKFLIP_PHASE_LAUNCH, dtype=torch.long),
+            torch.full_like(t, BACKFLIP_PHASE_GONE, dtype=torch.long),
+        ),
+    )
+    return z, pitch, vz_t, w_t, phase
