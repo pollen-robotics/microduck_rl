@@ -56,6 +56,9 @@ class LocalOnlyRunner:
     def status(self, fingerprint):
         return {"status": "pending", "fingerprint": fingerprint}
 
+    def start(self, prepared):
+        raise AssertionError("readiness must not start a trainer")
+
 
 raise SystemExit(main(sys.argv[1:], dependencies=CliDependencies(
     runner_factory=lambda home: LocalOnlyRunner(),
@@ -158,7 +161,7 @@ def _review_arguments(capability: Path, evaluation: Path, clips: dict[str, Path]
 
 
 def test_example_skill_is_a_numeric_warm_start_plan_without_training(tmp_path: Path):
-    """Catch an example that cannot pass schema planning or omits deployable acceptance data."""
+    """Catch an example that omits phase-scoped contact and acceptance semantics."""
     home = tmp_path / "workspace"
     inventory = _run_cli("inventory", home=home)
     assert any(item["id"] == "standing" for item in inventory["capabilities"])
@@ -172,29 +175,60 @@ def test_example_skill_is_a_numeric_warm_start_plan_without_training(tmp_path: P
     skill = json.loads(EXAMPLE.read_text(encoding="utf-8"))
     metric_names = {metric["name"] for metric in skill["metrics"]}
     assert {
-        "left_foot_support_ratio",
-        "right_foot_clearance_m",
-        "right_hip_lateral_cycles",
-        "trunk_tilt_abs_rad",
-        "forbidden_contact_count",
-        "fall_count",
-        "safe_return_success_ratio",
+        "raised_wave_left_foot_support_ratio",
+        "raised_wave_right_foot_clearance_m",
+        "raised_wave_right_hip_lateral_cycles",
+        "raised_wave_right_knee_flexion_min_rad",
+        "raised_wave_right_knee_flexion_max_rad",
+        "raised_wave_trunk_tilt_abs_rad",
+        "raised_wave_forbidden_contact_count",
+        "episode_fall_count",
+        "safe_exit_two_foot_contact_ratio",
+        "safe_exit_success_ratio",
     } <= metric_names
     assert all(isinstance(metric["limit"], (int, float)) for metric in skill["metrics"])
+    phases = skill["metadata"]["phase_contract"]
+    assert phases["entry"]["left_foot_floor_contact"] == "required"
+    assert phases["entry"]["right_foot_floor_contact"] == "required"
+    assert phases["raised_wave"]["right_foot_floor_contact"] == "forbidden"
+    assert set(phases["raised_wave"]["forbidden_contacts"]) == {"head", "trunk", "right_foot"}
+    assert phases["safe_exit"]["left_foot_floor_contact"] == "required"
+    assert phases["safe_exit"]["right_foot_floor_contact"] == "required"
+    assert set(skill["metadata"]["metric_scopes"]["raised_wave"]) == {
+        "raised_wave_left_foot_support_ratio",
+        "raised_wave_right_foot_clearance_m",
+        "raised_wave_right_hip_lateral_cycles",
+        "raised_wave_right_knee_flexion_min_rad",
+        "raised_wave_right_knee_flexion_max_rad",
+        "raised_wave_trunk_tilt_abs_rad",
+        "raised_wave_forbidden_contact_count",
+    }
     assert skill["metadata"]["hardware_deployment"]["calibration_required"] is True
     assert not list(home.rglob("model_*.pt"))
 
 
 def test_public_cli_readiness_flow_stays_local_until_human_approval(tmp_path: Path):
-    """Catch a CLI workflow that cannot prepare, review, reject, and approve isolated evidence."""
+    """Catch a CLI workflow that cannot repeat preparation and review isolated evidence."""
     home = tmp_path / "workspace"
+    # The installed executable is exercised for plan/review.  CLI dependencies are
+    # injectable only at ``main``; this subprocess uses that public parser with a
+    # local-only runner so prepare/status cannot reach SSH or start a trainer.
     prepared = _run_cli_with_local_runner(tmp_path, "prepare", str(EXAMPLE), home=home)
     assert prepared["status"] == "planned"
     assert prepared["fingerprint"] == prepared["prepared_fingerprint"]
+    fingerprint = str(prepared["fingerprint"])
+    manifest_path = home / "experiments" / fingerprint / "manifest.json"
+    status_path = home / "experiments" / fingerprint / "status.json"
+    first_manifest = manifest_path.read_bytes()
+    first_status = status_path.read_bytes()
+    repeated = _run_cli_with_local_runner(tmp_path, "prepare", str(EXAMPLE), home=home)
+    assert repeated == prepared
+    assert manifest_path.read_bytes() == first_manifest
+    assert status_path.read_bytes() == first_status
     assert not list(home.rglob("model_*.pt"))
 
-    status = _run_cli_with_local_runner(tmp_path, "status", str(prepared["fingerprint"]), home=home)
-    assert status == {"fingerprint": prepared["fingerprint"], "status": "pending"}
+    status = _run_cli_with_local_runner(tmp_path, "status", fingerprint, home=home)
+    assert status == {"fingerprint": fingerprint, "status": "pending"}
 
     capability, evaluation, clips = _review_inputs(tmp_path)
     review = _run_cli(*_review_arguments(capability, evaluation, clips), home=home)

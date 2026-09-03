@@ -1,7 +1,7 @@
 {
   "id": "one-leg-hello",
   "version": "1.0.0",
-  "description": "From an ordinary two-foot stand, support on the left foot, raise the right foot, wave the right hip laterally three times with a slightly bent right knee, keep the trunk controlled, and return safely to an ordinary stand.",
+  "description": "Enter from ordinary two-foot standing with both feet on the floor. During the raised-wave phase, support on the left foot, raise the right foot, wave the right hip laterally three times with a slightly bent right knee, and keep the trunk controlled. Safely exit by restoring ordinary two-foot standing contact.",
   "contract": {
     "model_api": 1,
     "obs_len": 61,
@@ -11,55 +11,61 @@
   },
   "metrics": [
     {
-      "name": "left_foot_support_ratio",
+      "name": "raised_wave_left_foot_support_ratio",
       "unit": "ratio",
       "direction": "minimum",
       "limit": 0.98
     },
     {
-      "name": "right_foot_clearance_m",
+      "name": "raised_wave_right_foot_clearance_m",
       "unit": "m",
       "direction": "minimum",
       "limit": 0.03
     },
     {
-      "name": "right_hip_lateral_cycles",
+      "name": "raised_wave_right_hip_lateral_cycles",
       "unit": "count",
       "direction": "minimum",
       "limit": 3
     },
     {
-      "name": "right_knee_flexion_min_rad",
+      "name": "raised_wave_right_knee_flexion_min_rad",
       "unit": "rad",
       "direction": "minimum",
       "limit": 0.15
     },
     {
-      "name": "right_knee_flexion_max_rad",
+      "name": "raised_wave_right_knee_flexion_max_rad",
       "unit": "rad",
       "direction": "maximum",
       "limit": 0.45
     },
     {
-      "name": "trunk_tilt_abs_rad",
+      "name": "raised_wave_trunk_tilt_abs_rad",
       "unit": "rad",
       "direction": "maximum",
       "limit": 0.25
     },
     {
-      "name": "forbidden_contact_count",
+      "name": "raised_wave_forbidden_contact_count",
       "unit": "count",
       "direction": "maximum",
       "limit": 0
     },
     {
-      "name": "fall_count",
+      "name": "episode_fall_count",
       "unit": "count",
       "direction": "maximum",
       "limit": 0
     },
     {
-      "name": "safe_return_success_ratio",
+      "name": "safe_exit_two_foot_contact_ratio",
+      "unit": "ratio",
+      "direction": "minimum",
+      "limit": 0.98
+    },
+    {
+      "name": "safe_exit_success_ratio",
       "unit": "ratio",
       "direction": "minimum",
       "limit": 0.98
@@ -73,25 +79,29 @@
   ],
   "entry_states": {
     "required_pose": "ordinary_two_foot_standing",
-    "left_foot": "support_contact_required",
-    "right_foot": "raised_without_floor_contact"
+    "left_foot_floor_contact": "required",
+    "right_foot_floor_contact": "required"
   },
   "exit_states": {
     "required_pose": "ordinary_two_foot_standing",
+    "left_foot_floor_contact": "required",
+    "right_foot_floor_contact": "required",
     "minimum_hold_s": 2.0,
     "safe_return_required": true
   },
   "commands": {
-    "right_hip_roll": {
-      "motion": "lateral_side_to_side",
-      "cycles": 3,
-      "peak_to_peak_rad": 0.3
-    },
-    "right_knee": {
-      "target_flexion_rad": 0.25
-    },
-    "trunk": {
-      "maximum_abs_tilt_rad": 0.25
+    "raised_wave": {
+      "right_hip_roll": {
+        "motion": "lateral_side_to_side",
+        "cycles": 3,
+        "peak_to_peak_rad": 0.3
+      },
+      "right_knee": {
+        "target_flexion_rad": 0.25
+      },
+      "trunk": {
+        "maximum_abs_tilt_rad": 0.25
+      }
     }
   },
   "held_out_scenarios": [
@@ -117,19 +127,54 @@
   "metadata": {
     "simulation_acceptance_defaults": {
       "evaluation_duration_s": 4.0,
-      "left_foot_support_ratio_min": 0.98,
-      "right_foot_clearance_m_min": 0.03,
-      "right_hip_lateral_cycles_min": 3,
-      "trunk_tilt_abs_rad_max": 0.25,
-      "forbidden_contact_count_max": 0,
-      "fall_count_max": 0,
-      "safe_return_success_ratio_min": 0.98
+      "raised_wave_left_foot_support_ratio_min": 0.98,
+      "raised_wave_right_foot_clearance_m_min": 0.03,
+      "raised_wave_right_hip_lateral_cycles_min": 3,
+      "raised_wave_right_knee_flexion_min_rad_min": 0.15,
+      "raised_wave_right_knee_flexion_max_rad_max": 0.45,
+      "raised_wave_trunk_tilt_abs_rad_max": 0.25,
+      "raised_wave_forbidden_contact_count_max": 0,
+      "episode_fall_count_max": 0,
+      "safe_exit_two_foot_contact_ratio_min": 0.98,
+      "safe_exit_success_ratio_min": 0.98
     },
-    "forbidden_contacts": [
-      "head",
-      "trunk",
-      "right_foot"
-    ],
+    "phase_contract": {
+      "entry": {
+        "left_foot_floor_contact": "required",
+        "right_foot_floor_contact": "required"
+      },
+      "raised_wave": {
+        "left_foot_floor_contact": "required",
+        "right_foot_floor_contact": "forbidden",
+        "forbidden_contacts": [
+          "head",
+          "trunk",
+          "right_foot"
+        ]
+      },
+      "safe_exit": {
+        "left_foot_floor_contact": "required",
+        "right_foot_floor_contact": "required"
+      }
+    },
+    "metric_scopes": {
+      "raised_wave": [
+        "raised_wave_left_foot_support_ratio",
+        "raised_wave_right_foot_clearance_m",
+        "raised_wave_right_hip_lateral_cycles",
+        "raised_wave_right_knee_flexion_min_rad",
+        "raised_wave_right_knee_flexion_max_rad",
+        "raised_wave_trunk_tilt_abs_rad",
+        "raised_wave_forbidden_contact_count"
+      ],
+      "episode": [
+        "episode_fall_count"
+      ],
+      "safe_exit": [
+        "safe_exit_two_foot_contact_ratio",
+        "safe_exit_success_ratio"
+      ]
+    },
     "hardware_deployment": {
       "calibration_required": true,
       "deployment_allowed_after_calibration": false

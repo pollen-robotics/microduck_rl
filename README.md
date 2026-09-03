@@ -63,6 +63,8 @@ existing trainer, exporter, publisher, or robot runtime. Start with the
 inventory, conservative planning, Nitro preparation and status, evaluation
 evidence, five-video human review, and explicit approval or rejection. A
 capability marked `learned` is not automatically published or deployed.
+The bundled `one-leg-hello` specification is planning-only: its
+`Mjlab-OneLegHello-MicroDuck` task ID is not registered and must not be started.
 
 ## Tasks
 

@@ -50,7 +50,7 @@ uv run next-rl plan examples/skills/one-leg-hello.json \
 
 ## Prepare and inspect a bounded job
 
-The current public syntax is:
+The current public `prepare` syntax is:
 
 ```bash
 uv run next-rl prepare examples/skills/one-leg-hello.json \
@@ -59,9 +59,16 @@ uv run next-rl prepare examples/skills/one-leg-hello.json \
 uv run next-rl status <fingerprint>
 ```
 
+`Mjlab-OneLegHello-MicroDuck` is a non-runnable planning placeholder: this
+repository does not yet have its task or reward registration. The
+`one-leg-hello` specification is valid planning data, but it **MUST NOT** be
+started or sent to a real runner. The command form above documents the current
+CLI arguments only; do not use it to prepare or start the hello example on
+Nitro.
+
 `prepare` records an immutable manifest and stages a safe, tracked-source
 bundle for the configured Nitro runner. It does **not** expose a `start`
-subcommand and does not start a trainer. A real runner preparation requires
+subcommand. A real runner preparation requires
 `NEXT_RL_NITRO_SSH_ALIAS` (and optionally `NEXT_RL_NITRO_SSH_USER`); it uses
 host-key-checked transport. The displayed fingerprint is the value to pass to
 `status`, which reports lifecycle state and any stable checkpoint metadata
@@ -75,16 +82,17 @@ remote sync or bounded Nitro smoke. The required documentation commit is:
 docs(next-rl): document guarded training workflow
 ```
 
-After a prepared job is deliberately started by the authorized runner workflow,
-run only the repository's bounded smoke before considering a longer run:
+The separately registered Velocity task is the only bounded workspace/GPU smoke
+shown here:
 
 ```bash
 WANDB_MODE=disabled uv run train Mjlab-Velocity-Flat-MicroDuck \
   --env.scene.num-envs 64 --agent.max-iterations 5
 ```
 
-This smoke is a configuration check, not evidence that `one-leg-hello` is
-learned. Do not publish or deploy its checkpoint.
+This is not a prepared hello job and does not validate the hello task, reward,
+or phase contract. It is only a workspace/GPU configuration check; do not
+publish or deploy its checkpoint.
 
 ### Resume semantics
 
@@ -122,7 +130,40 @@ entry, safe exit, held-out stress, and the worst observed rollout. The review
 bundle binds each clip and the report to the exact ONNX digest. It is not a
 replacement for a human reviewer.
 
-Use the returned record ID to make the human decision explicit:
+Before approving or rejecting, retain the returned `bundle_path` and
+`bundle_digest`, then inspect the canonical manifest and metrics and verify its
+exact file binding:
+
+```bash
+uv run python - "$bundle_path" "$bundle_digest" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+from mjlab_microduck.next_rl.artifacts import canonical_json
+from mjlab_microduck.next_rl.review import ReviewBundle
+
+path = Path(sys.argv[1])
+expected_digest = sys.argv[2]
+text = path.read_text(encoding="utf-8")
+raw = json.loads(text)
+assert canonical_json(raw) == text
+assert hashlib.sha256(text.encode("utf-8")).hexdigest() == expected_digest
+bundle = ReviewBundle.from_dict(raw)
+assert bundle.digest == expected_digest
+bundle.verify()
+print(json.dumps(json.loads(bundle.evaluation_json)["scenarios"], indent=2))
+for clip in bundle.clips:
+    print(clip.role, clip.path, clip.digest, clip.policy_digest)
+PY
+```
+
+`bundle.verify()` checks the exact evaluation and policy digest plus every
+referenced clip's role, scenario, path, and SHA-256. Open all five printed
+clips—nominal, entry, exit, stress, and worst case—and inspect the printed
+metrics before making the human decision. Use the returned record ID only after
+that inspection:
 
 ```bash
 uv run next-rl approve <record-id> --reviewer "operator-name"
@@ -140,11 +181,14 @@ start training, publish a repository, or command hardware.
 [`examples/skills/one-leg-hello.json`](../examples/skills/one-leg-hello.json)
 is planning data for a small, non-training acceptance contract. It specifies:
 
-- left-foot support while the right foot is raised at least 0.03 m;
-- three lateral right-hip side-to-side cycles, with right-knee flexion held
-  between 0.15 and 0.45 rad;
-- trunk tilt at most 0.25 rad, no forbidden contacts or falls, and a two-foot
-  ordinary-standing return held for 2.0 s;
+- entry from ordinary two-foot standing, with both left and right foot contacts
+  required;
+- only during the raised-wave phase, left-foot support, right-foot clearance of
+  at least 0.03 m, three lateral right-hip side-to-side cycles, right-knee
+  flexion between 0.15 and 0.45 rad, and trunk tilt at most 0.25 rad;
+- only during the raised-wave phase, no head, trunk, or right-foot contact;
+  right-foot contact is required, not forbidden, at entry and safe exit;
+- no episode falls and a safe two-foot ordinary-standing return held for 2.0 s;
 - explicit, unit-labelled simulation acceptance defaults and disjoint training
   and evaluation seeds.
 
