@@ -7228,9 +7228,27 @@ def backflip_plate_kinematics(
     """Prescribed plate motion at time ``t`` (seconds since episode start).
 
     Returns ``(z, pitch, vz_t, w_t, phase)``, each shaped like ``t``. ``pitch``
-    is the plate's rotation about the lateral (+y) axis, positive = the flick
-    that drives the robot BACKWARD. ``phase`` is one of the BACKFLIP_PHASE_*
-    constants.
+    is the plate's rotation about the lateral (+y) axis. ``w0`` is the public
+    "backward-flick strength" knob: ``w0 > 0`` MEANS "the flick that drives
+    the robot BACKWARD (a backflip)" — but the returned ``pitch``/``w_t`` are
+    NEGATIVE for a positive ``w0``, not positive. That sign flip is
+    deliberate and lives here so every caller only ever reasons about
+    "w0 > 0 = backward":  this codebase's own convention (see
+    ``set_random_ground_state``'s ``face_down``/``face_up`` quaternions) is
+    that +90 deg rotation about +y = face-down = a FORWARD roll, and -90 deg
+    about +y = face-up = a BACKWARD roll. A backward flick must therefore
+    rotate the plate (and, via sole friction, the robot) about +y by a
+    NEGATIVE angle, so ``w_t``/``pitch`` run negative while ``w0`` stays
+    positive in the caller-facing sign.
+
+    Bug history: an earlier version returned ``pitch``/``w_t`` POSITIVE for
+    positive ``w0`` (i.e. ``a_ang = w0 / t_launch``), which actually drives
+    the robot FORWARD (nose-down/face-down), not backward — the opposite of
+    the docstring's own claim at the time. Caught by an independent
+    orientation trace (the robot's local +z axis in world coordinates at
+    ~90 deg of accumulated rotation) in the Task 3 flip-envelope probe; see
+    ``docs/backflip_envelope_results.md``. Fixed by negating ``a_ang``.
+    ``phase`` is one of the BACKFLIP_PHASE_* constants.
     """
     t_launch = torch.clamp(t_launch, min=1e-4)
     t_rel = t - t_hold                      # < 0 during hold
@@ -7245,7 +7263,10 @@ def backflip_plate_kinematics(
     # raises TypeError when min is float and max is Tensor in torch 2.9.1+.
     tau = torch.minimum(torch.maximum(t_rel, torch.zeros_like(t_rel)), t_launch)
     a_lin = vz / t_launch
-    a_ang = w0 / t_launch
+    # NEGATED: w0 > 0 is the caller-facing "backward" knob, but a backward
+    # roll is a NEGATIVE rotation about +y in this codebase's convention
+    # (see docstring). Do not remove this minus sign without re-reading it.
+    a_ang = -w0 / t_launch
     z_ramp = z0 + 0.5 * a_lin * tau * tau
     pitch_ramp = 0.5 * a_ang * tau * tau
     vz_ramp = a_lin * tau

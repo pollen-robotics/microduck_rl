@@ -64,7 +64,14 @@ def test_launch_is_a_ramp_not_a_step():
     t = torch.tensor([0.5, 0.55, 0.6])
     _, _, vz_t, w_t, phase = microduck_mdp.backflip_plate_kinematics(t, **_params(3))
     assert torch.allclose(vz_t, torch.tensor([0.0, 1.5, 3.0]), atol=1e-5)
-    assert torch.allclose(w_t, torch.tensor([0.0, 5.0, 10.0]), atol=1e-5)
+    # w_t is NEGATIVE for a positive w0: w0 > 0 means "backward flick" (the
+    # public contract), and a backward roll is a negative rotation about +y
+    # in this codebase's convention (face-down = +90deg about +y is FORWARD;
+    # see set_random_ground_state). This test previously pinned +5.0/+10.0,
+    # which was the bug the Task 3 flip-envelope probe caught (an orientation
+    # trace showed w0 > 0 was driving the robot face-down/forward, not
+    # backward) — corrected here alongside the backflip_plate_kinematics fix.
+    assert torch.allclose(w_t, torch.tensor([0.0, -5.0, -10.0]), atol=1e-5)
     assert torch.all(phase[:2] == microduck_mdp.BACKFLIP_PHASE_LAUNCH)
 
 
@@ -74,7 +81,10 @@ def test_launch_position_is_the_integral_of_the_ramp():
         torch.tensor([0.6]), **_params()
     )
     assert torch.allclose(z, torch.tensor([0.15 + 0.5 * 3.0 * 0.1]), atol=1e-5)
-    assert torch.allclose(pitch, torch.tensor([0.5 * 10.0 * 0.1]), atol=1e-5)
+    # pitch is NEGATIVE for a positive w0 — see the sign-convention comment
+    # in test_launch_is_a_ramp_not_a_step above. Previously pinned +0.5,
+    # which was the same mislabeled-direction bug.
+    assert torch.allclose(pitch, torch.tensor([-0.5 * 10.0 * 0.1]), atol=1e-5)
 
 
 def test_plate_is_gone_after_the_ramp():
