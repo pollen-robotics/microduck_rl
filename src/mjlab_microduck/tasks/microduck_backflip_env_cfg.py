@@ -168,9 +168,6 @@ SPAWN_XY_NOISE   = 0.01
 SPAWN_YAW_NOISE  = 0.05
 SPAWN_TILT_NOISE = 0.02   # rad of roll/pitch — the operator's hands are not level
 
-_LEG_JOINTS  = [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]
-_NECK_JOINTS = [5, 6, 7, 8]
-
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp import dr
 from mjlab.envs.mdp.actions import JointPositionActionCfg
