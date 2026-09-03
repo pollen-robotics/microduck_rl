@@ -26,7 +26,17 @@ with w0 above roughly 33-36 rad/s report large "backward rotation" numbers
 that a --check-direction trace shows are actually FORWARD rolls (see
 docs/backflip_envelope_results.md "The reversal") — do not trust rot_deg /
 land_m/s from this sweep for w0 past that point without directly verifying
-direction first. Override the grid with --vz/--w0/--tuck; --z0 is unchanged.
+direction first. Rows past the verified-safe ceiling (SAFE_W0_CEILING) are
+marked with a trailing '*' in the printed table as a reminder not to sort
+this output by land_m/s and trust whatever comes out on top. Override the
+grid with --vz/--w0/--tuck; --z0 is unchanged.
+
+Two DIFFERENT sets of flags, easy to fat-finger: --vz/--w0/--tuck take
+comma-separated GRIDS and drive the full sweep (main mode); --check-vz/
+--check-w0/--check-tuck take single numbers and only apply under
+--check-direction (one cell, direction trace). Typing --w0 when you meant
+--check-w0 silently sweeps the whole default grid instead of checking one
+cell.
 """
 
 import argparse
@@ -228,6 +238,16 @@ DEFAULT_VZ = (1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0)
 DEFAULT_W0 = tuple(float(w) for w in range(6, 55, 3))
 DEFAULT_TUCK = (0.5, 0.75, 1.0)
 
+# Verified-safe ceiling for w0, from the --check-direction boundary scan in
+# docs/backflip_envelope_results.md ("The reversal"): every checked cell with
+# w0<=30 came back genuinely backward; w0=33-36 was marginal/weakening; w0>=39
+# came back FORWARD (wrong) at every vz/tuck combination checked. Rows past
+# this ceiling are marked '*' below -- their rot_deg/land_m/s numbers have NOT
+# been direction-verified and several confirmed cases in this exact range are
+# known to be forward rolls, not backward flips. Do not sort this table by
+# land_m/s and trust the top row without checking it first.
+SAFE_W0_CEILING = 30.0
+
 
 def _float_list(s):
     return tuple(float(x) for x in s.split(","))
@@ -272,10 +292,20 @@ def main():
         )
         return
 
+    if max(args.w0) > SAFE_W0_CEILING:
+        print(
+            f"NOTE: rows with w0 > {SAFE_W0_CEILING:.1f} rad/s are marked '*' below. "
+            "Those cells are NOT direction-verified -- multiple cells in this exact "
+            "range have been directly checked (--check-direction) and came back "
+            "FORWARD rolls despite reporting a large 'backward' rot_deg. See "
+            "docs/backflip_envelope_results.md \"The reversal\" before trusting any "
+            "of them, especially the best-looking (lowest land_m/s) ones."
+        )
     print(f"{'vz':>5} {'w0':>6} {'tuck':>5} {'rot_deg':>8} {'land_m/s':>9} {'apex_m':>7}")
     for vz, w0, tuck in itertools.product(args.vz, args.w0, args.tuck):
         rot, land, apex = run_cell(model, data, vz, w0, tuck, args.z0)
-        print(f"{vz:5.2f} {w0:6.1f} {tuck:5.2f} {rot:8.1f} {land:9.2f} {apex:7.3f}")
+        flag = "*" if w0 > SAFE_W0_CEILING else " "
+        print(f"{vz:5.2f} {w0:6.1f} {tuck:5.2f} {rot:8.1f} {land:9.2f} {apex:7.3f} {flag}")
 
 
 if __name__ == "__main__":

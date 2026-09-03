@@ -375,8 +375,16 @@ roughly 1.5-2.6 m/s, not below 1 m/s.**
 
 ## Commands run
 Script changes: `scripts/backflip_envelope.py` gained `--vz`, `--w0`, `--tuck`
-(comma-separated grids, defaults below) and `--check-vz`/`--check-w0`/`--check-tuck`
-for `--check-direction` on an arbitrary cell. `--z0` is unchanged.
+(comma-separated GRIDS, defaults below, drive the main sweep) and
+`--check-vz`/`--check-w0`/`--check-tuck` (single numbers, only apply under
+`--check-direction`, trace one cell). `--z0` is unchanged. A later revision
+(review round) also added: a `*` marker on any printed row with
+`w0 > SAFE_W0_CEILING` (30.0 rad/s) plus a warning banner above the table
+when the swept `w0` grid includes any such rows, so sorting printed output
+by `land_m/s` cannot silently surface an unverified (or known-wrong) cell;
+and a docstring note distinguishing the grid flags from the single-cell
+check flags, since typing `--w0` when `--check-w0` was meant silently
+sweeps the whole default grid instead of checking one cell.
 ```
 # Default extended grid: vz in {1.00..3.00 step 0.25} (9 values),
 # w0 in {6..54 step 3} (17 values), tuck in {0.5, 0.75, 1.0} (3 values)
@@ -392,6 +400,11 @@ uv run python scripts/backflip_envelope.py --check-direction --z0 0.15 \
 # Direction check on the genuine (direction-verified) best cell -- PASSES:
 uv run python scripts/backflip_envelope.py --check-direction --z0 0.10 \
   --check-vz 2.25 --check-w0 30.0 --check-tuck 1.0
+
+# Review-round additions: direction checks at the recommended box's corners
+# (see "Direction verification at the box corners") and a finer vz scan at
+# its worst-margin corner (see "The vz floor: cliff or margin?") -- both
+# reproduced verbatim in their own sections below.
 ```
 `t_hold=0.3s`, `t_launch=0.12s` unchanged. The default `w0` ceiling (54) was
 not chosen up front: an initial pass to `w0<=30` (the brief's suggested
@@ -454,13 +467,23 @@ continuous drift that flips sign:
 | 42.0 | +0.131                        | **forward -- WRONG** |
 | 45.0 | +0.250                        | **forward -- WRONG** |
 
-The same pattern repeats at `vz=2.0, tuck=1.0`: x-component is -0.533 at
-`w0=24`, shrinks monotonically to -0.043 at `w0=36` (by which point rotation
-also stops closing 360, 346.0 deg). Every other "top of the naive list" cell
-checked directly (`vz=2.5, w0=39/42, tuck=0.75`; `vz=2.75, w0=42/45,
-tuck=1.0`) also comes back FACE-DOWN / WRONG. **None of the sub-`2.0 m/s`
-landing speeds from `w0` above roughly 36-39 are trustworthy backward
-flips** -- they are excluded from the recommendation below.
+The same pattern repeats at `vz=2.0, tuck=1.0`, with intermediate points
+sampled (not just the two endpoints), so this is a second full curve, not an
+interpolation between two checks:
+
+| w0   | local +z world x-component | verdict |
+|------|------------------------------|---------|
+| 24.0 | -0.533                        | backward |
+| 27.0 | -0.422                        | backward |
+| 30.0 | -0.280                        | backward |
+| 33.0 | -0.182                        | backward, marginal |
+| 36.0 | -0.043                         | ambiguous (rotation also stops closing 360 here, 346.0 deg) |
+
+Every other "top of the naive list" cell checked directly (`vz=2.5,
+w0=39/42, tuck=0.75`; `vz=2.75, w0=42/45, tuck=1.0`) also comes back
+FACE-DOWN / WRONG. **None of the sub-`2.0 m/s` landing speeds from `w0`
+above roughly 36-39 are trustworthy backward flips** -- they are excluded
+from the recommendation below.
 
 The likely mechanism (not independently re-derived here, flagged for
 whoever tunes reward shaping next): `backflip_plate_kinematics` prescribes
@@ -633,22 +656,126 @@ m/s x w0 in [24.0, 30.0] rad/s x tuck in [0.5, 1.0]` -- all direction-trustworth
 Every cell in this box closes 360 deg at every `z0`, with landing speed
 `1.46-2.59 m/s` -- meaningfully below the original document's closing-cell
 range (`3.1-4.3 m/s`) with margin on both sides of every dimension, not a
-knife edge. **One caveat found while building this box**: widening it to
+knife edge for CLOSURE and LANDING SPEED. (Direction is a separate claim,
+checked separately below -- see "Direction verification at the box
+corners".) **One caveat found while building this box**: widening it to
 include `vz=1.75` breaks at `z0=0.10` -- `vz=1.75, w0=30.0, tuck=1.00,
 z0=0.10` gives only `336.3 deg` (does not close). That corner (low vz, high
 w0, high tuck, shallow z0) is excluded from the recommended range below for
-exactly this reason.
+exactly this reason -- see "The vz floor" below for how close `vz=2.00`
+itself sits to that same cliff.
 
 `vz=2.5` was also checked at `w0 in [24,30]` and rejected: it still closes
 360 everywhere, but landing speed at `z0=0.20` reaches `3.10-3.72 m/s` --
 worse than the original best cell, not better -- so `vz` should not be
 pushed past `2.25` in the recommended range.
 
+### Direction verification at the box corners
+
+**Gap this closes**: the sections above establish CLOSURE and LANDING SPEED
+robustness across the whole box (all 54 rows, all three `z0`) by direct
+measurement. That is a different claim from DIRECTION robustness. Before
+this check, DIRECTION had been confirmed at exactly one point inside the
+box (`vz=2.25, w0=30.0, tuck=1.0, z0=0.10`, in "The genuine improvement"
+above) plus the general `w0<=30` boundary-scan trend at `tuck=1.0` only
+(two `vz` cuts, "The reversal" above) -- `tuck=0.5` had zero direct
+direction checks anywhere, and `z0=0.20` had zero direct direction checks
+anywhere, despite both being inside the recommended range. That gap is
+closed here with checks at both `tuck` extremes crossed with both `z0`
+extremes at `w0=30` (the box's `w0` ceiling, where direction margin is
+thinnest), plus the box's single worst-landing-speed point
+(`vz=2.25, w0=27.0, tuck=0.75, z0=0.20`, `2.59 m/s`):
+
+```
+uv run python scripts/backflip_envelope.py --check-direction --z0 0.10 \
+  --check-vz 2.0 --check-w0 30.0 --check-tuck 0.5
+uv run python scripts/backflip_envelope.py --check-direction --z0 0.20 \
+  --check-vz 2.0 --check-w0 30.0 --check-tuck 0.5
+uv run python scripts/backflip_envelope.py --check-direction --z0 0.10 \
+  --check-vz 2.0 --check-w0 30.0 --check-tuck 1.0
+uv run python scripts/backflip_envelope.py --check-direction --z0 0.20 \
+  --check-vz 2.0 --check-w0 30.0 --check-tuck 1.0
+uv run python scripts/backflip_envelope.py --check-direction --z0 0.20 \
+  --check-vz 2.25 --check-w0 27.0 --check-tuck 0.75
+```
+
+| vz   | w0   | tuck | z0   | local +z world x-component | verdict | rot_deg | land_m/s |
+|------|------|------|------|-------------------------------|-----------|---------|----------|
+| 2.00 | 30.0 | 0.5  | 0.10 | -0.292                         | backward  | 420.4   | 1.58     |
+| 2.00 | 30.0 | 0.5  | 0.20 | -0.292                         | backward  | 452.3   | 1.87     |
+| 2.00 | 30.0 | 1.0  | 0.10 | -0.280                         | backward  | 399.5   | 1.54     |
+| 2.00 | 30.0 | 1.0  | 0.20 | -0.280                         | backward  | 445.2   | 1.65     |
+| 2.25 | 27.0 | 0.75 | 0.20 | -0.510                         | backward  | 526.9   | 2.59     |
+
+All five come back backward (negative world-x component, same convention
+as every other check in this document). Note the `tuck=0.5` and `tuck=1.0`
+x-components at `w0=30` are identical to three decimal places across both
+`z0` values -- the direction check samples the flight trajectory at a fixed
+*accumulated-rotation* instant (~90 deg), not a fixed time, so at matched
+`vz/w0/tuck` the early-flight orientation is close to `z0`-independent (the
+plate's prescribed kinematics before liftoff are the same shape regardless
+of `z0`; `z0` mainly changes what happens after liftoff, i.e. apex and
+landing). This is expected, not a bug in the check.
+
+With this, every corner of the recommended box that could plausibly hide a
+reversal (`w0` at its ceiling, both `tuck` extremes, both `z0` extremes, and
+the single worst-landing point) has been directly checked and confirmed
+backward. The interior of the box was not exhaustively checked cell-by-cell
+-- that inference rests on the boundary-scan trend (monotonic movement away
+from zero as `w0` decreases from the ~33-39 reversal zone, confirmed on two
+independent `vz` cuts in "The reversal") plus these five corner points, not
+on a claim that all 54 rows were individually traced.
+
+### The vz floor: cliff or margin?
+
+`vz=1.75` fails closure (336.3 deg) while `vz=2.00` passes (399.5 deg) at
+the box's worst-margin corner (`w0=30, tuck=1.0, z0=0.10`) -- a single
+`0.25 m/s` step spanning "clearly fails" to "passes" with nothing sampled
+between them, and the eventual DR sampler will draw `vz` continuously from
+the recommended range, so it will land on every value in between. Sampled
+finer at that same corner:
+
+```
+uv run python scripts/backflip_envelope.py --z0 0.10 \
+  --vz 1.75,1.80,1.85,1.90,1.95,2.00 --w0 30 --tuck 1.0
+```
+
+```
+   vz     w0  tuck  rot_deg  land_m/s  apex_m
+ 1.75   30.0  1.00    336.3      2.09   0.298
+ 1.80   30.0  1.00    346.8      1.98   0.307
+ 1.85   30.0  1.00    360.8      1.84   0.314
+ 1.90   30.0  1.00    378.8      1.69   0.323
+ 1.95   30.0  1.00    389.7      1.59   0.331
+ 2.00   30.0  1.00    399.5      1.54   0.342
+```
+
+Closure crosses 360 deg between `vz=1.80` (fails, 346.8 deg) and `vz=1.85`
+(passes, but only barely -- 360.8 deg, 0.8 deg of margin). It does not
+recover gradually across a wide band; it is a real, fairly sharp threshold
+around `vz~1.82-1.84`, and `vz=1.85` itself is too close to that threshold
+to trust. **The box's stated floor of `vz=2.00` sits about 0.15-0.20 m/s
+above the measured cliff, with 399.5 deg of margin (39.5 deg clear of the
+360 deg line) rather than the ~1 deg margin at `vz=1.85`** -- so the floor
+does NOT need to move up. It is, however, closer to the cliff than a first
+glance at the box (`vz in [2.00, 2.25]`) suggests, and this is why: at
+`tuck=0.5/0.75` the same `vz=1.75` point already passes comfortably (365.6
+and 362.6 deg respectively, both `z0=0.10, w0=30`), so `tuck=1.0` is
+specifically the worst-case tuck for this cliff, consistent with full tuck
+being the most demanding pose for maintaining plate contact through the
+whole `t_launch` window. Do not treat `vz=2.00` as having a large buffer at
+other `(w0, tuck)` combinations without checking; this measurement is
+specific to the box's `w0=30, tuck=1.0` corner, its worst case.
+
 ## Full raw sweep output (verbatim, all 459 cells per z0)
 Collapsed for length -- reproduced with the commands in "Commands run"
 above. `rot_deg` is backward rotation for `w0<=~33`; treat `rot_deg` for
 `w0>36` as an ungrounded number until independently direction-checked (see
-"The reversal" above).
+"The reversal" above). These tables predate the script's `*` marker column
+(added after this sweep, per "Minor items" below); a fresh run of the same
+commands now marks every `w0 > 30.0` row with a trailing `*` and prints a
+warning banner above the table for exactly this reason -- don't sort these
+rows by `land_m/s` and trust the top one without checking it.
 
 <details>
 <summary>z0 = 0.15 (179/459 close)</summary>
@@ -2074,20 +2201,34 @@ This is exactly the "implausibly low apex" trap the brief warned about: apex
 at those cells (0.25-0.39 m) is well below the original best cell's 0.56 m,
 and the number is untrustworthy precisely because it looked too good.
 
-Restricted to the region where direction is verified (`w0<=~30`, with margin
-before the ~33-36 boundary where the signal degrades), the genuine picture
-is:
+Restricted to `w0<=~30` (with margin before the ~33-36 boundary where the
+general direction signal degrades, per the two boundary-scan curves in "The
+reversal"), the genuine picture is:
 
 - **The best single cell**: `vz=2.25, w0=30.0, tuck=1.0` -> lands at
   **1.46-1.88 m/s** depending on `z0` (was 3.14-3.28 m/s in the original
   document's best cell at the matching `z0` range) -- a ~45-55% reduction,
   confirmed backward by direct measurement.
-- **A robust DR box, not a knife edge**: `vz in [2.00, 2.25] m/s`, `w0 in
-  [24.0, 30.0] rad/s`, `tuck in [0.5, 1.0]` closes 360 deg at every combination
-  tested across all three `z0 in {0.10, 0.15, 0.20}`, with landing speed
-  `1.46-2.59 m/s` throughout -- every cell in the box beats the original
-  document's worst closing-cell landing speed (4.3 m/s) and the large
-  majority beat its best (3.14 m/s).
+- **A robust DR box, not a knife edge, for closure AND direction**: `vz in
+  [2.00, 2.25] m/s`, `w0 in [24.0, 30.0] rad/s`, `tuck in [0.5, 1.0]` closes
+  360 deg at every combination tested across all three `z0 in {0.10, 0.15,
+  0.20}` (54 rows, directly measured), with landing speed `1.46-2.59 m/s`
+  throughout -- every cell in the box beats the original document's worst
+  closing-cell landing speed (4.3 m/s) and the large majority beat its best
+  (3.14 m/s). Direction was directly checked at every combination of both
+  `tuck` extremes x both `z0` extremes at the box's `w0` ceiling (30, where
+  direction margin is thinnest), plus the box's single worst-landing point
+  -- five points total, all confirmed backward (see "Direction verification
+  at the box corners"). The box's interior was not checked cell-by-cell;
+  that relies on the boundary-scan trend, not an exhaustive trace.
+- **The `vz=2.00` floor is close to a real cliff, but clears it with
+  measured margin**: at the box's worst-margin corner (`w0=30, tuck=1.0,
+  z0=0.10`), closure fails at `vz=1.80` (346.8 deg) and barely passes at
+  `vz=1.85` (360.8 deg, ~1 deg of margin) -- `vz=2.00` sits roughly
+  0.15-0.20 m/s above that cliff, with a much healthier 39.5 deg of margin
+  (399.5 deg). The floor does not need to move up, but it is closer to a
+  real threshold than the box's headline numbers suggest (see "The vz
+  floor: cliff or margin?").
 - **Do not widen the box on either axis without re-checking**: `vz=1.75`
   fails to close at `z0=0.10, w0=30, tuck=1.0` (336.3 deg); `vz=2.5` closes
   everywhere but its landing speed at `z0=0.20` (up to 3.72 m/s) is worse
