@@ -156,6 +156,39 @@ def test_status_rejects_malformed_or_missing_lifecycle_state(tmp_path: Path, mon
     assert json.loads(capsys.readouterr().out) == {"error": "invalid_request"}
 
 
+def test_status_allows_runner_signal_exit_code(tmp_path: Path, monkeypatch, capsys):
+    """Catch status rejecting the runner's valid negative signal exit codes."""
+    runner = _FakeRunner()
+    runner.status = lambda fingerprint: {"status": "failed", "exit_code": -15}
+    monkeypatch.setenv("NEXT_RL_HOME", str(tmp_path / "state"))
+
+    assert main(["status", "e" * 64], dependencies=CliDependencies(runner_factory=lambda home: runner)) == 0
+
+    assert json.loads(capsys.readouterr().out) == {
+        "fingerprint": "e" * 64, "status": "failed", "exit_code": -15,
+    }
+
+
+def test_status_rejects_runner_checkpoint_parent_segment(tmp_path: Path, monkeypatch, capsys):
+    """Catch a checkpoint path the Nitro runner itself would refuse to sync."""
+    runner = _FakeRunner()
+    runner.status = lambda fingerprint: {
+        "status": "succeeded",
+        "last_stable_checkpoint": {
+            "name": "model_1.pt",
+            "relative_path": "source/logs/../model_1.pt",
+            "sha256": "e" * 64,
+            "size": 12,
+            "mtime_ns": 34,
+        },
+    }
+    monkeypatch.setenv("NEXT_RL_HOME", str(tmp_path / "state"))
+
+    assert main(["status", "e" * 64], dependencies=CliDependencies(runner_factory=lambda home: runner)) == 2
+
+    assert json.loads(capsys.readouterr().out) == {"error": "invalid_request"}
+
+
 def _review_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path, dict[str, Path]]:
     spec = SkillSpec(
         "new-skill", "1.0.0", "A reviewable skill.", PolicyContract.microduck(),
@@ -254,6 +287,23 @@ def test_review_allows_benign_token_keys(tmp_path: Path, monkeypatch, capsys):
     assert main(_review_args(inputs)) == 0
 
     assert json.loads(capsys.readouterr().out)["status"] == "review_pending"
+
+
+@pytest.mark.parametrize("credential_key", ("auth", "authorization"))
+def test_review_rejects_experiment_credential_keys_before_persistence(tmp_path: Path, monkeypatch, capsys, credential_key: str):
+    """Catch common credential aliases that would otherwise survive review persistence."""
+    inputs = _review_inputs(tmp_path)
+    raw = json.loads(inputs[1].read_text())
+    marker = f"{credential_key}-must-not-persist"
+    raw["metadata"] = {credential_key: marker}
+    inputs[1].write_text(canonical_json(raw))
+    home = tmp_path / "state"
+    monkeypatch.setenv("NEXT_RL_HOME", str(home))
+
+    assert main(_review_args(inputs)) == 2
+
+    assert json.loads(capsys.readouterr().out) == {"error": "invalid_request"}
+    assert marker not in "".join(path.read_text(errors="ignore") for path in home.rglob("*") if path.is_file())
 
 
 @pytest.mark.parametrize("child,command", (("review-bundles", "review"), ("promotions", "review"), ("experiments", "prepare"), ("bundles", "prepare")))

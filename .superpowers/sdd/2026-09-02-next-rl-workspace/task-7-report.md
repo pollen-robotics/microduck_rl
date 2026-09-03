@@ -199,3 +199,50 @@ browser automation, live Nitro, training, or network action was invoked.
 ### Commit
 
 `fix(next-rl): harden CLI state boundaries`
+
+## Fix round 3/5 — runner parity and credential aliases
+
+### RED evidence
+
+The four new regressions failed before implementation:
+
+```text
+4 failed, 23 passed
+```
+
+They showed that `auth` and `authorization` metadata could persist in a review
+bundle/promotion record, a valid `exit_code: -15` was rejected, and a checkpoint
+at `source/logs/../model_1.pt` bypassed the CLI's looser path expression.
+
+### Changes
+
+- Added `auth` and `authorization` to the recursive credential-key rejection
+  policy. Together with the existing token/pair checks, this covers the
+  standard credential variants normalized by `experiments.py` while retaining
+  benign token-budget/count/tokenizer metadata.
+- Kept the CLI's strict checkpoint output allowlist, but delegate validation of
+  its required fields and path to `NitroRunner._checkpoint_record`. This uses
+  the runner's authoritative `PurePosixPath` containment/safe-part checks and
+  eliminates duplicated checkpoint validation drift.
+- Permit every non-boolean integer `exit_code`, including negative signal
+  codes, matching remote runner lifecycle state.
+
+### GREEN evidence
+
+```text
+uv run --with pytest pytest tests/test_next_rl_cli.py -q
+27 passed in 0.31s
+
+uv run --with pytest pytest tests/test_next_rl_*.py -q
+240 passed in 6.85s
+
+uv run --with pytest pytest tests/ -q
+436 passed, 1 skipped in 13.49s
+```
+
+Syntax compilation and whitespace checks passed. No start, publish, rendering,
+browser automation, live Nitro, training, or network action was invoked.
+
+### Commit
+
+`fix(next-rl): align CLI runner validation`

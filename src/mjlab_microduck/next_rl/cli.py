@@ -68,7 +68,9 @@ def _name_tokens(value: str) -> tuple[str, ...]:
 def _is_secret_like_key(key: str) -> bool:
     """Use the runner's conservative credential-name policy at JSON boundaries."""
     tokens = _name_tokens(key)
-    if any(token in {"password", "passwd", "credential", "credentials", "secret", "secrets"} for token in tokens):
+    if any(token in {
+        "auth", "authorization", "password", "passwd", "credential", "credentials", "secret", "secrets",
+    } for token in tokens):
         return True
     if any(pair in {("private", "key"), ("api", "key"), ("access", "key"), ("client", "secret")} for pair in zip(tokens, tokens[1:])):
         return True
@@ -214,7 +216,7 @@ def _status(fingerprint: str, dependencies: CliDependencies) -> dict[str, Any]:
         result["artifact_status"] = state["artifact_status"]
     if "exit_code" in state:
         exit_code = state["exit_code"]
-        if exit_code is not None and (isinstance(exit_code, bool) or not isinstance(exit_code, int) or exit_code < 0):
+        if exit_code is not None and (isinstance(exit_code, bool) or not isinstance(exit_code, int)):
             raise ValueError("runner exit code is invalid")
         result["exit_code"] = exit_code
     if "last_stable_checkpoint" in state and state["last_stable_checkpoint"] is not None:
@@ -223,32 +225,12 @@ def _status(fingerprint: str, dependencies: CliDependencies) -> dict[str, Any]:
             "name", "relative_path", "sha256", "size", "mtime_ns",
         }:
             raise ValueError("runner checkpoint is invalid")
-        name = checkpoint.get("name")
-        relative = checkpoint.get("relative_path")
-        digest = checkpoint.get("sha256")
-        size = checkpoint.get("size")
-        mtime = checkpoint.get("mtime_ns")
-        if not (
-            isinstance(name, str)
-            and re.fullmatch(r"model_[0-9]+\.pt", name)
-            and isinstance(relative, str)
-            and re.fullmatch(r"source/logs/(?:[A-Za-z0-9_.-]+/)+model_[0-9]+\.pt", relative)
-            and relative.endswith(f"/{name}")
-            and isinstance(digest, str)
-            and re.fullmatch(r"[0-9a-f]{64}", digest)
-            and isinstance(size, int)
-            and not isinstance(size, bool)
-            and size > 0
-            and isinstance(mtime, int)
-            and not isinstance(mtime, bool)
-            and mtime >= 0
-        ):
-            raise ValueError("runner checkpoint is invalid")
+        validated = NitroRunner._checkpoint_record(state)
         result["last_stable_checkpoint"] = {
-            "mtime_ns": mtime,
-            "name": name,
-            "sha256": digest,
-            "size": size,
+            "mtime_ns": validated["mtime_ns"],
+            "name": validated["name"],
+            "sha256": validated["sha256"],
+            "size": validated["size"],
         }
     return result
 
