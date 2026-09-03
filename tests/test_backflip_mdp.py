@@ -1,3 +1,5 @@
+import math
+
 import torch
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
@@ -12,6 +14,45 @@ class _FakeEnv:
         self.step_dt = 0.02
         self.common_step_counter = 0
         self.episode_length_buf = torch.zeros(num_envs, dtype=torch.long)
+
+
+class _FakeEntity:
+    """Records every write_root_link_*_to_sim call so tests can assert on it."""
+
+    def __init__(self):
+        self.pose_calls = []
+        self.vel_calls = []
+
+    def write_root_link_pose_to_sim(self, root_pose, env_ids=None):
+        self.pose_calls.append((root_pose.clone(), env_ids))
+
+    def write_root_link_velocity_to_sim(self, root_velocity, env_ids=None):
+        self.vel_calls.append((root_velocity.clone(), env_ids))
+
+
+class _FakeTerrain:
+    def __init__(self, env_origins):
+        self.env_origins = env_origins
+
+
+class _FakeScene:
+    def __init__(self, entities, env_origins):
+        self._entities = entities
+        self.terrain = _FakeTerrain(env_origins)
+
+    def __getitem__(self, name):
+        return self._entities[name]
+
+
+class _FakeEnvWithScene(_FakeEnv):
+    """_FakeEnv plus a scene/plate, for tests that exercise backflip_plate_step."""
+
+    def __init__(self, num_envs=1, env_origins=None):
+        super().__init__(num_envs=num_envs)
+        if env_origins is None:
+            env_origins = torch.zeros(num_envs, 3)
+        self.plate = _FakeEntity()
+        self.scene = _FakeScene({"plate": self.plate}, env_origins)
 
 
 def test_state_buffers_are_created_lazily_and_sized_per_env():
@@ -88,3 +129,116 @@ def test_phase_of_env_follows_episode_time():
         microduck_mdp.BACKFLIP_PHASE_LAUNCH,
         microduck_mdp.BACKFLIP_PHASE_GONE,
     ]
+
+
+def test_plate_step_during_hold_parks_at_z0_with_identity_orientation_and_zero_velocity():
+    # Nonzero terrain origin so a missing/mishandled offset is visible.
+    origin = torch.tensor([[2.0, 3.0, 1.0]])
+    env = _FakeEnvWithScene(num_envs=1, env_origins=origin)
+    microduck_mdp.reset_backflip_launch_params(
+        env,
+        torch.tensor([0]),
+        hold_range=(0.5, 0.5),
+        launch_range=(0.2, 0.2),
+        z0_range=(0.15, 0.15),
+        vz_range=(2.0, 2.0),
+        w0_range=(24.0, 24.0),
+    )
+    env.episode_length_buf = torch.tensor([5])  # t = 0.10 s < t_hold = 0.5 s
+    microduck_mdp.backflip_plate_step(env)
+
+    pose, pose_ids = env.plate.pose_calls[-1]
+    vel, vel_ids = env.plate.vel_calls[-1]
+
+    assert torch.equal(pose_ids, torch.tensor([0]))
+    assert torch.equal(vel_ids, torch.tensor([0]))
+    assert torch.equal(pose[:, 0:2], origin[:, 0:2])
+    assert torch.allclose(pose[:, 2], origin[:, 2] + 0.15)
+    assert torch.allclose(pose[:, 3], torch.tensor([1.0]))  # qw = cos(0) = 1
+    assert torch.allclose(pose[:, 4], torch.tensor([0.0]))  # qx
+    assert torch.allclose(pose[:, 5], torch.tensor([0.0]))  # qy = sin(0) = 0
+    assert torch.allclose(pose[:, 6], torch.tensor([0.0]))  # qz
+    assert torch.equal(vel, torch.zeros(1, 6))
+
+
+def test_plate_step_mid_launch_writes_signed_pitch_quat_and_matching_rates():
+    origin = torch.tensor([[0.0, 0.0, 1.0]])
+    env = _FakeEnvWithScene(num_envs=1, env_origins=origin)
+    t_hold, t_launch, z0, vz, w0 = 0.5, 0.2, 0.15, 2.0, 24.0
+    microduck_mdp.reset_backflip_launch_params(
+        env,
+        torch.tensor([0]),
+        hold_range=(t_hold, t_hold),
+        launch_range=(t_launch, t_launch),
+        z0_range=(z0, z0),
+        vz_range=(vz, vz),
+        w0_range=(w0, w0),
+    )
+    tau = 0.1  # 0.1 s into the 0.2 s ramp
+    t = t_hold + tau  # 0.6 s
+    env.episode_length_buf = torch.tensor([round(t / env.step_dt)])  # 30 steps
+    microduck_mdp.backflip_plate_step(env)
+
+    # Independently derived (constant-acceleration ramp), NOT obtained by
+    # calling backflip_plate_kinematics -- this is what pins the WIRING in
+    # backflip_plate_step (axis indices, quaternion construction, offset),
+    # not the kinematics function itself (already pinned elsewhere).
+    a_lin = vz / t_launch  # 10.0
+    # w0 > 0 is the caller-facing "backward" knob; a backward roll is a
+    # NEGATIVE rotation about +y in this codebase's convention, so the
+    # angular accel is negative for positive w0.
+    a_ang = -w0 / t_launch  # -120.0
+    expected_z = z0 + 0.5 * a_lin * tau * tau  # 0.20
+    expected_pitch = 0.5 * a_ang * tau * tau  # -0.6
+    expected_vz_t = a_lin * tau  # 1.0
+    expected_w_t = a_ang * tau  # -12.0
+
+    pose, _ = env.plate.pose_calls[-1]
+    vel, _ = env.plate.vel_calls[-1]
+
+    assert torch.allclose(pose[:, 0:2], origin[:, 0:2])
+    assert torch.allclose(pose[:, 2], origin[:, 2] + expected_z, atol=1e-4)
+    assert torch.allclose(
+        pose[:, 3], torch.tensor([math.cos(expected_pitch / 2)]), atol=1e-5
+    )
+    assert torch.allclose(pose[:, 4], torch.tensor([0.0]), atol=1e-8)  # qx stays 0
+    assert torch.allclose(
+        pose[:, 5], torch.tensor([math.sin(expected_pitch / 2)]), atol=1e-5
+    )
+    assert torch.allclose(pose[:, 6], torch.tensor([0.0]), atol=1e-8)  # qz stays 0
+    # Sign pin: expected_pitch is negative, so qy = sin(pitch/2) must be
+    # negative too. A build that dropped the kinematics minus sign, or
+    # negated pitch while building the quaternion, would write +sin(0.3)
+    # here instead of -sin(0.3) -- this assertion fails under that bug.
+    assert pose[0, 5].item() < 0.0
+
+    assert torch.allclose(vel[:, 2], torch.tensor([expected_vz_t]), atol=1e-4)
+    assert torch.allclose(vel[:, 4], torch.tensor([expected_w_t]), atol=1e-3)
+    # Sign pin on the angular-rate channel too: w0 > 0 => backward => w_t < 0.
+    assert vel[0, 4].item() < 0.0
+    assert torch.allclose(vel[:, [0, 1, 3, 5]], torch.zeros(1, 4))
+
+
+def test_plate_step_once_gone_parks_far_below_floor_with_zero_velocity():
+    origin = torch.tensor([[5.0, -2.0, 0.5]])
+    env = _FakeEnvWithScene(num_envs=1, env_origins=origin)
+    microduck_mdp.reset_backflip_launch_params(
+        env,
+        torch.tensor([0]),
+        hold_range=(0.1, 0.1),
+        launch_range=(0.05, 0.05),
+        z0_range=(0.15, 0.15),
+        vz_range=(2.0, 2.0),
+        w0_range=(24.0, 24.0),
+    )
+    env.episode_length_buf = torch.tensor([100])  # 2.0 s, well past hold + launch
+    microduck_mdp.backflip_plate_step(env)
+
+    pose, _ = env.plate.pose_calls[-1]
+    vel, _ = env.plate.vel_calls[-1]
+
+    assert torch.equal(pose[:, 0:2], origin[:, 0:2])
+    assert torch.allclose(pose[:, 2], origin[:, 2] + microduck_mdp.BACKFLIP_GONE_Z)
+    assert torch.allclose(pose[:, 3], torch.tensor([1.0]))  # identity: no rotation once gone
+    assert torch.allclose(pose[:, 5], torch.tensor([0.0]))
+    assert torch.equal(vel, torch.zeros(1, 6))
