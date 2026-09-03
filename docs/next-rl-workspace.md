@@ -74,6 +74,24 @@ host-key-checked transport. The displayed fingerprint is the value to pass to
 `status`, which reports lifecycle state and any stable checkpoint metadata
 without transport credentials.
 
+### Current Nitro connection configuration
+
+For the current Nitro endpoint, configure the authorized runner environment
+exactly as follows:
+
+```bash
+export NEXT_RL_NITRO_SSH_ALIAS=108.61.217.115
+export NEXT_RL_NITRO_SSH_USER=aif-engineering
+export NEXT_RL_NITRO_WSL_DISTRIBUTION=Ubuntu
+```
+
+`NEXT_RL_NITRO_WSL_DISTRIBUTION` is optional for direct-Linux hosts. It is
+required for this Nitro because public SSH lands in Windows; the runner bridges
+each remote Linux command through `wsl.exe -d Ubuntu --`. The host key must
+already be trusted. Transport uses BatchMode public-key authentication. Never
+include a password in an environment variable, command, manifest, or
+documentation. Do not disable host checking or replace the known-hosts file.
+
 The safe runner archives the committed Git tree, not local uncommitted edits.
 Therefore commit the example, guide, README, and readiness tests before a
 remote sync or bounded Nitro smoke. The required documentation commit is:

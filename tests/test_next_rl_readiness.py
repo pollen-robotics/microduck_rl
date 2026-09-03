@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "examples" / "skills" / "one-leg-hello.json"
+GUIDE = ROOT / "docs" / "next-rl-workspace.md"
 
 
 def _environment(home: Path) -> dict[str, str]:
@@ -205,6 +206,23 @@ def test_example_skill_is_a_numeric_warm_start_plan_without_training(tmp_path: P
     }
     assert skill["metadata"]["hardware_deployment"]["calibration_required"] is True
     assert not list(home.rglob("model_*.pt"))
+
+
+def test_operator_guide_documents_the_current_safe_nitro_connection_contract():
+    """Catch guide drift that could route an operator through an unsafe Nitro connection."""
+    guide = GUIDE.read_text(encoding="utf-8")
+    normalized = " ".join(guide.split())
+
+    assert "NEXT_RL_NITRO_SSH_ALIAS=108.61.217.115" in normalized
+    assert "NEXT_RL_NITRO_SSH_USER=aif-engineering" in normalized
+    assert "NEXT_RL_NITRO_WSL_DISTRIBUTION=Ubuntu" in normalized
+    assert "optional for direct-Linux hosts" in normalized
+    assert "required for this Nitro because public SSH lands in Windows" in normalized
+    assert "host key must already be trusted" in normalized.casefold()
+    assert "BatchMode public-key authentication" in normalized
+    assert "Never include a password" in normalized
+    assert "StrictHostKeyChecking=no" not in guide
+    assert "UserKnownHostsFile=/dev/null" not in guide
 
 
 def test_public_cli_readiness_flow_stays_local_until_human_approval(tmp_path: Path):

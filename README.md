@@ -65,6 +65,10 @@ evidence, five-video human review, and explicit approval or rejection. A
 capability marked `learned` is not automatically published or deployed.
 The bundled `one-leg-hello` specification is planning-only: its
 `Mjlab-OneLegHello-MicroDuck` task ID is not registered and must not be started.
+The operator guide also records the current host-checked Nitro/WSL connection
+configuration: `108.61.217.115` as `aif-engineering` requires
+`NEXT_RL_NITRO_WSL_DISTRIBUTION=Ubuntu`. It uses public-key authentication and
+never a password.
 
 ## Tasks
 

@@ -70,6 +70,50 @@ the separate fix commit below.
 
 `fix(next-rl): clarify phase-aware planning workflow`
 
+## Fix round 2/5 — actual Nitro connection documentation
+
+### RED evidence
+
+The new documentation-contract test failed before the connection block existed:
+
+```text
+FAILED test_operator_guide_documents_the_current_safe_nitro_connection_contract
+assert 'NEXT_RL_NITRO_SSH_ALIAS=108.61.217.115' in guide
+```
+
+### Changes
+
+- Documented the current endpoint, SSH user, and WSL distribution exactly:
+  `NEXT_RL_NITRO_SSH_ALIAS=108.61.217.115`,
+  `NEXT_RL_NITRO_SSH_USER=aif-engineering`, and
+  `NEXT_RL_NITRO_WSL_DISTRIBUTION=Ubuntu`.
+- Explained that the WSL setting is optional for direct-Linux hosts but required
+  for this Nitro because public SSH lands in Windows.
+- Required a pre-trusted host key and BatchMode public-key authentication;
+  documented that passwords and host-check bypasses are forbidden.
+- Added a readiness documentation contract that rejects missing exact settings
+  and unsafe host-check bypass text while retaining planning-only hello/no-start
+  coverage.
+
+### Verification
+
+```text
+uv run --with pytest pytest tests/test_next_rl_readiness.py -q
+3 passed in 0.65s
+
+uv run --with pytest pytest tests/test_next_rl_*.py -q
+257 passed in 8.06s
+
+uv run --with pytest pytest tests/ -q
+453 passed, 1 skipped in 15.06s
+```
+
+Fresh staged whitespace and status checks precede this round's distinct commit.
+
+### Commit
+
+`docs(next-rl): document Nitro WSL connection`
+
 ## Concerns / handoff
 
 The phase-qualified numeric values remain simulation acceptance defaults, not
