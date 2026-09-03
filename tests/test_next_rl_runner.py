@@ -284,10 +284,10 @@ def test_prepare_transfers_only_into_fingerprint_directory(repository: Path, tmp
 
     prepared = NitroRunner(config(repository, tmp_path), adapter).prepare(job())
 
-    expected = f"aif_eng@nitro:{prepared.remote_directory}/"
+    expected_prefix = f"aif_eng@nitro:{prepared.remote_directory}/"
     scp_calls = [call for call in adapter.calls if call[0] == "scp"]
     assert scp_calls
-    assert all(call[-1] == expected for call in scp_calls)
+    assert all(call[-1].startswith(expected_prefix) for call in scp_calls)
     assert str(prepared.remote_directory).startswith(
         "/home/aif_eng/microduck-training/runs/"
     )
@@ -333,6 +333,9 @@ def test_prepare_rejects_tracked_symlink(repository: Path, tmp_path: Path):
         "config/private-key-backup.json",
         "private_key",
         "wandb_api_key.txt",
+        "config/wandb_token_value.txt",
+        "keys/github_token_backup",
+        "auth/oauth2_token_file.json",
     ),
 )
 def test_prepare_rejects_secret_like_tracked_paths(
@@ -369,11 +372,14 @@ def test_prepared_manifest_recursively_removes_credential_like_keys(
     raw = job().as_dict()
     raw["environment_config"]["telemetry"] = {
         "wandb_api_key": "wandb-secret",
+        "wandb_token_value": "wandb-token-secret",
+        "github_token_backup": "github-token-secret",
         "tokenizer": "kept-learning-setting",
-        "token_budget": 128,
+        "tokenization_budget": 128,
     }
     raw["agent_config"]["nested"] = {
         "private-key-backup": "private-secret",
+        "oauth2_token_file": "oauth-token-secret",
         "monkey": "kept-agent-setting",
     }
 
@@ -386,8 +392,11 @@ def test_prepared_manifest_recursively_removes_credential_like_keys(
     assert "wandb-secret" not in serialized
     assert "private-key-backup" not in serialized
     assert "private-secret" not in serialized
+    assert "wandb-token-secret" not in serialized
+    assert "github-token-secret" not in serialized
+    assert "oauth-token-secret" not in serialized
     assert "tokenizer" in serialized
-    assert '"token_budget":128' in serialized
+    assert '"tokenization_budget":128' in serialized
     assert "monkey" in serialized
 
 
@@ -413,18 +422,115 @@ def test_disconnect_does_not_cancel_remote_process(repository: Path, tmp_path: P
     assert adapter.cancel_calls == []
 
 
-def test_prepare_atomically_creates_remote_job_before_any_transfer(
+class PrepareAdapter(FakeAdapter):
+    def __init__(
+        self,
+        bundle_root: Path,
+        *,
+        fail_stage_mkdir: bool = False,
+        fail_upload: bool = False,
+        existing: str | None = None,
+    ):
+        super().__init__()
+        self.bundle_root = bundle_root
+        self.fail_stage_mkdir = fail_stage_mkdir
+        self.fail_upload = fail_upload
+        self.existing = existing
+
+    def _bundle_digest(self) -> str:
+        manifest = next(self.bundle_root.glob("*/bundle-manifest.json"))
+        return json.loads(manifest.read_text())["bundle_sha256"]
+
+    def run(self, argv: tuple[str, ...]) -> CommandResult:
+        self.calls.append(tuple(argv))
+        joined = " ".join(argv)
+        if argv[0] == "scp" and self.fail_upload:
+            self.fail_upload = False
+            raise ConnectionError("partial scp disconnect")
+        if argv[0] == "ssh" and "mkdir --" in joined and "/.incoming-" in joined:
+            if self.fail_stage_mkdir:
+                self.fail_stage_mkdir = False
+                raise ConnectionError("disconnect before scp")
+            return CommandResult()
+        if argv[0] == "ssh" and "mkdir --" in joined and "/.incoming-" not in joined:
+            if self.existing is not None:
+                return CommandResult(returncode=1, stderr="already exists")
+            return CommandResult()
+        if argv[0] == "ssh" and "test ! -L" in joined and self.existing == "symlink":
+            return CommandResult(returncode=1, stderr="symlink")
+        if argv[0] == "ssh" and "python3" in argv and "/.incoming-" not in joined:
+            if self.existing == "matching":
+                return CommandResult(
+                    stdout=json.dumps({"prepared_bundle_sha256": self._bundle_digest()})
+                )
+            if self.existing == "conflicting":
+                return CommandResult(stdout=json.dumps({"prepared_bundle_sha256": "f" * 64}))
+            return CommandResult(returncode=2, stderr="incomplete")
+        if argv[0] == "ssh" and "python3" in argv and "/.incoming-" in joined:
+            return CommandResult(
+                stdout=json.dumps({"prepared_bundle_sha256": self._bundle_digest()})
+            )
+        return CommandResult()
+
+
+@pytest.mark.parametrize("failure", ("before_copy", "partial_copy"))
+def test_prepare_cleans_only_incomplete_fingerprint_and_retries_transfer(
     repository: Path,
     tmp_path: Path,
+    failure: str,
 ):
-    adapter = FakeAdapter(outputs=[CommandResult(returncode=1, stderr="already exists")])
+    runner_config = config(repository, tmp_path)
+    adapter = PrepareAdapter(
+        runner_config.bundle_root,
+        fail_stage_mkdir=failure == "before_copy",
+        fail_upload=failure == "partial_copy",
+    )
 
-    with pytest.raises(RunnerError, match="transport"):
-        NitroRunner(config(repository, tmp_path), adapter).prepare(job())
+    prepared = NitroRunner(runner_config, adapter).prepare(job())
 
-    assert adapter.calls[0][-3:-1] == ("mkdir", "--")
-    assert "-p" not in adapter.calls[0]
+    uploads = [call for call in adapter.calls if call[0] == "scp"]
+    assert len(uploads) == (1 if failure == "before_copy" else 2)
+    assert all(
+        call[-1].startswith(f"aif_eng@nitro:{prepared.remote_directory}/.incoming-")
+        for call in uploads
+    )
+    removals = [call for call in adapter.calls if call[0] == "ssh" and "rm" in call]
+    assert removals
+    assert all(call[-1] == str(prepared.remote_directory) for call in removals)
+    assert not any(str(prepared.remote_directory.parent) == part for call in removals for part in call)
+
+
+def test_prepare_reuses_only_matching_complete_job(repository: Path, tmp_path: Path):
+    runner_config = config(repository, tmp_path)
+    adapter = PrepareAdapter(runner_config.bundle_root, existing="matching")
+
+    prepared = NitroRunner(runner_config, adapter).prepare(job())
+
+    assert prepared.fingerprint
     assert not any(call[0] == "scp" for call in adapter.calls)
+    assert not any("rm" in call for call in adapter.calls)
+
+
+def test_prepare_rejects_conflicting_complete_job(repository: Path, tmp_path: Path):
+    runner_config = config(repository, tmp_path)
+    adapter = PrepareAdapter(runner_config.bundle_root, existing="conflicting")
+
+    with pytest.raises(RunnerError, match="conflicting"):
+        NitroRunner(runner_config, adapter).prepare(job())
+
+    assert not any(call[0] == "scp" for call in adapter.calls)
+    assert not any("rm" in call for call in adapter.calls)
+
+
+def test_prepare_rejects_remote_job_directory_symlink(repository: Path, tmp_path: Path):
+    runner_config = config(repository, tmp_path)
+    adapter = PrepareAdapter(runner_config.bundle_root, existing="symlink")
+
+    with pytest.raises(RunnerError, match="symlink"):
+        NitroRunner(runner_config, adapter).prepare(job())
+
+    assert not any(call[0] == "scp" for call in adapter.calls)
+    assert not any("rm" in call for call in adapter.calls)
 
 
 def test_cancel_refuses_reused_pid(repository: Path, tmp_path: Path):

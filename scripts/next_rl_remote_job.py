@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -30,6 +31,16 @@ _SUPERVISOR_ENV = "NEXT_RL_REMOTE_SUPERVISOR"
 _POLL_SECONDS = 2.0
 _CHECKPOINT_PROBE_SECONDS = 1.0
 _TERMINATE_TIMEOUT_SECONDS = 5.0
+_BUNDLE_REQUIRED_FILES = frozenset(
+    {
+        "next_rl_remote_job.py",
+        "prepared-manifest.json",
+        "source.tar",
+        "status.json",
+        "train-argv.json",
+    }
+)
+_BUNDLE_OPTIONAL_FILES = frozenset({"resume-checkpoint.pt"})
 
 
 class RemoteJobError(RuntimeError):
@@ -134,6 +145,26 @@ def lifecycle_lock(job_directory: str | Path):
         os.close(descriptor)
 
 
+@contextmanager
+def supervisor_lock(job_directory: str | Path):
+    """Allow only one detached supervisor to own trainer launch and monitoring."""
+    path = Path(job_directory) / ".supervisor.lock"
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        raise RemoteJobError("cannot open supervisor lock safely") from error
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise RemoteJobError("supervisor lock must be a regular file")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
 def load_train_argv(job_directory: str | Path) -> tuple[str, ...]:
     path = Path(job_directory) / "train-argv.json"
     try:
@@ -184,8 +215,122 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def launch_training(
+def _validated_bundle(stage: Path, job: Path) -> tuple[str, tuple[str, ...]]:
+    if stage.is_symlink() or not stage.is_dir() or stage.parent != job:
+        raise RemoteJobError("bundle staging directory is unsafe")
+    bundle = _load_object(stage / "bundle-manifest.json", "bundle manifest")
+    if set(bundle) != {"bundle_sha256", "files", "fingerprint"}:
+        raise RemoteJobError("bundle manifest fields are invalid")
+    digest = bundle.get("bundle_sha256")
+    fingerprint = bundle.get("fingerprint")
+    files = bundle.get("files")
+    if (
+        not isinstance(digest, str)
+        or not _SHA256.fullmatch(digest)
+        or fingerprint != job.name
+        or not isinstance(files, Mapping)
+    ):
+        raise RemoteJobError("bundle manifest identity is invalid")
+    unsigned = {"files": files, "fingerprint": fingerprint}
+    if hashlib.sha256(canonical_json(unsigned).encode("utf-8")).hexdigest() != digest:
+        raise RemoteJobError("bundle manifest digest mismatch")
+    if stage.name != f".incoming-{digest}":
+        raise RemoteJobError("bundle staging path does not match its digest")
+    names = set(files)
+    if not _BUNDLE_REQUIRED_FILES.issubset(names) or not names.issubset(
+        _BUNDLE_REQUIRED_FILES | _BUNDLE_OPTIONAL_FILES
+    ):
+        raise RemoteJobError("bundle file set is invalid")
+    actual_names = {path.name for path in stage.iterdir()}
+    if actual_names != names | {"bundle-manifest.json"}:
+        raise RemoteJobError("bundle staging directory contains unexpected files")
+    for name in sorted(names):
+        record = files.get(name)
+        path = stage / name
+        if (
+            not isinstance(record, Mapping)
+            or set(record) != {"sha256", "size"}
+            or not isinstance(record.get("sha256"), str)
+            or not _SHA256.fullmatch(str(record.get("sha256")))
+            or isinstance(record.get("size"), bool)
+            or not isinstance(record.get("size"), int)
+            or int(record.get("size")) < 0
+            or not path.is_file()
+            or path.is_symlink()
+            or path.stat().st_size != record.get("size")
+            or sha256_file(path) != record.get("sha256")
+        ):
+            raise RemoteJobError(f"bundle file digest or size mismatch: {name}")
+
+    prepared = _load_object(stage / "prepared-manifest.json", "prepared manifest")
+    if prepared.get("fingerprint") != job.name:
+        raise RemoteJobError("prepared manifest fingerprint mismatch")
+    source = prepared.get("source")
+    if not isinstance(source, Mapping) or source.get("archive_sha256") != sha256_file(
+        stage / "source.tar"
+    ):
+        raise RemoteJobError("prepared source archive digest mismatch")
+    command = prepared.get("command")
+    argv = load_train_argv(stage)
+    if (
+        not isinstance(command, Mapping)
+        or command.get("argv_file") != "train-argv.json"
+        or command.get("sha256") != command_digest(argv)
+    ):
+        raise RemoteJobError("prepared command digest mismatch")
+    status = _load_object(stage / "status.json", "status")
+    if status.get("status") != "pending":
+        raise RemoteJobError("prepared status must be pending")
+    return digest, tuple(sorted(names))
+
+
+def finalize_preparation(
     job_directory: str | Path,
+    staging_directory: str | Path,
+) -> dict[str, object]:
+    """Digest-verify staged content and publish a completion marker last."""
+    job = Path(job_directory)
+    stage = Path(staging_directory)
+    if job.is_symlink() or not job.is_dir():
+        raise RemoteJobError("job directory itself must not be a symlink")
+    digest, names = _validated_bundle(stage, job)
+    for name in (*names, "bundle-manifest.json"):
+        source = stage / name
+        target = job / name
+        if target.exists():
+            if target.is_symlink() or not target.is_file() or sha256_file(target) != sha256_file(
+                source
+            ):
+                raise RemoteJobError(f"existing prepared file conflicts: {name}")
+            source.unlink()
+        else:
+            os.replace(source, target)
+    stage.rmdir()
+    marker = {"bundle_sha256": digest, "fingerprint": job.name}
+    atomic_write_json(job / ".complete.json", marker)
+    state = _load_object(job / "status.json", "status")
+    return {**state, "prepared_bundle_sha256": digest}
+
+
+def completed_preparation_state(job_directory: str | Path) -> dict[str, object]:
+    job = Path(job_directory)
+    marker = _load_object(job / ".complete.json", "completion marker")
+    bundle = _load_object(job / "bundle-manifest.json", "bundle manifest")
+    digest = marker.get("bundle_sha256")
+    if (
+        marker.get("fingerprint") != job.name
+        or bundle.get("fingerprint") != job.name
+        or bundle.get("bundle_sha256") != digest
+        or not isinstance(digest, str)
+        or not _SHA256.fullmatch(digest)
+    ):
+        raise RemoteJobError("completed bundle identity is invalid")
+    state = _load_object(job / "status.json", "status")
+    return {**state, "prepared_bundle_sha256": digest}
+
+
+def launch_training(
+    argv: tuple[str, ...],
     *,
     cwd: str | Path,
     stdout: BinaryIO,
@@ -193,7 +338,7 @@ def launch_training(
 ) -> subprocess.Popen[bytes]:
     """Launch the validated trainer without a shell in a new process group."""
     return popen(
-        load_train_argv(job_directory),
+        argv,
         cwd=Path(cwd),
         stdin=subprocess.DEVNULL,
         stdout=stdout,
@@ -416,8 +561,6 @@ def _verified_source(job: Path) -> Path:
             os.replace(temporary, destination)
         except BaseException:
             # The temporary directory is fingerprint-local and contains only archive output.
-            import shutil
-
             shutil.rmtree(temporary, ignore_errors=True)
             raise
     _stage_resume_checkpoint(job, destination, manifest.get("resume"))
@@ -591,7 +734,7 @@ def supervise(
     }
     try:
         with stdout_path.open("ab", buffering=0) as output:
-            process = launch_training(job, cwd=source, stdout=output)
+            process = launch_training(argv, cwd=source, stdout=output)
             state = {**state, "pid": process.pid}
             identity = live_process_identity(process.pid)
             if identity.command_digest != digest:
@@ -647,34 +790,37 @@ def supervise(
 
 def run_supervisor(job: Path) -> dict[str, object]:
     """Run the supervisor and make pre-launch failures durable."""
-    with lifecycle_lock(job):
-        state = _load_object(job / "status.json", "status")
-        if state.get("status") in ("running", "succeeded", "failed"):
-            return state
-        state = {
-            **state,
-            "launch_state": "supervising",
-            "supervisor_pid": os.getpid(),
-        }
-        atomic_write_json(job / "status.json", state)
-    try:
-        return supervise(job)
-    except Exception as error:
-        state = _load_object(job / "status.json", "status")
-        failed = {
-            **state,
-            "error": str(error),
-            "exit_code": 1,
-            "status": "failed",
-        }
-        atomic_write_json(job / "status.json", failed)
-        raise
+    with supervisor_lock(job):
+        with lifecycle_lock(job):
+            state = _load_object(job / "status.json", "status")
+            if state.get("status") in ("running", "succeeded", "failed"):
+                return state
+            state = {
+                **state,
+                "launch_state": "supervising",
+                "supervisor_pid": os.getpid(),
+            }
+            atomic_write_json(job / "status.json", state)
+        try:
+            return supervise(job)
+        except Exception as error:
+            state = _load_object(job / "status.json", "status")
+            failed = {
+                **state,
+                "error": str(error),
+                "exit_code": 1,
+                "status": "failed",
+            }
+            atomic_write_json(job / "status.json", failed)
+            raise
 
 
 def _start_supervisor(
     job: Path,
     *,
     popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+    after_claim: Callable[[Mapping[str, object]], None] | None = None,
+    after_popen: Callable[[subprocess.Popen[bytes]], None] | None = None,
     after_spawn: Callable[[Mapping[str, object]], None] | None = None,
 ) -> dict[str, object]:
     request = _load_object(job / "start-request.json", "start request")
@@ -693,8 +839,6 @@ def _start_supervisor(
         except FileNotFoundError:
             pass
         return state
-    if state.get("launch_request_id") == request_id and state.get("launch_state") == "claimed":
-        return state
     if state.get("status") != "pending":
         if state.get("launch_request_id") == request_id:
             try:
@@ -712,6 +856,8 @@ def _start_supervisor(
         "launch_state": "claimed",
     }
     atomic_write_json(job / "status.json", claimed)
+    if after_claim is not None:
+        after_claim(claimed)
     environment = os.environ.copy()
     environment[_SUPERVISOR_ENV] = "1"
     try:
@@ -729,6 +875,8 @@ def _start_supervisor(
     except BaseException:
         atomic_write_json(job / "status.json", state)
         raise
+    if after_popen is not None:
+        after_popen(supervisor)
     spawned = {
         **claimed,
         "launch_state": "spawned",
@@ -748,6 +896,8 @@ def inspect_or_control(
     job: Path,
     *,
     supervisor_popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+    after_claim: Callable[[Mapping[str, object]], None] | None = None,
+    after_popen: Callable[[subprocess.Popen[bytes]], None] | None = None,
     after_spawn: Callable[[Mapping[str, object]], None] | None = None,
 ) -> dict[str, object]:
     with lifecycle_lock(job):
@@ -757,6 +907,8 @@ def inspect_or_control(
             return _start_supervisor(
                 job,
                 popen=supervisor_popen,
+                after_claim=after_claim,
+                after_popen=after_popen,
                 after_spawn=after_spawn,
             )
         state = _load_object(job / "status.json", "status")
@@ -774,10 +926,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     if len(arguments) != 1:
         raise SystemExit("usage: next_rl_remote_job.py JOB_DIRECTORY")
     job = validate_job_directory(arguments[0])
+    script_directory = Path(__file__).resolve().parent
+    if script_directory.parent == job and script_directory.name.startswith(".incoming-"):
+        print(canonical_json(finalize_preparation(job, script_directory)), flush=True)
+        return 0
+    completed = completed_preparation_state(job)
     if os.environ.get(_SUPERVISOR_ENV) == "1":
         run_supervisor(job)
         return 0
-    print(canonical_json(inspect_or_control(job)), flush=True)
+    state = inspect_or_control(job)
+    print(
+        canonical_json(
+            {**state, "prepared_bundle_sha256": completed["prepared_bundle_sha256"]}
+        ),
+        flush=True,
+    )
     return 0
 
 

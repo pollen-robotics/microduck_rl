@@ -199,6 +199,7 @@ def test_training_launch_never_uses_a_shell_and_creates_a_process_group(
     job_directory: Path,
 ):
     calls = []
+    argv = remote_job.load_train_argv(job_directory)
 
     def popen(argv, **kwargs):
         calls.append((argv, kwargs))
@@ -206,16 +207,39 @@ def test_training_launch_never_uses_a_shell_and_creates_a_process_group(
 
     with open(os.devnull, "wb") as output:
         process = remote_job.launch_training(
-            job_directory,
+            argv,
             cwd=job_directory,
             stdout=output,
             popen=popen,
         )
 
     assert process.pid == 123
-    assert calls[0][0] == remote_job.load_train_argv(job_directory)
+    assert calls[0][0] == argv
     assert calls[0][1]["shell"] is False
     assert calls[0][1]["start_new_session"] is True
+
+
+def test_launch_uses_verified_tuple_without_rereading_argv_file(
+    remote_job,
+    job_directory: Path,
+):
+    argv = remote_job.load_train_argv(job_directory)
+    (job_directory / "train-argv.json").unlink()
+    calls = []
+
+    def popen(actual, **kwargs):
+        calls.append(tuple(actual))
+        return FakeProcess()
+
+    with open(os.devnull, "wb") as output:
+        remote_job.launch_training(
+            argv,
+            cwd=job_directory,
+            stdout=output,
+            popen=popen,
+        )
+
+    assert calls == [argv]
 
 
 def test_latest_checkpoint_is_selected_numerically(remote_job, job_directory: Path):
@@ -424,6 +448,75 @@ def test_cli_accepts_exactly_one_job_directory_argument(remote_job):
         remote_job.main(["abc123", "extra"])
 
 
+def _staged_bundle(remote_job, job_directory: Path) -> tuple[Path, str]:
+    argv = remote_job.load_train_argv(job_directory)
+    archive = b"deterministic source archive"
+    files = {
+        "source.tar": archive,
+        "train-argv.json": remote_job.canonical_json(list(argv)).encode(),
+        "prepared-manifest.json": remote_job.canonical_json(
+            {
+                "fingerprint": job_directory.name,
+                "command": {
+                    "argv_file": "train-argv.json",
+                    "sha256": remote_job.command_digest(argv),
+                },
+                "source": {"archive_sha256": hashlib.sha256(archive).hexdigest()},
+            }
+        ).encode(),
+        "status.json": b'{"status":"pending"}',
+        "next_rl_remote_job.py": b"# fixed wrapper\n",
+    }
+    records = {
+        name: {"sha256": hashlib.sha256(payload).hexdigest(), "size": len(payload)}
+        for name, payload in files.items()
+    }
+    record = {"files": records, "fingerprint": job_directory.name}
+    digest = hashlib.sha256(remote_job.canonical_json(record).encode()).hexdigest()
+    stage = job_directory / f".incoming-{digest}"
+    stage.mkdir()
+    for name, payload in files.items():
+        (stage / name).write_bytes(payload)
+    remote_job.atomic_write_json(
+        stage / "bundle-manifest.json",
+        {**record, "bundle_sha256": digest},
+    )
+    return stage, digest
+
+
+def test_finalize_preparation_validates_all_digests_before_marking_complete(
+    remote_job,
+    job_directory: Path,
+):
+    stage, digest = _staged_bundle(remote_job, job_directory)
+    (job_directory / "train-argv.json").unlink()
+
+    state = remote_job.finalize_preparation(job_directory, stage)
+
+    assert state["prepared_bundle_sha256"] == digest
+    assert json.loads((job_directory / ".complete.json").read_text()) == {
+        "bundle_sha256": digest,
+        "fingerprint": job_directory.name,
+    }
+    assert not stage.exists()
+    assert (job_directory / "source.tar").read_bytes() == b"deterministic source archive"
+
+
+def test_finalize_preparation_rejects_tampering_without_a_complete_directory(
+    remote_job,
+    job_directory: Path,
+):
+    stage, _ = _staged_bundle(remote_job, job_directory)
+    (job_directory / "train-argv.json").unlink()
+    (stage / "source.tar").write_bytes(b"tampered")
+
+    with pytest.raises(remote_job.RemoteJobError, match="digest|size"):
+        remote_job.finalize_preparation(job_directory, stage)
+
+    assert not (job_directory / ".complete.json").exists()
+    assert not (job_directory / "source.tar").exists()
+
+
 def test_failed_supervisor_setup_records_a_complete_failed_state(
     remote_job,
     job_directory: Path,
@@ -497,13 +590,97 @@ def test_claimed_start_is_idempotently_left_for_spawned_supervisor(
         },
     )
 
+    spawned = []
     result = remote_job.inspect_or_control(
         job_directory,
-        supervisor_popen=lambda *args, **kwargs: pytest.fail("duplicate spawn"),
+        supervisor_popen=lambda *args, **kwargs: spawned.append(SpawnedSupervisor())
+        or spawned[-1],
     )
 
-    assert result["launch_state"] == "claimed"
-    assert (job_directory / "start-request.json").exists()
+    assert result["launch_state"] == "spawned"
+    assert len(spawned) == 1
+    assert not (job_directory / "start-request.json").exists()
+
+
+def test_crash_after_claim_before_popen_self_heals_on_retry(
+    remote_job,
+    job_directory: Path,
+):
+    _pending_start(remote_job, job_directory)
+
+    with pytest.raises(RuntimeError, match="claimed"):
+        remote_job.inspect_or_control(
+            job_directory,
+            after_claim=lambda state: (_ for _ in ()).throw(
+                RuntimeError("crashed while claimed")
+            ),
+        )
+
+    assert json.loads((job_directory / "status.json").read_text())["launch_state"] == "claimed"
+    result = remote_job.inspect_or_control(
+        job_directory,
+        supervisor_popen=lambda *args, **kwargs: SpawnedSupervisor(),
+    )
+    assert result["launch_state"] == "spawned"
+
+
+def test_crash_after_popen_before_spawn_record_converges_via_duplicate_supervisors(
+    remote_job,
+    job_directory: Path,
+):
+    _pending_start(remote_job, job_directory)
+    spawned = []
+
+    def popen(*args, **kwargs):
+        spawned.append(SpawnedSupervisor())
+        return spawned[-1]
+
+    with pytest.raises(RuntimeError, match="before record"):
+        remote_job.inspect_or_control(
+            job_directory,
+            supervisor_popen=popen,
+            after_popen=lambda process: (_ for _ in ()).throw(
+                RuntimeError("crashed before record")
+            ),
+        )
+
+    result = remote_job.inspect_or_control(job_directory, supervisor_popen=popen)
+
+    assert result["launch_state"] == "spawned"
+    assert len(spawned) == 2
+
+
+def test_duplicate_supervisors_use_singleton_lock_to_launch_one_trainer(
+    remote_job,
+    job_directory: Path,
+    monkeypatch,
+):
+    remote_job.atomic_write_json(
+        job_directory / "status.json",
+        {"status": "pending", "launch_state": "spawned"},
+    )
+    calls = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def supervise(job):
+        calls.append(job)
+        entered.set()
+        release.wait(timeout=2)
+        state = {"status": "succeeded", "exit_code": 0}
+        remote_job.atomic_write_json(job_directory / "status.json", state)
+        return state
+
+    monkeypatch.setattr(remote_job, "supervise", supervise)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(remote_job.run_supervisor, job_directory)
+        assert entered.wait(timeout=2)
+        second = executor.submit(remote_job.run_supervisor, job_directory)
+        release.set()
+        results = (first.result(timeout=2), second.result(timeout=2))
+
+    assert calls == [job_directory]
+    assert all(result["status"] == "succeeded" for result in results)
 
 
 class SpawnedSupervisor:

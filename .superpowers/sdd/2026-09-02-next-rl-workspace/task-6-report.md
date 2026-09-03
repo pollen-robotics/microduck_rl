@@ -195,3 +195,96 @@ uv run --with pytest pytest tests/ -q
   tests are the available verification evidence.
 - No live SSH/network operation, Nitro start/cancel, training, upload, or
   publishing was performed.
+
+## Fix round 2 — crash convergence and atomic preparation
+
+### RED evidence
+
+The detached-launch regression slice reproduced both crash windows, duplicate
+trainer launch, and the command reload race:
+
+```text
+FAILED test_training_launch_never_uses_a_shell_and_creates_a_process_group
+FAILED test_launch_uses_verified_tuple_without_rereading_argv_file
+FAILED test_claimed_start_is_idempotently_left_for_spawned_supervisor
+FAILED test_crash_after_claim_before_popen_self_heals_on_retry
+FAILED test_crash_after_popen_before_spawn_record_converges_via_duplicate_supervisors
+FAILED test_duplicate_supervisors_use_singleton_lock_to_launch_one_trainer
+6 failed, 24 passed
+```
+
+The credential-token mutation slice then proved that token indicators embedded
+inside longer, delimiter-separated names were not rejected or scrubbed:
+
+```text
+FAILED test_prepare_rejects_secret_like_tracked_paths[config/wandb_token_value.txt]
+FAILED test_prepare_rejects_secret_like_tracked_paths[keys/github_token_backup]
+FAILED test_prepare_rejects_secret_like_tracked_paths[auth/oauth2_token_file.json]
+FAILED test_prepared_manifest_recursively_removes_credential_like_keys
+4 failed, 9 passed, 40 deselected
+```
+
+Finally, interrupted preparation and existing-directory tests failed before a
+staged, retryable protocol existed:
+
+```text
+FAILED test_prepare_cleans_only_incomplete_fingerprint_and_retries_transfer[before_copy]
+FAILED test_prepare_cleans_only_incomplete_fingerprint_and_retries_transfer[partial_copy]
+FAILED test_prepare_reuses_only_matching_complete_job
+FAILED test_prepare_rejects_conflicting_complete_job
+FAILED test_prepare_rejects_remote_job_directory_symlink
+5 failed, 52 deselected
+```
+
+### GREEN evidence
+
+```text
+uv run --with pytest pytest tests/test_next_rl_runner.py tests/test_next_rl_remote_job.py -q
+89 passed in 4.56s
+
+uv run --with pytest pytest tests/test_next_rl_*.py -q
+198 passed in 6.30s
+
+uv run --with pytest pytest -q
+394 passed, 1 skipped in 14.68s
+
+python3 -m compileall -q src/mjlab_microduck/next_rl/runner.py scripts/next_rl_remote_job.py
+exit 0
+
+git diff --check
+exit 0
+```
+
+### Fixes
+
+- Detached supervisors now hold a separate per-job `fcntl.flock` singleton for
+  launch and monitoring. A stale claimed request spawns a replacement
+  supervisor; a crash after `Popen` can spawn a duplicate supervisor, but the
+  singleton permits exactly one trainer and retries converge on its terminal
+  state.
+- The supervisor loads and digest-validates training argv once and passes that
+  exact immutable tuple to `Popen`; the launch boundary never rereads
+  `train-argv.json`.
+- Secret detection tokenizes path components and nested manifest keys on
+  non-alphanumerics and now treats `token` anywhere as sensitive. This round
+  intentionally supersedes round 1's `token_budget` allowance; unrelated whole
+  words such as `tokenizer`, `tokenization`, `passwordless`, and `monkey` remain
+  accepted.
+- Preparation writes a deterministic bundle manifest, transfers only into a
+  fingerprint-local `.incoming-<bundle-digest>` directory, and asks the pinned
+  wrapper to validate every size/digest plus the prepared source and command
+  manifests before atomically writing `.complete.json`. Interrupted attempts
+  inspect for a matching completed bundle, reject conflicting completed jobs
+  and symlinks, and clean/retry only the exact incomplete fingerprint path.
+
+### Commit
+
+`fix(next-rl): make Nitro launch and prepare crash-safe`
+
+### Concerns
+
+- Ruff remains unavailable (`Failed to spawn: ruff`); syntax compilation,
+  whitespace validation, focused tests, the complete Next RL suite, and the
+  full repository suite passed.
+- No live SSH/network operation, Nitro start/cancel, training, upload, or
+  publishing was performed.

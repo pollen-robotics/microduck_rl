@@ -48,7 +48,15 @@ _SECRET_FILENAMES = frozenset(
 _SECRET_SUFFIXES = frozenset({".key", ".p12", ".pem", ".pfx"})
 _SAFE_PATH_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
 _SENSITIVE_WORDS = frozenset(
-    {"credential", "credentials", "passwd", "password", "secret", "secrets"}
+    {
+        "credential",
+        "credentials",
+        "passwd",
+        "password",
+        "secret",
+        "secrets",
+        "token",
+    }
 )
 _SENSITIVE_PAIRS = frozenset(
     {
@@ -167,8 +175,6 @@ def _is_secret_like_name(value: str) -> bool:
         return True
     tokens = _name_tokens(value)
     if any(token in _SENSITIVE_WORDS for token in tokens):
-        return True
-    if tokens == ("token",) or (len(tokens) > 1 and tokens[-1] == "token"):
         return True
     return any((left, right) in _SENSITIVE_PAIRS for left, right in zip(tokens, tokens[1:]))
 
@@ -369,6 +375,49 @@ class NitroRunner:
                 f"{result.stderr.strip()}"
             )
         return result
+
+    def _existing_preparation_matches(
+        self,
+        remote_directory: PurePosixPath,
+        bundle_sha256: str,
+    ) -> bool:
+        """Distinguish a valid complete bundle from an incomplete directory."""
+        check = self.adapter.run(self._ssh("test", "!", "-L", str(remote_directory)))
+        if check.returncode:
+            raise RunnerError("remote fingerprint job directory is a symlink")
+        try:
+            result = self.adapter.run(
+                self._ssh(
+                    "python3",
+                    str(remote_directory / "next_rl_remote_job.py"),
+                    str(remote_directory),
+                )
+            )
+        except Exception:
+            return False
+        if result.returncode:
+            return False
+        try:
+            state = self._state(result)
+        except RunnerError:
+            return False
+        existing_digest = state.get("prepared_bundle_sha256")
+        if existing_digest is None:
+            return False
+        if existing_digest != bundle_sha256:
+            raise RunnerError("remote fingerprint directory contains a conflicting complete job")
+        return True
+
+    def _remove_incomplete_preparation(self, remote_directory: PurePosixPath) -> None:
+        """Remove only one validated, non-symlink fingerprint directory."""
+        if remote_directory.parent != _REMOTE_ROOT or not _FINGERPRINT.fullmatch(
+            remote_directory.name
+        ):
+            raise RunnerError("refusing to clean an unsafe remote preparation path")
+        check = self.adapter.run(self._ssh("test", "!", "-L", str(remote_directory)))
+        if check.returncode:
+            raise RunnerError("remote fingerprint job directory is a symlink")
+        self._run(self._ssh("rm", "-rf", "--", str(remote_directory)))
 
     @staticmethod
     def _checkpoint_record(state: Mapping[str, object]) -> dict[str, object]:
@@ -581,13 +630,65 @@ class NitroRunner:
         sources = [archive_path, manifest_path, argv_path, status_path, wrapper_path]
         if staged_checkpoint is not None:
             sources.append(staged_checkpoint)
+        file_records = {
+            source.name: {
+                "sha256": sha256_file(source),
+                "size": source.stat().st_size,
+            }
+            for source in sources
+        }
+        bundle_record: dict[str, object] = {
+            "files": file_records,
+            "fingerprint": fingerprint,
+        }
+        bundle_sha256 = hashlib.sha256(
+            canonical_json(bundle_record).encode("utf-8")
+        ).hexdigest()
+        bundle_manifest_path = local_directory / "bundle-manifest.json"
+        atomic_write_json(
+            bundle_manifest_path,
+            {**bundle_record, "bundle_sha256": bundle_sha256},
+        )
+        sources.append(bundle_manifest_path)
+        staging_directory = remote_directory / f".incoming-{bundle_sha256}"
         mkdir_argv = self._ssh("mkdir", "--", str(remote_directory))
+        staging_mkdir_argv = self._ssh("mkdir", "--", str(staging_directory))
         transfer_argv = self._scp(
             sources,
-            remote_directory,
+            staging_directory,
         )
-        self._run(mkdir_argv)
-        self._run(transfer_argv)
+        finalize_argv = self._ssh(
+            "python3",
+            str(staging_directory / "next_rl_remote_job.py"),
+            str(remote_directory),
+        )
+        last_error: BaseException | None = None
+        complete = False
+        for _ in range(3):
+            try:
+                claim = self.adapter.run(mkdir_argv)
+                if claim.returncode:
+                    if self._existing_preparation_matches(remote_directory, bundle_sha256):
+                        complete = True
+                        break
+                    self._remove_incomplete_preparation(remote_directory)
+                    self._run(mkdir_argv)
+                self._run(self._ssh("test", "!", "-L", str(remote_directory)))
+                self._run(staging_mkdir_argv)
+                self._run(transfer_argv)
+                self._run(finalize_argv)
+                complete = True
+                break
+            except Exception as error:
+                last_error = error
+                if self._existing_preparation_matches(remote_directory, bundle_sha256):
+                    complete = True
+                    break
+                self._remove_incomplete_preparation(remote_directory)
+        if not complete:
+            raise RunnerError(
+                f"remote bundle preparation failed after 3 attempts: {last_error}"
+            ) from last_error
         return PreparedJob(
             fingerprint=fingerprint,
             manifest=prepared_manifest,
@@ -598,7 +699,7 @@ class NitroRunner:
             source_commit=commit,
             source_tree=tree,
             train_argv=train_argv,
-            dry_run_argv=(mkdir_argv, transfer_argv),
+            dry_run_argv=(mkdir_argv, staging_mkdir_argv, transfer_argv, finalize_argv),
         )
 
     def _invoke_wrapper(self, remote_directory: PurePosixPath) -> CommandResult:
