@@ -51,8 +51,10 @@ a lateral-axis (`0 1 0`) `hinge` for the pitch flick. Joint names carry the
 separate entity, so no robot-scoped selector can reach them, but new
 `passive_*` regexes in robot selectors must stay narrow regardless.
 
-**The plate is kinematically prescribed, not dynamic.** A per-step event writes
-its `qpos`/`qvel` every control step. The consequences are all wanted:
+**The plate is kinematically prescribed, not dynamic.** An `EventTermCfg` with
+mjlab's `mode="step"` (fires every env step, on all envs) rewrites its root
+pose and velocity every control step from the sampled launch parameters. The
+consequences are all wanted:
 
 - it does not sag under the robot's weight during the hold,
 - it does not recoil when the robot pushes off (a hand is effectively
@@ -201,7 +203,14 @@ Then: a 64-env / 5-iteration smoke test, and an ONNX export through
 - **The envelope may not close safely.** If the sweep shows 360° only completes
   above a landing speed that risks the hardware, report the numbers and stop —
   do not train something that breaks the robot.
-- **The prescribed-kinematic plate depends on a per-step event.** mjlab
-  interval events at `(dt, dt)` are assumed to fire every control step;
-  implementation step 2 verifies this on a real env before the reward stack is
-  built on it.
+- ~~The prescribed-kinematic plate depends on a per-step event.~~ **Resolved
+  during spec review**: mjlab's `EventTermCfg` supports `mode="step"`
+  ("every environment step, unconditionally on all envs"), which is exactly the
+  hook the phase machine needs. No interval-timer workaround required.
+
+The plate carries a free joint (like the `ball` prop) rather than
+slide + hinge joints, because the per-step prescription only needs
+`write_root_link_pose_to_sim` / `write_root_link_velocity_to_sim` — the same
+two calls the ball reset already uses — and a free joint makes the teleport to
+z = −3 trivial. Its mass is set large enough that any intra-step deviation from
+the prescribed motion, before the next step rewrites it, is negligible.
