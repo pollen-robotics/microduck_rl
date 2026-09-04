@@ -11,6 +11,7 @@ from mjlab_microduck.tasks.mdp import (
     hop_both_feet_airborne,
     hop_energy_monitor,
     hop_load_force,
+    hop_symmetric_push,
     hop_upward_velocity,
 )
 
@@ -994,3 +995,78 @@ def test_com_height_recovery_only_is_nan_safe():
         env, command_name=_CMD, target_height_min=0.14, target_height_max=0.20
     )
     assert torch.isfinite(out).all()
+
+
+# ── hop_symmetric_push ───────────────────────────────────────────────────────
+#
+# The term exists to stop the SKIP: run 59yiy9h6 leaned ~5.9 deg onto one foot
+# and launched off it. These tests pin the two properties that make it work --
+# it saturates on an even two-footed push, and it cannot be farmed by the three
+# cheats a difference penalty would have allowed.
+
+
+def _split_force(left_n, right_n):
+    """One env, per-foot vertical GRF. Negative z, as MuJoCo reports a loaded foot."""
+    return [[[0.0, 0.0, -left_n], [0.0, 0.0, -right_n]]]
+
+
+def test_symmetric_push_saturates_when_both_feet_press_body_weight():
+    """Each foot at body weight = the two together at hop_load_force's
+    max_ratio 2.0. The two terms are normalised to peak on the same push."""
+    env = _Env(cmd=_phase(_TAKEOFF), force=_split_force(_BW, _BW))
+    out = hop_symmetric_push(env, sensor_name=_SENSOR, command_name=_CMD,
+                             body_weight_n=_BW)
+    assert abs(float(out[0]) - 1.0) < 1e-5
+
+
+def test_symmetric_push_pays_the_weaker_foot_not_the_average():
+    """THE WHOLE POINT. A skip loads one foot hard and the other barely; an
+    average would score it well, the weaker foot scores it honestly."""
+    env = _Env(cmd=_phase(_TAKEOFF), force=_split_force(1.8 * _BW, 0.2 * _BW))
+    out = hop_symmetric_push(env, sensor_name=_SENSOR, command_name=_CMD,
+                             body_weight_n=_BW)
+    # Same 2.0 x body weight total as the saturating case above, but split 9:1.
+    assert abs(float(out[0]) - 0.2) < 1e-5
+
+
+def test_symmetric_push_pays_nothing_for_a_one_legged_launch():
+    env = _Env(cmd=_phase(_TAKEOFF), force=_split_force(3.0 * _BW, 0.0))
+    out = hop_symmetric_push(env, sensor_name=_SENSOR, command_name=_CMD,
+                             body_weight_n=_BW)
+    assert abs(float(out[0])) < 1e-6
+
+
+def test_symmetric_push_cannot_be_farmed_by_unloading_both_feet():
+    """The cheat that kills a `-|f_left - f_right|` penalty: two feet carrying
+    NOTHING are perfectly symmetric, so a difference penalty scores them
+    perfectly. `min` scores them zero, which is why the term is a min."""
+    env = _Env(cmd=_phase(_TAKEOFF), force=_split_force(0.0, 0.0))
+    out = hop_symmetric_push(env, sensor_name=_SENSOR, command_name=_CMD,
+                             body_weight_n=_BW)
+    assert abs(float(out[0])) < 1e-6
+
+
+def test_symmetric_push_cannot_be_farmed_by_tucking_in_the_window():
+    """The same cheat with the feet merely light rather than exactly zero: a
+    tuck during the gate window must not pay."""
+    env = _Env(cmd=_phase(_TAKEOFF), force=_split_force(0.01 * _BW, 0.01 * _BW))
+    out = hop_symmetric_push(env, sensor_name=_SENSOR, command_name=_CMD,
+                             body_weight_n=_BW)
+    assert float(out[0]) < 0.02
+
+
+def test_symmetric_push_shares_hop_load_forces_gate():
+    """Gated on the cosine channel, so it is shut at mid-launch and mid-flight
+    and open at takeoff -- the same window hop_load_force uses."""
+    for phi in (_MID_LAUNCH, _MID_FLIGHT, _SINE_LOAD_PEAK):
+        env = _Env(cmd=_phase(phi), force=_split_force(_BW, _BW))
+        out = hop_symmetric_push(env, sensor_name=_SENSOR, command_name=_CMD,
+                                 body_weight_n=_BW)
+        assert abs(float(out[0])) < 1e-6, f"gate should be shut at phi={phi}"
+
+
+def test_symmetric_push_does_not_exceed_one_when_both_feet_slam():
+    env = _Env(cmd=_phase(_TAKEOFF), force=_split_force(9 * _BW, 9 * _BW))
+    out = hop_symmetric_push(env, sensor_name=_SENSOR, command_name=_CMD,
+                             body_weight_n=_BW)
+    assert abs(float(out[0]) - 1.0) < 1e-6

@@ -93,8 +93,10 @@ from .hop import (
     apply_hop_corrections,
     hop_rl_cfg,
     make_hop_variant,
+    make_in_place_variant,
+    make_symmetric_variant,
 )
-from mjlab_microduck.robot.sprung_foot import H_ADD, K_MEASURED
+from mjlab_microduck.robot.sprung_foot import H_ADD, K_MEASURED, PAD_MASS, TRAVEL
 
 # Standard velocity task
 register_mjlab_task(
@@ -220,6 +222,50 @@ register_mjlab_task(
     runner_cls=MicroduckOnPolicyRunner,
 )
 print(f"✓ Hop task registered: {_std_tid}")
+
+# ── In-place hop, head freed ─────────────────────────────────────────────────
+#
+# Two arms on the MEASURED stiffness, answering one question: does paying for a
+# TWO-FOOTED launch buy height over the skip the campaign actually produced?
+#
+# Both arms carry `make_in_place_variant`, which is not part of the question --
+# it fixes two things that were wrong for every earlier hop run:
+#
+#   * `stillness_at_zero_command` (weight 3.0) never fired, because its gate
+#     tests the command magnitude and the hop command's magnitude is 1.0 by
+#     construction. Run 59yiy9h6 drifted 132 mm in 14 s as a result.
+#   * The head -- 39% of body mass, at the top of the body -- was held still by
+#     `head_pose_tracking` (+3.0) and `neck_action_rate_l2` (-0.1). Both are
+#     dropped so the policy can swing it. This SPENDS runtime head control on
+#     this task; see `make_in_place_variant` for the trade.
+#
+# The baseline for both is the published K3344 run 59yiy9h6, which does not need
+# re-running: 27.6 mm reported / ~21 mm ballistic, skipping at ~3.3 Hz.
+for _sym, _suffix in ((False, "InPlace"), (True, "InPlaceSym")):
+    def _build(play: bool, _sym=_sym):
+        cfg = make_in_place_variant(
+            make_hop_variant(
+                make_microduck_velocity_env_cfg(play=play), stiffness=K_MEASURED
+            )
+        )
+        if _sym:
+            cfg = make_symmetric_variant(cfg)
+        return apply_hop_corrections(
+            make_sprung_variant(
+                cfg, stiffness=K_MEASURED, travel=TRAVEL,
+                pad_mass=PAD_MASS, h_add=H_ADD,
+            )
+        )
+
+    _tid = f"Mjlab-Hop-{_suffix}-K3344-MicroDuck"
+    register_mjlab_task(
+        task_id=_tid,
+        env_cfg=_build(play=False),
+        play_env_cfg=_build(play=True),
+        rl_cfg=hop_rl_cfg("k3344"),
+        runner_cls=MicroduckOnPolicyRunner,
+    )
+    print(f"✓ Hop task registered: {_tid}")
 
 # Velocity2 — microban reward/regularization recipe on the velocity task.
 register_mjlab_task(

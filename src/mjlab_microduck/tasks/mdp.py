@@ -6724,6 +6724,75 @@ def hop_energy_monitor(
     return zeros
 
 
+def hop_symmetric_push(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "feet_ground_contact",
+    command_name: str = "twist",
+    body_weight_n: float = 8.60,
+) -> torch.Tensor:
+    """Reward BOTH feet pushing hard at once, during the countermovement window.
+
+    The gait the campaign actually produced is a SKIP: the robot leans ~5.9 deg
+    onto one side and launches off that foot. Nothing in the reward set
+    distinguishes that from a two-foot hop, and the policy found skipping
+    cheaper. Skipping is legitimate locomotion, but it wastes the mechanism
+    under test -- one boot loading alone can reach at most half the 631 mJ that
+    both boots together can store, so the spring's own capacity caps the hop
+    long before the actuators do.
+
+    THE FORM IS `min`, NOT A DIFFERENCE PENALTY, and that choice is what makes
+    the term unfarmable. The obvious spelling is
+    `-|f_left - f_right|`, which is dodged by unloading BOTH feet: two feet
+    carrying nothing are perfectly symmetric and score a perfect zero penalty.
+    Gating that penalty on contact does not fix it either -- the robot simply
+    tucks during the window and pays nothing. Taking the weaker foot instead
+    means the only way to score is for BOTH feet to be genuinely loaded:
+
+        reward = clamp(cos(2*pi*phi), 0)
+                 * clamp(min(f_left_z, f_right_z) / body_weight_n, 0, 1)
+
+    Airborne reads min = 0. One-legged push reads min ~ 0. A tuck reads 0. The
+    single behaviour that pays is two feet pressing together, which is the one
+    we want.
+
+    The normalisation matches `hop_load_force`'s `max_ratio = 2.0`: that term
+    saturates when the two feet TOGETHER reach twice body weight, so this one
+    saturates when EACH foot reaches body weight -- the same physical push,
+    split evenly. The two terms therefore peak on the same trajectory instead
+    of pulling against each other.
+
+    The gate is `hop_load_force`'s cosine channel, deliberately, not the sine
+    launch gate: the window that brackets takeoff (phi in [0.75, 1.0) u
+    [0.0, 0.25]) is when both feet are still down and the push is being made.
+    See `hop_load_force` for why the cosine channel and not the load half.
+
+    Force source and the |z| convention are `hop_load_force`'s -- see there.
+    """
+    zeros = torch.zeros(env.num_envs, device=env.device)
+    if sensor_name not in env.scene.sensors:
+        return zeros
+    forces = env.scene.sensors[sensor_name].data.force
+    if forces is None or forces.dim() != 3 or forces.shape[-1] != 3:
+        return zeros
+    # Exactly two collision geoms exist on this robot -- the two pads. A model
+    # that ever grows a third would make `min` mean something else, so say so
+    # rather than silently rewarding the quietest of N feet.
+    if forces.shape[1] != 2:
+        return zeros
+
+    f_z = torch.nan_to_num(forces[..., 2].float(), nan=0.0, posinf=0.0, neginf=0.0)
+    weaker = f_z.abs().min(dim=1).values
+
+    # The command IS [cos(2*pi*phi), sin(2*pi*phi), 0], so slot 0 is already the
+    # cosine -- no need to recover phi and re-evaluate it. nan_to_num matches
+    # hop_load_force: a NaN gate must read as "window closed", not pay out.
+    cmd = env.command_manager.get_command(command_name)
+    gate = torch.clamp(torch.nan_to_num(cmd[:, 0], nan=0.0), min=0.0)
+
+    share = torch.clamp(weaker / body_weight_n, min=0.0, max=1.0)
+    return gate * share
+
+
 def hop_load_force(
     env: ManagerBasedRlEnv,
     sensor_name: str = "feet_ground_contact",

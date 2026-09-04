@@ -208,6 +208,23 @@ BODY_HEIGHT_WEIGHT = 8.0
 # not the objective. Its ceiling is 4.0 * 1/pi = 1.27/step.
 LOAD_FORCE_WEIGHT = 4.0
 
+# Symmetric-push reward. Sized to sit BETWEEN the load term it complements
+# (4.0) and the launch terms it must not outbid (8.0-12.0): the goal is a
+# two-footed launch, not a policy that presses evenly and never leaves the
+# ground. Ceiling 6.0 * 1/pi = 1.91/step, against hop_load_force's 1.27.
+SYMMETRIC_PUSH_WEIGHT = 6.0
+
+# In-place stillness. `stillness_at_zero_command` is registered at weight 3.0 by
+# the velocity env and pays EXACTLY ZERO on this task: it gates on
+# `norm(cmd[:2]) + |cmd[2]| < 0.01`, and the hop command [cos, sin, 0] has norm
+# 1.0 by construction, always. Measured consequence on run 59yiy9h6: 132 mm of
+# horizontal drift in 14 s (p95 339 mm) at 0.126 m/s -- the robot travels while
+# it hops. Raising the THRESHOLD past 1.0 re-arms the existing, tested term
+# rather than adding a near-duplicate of it; "zero command" then reads as
+# "always", which is correct here because this task has no velocity command at
+# all -- the twist slots carry the phase.
+IN_PLACE_THRESHOLD = 2.0
+
 # Robot weight in newtons, the datum `hop_load_force` normalises against:
 # 0.877 kg (737 g robot + 2 x 70 g boot, worn by ALL THREE arms including Locked)
 # x 9.81 m/s^2. Named rather than left as a literal because the same 0.877 kg
@@ -483,6 +500,82 @@ def make_hop_variant(
     com = cfg.rewards["com_height_target"]
     com.func = microduck_mdp.com_height_target_recovery_only
     com.params["command_name"] = "twist"
+
+    return cfg
+
+
+def make_symmetric_variant(cfg):
+    """Pay for a TWO-FOOTED launch, so the hop stops being a skip.
+
+    Deliberately a separate transform rather than part of `make_hop_variant`:
+    every published hop arm (Locked, K2500, K3344, K3900, Standard) keeps the
+    exact reward set its numbers were measured with, and the symmetric arm
+    differs from the plain in-place arm in this one term. That is what makes
+    "did symmetry buy height?" answerable by comparing two runs.
+
+    See `microduck_mdp.hop_symmetric_push` for the reward's shape and for why it
+    is a `min` over the two feet rather than a difference penalty (which two
+    unloaded feet satisfy perfectly).
+    """
+    cfg.rewards["hop_symmetric_push"] = RewardTermCfg(
+        func=microduck_mdp.hop_symmetric_push,
+        weight=SYMMETRIC_PUSH_WEIGHT,
+        params={
+            "sensor_name": SENSOR_NAME,
+            "command_name": "twist",
+            "body_weight_n": BODY_WEIGHT_N,
+        },
+    )
+    return cfg
+
+
+def make_in_place_variant(cfg):
+    """Hop ON THE SPOT, and let the head help.
+
+    Two independent corrections that happen to share a motive -- both were
+    holding the in-place hop down, and neither is about the spring.
+
+    1. IN PLACE. `stillness_at_zero_command` is registered at weight 3.0 by the
+       velocity env, and on this task it pays EXACTLY ZERO, always. It gates on
+       `norm(cmd[:2]) + |cmd[2]| < 0.01`; the hop command is
+       [cos(2*pi*phi), sin(2*pi*phi), 0], whose norm is 1.0 by construction. So
+       the gate is never open and 3.0 of weight has been inert for every hop run
+       in the campaign. Measured on run 59yiy9h6: 132 mm of horizontal drift in
+       14 s, p95 339 mm, at 0.126 m/s.
+
+       Fixed by raising the THRESHOLD past the command's magnitude rather than
+       writing a near-duplicate term. "Zero command" then means "always", which
+       is the correct reading here: this task has no velocity command at all --
+       the twist slots carry the phase, and there is no other velocity for the
+       robot to be tracking instead.
+
+    2. THE HEAD IS FREED. The head subtree is 294.9 g of a 752.2 g robot -- 39%,
+       proportionally a far bigger swing mass than a human arm -- and it sits at
+       the top of the body where it does the most good. Two rewards were
+       actively preventing it from being used:
+
+         head_pose_tracking   +3.0   pays for tracking the COMMANDED head pose
+         neck_action_rate_l2  -0.1   penalises moving the head at all
+
+       Both are dropped. `head_command` STAYS IN THE OBSERVATION -- the 61-D
+       layout is a deployment contract (docs/sim2real/hop_deployment.md) and
+       must not move -- the policy simply stops being paid to obey it.
+
+       THE COST, and it is a real one: those two terms plus the neck-offset
+       randomisation are why head pose is independently commandable at runtime
+       (see CLAUDE.md). Freeing the head spends that on this task. It is the
+       right trade while the goal is a maximum-height in-place hop, and it is
+       the first thing to revisit if head control is wanted back.
+    """
+    still = cfg.rewards.get("stillness_at_zero_command")
+    if still is not None:
+        still.params["command_threshold"] = IN_PLACE_THRESHOLD
+
+    # Pop rather than zero the weight: RewardManager.compute short-circuits on
+    # weight == 0.0 without calling the term, so a zeroed term is a dead entry
+    # that still shows up in every log and reward-bar panel.
+    cfg.rewards.pop("head_pose_tracking", None)
+    cfg.rewards.pop("neck_action_rate_l2", None)
 
     return cfg
 
