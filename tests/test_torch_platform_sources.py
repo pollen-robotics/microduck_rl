@@ -1,10 +1,11 @@
-"""Jetson AGX Thor (JetPack 7 / SBSA): torch comes from NVIDIA's Jetson index
-and the two libraries that wheel forgets to declare are pre-loaded.
+"""Per-platform torch sources beyond the GB10 one, and the pre-load of the
+libraries a platform's torch wheel links but does not declare.
 
-Companion to test_aarch64_cuda_torch.py (which now covers the NON-Jetson
-aarch64 entry, i.e. DGX Spark / GB10). The discriminator is the PEP 508
-`platform_release` marker: Jetson kernels carry `-tegra`, GB10's do not.
-Verified on-box 2026-09-04 (pollen-robotics/microduck_rl#38).
+Today that is JetPack 7 / SBSA (Jetson AGX Thor): torch from NVIDIA's SBSA
+index, NVPL + cuDSS pre-loaded. Companion to test_aarch64_cuda_torch.py
+(which covers the NON-Jetson aarch64 entry, i.e. DGX Spark / GB10). The
+discriminator is the PEP 508 `platform_release` marker: Jetson kernels carry
+`-tegra`, GB10's do not. Verified on-box 2026-09-04 (#38).
 """
 
 import platform
@@ -14,7 +15,10 @@ from pathlib import Path
 
 import pytest
 
-from mjlab_microduck._jetson import _PRELOAD, is_jetson, preload_jetson_libs
+from mjlab_microduck._torch_libs import (
+    UNDECLARED_TORCH_LIBS,
+    preload_undeclared_torch_libs,
+)
 
 _ROOT = Path(__file__).resolve().parents[1]
 _JETSON_INDEX = "https://pypi.jetson-ai-lab.io/sbsa/cu130"
@@ -84,31 +88,26 @@ def test_gb10_entry_still_excludes_jetson():
     )
 
 
-def test_is_jetson_matches_the_marker():
-    assert is_jetson(sys_platform="linux", machine="aarch64", release="6.8.12-tegra")
-    assert not is_jetson(
-        sys_platform="linux", machine="aarch64", release="6.11.0-1016-nvidia"
+def _on_jetson():
+    return (
+        sys.platform == "linux"
+        and platform.machine() == "aarch64"
+        and "tegra" in platform.release()
     )
-    assert not is_jetson(sys_platform="linux", machine="x86_64", release="6.8.12-tegra")
-    assert not is_jetson(sys_platform="darwin", machine="aarch64", release="24.0.0")
 
 
-def test_preload_is_a_noop_off_jetson(monkeypatch, tmp_path):
-    monkeypatch.setattr(platform, "release", lambda: "6.11.0-1016-nvidia")
-    assert preload_jetson_libs(tmp_path) == []
+def test_preload_is_a_noop_where_the_wheels_are_absent(tmp_path):
+    assert (
+        preload_undeclared_torch_libs(tmp_path) == []
+    )  # nothing there, nothing raised
 
 
-def test_preload_tolerates_missing_wheels(monkeypatch, tmp_path):
-    monkeypatch.setattr(platform, "release", lambda: "6.8.12-tegra")
-    monkeypatch.setattr(platform, "machine", lambda: "aarch64")
-    monkeypatch.setattr(sys, "platform", "linux")
-    assert preload_jetson_libs(tmp_path) == []  # nothing there, nothing raised
-
-
-@pytest.mark.skipif(not is_jetson(), reason="not a Jetson")
+@pytest.mark.skipif(
+    not _on_jetson(), reason="not a Jetson: the SBSA wheels are not resolved here"
+)
 def test_on_jetson_the_libraries_load_and_torch_sees_the_gpu():
-    loaded = preload_jetson_libs()
-    assert len(loaded) == len(_PRELOAD), loaded
+    loaded = preload_undeclared_torch_libs()
+    assert len(loaded) == len(UNDECLARED_TORCH_LIBS), loaded
     import torch
 
     assert torch.cuda.is_available()

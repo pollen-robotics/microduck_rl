@@ -47,7 +47,7 @@ def _markers(pkg):
 def _aarch64_entry(pkgs):
     """The entry whose resolution-markers SELECT linux-aarch64 NON-Jetson
     (DGX Spark / GB10). The Jetson entry (`'tegra' in platform_release`) is
-    tests/test_jetson_thor_torch.py's."""
+    tests/test_torch_platform_sources.py's."""
     hits = [
         p
         for p in pkgs

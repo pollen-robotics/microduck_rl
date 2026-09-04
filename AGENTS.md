@@ -240,8 +240,8 @@ Never launch a long run without one.
   silently dragged torch 2.9.1 → 2.13.0). **Jetson AGX Thor** (JetPack 7,
   CUDA 13, `sm_110`) is a third case: the cu129 wheels predate its GPU, so
   `'tegra' in platform_release` (the Jetson kernel) routes torch to NVIDIA's
-  SBSA index instead, and `_jetson.py` pre-loads the NVPL/cuDSS libraries
-  that wheel links but does not declare (`tests/test_jetson_thor_torch.py`,
+  SBSA index instead, and `_torch_libs.py` pre-loads the NVPL/cuDSS libraries
+  that wheel links but does not declare (`tests/test_torch_platform_sources.py`,
   verified on-box 2026-09-04, #38). GB10's marker now says `'tegra' not in
   platform_release` — drop that and both sources match on Spark. AGX Orin
   (`sm_87`, also `-tegra`) resolves the same SBSA wheel, which has no `sm_87`

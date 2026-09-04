@@ -29,11 +29,10 @@ Requires a CUDA GPU (training runs through MuJoCo Warp) and [uv](https://docs.as
 >
 > **Jetson AGX Thor (JetPack 7, CUDA 13):** nothing extra — `uv sync` routes
 > torch to NVIDIA's Jetson AI Lab SBSA index (kernel `-tegra` is the
-> discriminator; Spark stays on cu129) and `mjlab_microduck` pre-loads the two
-> libraries that wheel forgets to declare when it is first imported — which
-> every `uv run train` / `duck-body` / `publish` does. In a checkout, a bare
-> `import torch` before `import mjlab` still fails to load them; `import mjlab`
-> first. **AGX Orin** gets the same routing (its kernel is `-tegra` too) but
+> discriminator; Spark stays on cu129) and the `mjlab.tasks` plugin hook
+> pre-loads the two libraries that wheel forgets to declare (`_torch_libs.py`),
+> inside `import mjlab`. A bare `import torch` before `import mjlab` still fails to
+> load them; `import mjlab` first. **AGX Orin** gets the same routing (its kernel is `-tegra` too) but
 > that wheel carries `sm_110`/`sm_121` kernels only, not Orin's `sm_87`, and
 > no other `torch==2.9.1` cp312 wheel exists on the Jetson indexes — GPU
 > training on Orin is not available at this pin (verified 2026-09-04; the

@@ -37,7 +37,7 @@ dependencies = [
     "torch==2.9.1",
     # Jetson (JetPack 7 / SBSA, e.g. AGX Thor) ONLY: the SBSA torch wheel links
     # NVPL BLAS/LAPACK and cuDSS without declaring them; pre-loaded by
-    # mjlab_microduck/_jetson.py. `'tegra' in platform_release` is the Jetson
+    # mjlab_microduck/_torch_libs.py. `'tegra' in platform_release` is the Jetson
     # kernel (6.8.12-tegra); GB10 / x86_64 never match.
     "nvpl-blas ; sys_platform == 'linux' and platform_machine == 'aarch64' and 'tegra' in platform_release",
     "nvpl-lapack ; sys_platform == 'linux' and platform_machine == 'aarch64' and 'tegra' in platform_release",
@@ -61,13 +61,6 @@ train = "mjlab_microduck.train_cli:main"
 # Serve a simulated body to the real `robotd` — see sim/body_server.py.
 duck-body = "mjlab_microduck.sim.body_server:main"
 publish = "mjlab_microduck.publish.cli:main"
-[tool.uv.build-backend]
-# Ships src/purelib/mjlab_microduck_jetson.pth into site-packages: a `.pth`
-# `import` line runs at interpreter start, so the Jetson pre-load in
-# _jetson.py happens before ANY `import torch` — a test that imports torch
-# first, a notebook, `python -c` — not only paths that go through this package.
-data = { purelib = "src/purelib" }
-
 [tool.ruff]
 src = ["src"]  # Helpful for recognizing first-party imports.
 indent-width = 4
@@ -107,7 +100,7 @@ better-actuator-models = { git = "https://github.com/Rhoban/bam.git", branch = "
 #  * Jetson (JetPack 7 / SBSA, AGX Thor; kernel `-tegra`, CUDA 13.0, sm_110):
 #    NVIDIA's Jetson AI Lab SBSA index carries a native torch 2.9.1 build — the
 #    same version as the pin, so only the wheel's source changes. The cu129
-#    wheels below predate sm_110. See _jetson.py for the two undeclared deps.
+#    wheels below predate sm_110. See _torch_libs.py for the two undeclared deps.
 #  * Everything else (DGX Spark / GB10), unchanged from here on:
 # On linux-aarch64 (DGX Spark / GB10) PyPI's torch wheel is CPU-ONLY:
 # torch.__version__ == "2.9.1+cpu", torch.version.cuda is None, so
