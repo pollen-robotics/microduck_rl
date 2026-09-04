@@ -33,7 +33,11 @@ Requires a CUDA GPU (training runs through MuJoCo Warp) and [uv](https://docs.as
 > libraries that wheel forgets to declare when it is first imported — which
 > every `uv run train` / `duck-body` / `publish` does. In a checkout, a bare
 > `import torch` before `import mjlab` still fails to load them; `import mjlab`
-> first. AGX Orin (JetPack 6) is not wired.
+> first. **AGX Orin** gets the same routing (its kernel is `-tegra` too) but
+> that wheel carries `sm_110`/`sm_121` kernels only, not Orin's `sm_87`, and
+> no other `torch==2.9.1` cp312 wheel exists on the Jetson indexes — GPU
+> training on Orin is not available at this pin (verified 2026-09-04; the
+> sim body still runs there).
 
 ```bash
 git clone https://github.com/pollen-robotics/microduck_rl

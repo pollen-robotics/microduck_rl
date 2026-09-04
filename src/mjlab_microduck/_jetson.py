@@ -22,7 +22,10 @@ such hook — uv_build's editable wheel ships no data files — so there, import
 ``mjlab`` or ``mjlab_microduck`` before torch (``tests/conftest.py`` does).
 A no-op anywhere that is not a Jetson (the kernel release carries ``-tegra``:
 ``6.8.12-tegra`` on Thor) or where the wheels are absent, so GB10 / x86_64 /
-HF Jobs are untouched.
+HF Jobs are untouched. AGX Orin matches too and gets the same wheel, which
+imports and initialises CUDA but has no ``sm_87`` kernels — training there
+is not available at this pin (verified 2026-09-04), and nothing here can
+change that.
 """
 
 from __future__ import annotations

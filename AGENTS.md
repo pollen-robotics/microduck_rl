@@ -243,7 +243,11 @@ Never launch a long run without one.
   SBSA index instead, and `_jetson.py` pre-loads the NVPL/cuDSS libraries
   that wheel links but does not declare (`tests/test_jetson_thor_torch.py`,
   verified on-box 2026-09-04, #38). GB10's marker now says `'tegra' not in
-  platform_release` — drop that and both sources match on Spark.
+  platform_release` — drop that and both sources match on Spark. AGX Orin
+  (`sm_87`, also `-tegra`) resolves the same SBSA wheel, which has no `sm_87`
+  kernels (`no kernel image is available`); no `torch==2.9.1` cp312 wheel for
+  `sm_87` exists on any Jetson index, so Orin cannot train at this pin —
+  verified 2026-09-04, not a routing bug to "fix" by pointing it elsewhere.
 - Physics-aligned limits: a 25 cm robot tumbles at 3.5–5.5 rad/s NATURALLY —
   don't impose human-scale speed intuitions via caps; put anti-violence
   pressure on impacts and thrash (|a_z|, action_rate, support gates), not on
