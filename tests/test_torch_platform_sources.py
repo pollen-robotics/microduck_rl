@@ -112,3 +112,36 @@ def test_on_jetson_the_libraries_load_and_torch_sees_the_gpu():
 
     assert torch.cuda.is_available()
     assert torch.version.cuda is not None
+
+
+def test_every_module_that_imports_torch_at_module_scope_imports_mjlab_first():
+    """The pre-load runs from the mjlab.tasks plugin hook, i.e. inside
+    `import mjlab`. A module of ours that imports torch at module scope before
+    anything imported mjlab (export.py reached from scripts/export.py) would
+    miss it on Jetson, so `import mjlab` must come first there."""
+    src = _ROOT / "src" / "mjlab_microduck"
+    for path in src.rglob("*.py"):
+        if path.is_relative_to(src / "tasks"):
+            continue  # the hook itself lives here, ahead of every cfg import
+        lines = path.read_text().splitlines()
+        torch_at = next(
+            (
+                i
+                for i, l in enumerate(lines)
+                if l.startswith(("import torch", "from torch"))
+            ),
+            None,
+        )
+        if torch_at is None:
+            continue
+        mjlab_at = next(
+            (
+                i
+                for i, l in enumerate(lines)
+                if l.startswith(("import mjlab", "from mjlab"))
+            ),
+            None,
+        )
+        assert mjlab_at is not None and mjlab_at < torch_at, (
+            f"{path.relative_to(_ROOT)}: imports torch at line {torch_at + 1} before mjlab"
+        )
