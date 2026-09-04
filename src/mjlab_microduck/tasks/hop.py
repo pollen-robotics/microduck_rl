@@ -248,8 +248,9 @@ DRIFT_VEL_STD = 0.4
 DRIFT_WEIGHT = 1.0
 
 # Fallback datum for the two force terms, in newtons. `apply_hop_corrections`
-# OVERWRITES this per arm from the compiled mass -- 908.0 g sprung / 806.0 g
-# standard, both matching the scale as of 2026-09-04 -- so this literal is only
+# OVERWRITES this per arm from the compiled mass -- 893.0 g sprung / 791.0 g
+# standard, matching the scale's 908 g less the 15 g radiator now removed -- so
+# this literal is only
 # what a term is registered with before that runs, and what it keeps if the
 # compile fails. Left at the historical 0.877 kg x 9.81 rather than restated,
 # because a wrong-looking fallback is easier to notice than a plausible one.
@@ -582,7 +583,7 @@ def make_in_place_variant(cfg):
        the shape that produced the Phase 4 null. See DRIFT_VEL_STD and
        DRIFT_WEIGHT for both numbers and why.
 
-    2. THE HEAD IS FREED. The head subtree is 294.9 g of a 752.2 g robot -- 39%,
+    2. THE HEAD IS FREED. The head subtree is 279.9 g of a 791.0 g robot -- 35%,
        proportionally a far bigger swing mass than a human arm -- and it sits at
        the top of the body where it does the most good. Two rewards were
        actively preventing it from being used:
@@ -691,8 +692,8 @@ def apply_hop_corrections(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
     params = str(Path(__file__).resolve().parents[1] / "robot" / _MEASURED_PARAMS)
 
     # Both force terms normalise ground reaction force by body weight, and the
-    # arms no longer share a mass: 908.0 g with spring boots (2 x 51 g delta),
-    # 806.0 g standard. Compile the actual robot and use its real weight, so no
+    # arms no longer share a mass: 893.0 g with spring boots (2 x 51 g delta),
+    # 791.0 g standard. Compile the actual robot and use its real weight, so no
     # arm gets a normalisation advantage. Hardcoding one value made the lighter
     # Standard arm's load term read 13.6% high.
     #
