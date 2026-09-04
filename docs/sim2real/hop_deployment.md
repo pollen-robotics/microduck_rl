@@ -1,13 +1,17 @@
 # Deploying the hop policy on hardware
 
 Interface spec for running a trained hop policy on the real MicroDuck.
-Verified by exporting a trained checkpoint 2026-09-03.
+Verified against the exported checkpoint 2026-09-04.
 
-## Export
+## The artifact
+
+`exports/hop_k3344_59yiy9h6.onnx` — trained run `59yiy9h6`
+(`2026-09-04_03-10-50_real_Sprung-K3344`, 8000 iters). Regenerate with:
 
 ```bash
 uv run python scripts/export.py Mjlab-Hop-Flat-Sprung-K3344-MicroDuck \
-    --wandb-run-path <entity/project/run_id> --onnx-file hop.onnx
+    --wandb-run-path pollen-robotics/mjlab_microduck/59yiy9h6 \
+    --onnx-file exports/hop_k3344_59yiy9h6.onnx
 ```
 
 Produces **61 float32 in -> 14 float32 out**. (Note 61, not the 51 quoted in
@@ -49,6 +53,26 @@ non-zero values.
 goal_joint_angle = HOME_FRAME[joint] + action[i]
 ```
 
+**Joint order is baked into the ONNX metadata — read it from there, do not
+hardcode.** It is NOT grouped left-then-right; the head sits in the middle:
+
+```
+0  left_hip_yaw     5  neck_pitch      9  right_hip_yaw
+1  left_hip_roll    6  head_pitch     10  right_hip_roll
+2  left_hip_pitch   7  head_yaw       11  right_hip_pitch
+3  left_knee        8  head_roll      12  right_knee
+4  left_ankle                         13  right_ankle
+```
+
+The same order applies to the `joint_pos` and `joint_vel` observation blocks.
+`onnx.load(path).metadata_props` carries `joint_names`, `default_joint_pos`,
+`action_scale`, and `observation_names`.
+
+**TRAP: ignore `joint_stiffness` and `joint_damping` in that metadata.** They
+read 1.0 and 0.0 for every joint — those are the BAM actuator's torque-mode
+placeholders, not PD gains. Writing them to the servos would be wrong. The
+gain the policy was trained against is firmware Position P Gain = 400.
+
 `HOME_FRAME` (radians) — keep in sync with `microduck_constants.py`:
 
 ```
@@ -79,10 +103,12 @@ kp 400–800 and **falls** at 1600 while current rises 71%. Do not raise it.
 There is no torque ceiling protecting the gearboxes. One XL330 gearbox has
 already been destroyed on this project by repeated high-torque cycling.
 
-- The sprung policy commands **3.4x the action rate** of the rigid one
-  (`action_rate_l2` −1.50 vs −0.44). High action rate means high current.
-- It also **falls 7.6x more often** (`fell_over` 0.68 vs 0.089). In simulation
+- The sprung policy commands **3.5x the action rate** of the Locked control
+  (`action_rate_l2` −1.59 vs −0.45). High action rate means high current.
+- It also **falls 8.3x more often** (`fell_over` 0.875 vs 0.105). In simulation
   that is a reset; on hardware it is an impact.
+- Landing force averages **14.2 N ≈ 1.7x body weight** (854 g robot), against
+  9.4 N for Locked and 6.5 N for the stock rigid foot.
 - **Tether or foam for the first attempt.** Monitor Present Temperature
   (addr 146) on the leg servos; the limit is 70 °C.
 
@@ -90,10 +116,32 @@ already been destroyed on this project by repeated high-torque cycling.
 
 The trained gait is a **skip**, not a symmetric two-foot hop — nothing in the
 reward distinguishes them, and the policy found skipping cheaper. Both feet do
-leave the ground simultaneously.
+leave the ground simultaneously. Visually: the robot leans slightly to one
+side, then pushes off with the foot on that side.
 
-Simulated rise was 27.2 mm of CoM height for K3900 in the corrected sweep;
-K3344 is untrained as of this writing, and its slightly softer spring should
-land in the same band. Treat any of it as optimistic:
+**It hops ~3x faster than commanded.** Measured 42.8% of all steps airborne and
+~3.3 flight phases per second, against a commanded `HOP_PERIOD` of 1.0 s. The
+hop rewards gate on `sin(2*pi*phase) > 0`, so flights outside the rewarded half
+cycle cost nothing and the policy simply skips continuously. Harmless for the
+sim experiment; on hardware it means **3x the impacts and 3x the thermal load**
+you would budget for a 1 Hz hop. Plan the first bench run around that, not
+around the commanded period.
+
+**Expect roughly 21 mm of hop, not the 27.6 mm the training metric reports.**
+A headless rollout of this exact checkpoint (64 envs, 2944 flight phases)
+measured 129.6 ms of flight, whose ballistic apex is 20.6 mm. The metric reads
+30.6 mm because its takeoff datum is the last *in-contact* sample, up to one
+20 ms control step before the foot leaves; at the 0.64 m/s takeoff velocity
+that implies, the body rises up to 12.7 mm more during that final stance step
+and the reward credits it. That datum choice is deliberate — measuring from the
+first airborne sample zeroed the Locked control arm two thirds of the time —
+and it does not affect the arm-to-arm comparison. It does inflate the absolute
+number by ~34%.
+
+The rise is a genuine hop, not a posture artifact: CoM rise / root-link rise
+measured **0.980**, so the body is going ballistic rather than the legs
+extending downward under a stationary CoM. Body tilt at takeoff is 5.6° mean.
+
+Treat even the 21 mm as optimistic:
 the actuator model still over-predicts current 3–4x in the unsaturated regime
 (see `xl330_bench_2026-09-03.md`), so real hop height will likely be lower.
