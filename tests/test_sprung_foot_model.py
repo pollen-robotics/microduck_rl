@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from mjlab_microduck.robot.sprung_foot import (
+    _PAD_HALF_EXTENTS,
     DAMPING_RATIO,
     damping_for,
     H_ADD,
@@ -279,3 +280,44 @@ def test_spring_joint_limit_is_stiffened(model):
         jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, j)
         assert model.jnt_solref[jid][0] == pytest.approx(0.004)
         assert model.jnt_solimp[jid][1] == pytest.approx(0.99)
+
+
+# ── the contact footprint ────────────────────────────────────────────────────
+
+
+def test_pad_footprint_matches_the_measured_prototype():
+    """25 mm fore-aft x 40 mm lateral, measured on the Sarrus boot 2026-09-04.
+
+    These were TRANSPOSED until 2026-09-04 -- 40 fore-aft x 28 lateral -- which
+    gave the simulated robot 60% more pitch base of support than it owns and
+    flattered every landing in the campaign. The transposition is invisible by
+    inspection because both spellings are "a 40-and-a-small-number box", so it
+    is pinned here per axis rather than as a set.
+    """
+    fore_aft, thickness, lateral = _PAD_HALF_EXTENTS
+    assert fore_aft == pytest.approx(0.0125), "fore-aft half-extent: 25 mm sole"
+    assert lateral == pytest.approx(0.0200), "lateral half-extent: 40 mm sole"
+    assert thickness == pytest.approx(0.004)
+    assert lateral > fore_aft, (
+        "the boot is WIDER THAN LONG -- the linkage eats the fore-aft footprint. "
+        "If this ever flips, check it is a real design change and not a "
+        "transposition, and re-tune ANKLE_TO_SOLE against the settled delta."
+    )
+
+
+def test_pad_local_axes_map_to_fore_aft_and_lateral(model):
+    """The half-extents are only meaningful given this mapping, so assert it.
+
+    Local y is world-up at the home pose (that is why the spring slides along
+    it), which leaves local x as fore-aft and local z as lateral. A change to
+    the ankle frame would silently redefine which number is the pitch base.
+    """
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "left_foot_pad")
+    assert bid >= 0
+    rot = data.xmat[bid].reshape(3, 3)
+    # Columns are the pad's local axes expressed in world.
+    assert abs(rot[0, 0]) == pytest.approx(1.0, abs=0.02), "local x is fore-aft"
+    assert abs(rot[2, 1]) == pytest.approx(1.0, abs=0.02), "local y is vertical"
+    assert abs(rot[1, 2]) == pytest.approx(1.0, abs=0.02), "local z is lateral"

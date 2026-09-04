@@ -52,7 +52,16 @@ SPRING_AXIS = (0.0, 1.0, 0.0)
 # on the LOCKED (zero-compliance) arm's settled delta and was re-tuned down
 # by that amount. See FIX 5's settling measurement in the prototype-update
 # report.
-ANKLE_TO_SOLE = 0.01744
+#
+# RETUNED AGAIN 2026-09-04, +3.53 mm, when the pad footprint was corrected to
+# the measured 25 x 40 mm. THIS CONSTANT IS COUPLED TO THE FOOTPRINT and that is
+# not obvious: it exists to cancel the contact-penetration difference between
+# the mesh sole and the box pad, and penetration depends on contact PRESSURE.
+# Shrinking the sole from 40x28 to 25x40 mm cut its area 11% and pushed the
+# settled Locked-minus-Standard delta to 26.47 mm against the 30.00 mm H_ADD
+# target. Anyone touching `_PAD_HALF_EXTENTS` must re-measure that delta and
+# re-tune this; `test_sprung_foot.py` pins it so the drift cannot pass silently.
+ANKLE_TO_SOLE = 0.02097
 
 H_ADD = 0.030      # measured on the Sarrus prototype (was an assumed 0.025)
 # MEASURED stiffness of the prototype boot, 2026-09-03, on the RobStride gripper
@@ -166,9 +175,28 @@ SPRING_JOINTS = ("passive_left_foot_spring", "passive_right_foot_spring")
 # `foot_clearance` and `foot_swing_height`.
 _COLLISION_CLASS = "collision"
 
-# Contact pad half-extents (m). Local y is world-up here, so the middle number
-# is half the pad thickness.
-_PAD_HALF_EXTENTS = (0.020, 0.004, 0.014)
+# Contact pad half-extents (m), as (fore-aft, thickness, lateral).
+#
+# MEASURED on the Sarrus prototype, 2026-09-04: the contact sole is 25 mm
+# fore-aft x 40 mm lateral. The linkage eats most of the original foot's
+# footprint, so the boot's sole is much SMALLER than the mesh sole it replaces.
+#
+# THESE WERE TRANSPOSED UNTIL 2026-09-04, and it flattered every landing in the
+# campaign. The old (0.020, 0.004, 0.014) gave 40 mm fore-aft x 28 mm lateral --
+# 60% MORE fore-aft base than the robot has, and 30% less lateral. Fore-aft is
+# the axis that matters: laterally a biped is braced by having two feet spaced
+# apart, but nothing resists a fore-aft topple except sole length and the ankle,
+# and the CoM sits ~150 mm up. So the simulated robot was landing on a pitch
+# footprint it does not own, and `fell_over = 0.875` was measured on the
+# forgiving geometry -- the real figure is worse.
+#
+# Axis mapping, verified against the compiled model at the home pose rather than
+# assumed (local y is world-up here, so the middle number is half the thickness):
+#
+#   local x -> world [-1.000, 0.000, 0.000]  = fore-aft
+#   local y -> world [ 0.000, 0.087, 0.996]  = vertical
+#   local z -> world [ 0.000, 0.996,-0.087]  = lateral
+_PAD_HALF_EXTENTS = (0.0125, 0.004, 0.020)
 
 
 def make_sprung_foot_spec_fn(
