@@ -237,7 +237,13 @@ Never launch a long run without one.
   (uv applies `[tool.uv.sources]` to direct deps only — deleting the
   redundant-looking `torch==` pin makes the routing a no-op), and the pin must
   stay `==`, since the CUDA index carries newer builds than PyPI (a `>=`
-  silently dragged torch 2.9.1 → 2.13.0).
+  silently dragged torch 2.9.1 → 2.13.0). **Jetson AGX Thor** (JetPack 7,
+  CUDA 13, `sm_110`) is a third case: the cu129 wheels predate its GPU, so
+  `'tegra' in platform_release` (the Jetson kernel) routes torch to NVIDIA's
+  SBSA index instead, and `_jetson.py` pre-loads the NVPL/cuDSS libraries
+  that wheel links but does not declare (`tests/test_jetson_thor_torch.py`,
+  verified on-box 2026-09-04, #38). GB10's marker now says `'tegra' not in
+  platform_release` — drop that and both sources match on Spark.
 - Physics-aligned limits: a 25 cm robot tumbles at 3.5–5.5 rad/s NATURALLY —
   don't impose human-scale speed intuitions via caps; put anti-violence
   pressure on impacts and thrash (|a_z|, action_rate, support gates), not on

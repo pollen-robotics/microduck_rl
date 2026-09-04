@@ -35,6 +35,13 @@ dependencies = [
     # floating `>=` lets the CUDA index (which carries newer builds than the
     # PyPI pin) drag torch 2.9.1 -> 2.13.0, an unvetted bump for mjlab/rsl_rl.
     "torch==2.9.1",
+    # Jetson (JetPack 7 / SBSA, e.g. AGX Thor) ONLY: the SBSA torch wheel links
+    # NVPL BLAS/LAPACK and cuDSS without declaring them; pre-loaded by
+    # mjlab_microduck/_jetson.py. `'tegra' in platform_release` is the Jetson
+    # kernel (6.8.12-tegra); GB10 / x86_64 never match.
+    "nvpl-blas ; sys_platform == 'linux' and platform_machine == 'aarch64' and 'tegra' in platform_release",
+    "nvpl-lapack ; sys_platform == 'linux' and platform_machine == 'aarch64' and 'tegra' in platform_release",
+    "nvidia-cudss-cu13 ; sys_platform == 'linux' and platform_machine == 'aarch64' and 'tegra' in platform_release",
 ]
 
 [project.entry-points."mjlab.tasks"]
@@ -54,6 +61,13 @@ train = "mjlab_microduck.train_cli:main"
 # Serve a simulated body to the real `robotd` — see sim/body_server.py.
 duck-body = "mjlab_microduck.sim.body_server:main"
 publish = "mjlab_microduck.publish.cli:main"
+[tool.uv.build-backend]
+# Ships src/purelib/mjlab_microduck_jetson.pth into site-packages: a `.pth`
+# `import` line runs at interpreter start, so the Jetson pre-load in
+# _jetson.py happens before ANY `import torch` — a test that imports torch
+# first, a notebook, `python -c` — not only paths that go through this package.
+data = { purelib = "src/purelib" }
+
 [tool.ruff]
 src = ["src"]  # Helpful for recognizing first-party imports.
 indent-width = 4
@@ -89,6 +103,12 @@ override-dependencies = [
 better-actuator-models = { git = "https://github.com/Rhoban/bam.git", branch = "mjlab_frictionloss" }
 # For local BAM development, comment the line above and use:
 # better-actuator-models = { path = "/home/antoine/Rhoban/bam", editable = true }
+# Two aarch64 hosts, told apart by the kernel release (PEP 508 platform_release):
+#  * Jetson (JetPack 7 / SBSA, AGX Thor; kernel `-tegra`, CUDA 13.0, sm_110):
+#    NVIDIA's Jetson AI Lab SBSA index carries a native torch 2.9.1 build — the
+#    same version as the pin, so only the wheel's source changes. The cu129
+#    wheels below predate sm_110. See _jetson.py for the two undeclared deps.
+#  * Everything else (DGX Spark / GB10), unchanged from here on:
 # On linux-aarch64 (DGX Spark / GB10) PyPI's torch wheel is CPU-ONLY:
 # torch.__version__ == "2.9.1+cpu", torch.version.cuda is None, so
 # torch.cuda.device_count() == 0 and mjlab's select_gpus() indexes an empty
@@ -99,11 +119,19 @@ better-actuator-models = { git = "https://github.com/Rhoban/bam.git", branch = "
 # The marker keeps x86_64 (HF Jobs) on PyPI, where the wheel already bundles
 # CUDA via its nvidia-*-cu12 deps — that resolution is unchanged.
 torch = [
-  { index = "pytorch-cu129", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+  { index = "jetson-sbsa-cu130", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and 'tegra' in platform_release" },
+  { index = "pytorch-cu129", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and 'tegra' not in platform_release" },
 ]
 
 [[tool.uv.index]]
 name = "pytorch-cu129"
 url = "https://download.pytorch.org/whl/cu129"
 # explicit: only packages that name this index resolve from it.
+explicit = true
+
+# JetPack 7 (Thor) uses the SBSA userspace; the "jp7" index is empty, this one
+# is live. explicit: only torch names it.
+[[tool.uv.index]]
+name = "jetson-sbsa-cu130"
+url = "https://pypi.jetson-ai-lab.io/sbsa/cu130"
 explicit = true

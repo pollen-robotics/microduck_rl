@@ -27,6 +27,8 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
 _CUDA_INDEX = "https://download.pytorch.org/whl/cu"
+_JETSON_INDEX = "https://pypi.jetson-ai-lab.io/"
+_JETSON_MARKER = "'tegra' in platform_release"
 
 
 def _packages(name):
@@ -43,14 +45,17 @@ def _markers(pkg):
 
 
 def _aarch64_entry(pkgs):
-    """The entry whose resolution-markers SELECT linux-aarch64."""
+    """The entry whose resolution-markers SELECT linux-aarch64 NON-Jetson
+    (DGX Spark / GB10). The Jetson entry (`'tegra' in platform_release`) is
+    tests/test_jetson_thor_torch.py's."""
     hits = [
         p
         for p in pkgs
         if "platform_machine == 'aarch64'" in _markers(p)
         and "sys_platform == 'linux'" in _markers(p)
+        and _JETSON_MARKER not in _markers(p)
     ]
-    assert len(hits) == 1, f"expected 1 aarch64 entry, found {len(hits)}"
+    assert len(hits) == 1, f"expected 1 non-Jetson aarch64 entry, found {len(hits)}"
     return hits[0]
 
 
@@ -76,9 +81,13 @@ def test_torch_source_is_pinned_to_a_cuda_index_on_aarch64():
     indexes = {p["name"]: p["url"] for p in uv_cfg.get("index", [])}
     for src in sources:
         assert "aarch64" in src["marker"], "the torch source must stay aarch64-scoped"
-        assert indexes[src["index"]].startswith(_CUDA_INDEX), (
-            f"index {src['index']} is not a PyTorch CUDA index"
-        )
+        url = indexes[src["index"]]
+        if _JETSON_MARKER in src["marker"]:
+            assert url.startswith(_JETSON_INDEX), f"Jetson index {src['index']} moved"
+        else:
+            assert url.startswith(_CUDA_INDEX), (
+                f"index {src['index']} is not a PyTorch CUDA index"
+            )
 
 
 def test_lockfile_routes_aarch64_torch_to_cuda_wheels():
