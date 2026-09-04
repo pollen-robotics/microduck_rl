@@ -275,7 +275,7 @@ def test_unloaded_rigid_height_is_pinned_to_the_compiled_locked_arm_geometry():
         )
     )
     kinematic_rigid = -lowest - H_ADD
-    assert kinematic_rigid == pytest.approx(0.11710, abs=0.002)
+    assert kinematic_rigid == pytest.approx(0.12114, abs=0.002)
     # UNLOADED_RIGID_HEIGHT *is* this sag-free kinematic height, so pin it to the
     # geometry rather than to a copied literal.
     assert UNLOADED_RIGID_HEIGHT == pytest.approx(kinematic_rigid, abs=0.002)

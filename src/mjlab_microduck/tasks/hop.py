@@ -68,8 +68,10 @@ HOP_PERIOD = 1.0
 #       H_ADD 0.030. An 80 s settle creeps to 0.1035, so the settled value is
 #       inside [0.1035, 0.1171] on any reading.)
 #
-#   sag-free kinematic height    0.1171   (UNLOADED_RIGID_HEIGHT below: upright,
-#       HOME_FRAME, lowest pad corner exactly on the floor, h_add removed.)
+#   sag-free kinematic height    0.12114  (UNLOADED_RIGID_HEIGHT below: upright,
+#       HOME_FRAME, lowest pad corner exactly on the floor, h_add removed.
+#       Was 0.1171 before the 2026-09-04 footprint correction; ANKLE_TO_SOLE
+#       moved +3.53 mm with it, which is where the 4 mm went.)
 #
 #   max sag-free stance height   0.16133  (grid search over symmetric
 #       hip_pitch/knee/ankle poses, pad kept flat, vs HOME_FRAME's 0.14710.)
@@ -90,7 +92,7 @@ HOP_PERIOD = 1.0
 # NOT a reward datum -- nothing in the reward path reads it. It survives as the
 # STANCE reference that justifies `HOP_COM_HEIGHT_MAX`: the CoM band is about
 # standing behaviour, so it still needs to know how tall the robot stands.
-UNLOADED_RIGID_HEIGHT = 0.1171
+UNLOADED_RIGID_HEIGHT = 0.12114
 
 # RISE above takeoff height that the Gaussian peaks at, and its width.
 #
@@ -489,7 +491,7 @@ def make_hop_variant(
     #    experiment exists to resolve. It penalised exactly the hops we want.
     #
     #    Safe for STANCE, which is what the band is actually for: the rigid
-    #    sag-free kinematic maximum is UNLOADED_RIGID_HEIGHT = 0.1171, already
+    #    sag-free kinematic maximum is UNLOADED_RIGID_HEIGHT = 0.12114, already
     #    BELOW the old 0.14 top, so the upper edge was unreachable while standing
     #    and only ever fired airborne. Raising it therefore changes nothing about
     #    standing behaviour on any arm. (Sprung, same argument: a 0.1471 stand vs
@@ -501,7 +503,7 @@ def make_hop_variant(
     #    "CoM band shift" is the out-of-scope item in the spec): running after
     #    this, it shifts both edges by h_add and yields [0.14, 0.23] for the
     #    sprung arms -- comfortably above the apex the hop reward asks for, which
-    #    is UNLOADED_RIGID_HEIGHT + H_ADD + HOP_HEIGHT_GAIN = 0.1871 for a hop
+    #    is UNLOADED_RIGID_HEIGHT + H_ADD + HOP_HEIGHT_GAIN = 0.19114 for a hop
     #    launched from a nominal stance. (The reward itself no longer names that
     #    number -- it shapes RISE -- but the CoM band still has to clear the
     #    absolute height a successful hop reaches, so the arithmetic belongs
