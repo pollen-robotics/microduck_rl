@@ -751,6 +751,25 @@ def apply_hop_corrections(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
     cfg.sim.mujoco.timestep = HOP_TIMESTEP
     cfg.decimation = HOP_DECIMATION
 
+    # CONTACT SOLVER HARDENING, and it is load-bearing now rather than
+    # defensive. Switching the hop arms to robot_allcollisions.xml took the
+    # robot from 5 collidable geoms to 70, 22 of them on the head and neck.
+    # nconmax = 35 is the FLAT-terrain default, sized for the 5-geom model; a
+    # hop arm falls 48-92% of the time and lands with trunk, folded legs and
+    # head all in close ground/self contact, which is precisely the state the
+    # sitstand env documents as overflowing the solver at 35/10 -> NaN ->
+    # nan_state terminations that punish the very behaviour being learned.
+    #
+    # Worse than a crash, an overflow here would be SILENT AND SELF-DEFEATING:
+    # dropped contacts re-admit the head-through-body intersection that
+    # switching models exists to prevent, and they drop it exactly during the
+    # collapses where the head is most likely to be inside the body.
+    #
+    # Values follow the sitstand env, which already runs this collision set.
+    cfg.sim.nconmax = 200
+    cfg.sim.mujoco.iterations = 30
+    cfg.sim.mujoco.ls_iterations = 50
+
     scale = 0.005 / HOP_TIMESTEP
     params = str(Path(__file__).resolve().parents[1] / "robot" / _MEASURED_PARAMS)
 
