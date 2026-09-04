@@ -53,6 +53,14 @@ assert MICRODUCK_ALLCOLLISIONS_ROLLERS_BACKLASH_XML.exists(), f"XML not found: {
 # on both sides: the spec's bare XML is 737.2 g, the boots add 2 x 51 g, and
 # 893.0 - 737.2 - 102.0 = 53.8 g of real robot is still not in the model.
 #
+# CONFIRMED ON THE SCALE: with the radiator out the robot weighs 892 g against
+# this model's 893.0 g. The 1 g is at the scale's own resolution and is left
+# uncorrected deliberately -- trimming the constant to match it would claim a
+# precision nothing else here has, and 1 g is two orders below the open
+# questions (where the 53.8 g actually sits, the 51 g boot delta, the actuator
+# model). What the agreement does establish is that the total is right, which is
+# the part hop height depends on.
+#
 # THE BATTERY IS THE PRIME SUSPECT, and it is not in the spec: there is no body
 # named battery, pack or cell anywhere, and an NP-F550 is 75-80 g. Either the
 # pack is partly folded into `trunk_base`'s 199.2 g already, or the residual is
