@@ -145,3 +145,106 @@ extending downward under a stationary CoM. Body tilt at takeoff is 5.6° mean.
 Treat even the 21 mm as optimistic:
 the actuator model still over-predicts current 3–4x in the unsaturated regime
 (see `xl330_bench_2026-09-03.md`), so real hop height will likely be lower.
+
+---
+
+# Running it on the robot (microduck_daemon)
+
+The daemon at `~/Project/Repo/Pollen/MICRODUCK/microduck_daemon` already
+implements this policy's contract. Verified against the source, not assumed:
+
+- `duck-control/src/obs.rs` declares `OBS_LEN = 61`, `ACTION_LEN = 14`, and an
+  index layout identical to the one above, including `z, roll, pitch` ordering
+  inside the body block.
+- `duck-control/src/model.rs:DEFAULT_POSITION` equals `HOME_FRAME` to four
+  decimals, and its 15-joint order minus the mouth (index 9) is exactly the
+  ONNX metadata's `joint_names`. No re-indexing.
+- `robotd/src/control.rs:501` already builds the phase command the hop policy
+  wants, byte for byte, for the ground pick:
+  `twist: [(TAU*phase).cos(), (TAU*phase).sin(), 0.0]` with head and body zero.
+
+So no Rust change is needed for a first bench test. Install the hop policy
+**into the ground-pick slot** and override three tuning keys.
+
+## Why the ground-pick slot
+
+The ground pick is the daemon's only phase-driven network. Generic `SkillDef`
+skills get a *static* twist from `def.command`, so they cannot drive a phase.
+
+Its one-shot semantics are an advantage here, not a compromise. The policy
+skips continuously at ~3.3 Hz when left running (see above); a one-shot cycle
+is one hop attempt, which is what you want the first time a 1.7x-body-weight
+landing goes through gearboxes with no firmware current ceiling.
+
+## Install
+
+```bash
+scp exports/hop_k3344_59yiy9h6.onnx <robot>:/tmp/
+robotctl policy load ground_pick /tmp/hop_k3344_59yiy9h6.onnx
+```
+
+`robotd` validates 61-in / 14-out at load and refuses a mismatch before the
+robot moves, so a wrong file fails standing still.
+
+## `/etc/robot/robotd.toml`
+
+```toml
+[policy]
+# Trained at kp_fw 400; the daemon's running gain is 200, so double it
+# for the duration of the move.
+ground_pick_gain_ratio = 2.0
+
+# The ONNX metadata says action_scale = 1.0. Walking defaults to 0.9.
+ground_pick_action_scale = 1.0
+
+# HOP_PERIOD is 1.0 s. The ground pick defaults to 4.0.
+ground_pick_period = 1.0
+
+# THE ONE THAT IS NOT A CLEAN OVERRIDE -- see below.
+head_lowpass = 1.0
+legs_lowpass = 1.0
+```
+
+Set the period explicitly rather than leaving it unset: an installed policy-set
+manifest supplies these when absent, and its ground-pick entry is 4.0 s.
+
+## The low-pass, which is global and therefore a real problem
+
+`head_lowpass` / `legs_lowpass` are first-order filters on the joint targets,
+defaulting to 0.5 / 0.7. `SkillOverrides` carries only `action_scale` and
+`gain_ratio`, so **the low-pass cannot be scoped to one skill** -- setting it to
+pass-through affects walking too.
+
+The hop policy was trained with no filter. Nothing in the training tree applies
+one: `ACTION_LOW_PASS_HEAD_ALPHA` / `_LEG_ALPHA`, which `robotd.toml`'s comment
+names, exist only on `velocity2` experiment branches that were reverted
+(`939c29e8`, "revert velocity2 walk experiments (lowpass filter, ...)"). The
+daemon's comment is correct about the alpha *walking* policies and does not
+transfer to this one.
+
+A 0.7 leg filter attenuates exactly the sharp push-off transient the hop
+depends on -- this policy runs 3.5x the action rate of the walking policy on
+purpose. So:
+
+**For a dedicated hop bench session, set both to 1.0 and do not walk the robot
+in that session. Revert before using the walking policy again.**
+
+If the hop needs to coexist with walking, that is what forces the proper fix
+below.
+
+## Doing it properly, later
+
+A real `Net::Hop` needs a Rust change in `robotd/src/control.rs` mirroring
+lines 498-506 (the `Net::GroundPick` arm), with its own period, gain ratio and
+action scale -- plus a per-skill low-pass override, which does not exist today.
+Until then the hop occupies the ground-pick slot and the low-pass is a global
+session setting.
+
+## Bench checklist
+
+1. Robot tethered or over foam. It falls often (`fell_over` 0.875 in sim).
+2. Confirm `robotctl monitor` shows the loaded ground-pick policy is the hop file.
+3. Trigger ONE cycle. Do not hold the trigger.
+4. Read Present Temperature (addr 146) on the four leg servos between attempts;
+   limit is 70 C. There is no firmware current ceiling in Position Mode 3.
+5. Expect ~21 mm of rise and a lean-then-push skip, not a symmetric hop.
