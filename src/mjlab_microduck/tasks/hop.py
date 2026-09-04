@@ -214,16 +214,38 @@ LOAD_FORCE_WEIGHT = 4.0
 # ground. Ceiling 6.0 * 1/pi = 1.91/step, against hop_load_force's 1.27.
 SYMMETRIC_PUSH_WEIGHT = 6.0
 
-# In-place stillness. `stillness_at_zero_command` is registered at weight 3.0 by
+# Drift containment. `stillness_at_zero_command` is registered at weight 3.0 by
 # the velocity env and pays EXACTLY ZERO on this task: it gates on
 # `norm(cmd[:2]) + |cmd[2]| < 0.01`, and the hop command [cos, sin, 0] has norm
 # 1.0 by construction, always. Measured consequence on run 59yiy9h6: 132 mm of
-# horizontal drift in 14 s (p95 339 mm) at 0.126 m/s -- the robot travels while
-# it hops. Raising the THRESHOLD past 1.0 re-arms the existing, tested term
-# rather than adding a near-duplicate of it; "zero command" then reads as
-# "always", which is correct here because this task has no velocity command at
-# all -- the twist slots carry the phase.
+# horizontal drift in 14 s (p95 339 mm) at 0.126 m/s. Raising the THRESHOLD past
+# 1.0 re-arms the existing, tested term rather than adding a near-duplicate of
+# it; "zero command" then reads as "always", which is correct here because this
+# task has no velocity command at all -- the twist slots carry the phase.
 IN_PLACE_THRESHOLD = 2.0
+
+# THE TERM IS THEN DELIBERATELY DETUNED, and both numbers matter.
+#
+# The goal is "do not run away", NOT "stand frozen". The robot is not asked to
+# hold a position -- nothing commands velocity or heading on this task -- it is
+# only asked not to travel fast while hopping. The velocity env sets
+# vel_std = 0.07 m/s (tighter than the function's own 0.1 default), which is a
+# position hold: it reads 0.04 at the 0.126 m/s this policy drifts at and is
+# numerically zero by 0.3. Widening to 0.4 leaves the current gait almost
+# untouched and bites only where travel becomes real -- payouts at weight 1.0:
+#
+#   v = 0.00 m/s -> 1.000     v = 0.60 m/s -> 0.105
+#   v = 0.13 m/s -> 0.906     v = 1.00 m/s -> 0.002
+#   v = 0.30 m/s -> 0.570
+DRIFT_VEL_STD = 0.4
+
+# And the weight comes down from 3.0, because a large reward available for
+# STANDING STILL is precisely the shape that produced the Phase 4 null, where
+# standing paid 2.2/step against a perfect hop's 1.9 and all three arms learned
+# to stand. A hopping robot earns this term anyway -- a vertical hop has near
+# zero horizontal velocity -- so it does not need to be large to be obeyed, and
+# every point of it is a point a non-hopper also collects.
+DRIFT_WEIGHT = 1.0
 
 # Robot weight in newtons, the datum `hop_load_force` normalises against:
 # 0.877 kg (737 g robot + 2 x 70 g boot, worn by ALL THREE arms including Locked)
@@ -535,7 +557,11 @@ def make_in_place_variant(cfg):
     Two independent corrections that happen to share a motive -- both were
     holding the in-place hop down, and neither is about the spring.
 
-    1. IN PLACE. `stillness_at_zero_command` is registered at weight 3.0 by the
+    1. DRIFT CONTAINMENT -- "do not run away", not "stand frozen". Nothing on
+       this task commands velocity or heading; the robot only needs to hop
+       without travelling fast while it does.
+
+       `stillness_at_zero_command` is registered at weight 3.0 by the
        velocity env, and on this task it pays EXACTLY ZERO, always. It gates on
        `norm(cmd[:2]) + |cmd[2]| < 0.01`; the hop command is
        [cos(2*pi*phi), sin(2*pi*phi), 0], whose norm is 1.0 by construction. So
@@ -548,6 +574,11 @@ def make_in_place_variant(cfg):
        is the correct reading here: this task has no velocity command at all --
        the twist slots carry the phase, and there is no other velocity for the
        robot to be tracking instead.
+
+       The term is then DETUNED -- vel_std 0.07 -> 0.4, weight 3.0 -> 1.0. The
+       stock values are a position hold, and a large standing-still reward is
+       the shape that produced the Phase 4 null. See DRIFT_VEL_STD and
+       DRIFT_WEIGHT for both numbers and why.
 
     2. THE HEAD IS FREED. The head subtree is 294.9 g of a 752.2 g robot -- 39%,
        proportionally a far bigger swing mass than a human arm -- and it sits at
@@ -570,6 +601,8 @@ def make_in_place_variant(cfg):
     still = cfg.rewards.get("stillness_at_zero_command")
     if still is not None:
         still.params["command_threshold"] = IN_PLACE_THRESHOLD
+        still.params["vel_std"] = DRIFT_VEL_STD
+        still.weight = DRIFT_WEIGHT
 
     # Pop rather than zero the weight: RewardManager.compute short-circuits on
     # weight == 0.0 without calling the term, so a zeroed term is a dead entry
