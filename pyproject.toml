@@ -5,8 +5,10 @@ build-backend = "uv_build"
 [project]
 name = "mjlab-microduck"
 version = "0.1.0"
-description = "Training microduck to walk in MJLab"
+description = "RL training environments for the Microduck robot, built on mjlab"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 # <3.13: bam (better-actuator-models) pins requires-python <3.13, and jobs must
 # run the same interpreter we test locally (3.12) — a floating upper bound let
 # HF jobs pick 3.13.14 (2026-07-21).
@@ -24,6 +26,15 @@ dependencies = [
     # to declare it — without this line a fresh `uv sync` (e.g. on HF jobs)
     # can't even `import mjlab_microduck` (found 2026-07-21).
     "scipy>=1.16",
+    # Direct dep ONLY so [tool.uv.sources] can bind torch to the CUDA index on
+    # aarch64 (see the torch source below) — uv applies sources to DIRECT
+    # dependencies only, so as a purely transitive dep (mjlab, rsl_rl) the
+    # source entry is silently ignored.
+    # Pinned to the exact version uv.lock already resolved from PyPI so this
+    # changes only the SOURCE of the wheel on aarch64, not the version: a
+    # floating `>=` lets the CUDA index (which carries newer builds than the
+    # PyPI pin) drag torch 2.9.1 -> 2.13.0, an unvetted bump for mjlab/rsl_rl.
+    "torch==2.9.1",
 ]
 
 [dependency-groups]
@@ -36,10 +47,19 @@ dev = ["pytest", "optuna", "cmaes"]
 mjlab_microduck = "mjlab_microduck.tasks"
 
 [project.scripts]
-# Shadows mjlab's `train` entry point: identical behavior, plus a --hf-jobs
-# flag that submits the run to Hugging Face Jobs instead (see train_cli.py).
+# This name collides with mjlab's `train` ON PURPOSE and must stay declared.
+# Same-name console scripts are last-writer-wins and both dist-info RECORDs
+# then claim bin/train, so deleting this line does NOT hand the name back to
+# mjlab: `uv sync` uninstalls the file (ours, per our RECORD) and nothing
+# recreates mjlab's, leaving no `train` in the venv at all — `uv run train`
+# then finds some unrelated `train` on PATH (liblinear's, 2026-08-31).
+# The collision is harmless because the two shims are interchangeable:
+# --hf-jobs is intercepted from the `mjlab.tasks` entry point above
+# (train_hook.py), not here. Locked by tests/test_hf_jobs_flag.py.
 train = "mjlab_microduck.train_cli:main"
-  
+# Serve a simulated body to the real `robotd` — see sim/body_server.py.
+duck-body = "mjlab_microduck.sim.body_server:main"
+publish = "mjlab_microduck.publish.cli:main"
 [tool.ruff]
 src = ["src"]  # Helpful for recognizing first-party imports.
 indent-width = 4
@@ -75,3 +95,21 @@ override-dependencies = [
 better-actuator-models = { git = "https://github.com/Rhoban/bam.git", branch = "mjlab_frictionloss" }
 # For local BAM development, comment the line above and use:
 # better-actuator-models = { path = "/home/antoine/Rhoban/bam", editable = true }
+# On linux-aarch64 (DGX Spark / GB10) PyPI's torch wheel is CPU-ONLY:
+# torch.__version__ == "2.9.1+cpu", torch.version.cuda is None, so
+# torch.cuda.device_count() == 0 and mjlab's select_gpus() indexes an empty
+# list -> `IndexError: list index out of range` before training even starts
+# (mjlab/utils/gpu.py:70). Route torch to PyTorch's CUDA index there.
+# cu129 (not cu130) matches the CUDA toolkit warp 1.12.0 bundles, so the
+# zero-copy warp<->torch interop stays on one runtime major version.
+# The marker keeps x86_64 (HF Jobs) on PyPI, where the wheel already bundles
+# CUDA via its nvidia-*-cu12 deps — that resolution is unchanged.
+torch = [
+  { index = "pytorch-cu129", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+# explicit: only packages that name this index resolve from it.
+explicit = true

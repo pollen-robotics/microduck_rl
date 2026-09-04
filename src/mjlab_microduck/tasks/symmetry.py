@@ -1,12 +1,20 @@
-"""Bilateral (left-right) symmetry augmentation for the microduck velocity environment.
+"""Bilateral (left-right) symmetry augmentation for the microduck 61-D envs.
 
-Actor observation layout (51-dim flat tensor, concatenated in term insertion order):
+Migrated 2026-08-13 from the old 51-D layout to the current 61-D family
+(velocity/velstand/standup/roulade — twist + head_command + body_command obs
+slots), and the augmented-obs output key fixed "policy" → "actor" (mjlab
+1.3.0 group naming; the old key would KeyError in rsl_rl 5.0.1's mirror-loss
+path — dead code until now since no env had symmetry enabled).
+
+Actor observation layout (61-dim flat tensor, concatenated in term insertion order):
     [0:3]   base_ang_vel      (roll, pitch, yaw  — body-frame IMU)
     [3:6]   projected_gravity (gx, gy, gz         — body-frame)
     [6:20]  joint_pos_rel     (14 joints, relative to default pose)
     [20:34] joint_vel_rel     (14 joints)
     [34:48] last_action       (14 joints)
-    [48:51] command           (lin_vel_x, lin_vel_y, ang_vel_z)
+    [48:51] twist command     (lin_vel_x, lin_vel_y, ang_vel_z)
+    [51:55] head command      (neck_pitch, head_pitch, head_yaw, head_roll deltas)
+    [55:61] body command      (x, y, z, roll, pitch, yaw deltas)
 
 Joint ordering within each 14-dim block (from robot_walk.xml body tree):
     0: left_hip_yaw    5: neck_pitch    9:  right_hip_yaw
@@ -26,7 +34,9 @@ Mirroring rules (left-right reflection about the sagittal plane):
     - neck_pitch, head_pitch: sagittal-plane joints, no sign change
 - base_ang_vel: negate roll ([0]) and yaw ([2]); pitch stays
 - projected_gravity: negate gy ([4]); gx and gz stay
-- command: negate lin_vel_y ([49]) and ang_vel_z ([50]); lin_vel_x stays
+- twist command: negate lin_vel_y ([49]) and ang_vel_z ([50]); lin_vel_x stays
+- head command: negate head_yaw ([53]) and head_roll ([54]); pitches stay
+- body command: negate y ([56]), roll ([58]), yaw ([60]); x, z, pitch stay
 """
 
 from dataclasses import dataclass
@@ -60,24 +70,28 @@ _JOINT_PERM: list[int] = [9, 10, 11, 12, 13, 5, 6, 7, 8, 0, 1, 2, 3, 4]
 # Signs applied AFTER permutation for each joint position
 _JOINT_SIGN: list[float] = [-1, -1, -1, -1, -1, 1, 1, -1, -1, -1, -1, -1, -1, -1]
 
-# Full 51-dim actor obs permutation
+# Full 61-dim actor obs permutation (all command slots mirror in place)
 _OBS_PERM: list[int] = (
     [0, 1, 2]                           # base_ang_vel (indices unchanged)
     + [3, 4, 5]                         # projected_gravity
     + [6 + j for j in _JOINT_PERM]     # joint_pos
     + [20 + j for j in _JOINT_PERM]    # joint_vel
     + [34 + j for j in _JOINT_PERM]    # last_action
-    + [48, 49, 50]                      # command
+    + [48, 49, 50]                      # twist command
+    + [51, 52, 53, 54]                  # head command
+    + [55, 56, 57, 58, 59, 60]          # body command
 )
 
-# Full 51-dim sign vector
+# Full 61-dim sign vector
 _OBS_SIGN: list[float] = (
     [-1.0, 1.0, -1.0]   # base_ang_vel: negate roll, yaw
     + [1.0, -1.0, 1.0]  # projected_gravity: negate gy
     + _JOINT_SIGN       # joint_pos
     + _JOINT_SIGN       # joint_vel
     + _JOINT_SIGN       # last_action
-    + [1.0, -1.0, -1.0] # command: negate lin_vel_y, ang_vel_z
+    + [1.0, -1.0, -1.0] # twist: negate lin_vel_y, ang_vel_z
+    + [1.0, 1.0, -1.0, -1.0]  # head: negate head_yaw, head_roll
+    + [1.0, -1.0, 1.0, -1.0, 1.0, -1.0]  # body: negate y, roll, yaw
 )
 
 # Cache tensors per device to avoid reallocating on every call
@@ -140,7 +154,7 @@ def microduck_vel_symmetry(
 
         aug_obs = TensorDict(
             {
-                "policy": torch.cat([actor_orig, actor_sym], dim=0),
+                "actor": torch.cat([actor_orig, actor_sym], dim=0),
                 "critic": critic_repeated,
             },
             batch_size=[actor_orig.shape[0] * 2],

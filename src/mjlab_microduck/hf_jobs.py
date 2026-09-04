@@ -1,6 +1,6 @@
 """Submit a mjlab-microduck training run as a Hugging Face Job.
 
-Invoked via the `train` wrapper (see train_cli.py):
+Invoked by the --hf-jobs interception (see train_hook.py):
 
     uv run train Mjlab-Kick-Flat-MicroDuck \
         --env.scene.num-envs 4096 --agent.max_iterations 4000 --hf-jobs
@@ -88,6 +88,34 @@ echo "[bootstrap] training exited with code $TRAIN_RC, final upload pass"
 # kill watcher loop, then run one final upload pass synchronously
 kill $UPLOADER_PID 2>/dev/null || true
 CKPT_ONE_SHOT=1 uv run python scripts/hf/uploader.py || true
+
+# Auto-export the final checkpoint to daemon-ready ONNX while the env is
+# still warm — a separate export job would pay the full bootstrap (image
+# pull + apt + uv sync) again just to run this one command. Best-effort:
+# an export failure must not mark a successful training as failed.
+if [ "$TRAIN_RC" -eq 0 ] && [ "${AUTO_EXPORT:-1}" = "1" ]; then
+    set +e
+    TASK_ID=${TRAIN_ARGS%% *}
+    CKPT=$(ls -t logs/rsl_rl/*/model_*.pt 2>/dev/null | head -1)
+    if [ -n "$CKPT" ]; then
+        echo "[bootstrap] auto-exporting ONNX from $(basename "$CKPT")"
+        uv run python scripts/export.py "$TASK_ID" \
+            --checkpoint-file "$(basename "$CKPT")" \
+            --num-envs 1 --onnx-file /work/policy.onnx \
+        && uv run python - <<'PY'
+import os
+from huggingface_hub import HfApi
+HfApi().upload_file(path_or_fileobj="/work/policy.onnx",
+                    path_in_repo="exported/policy.onnx",
+                    repo_id=os.environ["CKPT_REPO"], repo_type="model")
+print("[bootstrap] uploaded exported/policy.onnx")
+PY
+        [ $? -ne 0 ] && echo "[bootstrap] auto-export failed (training still OK)"
+    else
+        echo "[bootstrap] no checkpoint found, skipping auto-export"
+    fi
+    set -e
+fi
 
 exit $TRAIN_RC
 """
@@ -291,6 +319,9 @@ def submit(argv: list[str]) -> int:
     ckpt_repo = args.ckpt_repo or f"{namespace}/{run_name}"
 
     env: dict[str, str] = {
+        # Disarms the --hf-jobs interception inside the job, so the job's own
+        # `uv run train` can only ever train locally (see train_hook.py).
+        "MICRODUCK_IN_HF_JOB": "1",
         "CKPT_REPO": ckpt_repo,
         "TRAIN_ARGS": " ".join(shlex.quote(a) for a in [args.task, *train_args]),
     }

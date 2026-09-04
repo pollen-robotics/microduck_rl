@@ -1,0 +1,329 @@
+<!-- Microduck apartment — 6 rooms in a ~7×6 m floorplan.
+
+  Layout (top-down, +x right, +y up):
+
+      +y=+3 ┌────────────┬─────┬─────────────┐
+            │  KITCHEN   │     │  BEDROOM    │
+            │            │ C   │             │
+      +y=+1 ├──────┐     │ O ──┼─────────────┤
+            │      │     │ R   │             │
+            │ LIV  │     │ R   │   OFFICE    │
+            │ ING  │     │ I   │             │
+      +y=-1 │ ROOM │     │ D ──┼─────────────┤
+            │      │     │ O   │             │
+            │      │     │ R   │  BATHROOM   │
+            │      │     │     │             │
+      +y=-3 └──────┴─────┴─────┴─────────────┘
+            x=-4   -1     0.5      +4
+
+  Doorways are intentionally OFF-CENTRE on each interior wall — the
+  asymmetry is what lets MCL disambiguate poses on a 45° forward FoV.
+  All wall heights = 0.50 m (geom z half-size 0.25, pos z 0.25). Most
+  furniture is duck-height-relevant (≤ 50 cm tall).
+-->
+<mujoco model="apartment">
+
+  <asset>
+    <texture type="2d" name="floor_wood" builtin="checker"
+             rgb1="0.72 0.58 0.38" rgb2="0.62 0.50 0.30"
+             width="256" height="256"/>
+    <texture type="2d" name="floor_tile" builtin="checker"
+             rgb1="0.92 0.92 0.88" rgb2="0.78 0.78 0.74"
+             width="256" height="256"/>
+    <material name="floor_main"   texture="floor_wood" texrepeat="14 14" reflectance="0.04"/>
+    <material name="floor_kitchen" texture="floor_tile" texrepeat="20 20" reflectance="0.05"/>
+    <material name="floor_bath"   texture="floor_tile" texrepeat="20 20" reflectance="0.10"/>
+    <material name="floor_carpet" rgba="0.58 0.50 0.45 1" reflectance="0.01"/>
+
+    <material name="wall_warm"     rgba="0.94 0.88 0.80 1" reflectance="0.02"/>
+    <material name="wall_cool"     rgba="0.80 0.87 0.95 1" reflectance="0.02"/>
+    <material name="wall_kitchen"  rgba="0.92 0.94 0.84 1" reflectance="0.02"/>
+    <material name="wall_bath"     rgba="0.84 0.92 0.95 1" reflectance="0.05"/>
+
+    <material name="sofa"          rgba="0.35 0.45 0.68 1"/>
+    <material name="table_wood"    rgba="0.55 0.38 0.20 1"/>
+    <material name="bed_mat"       rgba="0.68 0.58 0.80 1"/>
+    <material name="bookshelf_mat" rgba="0.28 0.18 0.10 1"/>
+    <material name="desk_mat"      rgba="0.50 0.36 0.20 1"/>
+    <material name="rug_mat"       rgba="0.70 0.28 0.22 1"/>
+    <material name="lamp_mat"      rgba="0.95 0.90 0.65 1"/>
+    <material name="dock_mat"      rgba="0.10 0.90 0.10 1"/>
+
+    <material name="counter_mat"   rgba="0.85 0.78 0.60 1"/>
+    <material name="fridge_mat"    rgba="0.92 0.92 0.94 1"/>
+    <material name="tub_mat"       rgba="0.96 0.96 0.96 1"/>
+    <material name="toilet_mat"    rgba="0.94 0.96 0.96 1"/>
+    <material name="metal_mat"     rgba="0.65 0.65 0.70 1"/>
+
+    <material name="obj_red"       rgba="0.92 0.10 0.10 1"/>
+    <material name="obj_blue"      rgba="0.10 0.20 0.95 1"/>
+    <material name="obj_yellow"    rgba="0.95 0.85 0.05 1"/>
+    <material name="obj_cyan"      rgba="0.05 0.82 0.85 1"/>
+    <material name="ball_orange"   rgba="0.96 0.46 0.04 1"/>
+    <material name="ball_green"    rgba="0.10 0.84 0.16 1"/>
+    <material name="ball_pink"     rgba="0.96 0.26 0.70 1"/>
+  </asset>
+
+  <worldbody>
+
+    <!-- ── Floor (box-tiled, with a staircase hole in the corridor) ────── -->
+    <!-- Hole spans x ∈ [-0.40, 0.0], y ∈ [-1.40, -0.70] — corridor mid-south. -->
+    <geom name="floor_w" type="box" size="1.80 3.00 0.005"
+          pos="-2.20 0.00 -0.005" material="floor_main" contype="1" conaffinity="1"/>
+    <geom name="floor_e" type="box" size="2.00 3.00 0.005"
+          pos=" 2.00 0.00 -0.005" material="floor_main" contype="1" conaffinity="1"/>
+    <geom name="floor_corridor_s" type="box" size="0.20 0.80 0.005"
+          pos="-0.20 -2.20 -0.005" material="floor_main" contype="1" conaffinity="1"/>
+    <geom name="floor_corridor_n" type="box" size="0.20 1.85 0.005"
+          pos="-0.20  1.15 -0.005" material="floor_main" contype="1" conaffinity="1"/>
+
+    <!-- ── Staircase (4 steps, descending 10 cm each, going south) ───── -->
+    <!-- Top-step y is closest to the office doorway; deepest step is at south end. -->
+    <geom name="stair_1" type="box" size="0.20 0.0875 0.10"
+          pos="-0.20 -0.7875 -0.20" material="bookshelf_mat" contype="1" conaffinity="1"/>
+    <geom name="stair_2" type="box" size="0.20 0.0875 0.10"
+          pos="-0.20 -0.9625 -0.30" material="bookshelf_mat" contype="1" conaffinity="1"/>
+    <geom name="stair_3" type="box" size="0.20 0.0875 0.10"
+          pos="-0.20 -1.1375 -0.40" material="bookshelf_mat" contype="1" conaffinity="1"/>
+    <geom name="stair_4" type="box" size="0.20 0.0875 0.10"
+          pos="-0.20 -1.3125 -0.50" material="bookshelf_mat" contype="1" conaffinity="1"/>
+    <!-- Per-room floor overlays (visual only). -->
+    <geom name="floor_kitchen" type="box" size="1.50 1.25 0.002"
+          pos="-2.50 1.75 0.002" material="floor_kitchen" contype="0" conaffinity="0"/>
+    <geom name="floor_bath" type="box" size="1.75 1.00 0.002"
+          pos="2.25 -2.00 0.002" material="floor_bath" contype="0" conaffinity="0"/>
+    <geom name="rug_living" type="box" size="0.80 0.50 0.004"
+          pos="-2.50 -1.00 0.004" material="rug_mat" contype="0" conaffinity="0"/>
+    <geom name="rug_bedroom" type="box" size="0.70 0.50 0.004"
+          pos="2.20 1.50 0.004" material="floor_carpet" contype="0" conaffinity="0"/>
+
+    <!-- ── Outer walls (6×4 m bounding box at ±4 / ±3) ─────────────────── -->
+    <geom name="wall_south" type="box" size="4.00 0.06 0.25"
+          pos="0 -3.00 0.25" material="wall_warm" contype="1" conaffinity="1"/>
+    <geom name="wall_north" type="box" size="4.00 0.06 0.25"
+          pos="0  3.00 0.25" material="wall_warm" contype="1" conaffinity="1"/>
+    <geom name="wall_west"  type="box" size="0.06 3.00 0.25"
+          pos="-4.00 0 0.25" material="wall_warm" contype="1" conaffinity="1"/>
+    <geom name="wall_east"  type="box" size="0.06 3.00 0.25"
+          pos=" 4.00 0 0.25" material="wall_cool" contype="1" conaffinity="1"/>
+
+    <!-- ── Interior wall A: kitchen ↔ living (y=+0.5, x ∈ [-4, -1]) ────── -->
+    <!-- Doorway at x ∈ [-3.0, -2.2] (0.8 m wide, off-centre to the west). -->
+    <geom name="wA_w" type="box" size="0.50 0.06 0.25"
+          pos="-3.50  0.50 0.25" material="wall_kitchen" contype="1" conaffinity="1"/>
+    <geom name="wA_e" type="box" size="0.60 0.06 0.25"
+          pos="-1.60  0.50 0.25" material="wall_warm" contype="1" conaffinity="1"/>
+
+    <!-- ── Interior wall B: corridor west wall (x=-1, y ∈ [-3, +3]) ─────── -->
+    <!-- Two doorways, deliberately at different y: -->
+    <!--   Living → corridor at y ∈ [-1.8, -1.0]  -->
+    <!--   Kitchen → corridor at y ∈ [+1.6, +2.4] -->
+    <geom name="wB_s" type="box" size="0.06 0.60 0.25"
+          pos="-1.00 -2.40 0.25" material="wall_warm" contype="1" conaffinity="1"/>
+    <geom name="wB_m" type="box" size="0.06 1.30 0.25"
+          pos="-1.00  0.30 0.25" material="wall_warm" contype="1" conaffinity="1"/>
+    <geom name="wB_n" type="box" size="0.06 0.30 0.25"
+          pos="-1.00  2.70 0.25" material="wall_kitchen" contype="1" conaffinity="1"/>
+
+    <!-- ── Interior wall C: corridor east wall (x=+0.5, y ∈ [-3, +3]) ──── -->
+    <!-- Three doorways, all at distinct y: -->
+    <!--   Bathroom at y ∈ [-2.5, -1.7] (close to south)  -->
+    <!--   Office   at y ∈ [-0.2, +0.6] (slightly north of centre) -->
+    <!--   Bedroom  at y ∈ [+1.4, +2.2]                 -->
+    <geom name="wC_s" type="box" size="0.06 0.25 0.25"
+          pos="0.50 -2.75 0.25" material="wall_bath" contype="1" conaffinity="1"/>
+    <geom name="wC_m1" type="box" size="0.06 0.75 0.25"
+          pos="0.50 -0.95 0.25" material="wall_warm" contype="1" conaffinity="1"/>
+    <geom name="wC_m2" type="box" size="0.06 0.40 0.25"
+          pos="0.50  1.00 0.25" material="wall_warm" contype="1" conaffinity="1"/>
+    <geom name="wC_n" type="box" size="0.06 0.40 0.25"
+          pos="0.50  2.60 0.25" material="wall_warm" contype="1" conaffinity="1"/>
+
+    <!-- ── Interior wall F: bedroom ↔ office (y=+1, x ∈ [+0.5, +4]) ────── -->
+    <geom name="wF" type="box" size="1.75 0.06 0.25"
+          pos="2.25 1.00 0.25" material="wall_warm" contype="1" conaffinity="1"/>
+
+    <!-- ── Interior wall G: office ↔ bathroom (y=-1, x ∈ [+0.5, +4]) ───── -->
+    <geom name="wG" type="box" size="1.75 0.06 0.25"
+          pos="2.25 -1.00 0.25" material="wall_bath" contype="1" conaffinity="1"/>
+
+    <!-- ── Kitchen furniture (NW) ──────────────────────────────────────── -->
+    <!-- Counter along north wall -->
+    <geom name="kit_counter" type="box" size="1.30 0.20 0.18"
+          pos="-2.50 2.74 0.18" material="counter_mat" contype="1" conaffinity="1"/>
+    <!-- Fridge (tall — visible from far) -->
+    <geom name="kit_fridge" type="box" size="0.25 0.25 0.40"
+          pos="-3.65 2.65 0.40" material="fridge_mat" contype="1" conaffinity="1"/>
+    <!-- Kitchen island (free-standing) -->
+    <geom name="kit_island" type="box" size="0.40 0.30 0.20"
+          pos="-2.20 1.40 0.20" material="counter_mat" contype="1" conaffinity="1"/>
+    <!-- Stools at the island -->
+    <geom name="kit_stool1" type="cylinder" size="0.10 0.18"
+          pos="-2.70 0.95 0.18" material="metal_mat" contype="1" conaffinity="1"/>
+    <geom name="kit_stool2" type="cylinder" size="0.10 0.18"
+          pos="-1.70 0.95 0.18" material="metal_mat" contype="1" conaffinity="1"/>
+
+    <!-- ── Living-room furniture (SW) ──────────────────────────────────── -->
+    <!-- Sofa against west wall -->
+    <geom name="liv_sofa_seat" type="box" size="0.20 0.55 0.16"
+          pos="-3.78 -0.95 0.16" material="sofa" contype="1" conaffinity="1"/>
+    <geom name="liv_sofa_back" type="box" size="0.06 0.55 0.22"
+          pos="-3.94 -0.95 0.27" material="sofa" contype="1" conaffinity="1"/>
+    <!-- Coffee table -->
+    <geom name="liv_table" type="box" size="0.30 0.20 0.04"
+          pos="-2.80 -1.00 0.18" material="table_wood" contype="1" conaffinity="1"/>
+    <geom name="liv_table_l1" type="cylinder" size="0.018 0.08"
+          pos="-3.07 -1.18 0.08" material="table_wood" contype="1" conaffinity="1"/>
+    <geom name="liv_table_l2" type="cylinder" size="0.018 0.08"
+          pos="-2.53 -1.18 0.08" material="table_wood" contype="1" conaffinity="1"/>
+    <geom name="liv_table_l3" type="cylinder" size="0.018 0.08"
+          pos="-3.07 -0.82 0.08" material="table_wood" contype="1" conaffinity="1"/>
+    <geom name="liv_table_l4" type="cylinder" size="0.018 0.08"
+          pos="-2.53 -0.82 0.08" material="table_wood" contype="1" conaffinity="1"/>
+    <!-- TV stand against south wall -->
+    <geom name="liv_tv_stand" type="box" size="0.50 0.10 0.20"
+          pos="-2.50 -2.84 0.20" material="bookshelf_mat" contype="1" conaffinity="1"/>
+    <!-- Tall bookshelf in SW corner -->
+    <geom name="liv_shelf" type="box" size="0.10 0.30 0.40"
+          pos="-3.85 -2.50 0.40" material="bookshelf_mat" contype="1" conaffinity="1"/>
+    <geom name="liv_books" type="box" size="0.06 0.28 0.10"
+          pos="-3.78 -2.50 0.36" rgba="0.80 0.28 0.10 1" contype="0" conaffinity="0"/>
+    <!-- Floor lamp by sofa -->
+    <geom name="liv_lamp_pole" type="cylinder" size="0.015 0.45"
+          pos="-3.80 -0.30 0.45" material="table_wood" contype="1" conaffinity="1"/>
+    <geom name="liv_lamp_shade" type="cylinder" size="0.10 0.07"
+          pos="-3.80 -0.30 0.95" material="lamp_mat" contype="0" conaffinity="0"/>
+    <!-- Armchair in middle -->
+    <geom name="liv_chair_seat" type="box" size="0.20 0.20 0.16"
+          pos="-2.10 0.05 0.16" material="sofa" contype="1" conaffinity="1"/>
+    <geom name="liv_chair_back" type="box" size="0.20 0.06 0.20"
+          pos="-2.10 -0.10 0.30" material="sofa" contype="1" conaffinity="1"/>
+    <!-- Plant by corridor entrance -->
+    <geom name="liv_plant" type="cylinder" size="0.10 0.30"
+          pos="-1.20 -2.70 0.30" rgba="0.30 0.55 0.25 1" contype="1" conaffinity="1"/>
+
+    <!-- ── Corridor furniture ──────────────────────────────────────────── -->
+    <!-- Side console -->
+    <geom name="cor_console" type="box" size="0.20 0.07 0.20"
+          pos="-0.78 0.80 0.20" material="table_wood" contype="1" conaffinity="1"/>
+    <!-- Coat rack (cylinder) -->
+    <geom name="cor_coat_rack" type="cylinder" size="0.04 0.50"
+          pos="-0.80 2.80 0.50" material="metal_mat" contype="1" conaffinity="1"/>
+    <!-- Shoe rack -->
+    <geom name="cor_shoes" type="box" size="0.20 0.07 0.10"
+          pos="-0.80 -2.80 0.10" material="bookshelf_mat" contype="1" conaffinity="1"/>
+
+    <!-- ── Bedroom furniture (NE) ──────────────────────────────────────── -->
+    <!-- Bed -->
+    <geom name="bed_base" type="box" size="0.55 0.40 0.10"
+          pos="2.20 1.55 0.10" material="bed_mat" contype="1" conaffinity="1"/>
+    <geom name="bed_pillow" type="box" size="0.18 0.10 0.04"
+          pos="2.50 1.85 0.23" rgba="0.96 0.96 0.96 1" contype="0" conaffinity="0"/>
+    <geom name="bed_blanket" type="box" size="0.45 0.30 0.02"
+          pos="2.20 1.40 0.22" rgba="0.55 0.68 0.90 1" contype="0" conaffinity="0"/>
+    <!-- Nightstands -->
+    <geom name="bed_ns_l" type="box" size="0.15 0.15 0.20"
+          pos="1.55 1.85 0.20" material="desk_mat" contype="1" conaffinity="1"/>
+    <geom name="bed_ns_r" type="box" size="0.15 0.15 0.20"
+          pos="2.85 1.85 0.20" material="desk_mat" contype="1" conaffinity="1"/>
+    <!-- Wardrobe against east wall -->
+    <geom name="bed_wardrobe" type="box" size="0.20 0.50 0.40"
+          pos="3.74 2.30 0.40" material="bookshelf_mat" contype="1" conaffinity="1"/>
+    <!-- Dresser against north wall -->
+    <geom name="bed_dresser" type="box" size="0.30 0.10 0.24"
+          pos="1.10 2.86 0.24" material="bookshelf_mat" contype="1" conaffinity="1"/>
+
+    <!-- ── Office furniture (E centre) ─────────────────────────────────── -->
+    <!-- Desk against east wall -->
+    <geom name="off_desk" type="box" size="0.28 0.40 0.02"
+          pos="3.66 0.00 0.36" material="desk_mat" contype="1" conaffinity="1"/>
+    <geom name="off_desk_l1" type="box" size="0.018 0.018 0.17"
+          pos="3.40 -0.36 0.17" material="desk_mat" contype="1" conaffinity="1"/>
+    <geom name="off_desk_l2" type="box" size="0.018 0.018 0.17"
+          pos="3.92 -0.36 0.17" material="desk_mat" contype="1" conaffinity="1"/>
+    <geom name="off_desk_l3" type="box" size="0.018 0.018 0.17"
+          pos="3.40  0.36 0.17" material="desk_mat" contype="1" conaffinity="1"/>
+    <geom name="off_desk_l4" type="box" size="0.018 0.018 0.17"
+          pos="3.92  0.36 0.17" material="desk_mat" contype="1" conaffinity="1"/>
+    <!-- Office chair (cylinder, swivel-style) -->
+    <geom name="off_chair" type="cylinder" size="0.18 0.20"
+          pos="3.10 0.00 0.20" material="metal_mat" contype="1" conaffinity="1"/>
+    <!-- Bookshelf against bedroom-wall side (y=+1) -->
+    <geom name="off_shelf" type="box" size="0.40 0.10 0.42"
+          pos="1.00 0.86 0.42" material="bookshelf_mat" contype="1" conaffinity="1"/>
+    <!-- Filing cabinet -->
+    <geom name="off_cabinet" type="box" size="0.18 0.18 0.30"
+          pos="0.85 0.00 0.30" material="metal_mat" contype="1" conaffinity="1"/>
+    <!-- Plant -->
+    <geom name="off_plant" type="cylinder" size="0.10 0.32"
+          pos="1.20 -0.78 0.32" rgba="0.30 0.55 0.25 1" contype="1" conaffinity="1"/>
+
+    <!-- ── Bathroom furniture (SE) ─────────────────────────────────────── -->
+    <!-- Bathtub against south + east walls -->
+    <geom name="bth_tub" type="box" size="0.30 0.65 0.18"
+          pos="3.65 -2.20 0.18" material="tub_mat" contype="1" conaffinity="1"/>
+    <!-- Vanity / sink against west side (corridor wall side) -->
+    <geom name="bth_vanity" type="box" size="0.20 0.25 0.30"
+          pos="0.86 -1.40 0.30" material="counter_mat" contype="1" conaffinity="1"/>
+    <geom name="bth_mirror" type="box" size="0.01 0.20 0.20"
+          pos="0.66 -1.40 0.65" rgba="0.85 0.92 0.95 1" contype="0" conaffinity="0"/>
+    <!-- Toilet -->
+    <geom name="bth_toilet" type="cylinder" size="0.15 0.20"
+          pos="1.30 -2.78 0.20" material="toilet_mat" contype="1" conaffinity="1"/>
+    <!-- Towel rail against south wall -->
+    <geom name="bth_rail" type="box" size="0.30 0.02 0.04"
+          pos="2.50 -2.93 0.40" material="metal_mat" contype="0" conaffinity="0"/>
+
+    <!-- ── Charging dock (SW corner of living room) ────────────────────── -->
+    <body name="dock" pos="-3.80 -2.78 0">
+      <geom name="dock_base"  type="box" size="0.16 0.16 0.012"
+            pos="0 0 0.012" material="dock_mat" contype="0" conaffinity="0"/>
+      <geom name="dock_panel" type="box" size="0.022 0.13 0.17"
+            pos="0.14 0 0.18" material="dock_mat" contype="0" conaffinity="0"/>
+      <geom name="dock_s1" type="box" size="0.005 0.11 0.012"
+            pos="0.125 0 0.09" rgba="1 1 1 1" contype="0" conaffinity="0"/>
+      <geom name="dock_s2" type="box" size="0.005 0.11 0.012"
+            pos="0.125 0 0.19" rgba="1 1 1 1" contype="0" conaffinity="0"/>
+      <site name="dock_site" pos="0 0 0.02" size="0.01"/>
+    </body>
+
+    <!-- ── Interactable objects scattered across rooms ──────────────────── -->
+    <body name="obj_0" pos="-2.20 -1.20 0">
+      <freejoint/>
+      <geom name="obj_0_geom" type="box" size="0.035 0.035 0.035"
+            pos="0 0 0.035" material="obj_red" contype="1" conaffinity="1" mass="0.05"/>
+    </body>
+    <body name="obj_1" pos="-2.50 1.40 0">
+      <freejoint/>
+      <geom name="obj_1_geom" type="box" size="0.035 0.035 0.035"
+            pos="0 0 0.035" material="obj_blue" contype="1" conaffinity="1" mass="0.05"/>
+    </body>
+    <body name="obj_2" pos="2.10 -2.40 0">
+      <freejoint/>
+      <geom name="obj_2_geom" type="box" size="0.035 0.035 0.035"
+            pos="0 0 0.035" material="obj_yellow" contype="1" conaffinity="1" mass="0.05"/>
+    </body>
+    <body name="obj_3" pos="-0.30 0.10 0">
+      <freejoint/>
+      <geom name="obj_3_geom" type="box" size="0.035 0.035 0.035"
+            pos="0 0 0.035" material="obj_cyan" contype="1" conaffinity="1" mass="0.05"/>
+    </body>
+
+    <body name="ball_0" pos="-3.00 0.00 0">
+      <freejoint/>
+      <geom name="ball_0_geom" type="sphere" size="0.040"
+            pos="0 0 0.040" material="ball_orange" contype="1" conaffinity="1" mass="0.025"/>
+    </body>
+    <body name="ball_1" pos="2.40 2.30 0">
+      <freejoint/>
+      <geom name="ball_1_geom" type="sphere" size="0.040"
+            pos="0 0 0.040" material="ball_green" contype="1" conaffinity="1" mass="0.025"/>
+    </body>
+    <body name="ball_2" pos="-0.30 -1.40 0">
+      <freejoint/>
+      <geom name="ball_2_geom" type="sphere" size="0.040"
+            pos="0 0 0.040" material="ball_pink" contype="1" conaffinity="1" mass="0.025"/>
+    </body>
+
+  </worldbody>
+</mujoco>

@@ -1,0 +1,48 @@
+{
+    "url": "https://cad.onshape.com/documents/804927696f06d877f3f1803e/w/5b75db19292e71970de02dee/e/ef6e972847fec8d82570b35e",
+    "outputFormat": "mujoco",
+    "robot_name": "microduck",
+    "output_filename": "robot_groundcontact",
+    "simplify_stls": true,
+    "max_stl_size": 1.0,
+    "ignore": {
+        "*": "collision",
+        "!sole_left": "collision",
+        "!sole_right": "collision",
+        "!leg": "collision",
+        "!power_support": "collision",
+        
+        "!top_head_shell": "collision",
+        "!bottom_head_shell": "collision",
+        "!jaw": "collision",
+        "!left_upper_leg": "collision",
+        "!right_upper_leg": "collision",
+        "!hip_l": "collision",
+        "!NP-F970": "collision",
+        "!trunk_shell_left": "collision",
+        "!trunk_shell_right": "collision",
+        
+    },
+    "additional_xml": [
+        "joints_properties.xml",
+        "sensors.xml",
+        "additional.xml"
+    ],
+    "post_import_commands": [
+        "sed -i 's/body name=\"trunk_base\" pos=\"[^\"]*\"/body name=\"trunk_base\" pos=\"0 0 0.12\"/' robot_groundcontact.xml",
+        "sed -i '/<!-- Part sole_left -->/{n; n; s/class=\"collision\"/name=\"left_foot_collision\" class=\"collision\"/}' robot_groundcontact.xml",
+        "sed -i '/<!-- Part sole_right -->/{n; n; s/class=\"collision\"/name=\"right_foot_collision\" class=\"collision\"/}' robot_groundcontact.xml",
+        "sed -i '/<!-- Part power_support -->/{n; n; s/class=\"collision\"/class=\"self_collision_only\"/}' robot_groundcontact.xml",
+        "sed -i 's/ inheritrange=\"1\"//g' robot_groundcontact.xml",
+        "sed -i 's|<site[^>]*name=\"head_camera\"[^>]*pos=\"\\([^\"]*\\)\"[^>]*/>|&\\n              <camera name=\"head_camera\" pos=\"\\1\" quat=\"0 0 -1 0\"/>|' robot_groundcontact.xml"
+    ],
+    "joint_properties": {
+        "default": {
+            "class": "chosen_actuator"
+        },
+        "passive*": {
+          "actuated": false,
+          "class" : "passive_joint"
+        }
+    }
+}

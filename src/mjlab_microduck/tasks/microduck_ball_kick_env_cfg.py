@@ -25,9 +25,9 @@ Key design decisions:
   - Obs layout is the unified 61D actor layout (twist + zero-padded head/body
     command slots) so the runtime can hard-swap ONNX files with one buffer.
 
-DR / noise / regularization: velocity2-parity, copied from the standup env
-(which is itself matched to velocity2 — the recipe with proven transfer).
-Task reward mass ~10 ≈ velocity2's ~11, so the shared regularizer weights act
+DR / noise / regularization: velocity-parity, copied from the standup env
+(which is itself matched to velocity — the recipe with proven transfer).
+Task reward mass ~10 ≈ velocity's ~11, so the shared regularizer weights act
 at the same relative strength.
 """
 
@@ -38,13 +38,13 @@ from copy import deepcopy
 # Flips the ball spawn side and the support-foot (anti-hop) sensor. Everything
 # else is left/right symmetric (HOME pose has mirrored signs). Train the two
 # policies as separate runs — wandb experiment/run name follows this flag.
-KICK_FOOT = "left"
+KICK_FOOT = "right"
 assert KICK_FOOT in ("right", "left")
 
 # Symmetry — must stay OFF: the kick task is inherently one-footed.
 ENABLE_SYMMETRY = False
 
-# ── Domain randomisation (matched to velocity2 / standup) ─────────────────────
+# ── Domain randomisation (matched to velocity / standup) ─────────────────────
 ENABLE_COM_RANDOMIZATION             = True
 ENABLE_HEAD_COM_RANDOMIZATION        = True
 ENABLE_KP_RANDOMIZATION              = False
@@ -56,7 +56,7 @@ ENABLE_VELOCITY_PUSHES               = True
 ENABLE_IMU_ORIENTATION_RANDOMIZATION = True
 ENABLE_ENCODER_BIAS                  = True
 
-# ── Ranges (matched to velocity2 / standup) ───────────────────────────────────
+# ── Ranges (matched to velocity / standup) ───────────────────────────────────
 COM_RANDOMIZATION_RANGE             = 0.003           # ramped to 0.015 via curriculum
 HEAD_COM_RANDOMIZATION_RANGE        = 0.003           # ramped to 0.01 via curriculum
 MASS_INERTIA_RANDOMIZATION_RANGE    = (0.95, 1.05)
@@ -215,7 +215,7 @@ def make_microduck_ball_kick_env_cfg(
         "foot_swing_height",
         "foot_slip",
         "pose",           # gait-conditioned; replaced by pose_target_match below
-        "soft_landing",   # velocity2 removes it
+        "soft_landing",   # velocity removes it
     ]:
         if name in cfg.rewards:
             del cfg.rewards[name]
@@ -281,7 +281,7 @@ def make_microduck_ball_kick_env_cfg(
         },
     )
 
-    # Upright — velocity2's exact recipe (weight 2.0, std²=0.05).
+    # Upright — velocity's exact recipe (weight 2.0, std²=0.05).
     cfg.rewards["upright"].params["asset_cfg"].body_names = ("trunk_base",)
     cfg.rewards["upright"].weight = 2.0
     cfg.rewards["upright"].params["std"] = math.sqrt(0.05)
@@ -297,7 +297,7 @@ def make_microduck_ball_kick_env_cfg(
         },
     )
 
-    # ── Sim2real regularisers — velocity2 parity (see standup env rationale) ──
+    # ── Sim2real regularisers — velocity parity (see standup env rationale) ──
     cfg.rewards["action_rate_l2"].weight = -0.1  # stage-0; curriculum ramps to -1.0
     cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("trunk_base",)
     cfg.rewards["body_ang_vel"].weight = -0.05
@@ -554,7 +554,7 @@ def make_microduck_ball_kick_env_cfg(
     del cfg.curriculum["terrain_levels"]
     del cfg.curriculum["command_vel"]
 
-    # action_rate ramp — velocity2's exact stages (-0.1 → -1.0 by iter 1500).
+    # action_rate ramp — velocity's exact stages (-0.1 → -1.0 by iter 1500).
     # NOTE: the kick is a fast one-shot swing; if the converged kick is too
     # weak, softening the ramp end (-1.0 → -0.6) is the first knob to try
     # (motion-blocker vs dynamic-task tradeoff, see standup regularization notes).

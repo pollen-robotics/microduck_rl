@@ -1,17 +1,20 @@
-"""`train` entry point: mjlab's trainer, plus `--hf-jobs` remote submission.
+"""`train` console script — deliberately identical to mjlab's own.
 
-This project's [project.scripts] `train` shadows mjlab's so the everyday
-command grows one flag:
+This project must keep DECLARING a `train` script even though it no longer
+needs one: `--hf-jobs` is intercepted from the `mjlab.tasks` plugin entry point
+(train_hook.py), on mjlab's own import path, so the wrapper has nothing left to
+do.
 
-    uv run train Mjlab-Kick-Flat-MicroDuck --env.scene.num-envs 4096 \
-        --agent.max_iterations 4000              # local, exactly as before
-    uv run train Mjlab-Kick-Flat-MicroDuck --env.scene.num-envs 4096 \
-        --agent.max_iterations 4000 --hf-jobs    # same run, on HF Jobs
+Why keep it anyway: same-name console scripts are last-writer-wins, and after
+an install BOTH dist-info RECORDs claim `.venv/bin/train`. Removing this
+declaration therefore does not hand the name back to mjlab — it makes the next
+`uv sync` UNINSTALL the file (ours, per our RECORD) while nothing reinstalls
+mjlab's. `train` then vanishes from the venv entirely and `uv run train` falls
+through to whatever `train` sits on PATH: on one machine liblinear's, which
+answered `can't open input file Mjlab-Velocity-Flat-MicroDuck` (2026-08-31).
 
-Without --hf-jobs, argv is passed to mjlab.scripts.train untouched. With it,
-the submission flags (--flavor, --namespace, --detach, ... see hf_jobs.py)
-are consumed here and everything else is forwarded to `uv run train` inside
-the job.
+So the collision stays, and is made harmless instead: whichever shim wins,
+`train` behaves the same, and the flag is handled in exactly one place.
 """
 
 from __future__ import annotations
@@ -20,12 +23,10 @@ import sys
 
 
 def main() -> int | None:
-    argv = sys.argv[1:]
-    if "--hf-jobs" in argv:
-        from mjlab_microduck.hf_jobs import submit
-
-        return submit([a for a in argv if a != "--hf-jobs"])
-
+    # This import runs mjlab's plugin loader, which imports
+    # mjlab_microduck.tasks -> train_hook.maybe_submit_to_hf_jobs(). A
+    # `--hf-jobs` invocation submits and exits inside the import below; it
+    # never comes back here.
     from mjlab.scripts.train import main as mjlab_train_main
 
     return mjlab_train_main()

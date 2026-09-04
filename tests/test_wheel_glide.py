@@ -3,11 +3,14 @@ par gravité), plafonné à cap_speed, nul si les roues reculent, NaN-safe.
 Indépendant de toute commande (la tâche pente a une commande nulle).
 """
 
+import re
+
 import torch
 
 from mjlab_microduck.tasks.mdp import wheel_glide_reward
 
-_WHEELS = {"passive_LFwheel": 0, "passive_LRwheel": 1, "passive_RFwheel": 2, "passive_RRwheel": 3}
+# Current model joint names (post 2026-07 re-export: underscore spelling).
+_WHEELS = {"passive_LF_wheel": 0, "passive_LR_wheel": 1, "passive_RF_wheel": 2, "passive_RR_wheel": 3}
 
 
 class _Data:
@@ -20,8 +23,12 @@ class _Asset:
     def __init__(self, data):
         self.data = data
 
-    def find_joints(self, name):
-        return [_WHEELS[name]], None
+    def find_joints(self, pattern):
+        # Regex resolution like the real Entity.find_joints (mdp queries use
+        # spelling-tolerant patterns such as "passive_LF_?wheel").
+        ids = [i for name, i in _WHEELS.items() if re.fullmatch(pattern, name)]
+        assert ids, pattern
+        return ids, None
 
 
 class _Env:

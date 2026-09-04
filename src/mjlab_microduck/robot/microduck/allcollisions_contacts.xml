@@ -1,0 +1,10 @@
+<!-- allcollisions-only contact excludes (this file is listed in
+     config_mjcf_allcollisions.json additional_xml, not in the other variants:
+     the geoms involved carry no collision class anywhere else).
+     The jaw closed-loop linkage positions the jaw/bottom_head_shell meshes
+     (merged into the jaw_soft body) 2-4.5mm inside the neck_pitch bracket and
+     its bearing in EVERY pose - a permanent phantom self-contact, measured at
+     the INIT/STAND/SIT keyframes on the 2026-09 export. -->
+<contact>
+    <exclude body1="neck_pitch" body2="jaw_soft"/>
+</contact>

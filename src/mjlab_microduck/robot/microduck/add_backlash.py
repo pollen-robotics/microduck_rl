@@ -17,10 +17,10 @@ joint obs, pose reward). The encoder-through-backlash handling lives on the
 mjlab side (BacklashEncoderBamActuatorCfg + joint_pos/vel_rel_backlash obs).
 
 Meant to run as the LAST post_import_command of an onshape-to-robot config
-(see config_mjcf_allcollisions_backlash.json), but works standalone on any
+(see config_mjcf_groundcontact_backlash.json), but works standalone on any
 already-exported robot xml:
 
-    python3 add_backlash.py robot_allcollisions_backlash.xml --backlash-deg 2.0
+    python3 add_backlash.py robot_groundcontact_backlash.xml --backlash-deg 2.0
 
 ``--backlash-deg`` is the TOTAL peak-to-peak play (what you measure wiggling
 the horn with the servo held); the joint range is symmetric ±deg/2.

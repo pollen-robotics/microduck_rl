@@ -5,28 +5,11 @@
     "output_filename": "robot_allcollisions",
     "simplify_stls": true,
     "max_stl_size": 1.0,
-    "ignore": {
-        "*": "collision",
-        "!sole_left": "collision",
-        "!sole_right": "collision",
-        "!leg": "collision",
-        "!power_support": "collision",
-        
-        "!top_head_shell": "collision",
-        "!bottom_head_shell": "collision",
-        "!jaw": "collision",
-        "!left_upper_leg": "collision",
-        "!right_upper_leg": "collision",
-        "!hip_l": "collision",
-        "!NP-F970": "collision",
-        "!trunk_shell_left": "collision",
-        "!trunk_shell_right": "collision",
-        
-    },
     "additional_xml": [
         "joints_properties.xml",
         "sensors.xml",
-        "additional.xml"
+        "additional.xml",
+        "allcollisions_contacts.xml"
     ],
     "post_import_commands": [
         "sed -i 's/body name=\"trunk_base\" pos=\"[^\"]*\"/body name=\"trunk_base\" pos=\"0 0 0.12\"/' robot_allcollisions.xml",

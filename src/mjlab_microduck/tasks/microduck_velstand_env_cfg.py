@@ -1,7 +1,7 @@
 """Microduck VelStand environment: walking + fall recovery, one policy.
 
-REBASED (2026-07, audit follow-up) on the **velocity2** recipe — the proven
-walker — instead of the abandoned base-velocity recipe the old velstand used.
+REBASED (2026-07, audit follow-up) on the velocity recipe — the proven
+walker — instead of the abandoned older recipe the old velstand used.
 The 2026-07 audit found the old design starved the walk: only ~25% of
 experience was clean commanded walking (2/3 prone resets + fallen envs farming
 recovery reward for full 20 s episodes), the recovery rewards taxed the gait
@@ -10,7 +10,7 @@ below walk height), and the prone init dropped the robot from 0.20–0.25 m
 (function defaults — a violent uncontrolled impact opening most episodes).
 
 Design now:
-  - Walk layer  = make_microduck_velocity2_env_cfg, verbatim. Everything the
+  - Walk layer  = make_microduck_velocity_env_cfg, verbatim. Everything the
     good walker has (tracking weights, air_time, turn-in-place bucket, fixed
     command ranges, DR/noise/obs) flows in by construction.
   - Robot       = all-collision standup XML (body can physically lie down).
@@ -87,8 +87,8 @@ from mjlab.rl import (
 
 from mjlab_microduck.robot.microduck_constants import MICRODUCK_STANDUP_ROBOT_CFG
 from mjlab_microduck.tasks import mdp as microduck_mdp
-from mjlab_microduck.tasks.microduck_velocity2_env_cfg import (
-    make_microduck_velocity2_env_cfg,
+from mjlab_microduck.tasks.microduck_velocity_env_cfg import (
+    make_microduck_velocity_env_cfg,
 )
 from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg
 
@@ -160,8 +160,8 @@ PRONE_RAMP_STAGES = [
 
 
 def make_microduck_velstand_env_cfg(play: bool = False, rough: bool = False) -> ManagerBasedRlEnvCfg:
-    # Walk layer: the PROVEN velocity2 recipe, verbatim.
-    cfg = make_microduck_velocity2_env_cfg(play=play, rough=rough)
+    # Walk layer: the PROVEN velocity recipe, verbatim.
+    cfg = make_microduck_velocity_env_cfg(play=play, rough=rough)
 
     # In play mode the curriculum doesn't run, so the fall-termination disable
     # below never fires — just delete the termination outright.
@@ -171,6 +171,21 @@ def make_microduck_velstand_env_cfg(play: bool = False, rough: bool = False) -> 
     # Full-collision standup XML: trunk/head shells keep their contacts so the
     # robot can physically lie on the ground and push off it.
     cfg.scene.entities = {"robot": MICRODUCK_STANDUP_ROBOT_CFG}
+
+    # velocity env's head_pose_bias flows in UNGATED (fine on a walk-only env —
+    # fell_over terminates fallen episodes there). Velstand episodes SURVIVE
+    # falls, so the ungated EMA would charge head "droop" all through the
+    # ground phase — a flat tax on being fallen that the recovery economics
+    # (runs 1-7) never priced in. Add the upright gate: error stops feeding the
+    # EMA below z=0.09 / beyond 40° tilt (matching REWARD_GATE_TILT_DEG), so
+    # the term prices exactly what it does in the velocity env — sustained droop while
+    # actually standing/walking — and nothing during recovery.
+    cfg.rewards["head_pose_bias"].params.update({
+        "gate_height_low":    0.09,
+        "gate_height_high":   0.11,
+        "gate_tilt_full_deg": 20.0,
+        "gate_tilt_zero_deg": REWARD_GATE_TILT_DEG,
+    })
 
     # ── Recovery reward layer ─────────────────────────────────────────────────
     # LESSON (runs 1/2/4 — sitting, lying, head-tripod): ANY positive reward for
