@@ -64,9 +64,62 @@ def _add_head_electronics(spec: mujoco.MjSpec) -> mujoco.MjSpec:
     return spec
 
 
+# ── unmodelled trunk mass ────────────────────────────────────────────────────
+#
+# The whole robot -- battery and spring boots included -- weighs 908 g on a
+# scale (measured 2026-09-04). The spec compiles to 752.2 g, and the sprung
+# variant adds 2 x 51 g of boot delta for 854.2 g. So 53.8 g of real robot is
+# not in the model at all.
+#
+# THE BATTERY IS THE PRIME SUSPECT, and it is not in the spec: there is no body
+# named battery, pack or cell anywhere, and an NP-F550 is 75-80 g. Either the
+# pack is partly folded into `trunk_base`'s 199.2 g already, or the residual is
+# a mix of pack, fasteners and wiring. It cannot be decomposed further without
+# weighing subassemblies, so the whole residual goes into the trunk as one lump.
+#
+# WHY IT MATTERS HERE RATHER THAN AS A ROUNDING ERROR. For a fixed push impulse
+# hop height goes as 1/m^2, so 854 -> 908 g is ~11% of hop height -- the
+# difference between a ~21 mm and a ~19 mm ballistic apex. It also detunes
+# `hop_load_force` and `hop_symmetric_push`, which both normalise against a
+# `body_weight_n` computed from the compiled mass, so they saturated ~6% early.
+TRUNK_BODY = "trunk_base"
+
+# 908.0 g measured - 854.2 g modelled (spec + 2 x 51 g boot delta).
+#
+# PUT ON THE TRUNK, WHICH IS AN ASSUMPTION ABOUT PLACEMENT, NOT MASS. The 53.8 g
+# is measured; that it sits at the trunk's existing centre of mass is not. It is
+# the least-wrong single location -- the trunk is where the pack mounts and it is
+# already the second-heaviest body -- but 54 g displaced from the true position
+# tilts the CoM, and CoM offset matters more to a SYMMETRIC hop than mass does.
+# `randomize_com` covers +/-15 mm, which brackets any plausible error here.
+UNMODELLED_TRUNK_MASS = 0.0538
+
+
+def _add_trunk_ballast(spec: mujoco.MjSpec) -> mujoco.MjSpec:
+    """Add the unmodelled 53.8 g to the trunk, scaling inertia with it.
+
+    Same distribution assumption as `_add_head_electronics`, and weaker here:
+    this is a 27% change on `trunk_base`, not 7.9%, so treating the added mass
+    as distributed like the body already is stretches further. Accepted because
+    the alternative -- guessing a position for the pack -- adds an unmeasured
+    offset on top of an unmeasured distribution.
+    """
+    for body in spec.bodies:
+        if body.name == TRUNK_BODY:
+            original = body.mass
+            if original > 0:
+                scale = (original + UNMODELLED_TRUNK_MASS) / original
+                body.mass = original + UNMODELLED_TRUNK_MASS
+                body.fullinertia = [x * scale for x in body.fullinertia]
+            break
+    return spec
+
+
 def get_walk_spec() -> mujoco.MjSpec:
-    return _add_head_electronics(
-        mujoco.MjSpec.from_file(str(MICRODUCK_WALK_XML))
+    return _add_trunk_ballast(
+        _add_head_electronics(
+            mujoco.MjSpec.from_file(str(MICRODUCK_WALK_XML))
+        )
     )
 
 

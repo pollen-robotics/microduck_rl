@@ -694,21 +694,47 @@ def test_load_force_is_identical_on_the_locked_control_arm():
 def test_body_weight_is_taken_from_the_ACTUAL_arm_not_a_constant():
     """The arms no longer share a mass, so a single constant is wrong.
 
-    854.2 g with spring boots (752.2 g robot + 2 x 51 g delta) against 752.2 g
+    908.0 g with spring boots (806.0 g robot + 2 x 51 g delta) against 806.0 g
     standard. hop_load_force normalises by body weight, so hardcoding one value
-    made the lighter Standard arm's load term read 13.6% high -- an advantage to
+    made the lighter Standard arm's load term read 12.7% high -- an advantage to
     the control arm. apply_hop_corrections now compiles each robot and uses its
     real weight.
+
+    The 908.0 g is the WHOLE ROBOT ON A SCALE, battery and boots included
+    (measured 2026-09-04); `UNMODELLED_TRUNK_MASS` carries the 53.8 g the spec
+    was missing. If someone changes that constant, this test is where they find
+    out what else assumed the old number.
     """
     sprung = _registered("k3344").rewards["hop_load_force"].params["body_weight_n"]
-    assert sprung == pytest.approx(0.8542 * 9.81, rel=0.01)
+    assert sprung == pytest.approx(0.9080 * 9.81, rel=0.01)
 
     from mjlab.tasks.registry import load_env_cfg
     std = load_env_cfg("Mjlab-Hop-Flat-Standard-MicroDuck")
     std_w = std.rewards["hop_load_force"].params["body_weight_n"]
-    assert std_w == pytest.approx(0.7522 * 9.81, rel=0.01)
+    assert std_w == pytest.approx(0.8060 * 9.81, rel=0.01)
     assert std_w < sprung, "the standard arm is lighter; it must not share a constant"
     assert PAD_MASS == pytest.approx(0.051)
+
+
+def test_both_force_terms_share_one_body_weight():
+    """hop_symmetric_push is built to saturate on the same push hop_load_force
+    does -- each foot at body weight against the pair at max_ratio 2.0 -- and
+    that only holds if the two read the SAME body weight.
+
+    This is a regression test for a real break: apply_hop_corrections patched
+    hop_load_force from the compiled mass and left hop_symmetric_push on the
+    8.60 N literal, putting them 3.5% apart.
+    """
+    from mjlab.tasks.registry import load_env_cfg
+    cfg = load_env_cfg("Mjlab-Hop-InPlaceSym-K3344-MicroDuck")
+    lf = cfg.rewards["hop_load_force"].params["body_weight_n"]
+    sp = cfg.rewards["hop_symmetric_push"].params["body_weight_n"]
+    assert sp == pytest.approx(lf, rel=1e-9), (
+        f"symmetric push normalises against {sp} N but load force uses {lf} N; "
+        "the two terms must saturate on the same push"
+    )
+    # And it must be the REAL mass, not the fallback literal.
+    assert lf == pytest.approx(0.9080 * 9.81, rel=0.01)
 
 
 def test_load_force_stays_below_the_launch_terms():

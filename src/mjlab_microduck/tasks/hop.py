@@ -247,10 +247,12 @@ DRIFT_VEL_STD = 0.4
 # every point of it is a point a non-hopper also collects.
 DRIFT_WEIGHT = 1.0
 
-# Robot weight in newtons, the datum `hop_load_force` normalises against:
-# 0.877 kg (737 g robot + 2 x 70 g boot, worn by ALL THREE arms including Locked)
-# x 9.81 m/s^2. Named rather than left as a literal because the same 0.877 kg
-# appears in the spring-mass period and energy notes above.
+# Fallback datum for the two force terms, in newtons. `apply_hop_corrections`
+# OVERWRITES this per arm from the compiled mass -- 908.0 g sprung / 806.0 g
+# standard, both matching the scale as of 2026-09-04 -- so this literal is only
+# what a term is registered with before that runs, and what it keeps if the
+# compile fails. Left at the historical 0.877 kg x 9.81 rather than restated,
+# because a wrong-looking fallback is easier to notice than a plausible one.
 BODY_WEIGHT_N = 8.60
 
 # Multiple of body weight at which `hop_load_force` saturates: the term reads 0
@@ -688,23 +690,34 @@ def apply_hop_corrections(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
     scale = 0.005 / HOP_TIMESTEP
     params = str(Path(__file__).resolve().parents[1] / "robot" / _MEASURED_PARAMS)
 
-    # hop_load_force normalises ground reaction force by body weight, and the
-    # arms no longer share a mass: 854.2 g with spring boots (2 x 51 g delta),
-    # 752.2 g standard. Compile the actual robot and use its real weight, so no
+    # Both force terms normalise ground reaction force by body weight, and the
+    # arms no longer share a mass: 908.0 g with spring boots (2 x 51 g delta),
+    # 806.0 g standard. Compile the actual robot and use its real weight, so no
     # arm gets a normalisation advantage. Hardcoding one value made the lighter
     # Standard arm's load term read 13.6% high.
+    #
+    # BOTH TERMS, NOT JUST hop_load_force. `hop_symmetric_push` is designed to
+    # saturate on the same push hop_load_force does -- each foot at body weight
+    # against the pair at max_ratio = 2.0 -- and that only holds if the two read
+    # the SAME body weight. Patching one and leaving the other on the 8.60 N
+    # literal put them 3.5% apart and quietly broke the property the symmetric
+    # term was built around.
     robot_ent = cfg.scene.entities["robot"]
     try:
         model = robot_ent.spec_fn().compile()
         w = float(sum(model.body_mass)) * 9.81
-        term = cfg.rewards.get("hop_load_force")
-        if term is not None and "body_weight_n" in term.params:
-            term.params["body_weight_n"] = w
+        patched = []
+        for name in ("hop_load_force", "hop_symmetric_push"):
+            term = cfg.rewards.get(name)
+            if term is not None and "body_weight_n" in term.params:
+                term.params["body_weight_n"] = w
+                patched.append(name)
+        if patched:
             print(f"  [hop] body weight {w:.3f} N "
-                  f"({sum(model.body_mass)*1000:.1f} g) -> hop_load_force")
+                  f"({sum(model.body_mass)*1000:.1f} g) -> {', '.join(patched)}")
     except Exception as exc:  # noqa: BLE001 - never block registration on this
         print(f"  [hop] WARNING could not compute body weight ({exc}); "
-              f"hop_load_force keeps its default")
+              f"the force terms keep their defaults")
 
     robot = cfg.scene.entities["robot"]
     new_acts = []
