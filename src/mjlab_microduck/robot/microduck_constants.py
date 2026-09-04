@@ -136,7 +136,13 @@ def get_walk_rollers_spec() -> mujoco.MjSpec:
 
 
 def get_allcollisions_spec() -> mujoco.MjSpec:
-    return mujoco.MjSpec.from_file(str(MICRODUCK_ALLCOLLISIONS_XML))
+    # Ballasted like `get_walk_spec`, and it MUST be: the two XMLs describe the
+    # same robot (both compile to 737.2 g, 15 joints, 14 actuators) and differ
+    # only in collision geometry, so a task that swaps one for the other must
+    # not silently lose 53.8 g of measured mass.
+    return _add_trunk_ballast(
+        mujoco.MjSpec.from_file(str(MICRODUCK_ALLCOLLISIONS_XML))
+    )
 
 
 def get_ball_spec() -> mujoco.MjSpec:

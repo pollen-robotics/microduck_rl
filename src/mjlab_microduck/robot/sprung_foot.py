@@ -28,7 +28,7 @@ from mjlab_microduck.robot.microduck_constants import (
     FULL_COLLISION,
     HOME_FRAME,
     actuators,
-    get_walk_spec,
+    get_allcollisions_spec,
 )
 
 # Local +y of the ankle bodies maps to world [0, 0.087, 0.996] — almost straight
@@ -235,7 +235,19 @@ def make_sprung_foot_spec_fn(
     )
 
     def _spec_fn() -> mujoco.MjSpec:
-        spec = get_walk_spec()
+        # THE ALL-COLLISIONS BASE, not robot_walk.xml. The hop policy uses the
+        # head hard -- it is ~35% of body mass and swinging it is worth real
+        # height -- and robot_walk.xml has NO head or neck collision geometry
+        # at all: only trunk_base, leg and leg_2, on their own
+        # contype=2/conaffinity=2 layer. So the head swept straight through the
+        # body and the policy was free to exploit a self-intersection that
+        # cannot happen on hardware. apirrone's robot_allcollisions.xml
+        # (develop 08680d3d) carries 70 collidable geoms, 16 of them on
+        # `jaw_soft` and 6 on the neck.
+        #
+        # Same robot otherwise: both XMLs compile to 737.2 g with 15 joints and
+        # 14 actuators, so this changes contact only, not mass or kinematics.
+        spec = get_allcollisions_spec()
         for side in ("left", "right"):
             ankle = spec.body(f"ankle_{side}")
 

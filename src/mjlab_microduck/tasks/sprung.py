@@ -59,9 +59,21 @@ def make_sprung_variant(
 
     # 2. The sprung robot stands h_add taller — translate the CoM band, do not
     #    widen it.
-    com = cfg.rewards["com_height_target"]
-    com.params["target_height_min"] = com.params["target_height_min"] + h_add
-    com.params["target_height_max"] = com.params["target_height_max"] + h_add
+    #
+    #    ABSENT IS LEGAL NOW, and it is not the same as broken. develop's
+    #    4d34d845 ("merge velocity2 into velocity: one walking recipe") stopped
+    #    registering `com_height_target`, so the Run-Sprung arms reach here with
+    #    no band at all. There is then nothing to translate, and inventing one
+    #    would be worse than skipping: a band this transform fabricated would
+    #    not be the band those arms' published numbers were measured against.
+    #
+    #    The HOP arms are unaffected either way -- `make_hop_variant` runs
+    #    BEFORE this transform and registers the term itself, precisely because
+    #    the hop task does depend on it.
+    com = cfg.rewards.get("com_height_target")
+    if com is not None:
+        com.params["target_height_min"] = com.params["target_height_min"] + h_add
+        com.params["target_height_max"] = com.params["target_height_max"] + h_add
 
     # 3. A passive spring has no pose target, and rides its own limits by
     #    design. Deepcopy first: base templates share SceneEntityCfg objects

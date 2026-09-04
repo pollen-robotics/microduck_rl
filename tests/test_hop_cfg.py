@@ -7,6 +7,8 @@ import pytest
 from mjlab_microduck.robot.sprung_foot import H_ADD, PAD_MASS
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.hop import (
+    COM_BAND_CEILING_BASE,
+    COM_BAND_FLOOR,
     AIRBORNE_WEIGHT,
     BODY_HEIGHT_WEIGHT,
     BODY_WEIGHT_N,
@@ -413,9 +415,12 @@ def test_com_band_floor_is_untouched_by_the_hop_variant():
     make_sprung_variant (explicitly out of scope) must still be the only thing
     acting on it.
     """
-    base_min = make_microduck_velocity_env_cfg().rewards["com_height_target"].params[
-        "target_height_min"
-    ]
+    # Read from what the HOP TASK owns, not from the walking env. develop's
+    # 4d34d845 ("merge velocity2 into velocity: one walking recipe") stopped
+    # registering `com_height_target`, so `make_hop_variant` registers it itself
+    # and COM_BAND_FLOOR is the floor it registers. Reading the walking env here
+    # used to work by inheritance and now raises KeyError.
+    base_min = COM_BAND_FLOOR
     for label in HOP_ARM_SUFFIX:
         params = _registered(label).rewards["com_height_target"].params
         assert params["target_height_min"] == pytest.approx(base_min + H_ADD), _hop_task_id(label)
@@ -884,7 +889,9 @@ def test_com_height_target_swap_preserves_the_sprung_band_shift():
     h_add in place. Renaming the key or dropping either param would break the band
     on every sprung arm silently -- no error, just a robot penalised for its own
     geometry."""
-    base = make_microduck_velocity_env_cfg().rewards["com_height_target"].params
+    # Owned by make_hop_variant now, not inherited from the walking env -- see
+    # test_com_band_floor_is_untouched_by_the_hop_variant.
+    base = {"target_height_min": COM_BAND_FLOOR, "target_height_max": COM_BAND_CEILING_BASE}
     for label in HOP_ARM_SUFFIX:
         params = _registered(label).rewards["com_height_target"].params
         tid = _hop_task_id(label)

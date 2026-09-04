@@ -34,10 +34,13 @@ from copy import deepcopy
 from dataclasses import replace
 
 from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.managers import RewardTermCfg
+from mjlab.managers import CurriculumTermCfg, RewardTermCfg
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.microduck_velocity_env_cfg import MicroduckRlCfg
+
+# Phase 1's published air-time weight. See make_run_variant step 2.
+AIR_TIME_WEIGHT = 5.0
 
 SENSOR_NAME = "feet_ground_contact"
 
@@ -97,7 +100,14 @@ def make_run_variant(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
     #    deliberately signature-compatible with the stock one, so `command_name`
     #    and `command_threshold` survive the `.func` swap and the speed gate
     #    keeps working.
+    #    WEIGHT PINNED HERE. develop's 4d34d845 ("merge velocity2 into
+    #    velocity: one walking recipe") dropped the walking air_time weight from
+    #    5.0 to 3.0. Phase 1's published running numbers were measured at 5.0,
+    #    and this task exists to be the control for the sprung comparison, so it
+    #    states its own weight rather than inheriting whatever the walking
+    #    recipe currently prefers.
     air = cfg.rewards["air_time"]
+    air.weight = AIR_TIME_WEIGHT
     air.func = microduck_mdp.feet_air_time_capped
     air.params["sensor_name"] = SENSOR_NAME
     air.params["threshold_min"] = AIR_TIME_WINDOW[0]
@@ -130,6 +140,20 @@ def make_run_variant(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
         params={},
     )
 
+    # 5b. The CoM band, if the walking recipe no longer carries one.
+    #     Same reasoning as the air-time weight and the speed curriculum below:
+    #     develop's 4d34d845 stopped registering `com_height_target`, and
+    #     `make_sprung_variant` translates that band by h_add for every
+    #     Run-Sprung arm. Without it the Phase 2 arms lose a reward their
+    #     published numbers included, and the band shift silently becomes a
+    #     no-op. The function is still in mdp.py; only the registration went.
+    if "com_height_target" not in cfg.rewards:
+        cfg.rewards["com_height_target"] = RewardTermCfg(
+            func=microduck_mdp.com_height_target,
+            weight=1.2,
+            params={"target_height_min": 0.11, "target_height_max": 0.14},
+        )
+
     # 6. Speed curriculum — forward speed is the ONLY moving variable.
     #    `velocity_command_ranges_curriculum` defaults to `forward_only=False`
     #    and `update_lin_vel_y=True`, which would ramp backward and lateral
@@ -137,10 +161,29 @@ def make_run_variant(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
     #    lin_vel_x=(-1.5, 1.5) and lin_vel_y=(-1.5, 1.5)). `update_ang_vel_z` is
     #    left at its default because `ang_vel_range` is constant across stages
     #    anyway.
-    curriculum_params = cfg.curriculum["velocity_command_ranges"].params
-    curriculum_params["velocity_stages"] = [dict(stage) for stage in VELOCITY_STAGES]
-    curriculum_params["forward_only"] = True
-    curriculum_params["update_lin_vel_y"] = False
+    #    REGISTERED HERE, NOT MUTATED IN PLACE. This used to read
+    #    `cfg.curriculum["velocity_command_ranges"]` and edit the velocity env's
+    #    own term, which broke when develop's 4d34d845 ("merge velocity2 into
+    #    velocity: one walking recipe") stopped registering it -- the walking
+    #    recipe no longer ramps its command range, so the term simply is not
+    #    there and the lookup raised KeyError at import, taking every task in
+    #    this package down with it.
+    #
+    #    The curriculum FUNCTION still exists in mdp.py; only the registration
+    #    went. Owning the term here is also the more correct arrangement: the
+    #    stages below are the Run task's, not the walking task's, so nothing is
+    #    gained by inheriting a term in order to overwrite all three of its
+    #    interesting params. `setdefault`-style creation keeps working whether
+    #    or not the velocity env ever registers one again.
+    cfg.curriculum["velocity_command_ranges"] = CurriculumTermCfg(
+        func=microduck_mdp.velocity_command_ranges_curriculum,
+        params={
+            "command_name": "twist",
+            "velocity_stages": [dict(stage) for stage in VELOCITY_STAGES],
+            "forward_only": True,
+            "update_lin_vel_y": False,
+        },
+    )
 
     return cfg
 

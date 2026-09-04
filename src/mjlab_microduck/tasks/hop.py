@@ -36,6 +36,7 @@ from pathlib import Path
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers import RewardTermCfg
 
+from mjlab_microduck.robot.microduck_constants import get_allcollisions_spec
 from mjlab_microduck.robot.sprung_foot import SPRING_JOINTS, SPRING_PRELOAD
 from mjlab_microduck.tasks import mdp as microduck_mdp
 
@@ -159,6 +160,14 @@ MIN_RISE = 0.001
 # rather than 1.0 -- which is intended: a 0.5 m/s launch is a 13 mm hop, not a
 # finished behaviour.
 HOP_MAX_LAUNCH_VEL = 1.0
+
+# The pre-merge walking values for `com_height_target`, which the hop task now
+# registers itself (develop's 4d34d845 stopped registering the term). Named so
+# the tests can pin the band against what the hop task actually owns, rather
+# than reading it back out of a walking env that no longer has one.
+COM_BAND_FLOOR = 0.11
+COM_BAND_CEILING_BASE = 0.14
+COM_BAND_WEIGHT = 1.2
 
 # Upper edge of `com_height_target`'s band, for the RIGID robot, in the hop task
 # only. See the in-place edit in make_hop_variant for the reasoning.
@@ -356,6 +365,30 @@ def make_hop_variant(
             arm alongside the k3900 default, and a hardcoded value would report
             that arm's stored spring energy wrong (56% high for k2500 vs k3900).
     """
+    # 0. THE ALL-COLLISIONS ROBOT, for every hop arm.
+    #
+    #    robot_walk.xml has no head or neck collision geometry -- only
+    #    trunk_base, leg and leg_2, on their own contype=2/conaffinity=2 layer
+    #    -- so the head swept straight through the body. The hop policy uses
+    #    the head hard (~35% of body mass) and was exploiting a
+    #    self-intersection that cannot happen on hardware.
+    #
+    #    `make_sprung_variant` REPLACES the robot entity wholesale with one
+    #    built from `get_allcollisions_spec`, so for the sprung arms this line
+    #    is redundant. It exists for the STANDARD arm, which never goes through
+    #    that transform: without it Standard would keep the 5-geom walk model
+    #    while every sprung arm ran with 70, and the control comparison would
+    #    silently differ in contact as well as in compliance.
+    #
+    #    Same robot either way -- both XMLs compile to 737.2 g with 15 joints
+    #    and 14 actuators, and both are ballasted -- so this changes contact
+    #    only.
+    robot = cfg.scene.entities["robot"]
+    cfg.scene.entities = {
+        **cfg.scene.entities,
+        "robot": replace(robot, spec_fn=get_allcollisions_spec),
+    }
+
     # 1. Cyclic phase command, reusing the class already on develop.
     #
     # `make_microduck_velocity_env_cfg` sets cfg.commands["twist"] to
@@ -509,6 +542,22 @@ def make_hop_variant(
     #    absolute height a successful hop reaches, so the arithmetic belongs
     #    here. Posture headroom can add up to ~14 mm on top; the band's 0.23 top
     #    covers that too.)
+    #    REGISTERED IF ABSENT. develop's 4d34d845 ("merge velocity2 into
+    #    velocity: one walking recipe") stopped registering `com_height_target`
+    #    in the walking env -- the function is still in mdp.py, only the term
+    #    went. The hop task genuinely needs it (see below and
+    #    `make_sprung_variant`'s band shift), so it owns it here rather than
+    #    inheriting one. Weight and band are the pre-merge walking values,
+    #    which is what every hop number in the campaign was measured against.
+    if "com_height_target" not in cfg.rewards:
+        cfg.rewards["com_height_target"] = RewardTermCfg(
+            func=microduck_mdp.com_height_target,
+            weight=COM_BAND_WEIGHT,
+            params={
+                "target_height_min": COM_BAND_FLOOR,
+                "target_height_max": COM_BAND_CEILING_BASE,
+            },
+        )
     cfg.rewards["com_height_target"].params["target_height_max"] = HOP_COM_HEIGHT_MAX
 
     # 6. ...and stop paying it at all during the LAUNCH half.
@@ -603,11 +652,23 @@ def make_in_place_variant(cfg):
        right trade while the goal is a maximum-height in-place hop, and it is
        the first thing to revisit if head control is wanted back.
     """
-    still = cfg.rewards.get("stillness_at_zero_command")
-    if still is not None:
-        still.params["command_threshold"] = IN_PLACE_THRESHOLD
-        still.params["vel_std"] = DRIFT_VEL_STD
-        still.weight = DRIFT_WEIGHT
+    #    REGISTERED IF ABSENT, and this one must not fail quietly. develop's
+    #    4d34d845 also dropped `stillness_at_zero_command` from the walking
+    #    recipe. The old `cfg.rewards.get(...) / if not None` spelling then
+    #    became a SILENT NO-OP: the drift containment simply vanished, with no
+    #    error and no log line, and the only symptom would have been a robot
+    #    that travels while it hops -- exactly the bug this transform exists to
+    #    fix, reintroduced by a merge. Register it instead.
+    if "stillness_at_zero_command" not in cfg.rewards:
+        cfg.rewards["stillness_at_zero_command"] = RewardTermCfg(
+            func=microduck_mdp.stillness_at_zero_command,
+            weight=DRIFT_WEIGHT,
+            params={},
+        )
+    still = cfg.rewards["stillness_at_zero_command"]
+    still.params["command_threshold"] = IN_PLACE_THRESHOLD
+    still.params["vel_std"] = DRIFT_VEL_STD
+    still.weight = DRIFT_WEIGHT
 
     # Pop rather than zero the weight: RewardManager.compute short-circuits on
     # weight == 0.0 without calling the term, so a zeroed term is a dead entry

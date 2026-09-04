@@ -257,22 +257,11 @@ for _sym, _suffix in ((False, "InPlace"), (True, "InPlaceSym")):
     )
     print(f"✓ Hop task registered: {_tid}")
 
-# Velocity2 — microban reward/regularization recipe on the velocity task.
-register_mjlab_task(
-    task_id="Mjlab-Velocity2-Flat-MicroDuck",
-    env_cfg=make_microduck_velocity2_env_cfg(),
-    play_env_cfg=make_microduck_velocity2_env_cfg(play=True),
-    rl_cfg=MicroduckVelocity2RlCfg,
-    runner_cls=MicroduckOnPolicyRunner,
-)
-
-register_mjlab_task(
-    task_id="Mjlab-Velocity2-Rough-MicroDuck",
-    env_cfg=make_microduck_velocity2_env_cfg(rough=True),
-    play_env_cfg=make_microduck_velocity2_env_cfg(play=True, rough=True),
-    rl_cfg=MicroduckVelocity2RlCfg,
-    runner_cls=MicroduckOnPolicyRunner,
-)
+# Velocity2 REMOVED, not broken: develop's 4d34d845 ("merge velocity2 into
+# velocity: one walking recipe") folded that recipe into the velocity task and
+# deleted `microduck_velocity2_env_cfg`, so these two registrations had no
+# factory to call. The recipe they exercised now IS the velocity task -- use
+# Mjlab-Velocity-Flat-MicroDuck.
 
 # VelStand — walking + fall recovery + body pose control in one policy.
 register_mjlab_task(
