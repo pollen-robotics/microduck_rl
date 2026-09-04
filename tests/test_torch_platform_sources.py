@@ -114,15 +114,30 @@ def test_on_jetson_the_libraries_load_and_torch_sees_the_gpu():
     assert torch.version.cuda is not None
 
 
-def test_every_module_that_imports_torch_at_module_scope_imports_mjlab_first():
+def test_script_entry_modules_import_mjlab_before_torch():
     """The pre-load runs from the mjlab.tasks plugin hook, i.e. inside
-    `import mjlab`. A module of ours that imports torch at module scope before
-    anything imported mjlab (export.py reached from scripts/export.py) would
-    miss it on Jetson, so `import mjlab` must come first there."""
-    src = _ROOT / "src" / "mjlab_microduck"
-    for path in src.rglob("*.py"):
-        if path.is_relative_to(src / "tasks"):
-            continue  # the hook itself lives here, ahead of every cfg import
+    `import mjlab`. A package module that a script enters through directly
+    (scripts/export.py -> mjlab_microduck.export) and that imports torch at
+    module scope must import mjlab first, or the hook has not run yet on
+    Jetson. Modules only reached from tasks/ or from a module that already
+    imported mjlab are covered by that ordering and are not checked here."""
+    import re
+
+    entered = set()
+    for script in (_ROOT / "scripts").glob("*.py"):
+        for m in re.finditer(
+            r"^(?:from|import) (mjlab_microduck(?:\.\w+)*)",
+            script.read_text(),
+            re.MULTILINE,
+        ):
+            entered.add(m.group(1))
+    assert "mjlab_microduck.export" in entered, (
+        "scripts/export.py should still enter via the package"
+    )
+    for dotted in sorted(entered):
+        path = _ROOT / "src" / Path(*dotted.split(".")).with_suffix(".py")
+        if not path.is_file():
+            continue
         lines = path.read_text().splitlines()
         torch_at = next(
             (
@@ -143,5 +158,5 @@ def test_every_module_that_imports_torch_at_module_scope_imports_mjlab_first():
             None,
         )
         assert mjlab_at is not None and mjlab_at < torch_at, (
-            f"{path.relative_to(_ROOT)}: imports torch at line {torch_at + 1} before mjlab"
+            f"{dotted}: imports torch at line {torch_at + 1} before mjlab"
         )

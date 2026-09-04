@@ -20,7 +20,6 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass
 
-import mjlab  # noqa: F401  # before torch: the mjlab.tasks hook pre-loads torch's undeclared libs
 import torch
 from bam.mjlab import BamActuator, BamActuatorCfg
 from mjlab.actuator.actuator import ActuatorCmd

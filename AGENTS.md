@@ -237,17 +237,14 @@ Never launch a long run without one.
   (uv applies `[tool.uv.sources]` to direct deps only — deleting the
   redundant-looking `torch==` pin makes the routing a no-op), and the pin must
   stay `==`, since the CUDA index carries newer builds than PyPI (a `>=`
-  silently dragged torch 2.9.1 → 2.13.0). **Jetson AGX Thor** (JetPack 7,
-  CUDA 13, `sm_110`) is a third case: the cu129 wheels predate its GPU, so
-  `'tegra' in platform_release` (the Jetson kernel) routes torch to NVIDIA's
-  SBSA index instead, and `_torch_libs.py` pre-loads the NVPL/cuDSS libraries
-  that wheel links but does not declare (`tests/test_torch_platform_sources.py`,
-  verified on-box 2026-09-04, #38). GB10's marker now says `'tegra' not in
-  platform_release` — drop that and both sources match on Spark. AGX Orin
-  (`sm_87`, also `-tegra`) resolves the same SBSA wheel, which has no `sm_87`
-  kernels (`no kernel image is available`); no `torch==2.9.1` cp312 wheel for
-  `sm_87` exists on any Jetson index, so Orin cannot train at this pin —
-  verified 2026-09-04, not a routing bug to "fix" by pointing it elsewhere.
+  silently dragged torch 2.9.1 → 2.13.0). Jetson (`'tegra' in
+  platform_release`) is the third case: the cu129 wheels predate Thor's
+  `sm_110`, so torch comes from NVIDIA's SBSA index and `_torch_libs.py`
+  pre-loads the NVPL/cuDSS libraries that wheel does not declare
+  (`tests/test_torch_platform_sources.py`, #38). GB10's marker carries
+  `'tegra' not in platform_release` — drop it and both sources match on Spark.
+  AGX Orin (`sm_87`) gets the same wheel, which has no `sm_87` kernels; no
+  compatible `torch==2.9.1` cp312 wheel exists, so Orin cannot train at this pin.
 - Physics-aligned limits: a 25 cm robot tumbles at 3.5–5.5 rad/s NATURALLY —
   don't impose human-scale speed intuitions via caps; put anti-violence
   pressure on impacts and thrash (|a_z|, action_rate, support gates), not on

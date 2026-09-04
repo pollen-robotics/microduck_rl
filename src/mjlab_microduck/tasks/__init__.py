@@ -7,10 +7,8 @@ from mjlab_microduck.train_hook import maybe_submit_to_hf_jobs
 # train_hook.py). A no-op without the flag.
 maybe_submit_to_hf_jobs()
 
-# Some platforms' torch wheels link libraries they do not declare (the SBSA
-# CUDA-13 build: NVPL, cuDSS). Same reasoning as above — this runs inside
-# `import mjlab`, before `mjlab.envs` imports torch, on every path — and a
-# no-op wherever those wheels are not installed (_torch_libs.py).
+# Same reasoning: this runs inside `import mjlab`, before `mjlab.envs` imports
+# torch. A no-op wherever the wheels are not installed (see _torch_libs.py).
 preload_undeclared_torch_libs()
 
 from mjlab.tasks.registry import register_mjlab_task

@@ -35,10 +35,8 @@ dependencies = [
     # floating `>=` lets the CUDA index (which carries newer builds than the
     # PyPI pin) drag torch 2.9.1 -> 2.13.0, an unvetted bump for mjlab/rsl_rl.
     "torch==2.9.1",
-    # Jetson (JetPack 7 / SBSA, e.g. AGX Thor) ONLY: the SBSA torch wheel links
-    # NVPL BLAS/LAPACK and cuDSS without declaring them; pre-loaded by
-    # mjlab_microduck/_torch_libs.py. `'tegra' in platform_release` is the Jetson
-    # kernel (6.8.12-tegra); GB10 / x86_64 never match.
+    # Jetson only: the SBSA torch wheel links these without declaring them
+    # (pre-loaded by _torch_libs.py). `-tegra` is the Jetson kernel; GB10 never matches.
     "nvpl-blas ; sys_platform == 'linux' and platform_machine == 'aarch64' and 'tegra' in platform_release",
     "nvpl-lapack ; sys_platform == 'linux' and platform_machine == 'aarch64' and 'tegra' in platform_release",
     "nvidia-cudss-cu13 ; sys_platform == 'linux' and platform_machine == 'aarch64' and 'tegra' in platform_release",
@@ -96,12 +94,9 @@ override-dependencies = [
 better-actuator-models = { git = "https://github.com/Rhoban/bam.git", branch = "mjlab_frictionloss" }
 # For local BAM development, comment the line above and use:
 # better-actuator-models = { path = "/home/antoine/Rhoban/bam", editable = true }
-# Two aarch64 hosts, told apart by the kernel release (PEP 508 platform_release):
-#  * Jetson (JetPack 7 / SBSA, AGX Thor; kernel `-tegra`, CUDA 13.0, sm_110):
-#    NVIDIA's Jetson AI Lab SBSA index carries a native torch 2.9.1 build — the
-#    same version as the pin, so only the wheel's source changes. The cu129
-#    wheels below predate sm_110. See _torch_libs.py for the two undeclared deps.
-#  * Everything else (DGX Spark / GB10), unchanged from here on:
+# Jetson (kernel `-tegra`; Thor is sm_110, which the cu129 wheels predate) takes
+# torch 2.9.1 — the same pinned version — from NVIDIA's SBSA index instead.
+# Everything else on aarch64 (DGX Spark / GB10) is unchanged:
 # On linux-aarch64 (DGX Spark / GB10) PyPI's torch wheel is CPU-ONLY:
 # torch.__version__ == "2.9.1+cpu", torch.version.cuda is None, so
 # torch.cuda.device_count() == 0 and mjlab's select_gpus() indexes an empty
@@ -122,8 +117,7 @@ url = "https://download.pytorch.org/whl/cu129"
 # explicit: only packages that name this index resolve from it.
 explicit = true
 
-# JetPack 7 (Thor) uses the SBSA userspace; the "jp7" index is empty, this one
-# is live. explicit: only torch names it.
+# JetPack 7 uses the SBSA userspace (the "jp7" index is empty). explicit: only torch names it.
 [[tool.uv.index]]
 name = "jetson-sbsa-cu130"
 url = "https://pypi.jetson-ai-lab.io/sbsa/cu130"
