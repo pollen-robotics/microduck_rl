@@ -1,0 +1,37 @@
+{
+  "policy": "../policy/neutral_head_flamingo.onnx",
+  "source_branch": "pollen-robotics/microduck_rl flamingo",
+  "head_action_outputs_constrained_to_home": true,
+  "head_physics_locked": false,
+  "head_frozen_at_home": false,
+  "ten_second_holds": true,
+  "left_first": true,
+  "single_leg": null,
+  "hold_seconds": null,
+  "local_independent_pass": true,
+  "criteria": {
+    "right_support_single_contact_fraction": 0.99,
+    "left_support_single_contact_fraction": 1.0,
+    "right_support_lifted_left_foot_median_z_m": 0.07641763923157527,
+    "left_support_lifted_right_foot_median_z_m": 0.09672196322177716,
+    "final_two_foot_contact_fraction": 1.0,
+    "forbidden_ground_contact_samples": 0,
+    "maximum_trunk_tilt_deg": 27.93247018493915,
+    "net_xy_displacement_m": 0.03157116163131626,
+    "hold_median_abs_head_yaw_rad": 0.01928684467216688,
+    "hold_max_abs_head_yaw_rad": 0.020580630490099235,
+    "hold_head_joint_ranges_rad": {
+      "neck_pitch_rad": 0.09555014408388607,
+      "head_pitch_rad": 0.05633854283062201,
+      "head_yaw_rad": 0.03993136589025227,
+      "head_roll_rad": 0.01171044864208266
+    }
+  },
+  "acceptance": {
+    "single_support_fraction_min": 0.95,
+    "lifted_foot_height_min_m": 0.05,
+    "final_two_foot_fraction_min": 0.95,
+    "forbidden_contact_samples_max": 0,
+    "trunk_tilt_max_deg": 60.0
+  }
+}

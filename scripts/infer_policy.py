@@ -214,7 +214,7 @@ class PolicyInference:
                  standing_onnx_path=None, switch_threshold=0.05,
                  use_projected_gravity=False, ground_pick_onnx_path=None, ground_pick_period=4.0,
                  sit_onnx_path=None, new_cmd_obs=False, slope_onnx_path=None,
-                 sitstand_onnx_path=None,
+                 sitstand_onnx_path=None, flamingo_onnx_path=None,
                  kick_left_onnx_path=None, kick_right_onnx_path=None,
                  roulade_onnx_path=None,
                  kick_duration=3.0, roulade_duration=2.0):
@@ -302,6 +302,19 @@ class PolicyInference:
             ss_input_shape = self.sit_session.get_inputs()[0].shape
             print(f"Sitstand policy input shape: {ss_input_shape}")
 
+        # Flamingo policy (--flamingo): stand <-> one foot, either side, one network.
+        # twist = [flag, side, 0]: flag 1 = one foot, side +1 = right foot down /
+        # left leg lifted, -1 = left foot down. Trained idle is [0, 0, 0].
+        # Keys: F flips the flag, C flips the side (choose it while standing).
+        self.flamingo_session = None
+        self.flamingo_mode = False        # the flag
+        self.flamingo_side = 1.0          # +1 right stance, -1 left stance
+        if flamingo_onnx_path:
+            if not new_cmd_obs:
+                raise ValueError("--flamingo policies use the unified 13D command obs (61D); run with --new-cmd-obs")
+            print(f"\nLoading flamingo policy from: {flamingo_onnx_path}")
+            self.flamingo_session = ort.InferenceSession(flamingo_onnx_path)
+
         # Load slope policy (passive descent, runs with zero twist command)
         self.slope_session = None
         self.slope_mode = False
@@ -340,8 +353,8 @@ class PolicyInference:
 
         # Validate at least one policy loaded. A sitstand policy can run alone
         # (it holds the stand at flag=0), unlike the old one-way sit policy.
-        if not self.walking_session and not self.standing_session and not self.is_sitstand:
-            raise ValueError("At least one of --walking, --standing or --sitstand must be provided")
+        if not self.walking_session and not self.standing_session and not self.is_sitstand and self.flamingo_session is None:
+            raise ValueError("At least one of --walking, --standing, --sitstand or --flamingo must be provided")
 
         # Determine initial active session and policy
         if self.walking_session:
@@ -350,10 +363,14 @@ class PolicyInference:
         elif self.standing_session:
             self.current_policy = "standing"
             self.ort_session = self.standing_session
-        else:
+        elif self.is_sitstand:
             # sitstand-only: start standing (posture flag 0).
             self.current_policy = "sit"
             self.ort_session = self.sit_session
+        else:
+            # flamingo-only: start standing on two feet (flag 0).
+            self.current_policy = "flamingo"
+            self.ort_session = self.flamingo_session
 
         # Get input/output names from active session
         self.input_name = self.ort_session.get_inputs()[0].name
@@ -486,6 +503,10 @@ class PolicyInference:
                 # all-zero twist is the STAND command for this policy, which is
                 # why feeding it the old sit-policy zero command did nothing.
                 cmd[0] = 1.0 if self.sit_mode else 0.0
+            elif self.current_policy == "flamingo":
+                # [flag, side, 0]; side stays written while standing (trained both ways).
+                cmd[0] = 1.0 if self.flamingo_mode else 0.0
+                cmd[1] = self.flamingo_side
             # else standing/old-sit/ground_pick: leave twist 0 (ground_pick
             # writes its phase encoding later)
             cmd[3:7]  = self.head_offset
@@ -519,6 +540,8 @@ class PolicyInference:
             return  # Don't switch during ground pick
         if self.sit_mode:
             return  # Don't switch while sitting
+        if self.flamingo_mode or self.current_policy == "flamingo":
+            return  # Don't switch while on one foot (F again to come back down first)
         if self.slope_mode:
             return  # Don't switch during slope mode
         if self.behavior_mode is not None:
@@ -844,6 +867,37 @@ class PolicyInference:
             print(f"Sit: OFF → back to {self.current_policy}")
         self._update_command()
 
+    def toggle_flamingo(self):
+        """F: flip the flamingo flag. ON = lift the non-stance foot (side chosen with C);
+        OFF = the SAME policy lowers it and holds the two-foot stand (~1.5 s each way).
+        The session stays active after coming down; a velocity command switches back
+        to walking/standing as usual."""
+        if self.flamingo_session is None:
+            print("Flamingo unavailable: no --flamingo policy loaded")
+            return
+        if self.ground_pick_mode or self.sit_mode or self.behavior_mode is not None:
+            print("Cannot start flamingo during ground pick / sit / kick / roulade")
+            return
+        self.flamingo_mode = not self.flamingo_mode
+        if self.flamingo_mode:
+            self.vel_cmd = np.zeros(3, dtype=np.float32)
+            self.current_policy = "flamingo"
+            self.ort_session = self.flamingo_session
+            print(f"Flamingo: ON — lifting the {'LEFT' if self.flamingo_side > 0 else 'RIGHT'} foot (standing on the {'right' if self.flamingo_side > 0 else 'left'}); F again to come down")
+        else:
+            print("Flamingo: OFF → same policy lowering the foot (flag=0)")
+        self._update_command()
+
+    def flip_flamingo_side(self):
+        """C: choose the stance side (+1 = right foot down, -1 = left foot down). Flipping
+        it while on one foot was never trained — come down first (F)."""
+        if self.flamingo_mode:
+            print("Come down first (F) before changing the side")
+            return
+        self.flamingo_side = -self.flamingo_side
+        print(f"Flamingo side: {'RIGHT foot down / left leg lifts' if self.flamingo_side > 0 else 'LEFT foot down / right leg lifts'}")
+        self._update_command()
+
     def toggle_head_mode(self):
         """Toggle head control mode on/off."""
         self.head_mode = not self.head_mode
@@ -901,6 +955,7 @@ def main():
     parser.add_argument("--standing", "-s", type=str, default=None, help="Path to standing policy ONNX file")
     parser.add_argument("--ground-pick", type=str, default=None, help="Path to ground pick policy ONNX file (press G to activate)")
     parser.add_argument("--sit", type=str, default=None, help="Path to OLD one-way sitting policy ONNX file (press Y to sit, Y again switches back to standing/walking policy)")
+    parser.add_argument("--flamingo", type=str, default=None, help="Path to flamingo policy ONNX (stand <-> one foot, either side; press F to lift / lower, C to pick the side). Requires --new-cmd-obs. Can run standalone.")
     parser.add_argument("--sitstand", type=str, default=None, help="Path to sitstand policy ONNX (commanded sit<->stand; press Y to sit, Y again the SAME policy stands back up). Requires --new-cmd-obs. Can run standalone.")
     parser.add_argument("--slope", type=str, default=None, help="Path to slope policy ONNX file (press Y to toggle)")
     parser.add_argument("--kick-left", type=str, default=None, help="Path to LEFT-foot ball kick policy ONNX (press K to trigger). Requires --new-cmd-obs. Loads a scene with a ball.")
@@ -949,10 +1004,12 @@ def main():
                              "compliant PU sole. e.g. --foot-solref 0.04")
     args = parser.parse_args()
 
-    if not args.walking and not args.standing and not args.sitstand:
-        parser.error("At least one of --walking, --standing or --sitstand must be provided")
+    if not args.walking and not args.standing and not args.sitstand and not args.flamingo:
+        parser.error("At least one of --walking, --standing, --sitstand or --flamingo must be provided")
     if args.sitstand and not args.new_cmd_obs:
         parser.error("--sitstand policies use the unified 13D command obs (61D); add --new-cmd-obs")
+    if args.flamingo and not args.new_cmd_obs:
+        parser.error("--flamingo policies use the unified 13D command obs (61D); add --new-cmd-obs")
     if (args.kick_left or args.kick_right or args.roulade) and not args.new_cmd_obs:
         parser.error("--kick-left/--kick-right/--roulade policies use the unified 13D command obs (61D); add --new-cmd-obs")
     if (args.kick_left or args.kick_right or args.roulade) and args.roller:
@@ -1054,6 +1111,7 @@ def main():
         new_cmd_obs=args.new_cmd_obs,
         slope_onnx_path=args.slope,
         sitstand_onnx_path=args.sitstand,
+        flamingo_onnx_path=args.flamingo,
         kick_left_onnx_path=args.kick_left,
         kick_right_onnx_path=args.kick_right,
         roulade_onnx_path=args.roulade,
@@ -1283,6 +1341,10 @@ def main():
                     policy.toggle_sit()
                 else:
                     policy.toggle_slope_mode()
+            elif key == "f":
+                policy.toggle_flamingo()
+            elif key == "c":
+                policy.flip_flamingo_side()
             elif key == "h":
                 policy.toggle_head_mode()
             elif key == "b":
@@ -1338,6 +1400,7 @@ def main():
     print("  T:                toggle policy inference on/off (paused = motors hold last target)")
     print("  G:                trigger ground pick (requires --ground-pick)")
     print("  Y:                toggle sit (with --sit/--sitstand) or slope mode (with --slope)")
+    print("  F:                flamingo: lift / lower the foot (requires --flamingo); C: pick the side while standing")
     print("  K:                kick with LEFT foot (requires --kick-left)")
     print("  L:                kick with RIGHT foot (requires --kick-right)")
     print("  R:                roulade / forward roll (requires --roulade)")
