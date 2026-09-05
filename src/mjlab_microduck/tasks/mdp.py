@@ -6903,6 +6903,7 @@ def hop_symmetric_push(
     sensor_name: str = "feet_ground_contact",
     command_name: str = "twist",
     body_weight_n: float = 8.60,
+    min_load_frac: float = 0.25,
 ) -> torch.Tensor:
     """Reward BOTH feet pushing hard at once, during the countermovement window.
 
@@ -6929,11 +6930,27 @@ def hop_symmetric_push(
     single behaviour that pays is two feet pressing together, which is the one
     we want.
 
-    The normalisation matches `hop_load_force`'s `max_ratio = 2.0`: that term
-    saturates when the two feet TOGETHER reach twice body weight, so this one
-    saturates when EACH foot reaches body weight -- the same physical push,
-    split evenly. The two terms therefore peak on the same trajectory instead
-    of pulling against each other.
+    IT MEASURES THE RATIO, NOT THE FORCE, and that is the 2026-09-05 repair.
+    The first version scored `min(f_left, f_right) / body_weight`, which
+    conflates "pushing evenly" with "pushing hard" -- and `hop_load_force`
+    already pays for pushing hard, so the two terms were partly measuring the
+    same thing while this one paid for neither well.
+
+    Worse, it diluted itself against its own flight phase. Measured on run
+    u2ck51xg: when both feet are loaded the weaker one carries 0.387 x body
+    weight, which should score 0.387 -- but the term averaged 0.089, a 4.3x
+    loss. The gap is TIME, not force: the cosine window spans half the cycle
+    while both feet are loaded only 30% of the time, so most of the window
+    scored zero for the entirely correct reason that the robot was in the air.
+    The term was reading "how evenly do you push" multiplied by "how much of
+    this window are you on the ground", and the second factor is something the
+    hop rewards actively want to be small.
+
+    Scoring `weaker / stronger` instead makes it a pure quality measure, gated
+    on both feet carrying at least `min_load_frac` of body weight so that two
+    feet resting together -- a perfect ratio and no push -- earns nothing. The
+    division of labour is then clean: `hop_load_force` pays for the magnitude of
+    the push, this pays for its evenness.
 
     The gate is `hop_load_force`'s cosine channel, deliberately, not the sine
     launch gate: the window that brackets takeoff (phi in [0.75, 1.0) u
@@ -6954,8 +6971,9 @@ def hop_symmetric_push(
     if forces.shape[1] != 2:
         return zeros
 
-    f_z = torch.nan_to_num(forces[..., 2].float(), nan=0.0, posinf=0.0, neginf=0.0)
-    weaker = f_z.abs().min(dim=1).values
+    f_z = torch.nan_to_num(forces[..., 2].float(), nan=0.0, posinf=0.0, neginf=0.0).abs()
+    weaker = f_z.min(dim=1).values
+    stronger = f_z.max(dim=1).values
 
     # The command IS [cos(2*pi*phi), sin(2*pi*phi), 0], so slot 0 is already the
     # cosine -- no need to recover phi and re-evaluate it. nan_to_num matches
@@ -6963,8 +6981,17 @@ def hop_symmetric_push(
     cmd = env.command_manager.get_command(command_name)
     gate = torch.clamp(torch.nan_to_num(cmd[:, 0], nan=0.0), min=0.0)
 
-    share = torch.clamp(weaker / body_weight_n, min=0.0, max=1.0)
-    return gate * share
+    # BOTH FEET GENUINELY PUSHING, or nothing. The floor is what stops the ratio
+    # below paying for two feet resting together: 0.01 N against 0.01 N is a
+    # perfect ratio and no push at all.
+    loaded = weaker > (min_load_frac * body_weight_n)
+
+    # The RATIO, not the absolute share -- see the docstring. Guarded division:
+    # `stronger` is above the floor wherever `loaded` is true, and the where()
+    # keeps the untaken branch from producing a NaN gradient.
+    safe = torch.where(loaded, stronger, torch.ones_like(stronger))
+    ratio = torch.where(loaded, weaker / safe, torch.zeros_like(weaker))
+    return gate * ratio
 
 
 def hop_load_force(

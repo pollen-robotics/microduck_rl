@@ -1011,22 +1011,63 @@ def _split_force(left_n, right_n):
 
 
 def test_symmetric_push_saturates_when_both_feet_press_body_weight():
-    """Each foot at body weight = the two together at hop_load_force's
-    max_ratio 2.0. The two terms are normalised to peak on the same push."""
+    """An even push scores 1.0. Magnitude is hop_load_force's job."""
     env = _Env(cmd=_phase(_TAKEOFF), force=_split_force(_BW, _BW))
     out = hop_symmetric_push(env, sensor_name=_SENSOR, command_name=_CMD,
                              body_weight_n=_BW)
     assert abs(float(out[0]) - 1.0) < 1e-5
 
 
-def test_symmetric_push_pays_the_weaker_foot_not_the_average():
+def test_symmetric_push_scores_a_lopsided_push_at_zero():
     """THE WHOLE POINT. A skip loads one foot hard and the other barely; an
-    average would score it well, the weaker foot scores it honestly."""
+    average would score it well.
+
+    Same 2.0 x body weight total as the saturating case, split 9:1. The weaker
+    foot carries 0.2 x body weight, under the 0.25 load floor, so it does not
+    count as pushing at all.
+    """
     env = _Env(cmd=_phase(_TAKEOFF), force=_split_force(1.8 * _BW, 0.2 * _BW))
     out = hop_symmetric_push(env, sensor_name=_SENSOR, command_name=_CMD,
                              body_weight_n=_BW)
-    # Same 2.0 x body weight total as the saturating case above, but split 9:1.
-    assert abs(float(out[0]) - 0.2) < 1e-5
+    assert abs(float(out[0])) < 1e-6
+
+
+def test_symmetric_push_scores_the_ratio_not_the_magnitude():
+    """It measures EVENNESS; `hop_load_force` measures magnitude.
+
+    A soft even push and a hard even push score the same, because scoring both
+    would double-pay for magnitude -- and the first version's conflation of the
+    two is what let the term dilute itself to 8.8% of its ceiling on u2ck51xg.
+    """
+    soft = _Env(cmd=_phase(_TAKEOFF), force=_split_force(0.4 * _BW, 0.4 * _BW))
+    hard = _Env(cmd=_phase(_TAKEOFF), force=_split_force(4.0 * _BW, 4.0 * _BW))
+    kw = dict(sensor_name=_SENSOR, command_name=_CMD, body_weight_n=_BW)
+    assert abs(float(hop_symmetric_push(soft, **kw)[0]) - 1.0) < 1e-5
+    assert abs(float(hop_symmetric_push(hard, **kw)[0]) - 1.0) < 1e-5
+
+
+def test_symmetric_push_grades_partial_asymmetry():
+    """Between the extremes it must be graded, not a step: a 2:1 split is worse
+    than 1:1 and better than 4:1, so the policy has a gradient to climb."""
+    kw = dict(sensor_name=_SENSOR, command_name=_CMD, body_weight_n=_BW)
+    even = float(hop_symmetric_push(
+        _Env(cmd=_phase(_TAKEOFF), force=_split_force(_BW, _BW)), **kw)[0])
+    two_to_one = float(hop_symmetric_push(
+        _Env(cmd=_phase(_TAKEOFF), force=_split_force(2 * _BW, _BW)), **kw)[0])
+    four_to_one = float(hop_symmetric_push(
+        _Env(cmd=_phase(_TAKEOFF), force=_split_force(4 * _BW, _BW)), **kw)[0])
+    assert abs(even - 1.0) < 1e-5
+    assert abs(two_to_one - 0.5) < 1e-5
+    assert abs(four_to_one - 0.25) < 1e-5
+
+
+def test_symmetric_push_load_floor_rejects_two_feet_merely_resting():
+    """Two feet resting together are a PERFECT ratio and no push at all. The
+    floor is the only thing standing between the ratio form and that exploit."""
+    env = _Env(cmd=_phase(_TAKEOFF), force=_split_force(0.1 * _BW, 0.1 * _BW))
+    out = hop_symmetric_push(env, sensor_name=_SENSOR, command_name=_CMD,
+                             body_weight_n=_BW)
+    assert abs(float(out[0])) < 1e-6
 
 
 def test_symmetric_push_pays_nothing_for_a_one_legged_launch():
