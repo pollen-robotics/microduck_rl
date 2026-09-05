@@ -8,7 +8,9 @@ The answer in this MuJoCo evaluation is **yes**. A lightweight final-layer
 distillation produced one ONNX actor that completed a left-foot hold followed
 by a right-foot hold, with each command held for 10 seconds.
 
-![Left-then-right neutral-head Flamingo rollout](media/contact_sheet.png)
+![Animated left-then-right neutral-head Flamingo rollout](media/neutral_head_left_then_right.gif)
+
+[Static contact sheet](media/contact_sheet.png)
 
 The full rollout is in
 [`media/neutral_head_left_then_right.mp4`](media/neutral_head_left_then_right.mp4).
@@ -105,4 +107,3 @@ balance with its head mechanically locked.
   [`THIRD_PARTY_NOTICE.md`](THIRD_PARTY_NOTICE.md).
 - This is a simulation result. Validate torque limits, fall handling, and a
   physical kill switch before attempting deployment on hardware.
-
