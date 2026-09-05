@@ -349,11 +349,23 @@ class Body:
     # ── what the daemon commands ──────────────────────────────────────────
 
     def set_targets(self, wire_targets: list[float]) -> None:
+        if not isinstance(wire_targets, list):
+            raise TypeError("targets must be a JSON array")
         if len(wire_targets) != len(JOINT_NAMES):
             raise ValueError(f"expected {len(JOINT_NAMES)} targets, got {len(wire_targets)}")
+        # Validate the entire wire frame, including the unmapped mouth slot,
+        # before writing anything. A late conversion error otherwise leaves
+        # earlier motors changed, and NaN/Infinity can reach the physics solver.
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in wire_targets):
+            raise ValueError("targets must contain finite JSON numbers")
+        try:
+            targets = np.asarray(wire_targets, dtype=float)
+        except OverflowError as error:
+            raise ValueError("targets must contain finite JSON numbers") from error
+        if not np.isfinite(targets).all():
+            raise ValueError("targets must contain finite JSON numbers")
         with self.world.lock:
-            for slot, wire_index in enumerate(self.to_wire):
-                self.world.data.ctrl[self.actuators[slot]] = wire_targets[wire_index]
+            self.world.data.ctrl[self.actuator_slice] = targets[self.to_wire]
 
     def set_gain(self, kp: int) -> None:
         with self.world.lock:
