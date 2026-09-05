@@ -912,3 +912,63 @@ def test_upright_is_deliberately_not_gated():
         tid = _hop_task_id(label)
         assert term.func is rigid.func, tid
         assert term.weight == pytest.approx(rigid.weight), tid
+
+
+# ── the head-rest exploit ────────────────────────────────────────────────────
+
+
+def test_only_the_boots_may_touch_the_ground():
+    """Every hop arm terminates on non-boot ground contact.
+
+    Run 0zvhsz7f fell HEAD FIRST, came to rest on its head with both feet in the
+    air, and pushed off the feet from there -- which satisfies
+    `hop_both_feet_airborne` ("is neither foot touching?") 88.2% of the time.
+    Measured: mean "flight" 765 ms against a real 765 ms flight's 718 mm apex,
+    22 mm of actual CoM rise, CoM/root 0.562 against an honest hop's 0.980, and
+    spring compression p95 of 0.00 mm -- the exploit never used the springs.
+    """
+    from mjlab_microduck.tasks.hop import BODY_SENSOR_NAME
+
+    for label in list(HOP_ARM_SUFFIX) + ["standard"]:
+        try:
+            cfg = _registered(label)
+        except KeyError:
+            continue
+        assert "body_ground_contact" in cfg.terminations, label
+        names = [getattr(s, "name", None) for s in cfg.scene.sensors]
+        assert BODY_SENSOR_NAME in names, label
+
+
+def test_the_body_sensor_excludes_the_foot_assembly_by_body():
+    """By BODY, and the two obvious spellings both fail.
+
+    Only 2 of the 70 collidable geoms are named (the pads), so a geom regex
+    cannot address the other 68. And `mode="subtree"` resolves its pattern to a
+    SINGLE name, so `exclude` filters nothing and the sensor watches the whole
+    robot including the boots -- measured that way: 128/128 envs terminating at
+    step 1 while standing perfectly normally.
+    """
+    from mjlab_microduck.tasks.hop import BODY_SENSOR_NAME, _GROUND_CONTACT_ALLOWED
+
+    cfg = _registered("k3344")
+    sensor = next(s for s in cfg.scene.sensors
+                  if getattr(s, "name", None) == BODY_SENSOR_NAME)
+    assert sensor.primary.mode == "body", "subtree mode makes `exclude` a no-op"
+    assert set(sensor.primary.exclude) == set(_GROUND_CONTACT_ALLOWED)
+    # The pads AND the ankles: the Standard arm has no pad body, its
+    # foot_collision geom sits directly on ankle_*, and one list serves both.
+    assert "left_foot_pad" in _GROUND_CONTACT_ALLOWED
+    assert "ankle_left" in _GROUND_CONTACT_ALLOWED
+
+
+def test_fall_angle_is_below_the_exploit_posture():
+    """The resting posture sat at 52.8 deg mean / 62.7 deg p95, under the
+    velocity env's 70 deg, so `fell_over` never fired and episodes ran to 980 of
+    1000 steps. The honest skip only reaches 5.9 deg at takeoff, so there is
+    plenty of room between the two."""
+    import math
+
+    for label in HOP_ARM_SUFFIX:
+        limit = _registered(label).terminations["fell_over"].params["limit_angle"]
+        assert math.degrees(limit) == pytest.approx(50.0, abs=0.1), label
+        assert math.degrees(limit) < 52.8, "must fire below the measured exploit posture"

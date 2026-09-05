@@ -34,7 +34,9 @@ import os
 from pathlib import Path
 
 from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.managers import RewardTermCfg
+from mjlab.managers import RewardTermCfg, TerminationTermCfg
+from mjlab.sensor import ContactMatch, ContactSensorCfg
+from mjlab.tasks.velocity import mdp
 
 from mjlab_microduck.robot.microduck_constants import get_allcollisions_spec
 from mjlab_microduck.robot.sprung_foot import SPRING_JOINTS, SPRING_PRELOAD
@@ -174,6 +176,59 @@ COM_BAND_WEIGHT = 1.2
 HOP_COM_HEIGHT_MAX = 0.20
 
 SENSOR_NAME = "feet_ground_contact"
+
+# Everything on the robot EXCEPT the two spring boots, against the terrain.
+#
+# WHY THIS EXISTS. `hop_both_feet_airborne` asks only "is neither foot
+# touching?", which is not the same question as "is the robot airborne" once
+# the robot has body geometry that can rest on the floor. Switching the hop arms
+# to robot_allcollisions.xml (70 collidable geoms, 22 of them head and neck)
+# made that difference reachable, and the policy found it within 3000
+# iterations: run 0zvhsz7f falls HEAD FIRST, comes to rest on its head with the
+# feet in the air, and pushes off the feet from there. Measured: airborne 88.2%
+# of all steps, mean "flight" 765 ms -- a real 765 ms flight peaks at 718 mm,
+# against 22 mm of actual CoM rise -- body tilt 52.8 deg, and CoM/root rise
+# 0.562 against a genuine hop's 0.980. Spring compression p95 fell to 0.00 mm
+# and hop_load_force to 0.0008: the exploit does not use the springs at all.
+#
+# `fell_over` did not catch it either. Its limit_angle is 1.2217 rad = 70 deg,
+# and the resting posture sits at 52.8 deg mean / 62.7 deg p95 -- under the
+# threshold, so episodes ran to 980 of 1000 steps.
+#
+# The rule this encodes: THE ONLY PARTS ALLOWED TO TOUCH THE GROUND ARE THE
+# SPRING BOOTS. Anything else is a fall.
+BODY_SENSOR_NAME = "body_ground_contact"
+
+# Bodies allowed to touch the ground: the boots, and the ankles they hang from.
+#
+# BY BODY, NOT BY GEOM, and not by subtree -- both of the obvious spellings fail
+# here. Only 2 of the 70 collidable geoms carry names (the two pads), so a geom
+# regex cannot address the other 68. And `mode="subtree"` resolves its pattern
+# to a SINGLE name -- the subtree root -- so `exclude` has nothing to filter and
+# the sensor silently watches the whole robot, boots included: every env then
+# terminates on its first step. Measured that way round before this comment
+# existed: 128/128 envs terminating at step 1 while standing normally.
+#
+# THE ANKLES ARE EXCLUDED TOO, and that is a deliberate loosening. The sprung
+# arms carry their pad on its own `*_foot_pad` body, so excluding just those two
+# would be exact for them -- but the STANDARD arm has no pad body at all; its
+# `*_foot_collision` geom sits directly on `ankle_*`. One list has to serve both
+# or the control arm terminates on contact with its own feet, so the ankles are
+# excluded everywhere and the rule reads "the foot assembly may touch the
+# ground; nothing above it may". An ankle scraping the floor therefore does not
+# terminate on its own -- `fell_over` at 50 deg is what covers that case.
+_GROUND_CONTACT_ALLOWED = (
+    "left_foot_pad",
+    "right_foot_pad",
+    "ankle_left",
+    "ankle_right",
+)
+
+# Fall threshold for the hop arms, radians. The velocity env ships 1.2217 (70
+# deg); the head-rest exploit sat at 52.8 deg mean / 62.7 deg p95 and so never
+# terminated. 50 deg is comfortably above the 5.9 deg the honest skip reaches at
+# takeoff, and below anything that can become a stable resting posture.
+FALL_LIMIT_ANGLE = 0.8727  # 50 deg
 
 # THE REWARD BUDGET. Do not "tidy" these back down -- the 4x is the whole fix
 # for the first Phase 4 sweep's null, and the 1/pi below is where it comes from.
@@ -388,6 +443,53 @@ def make_hop_variant(
         **cfg.scene.entities,
         "robot": replace(robot, spec_fn=get_allcollisions_spec),
     }
+
+    # 0b. Any non-boot contact with the ground is a FALL, and terminates.
+    #
+    #     This is the fix for the head-rest exploit described on
+    #     BODY_SENSOR_NAME above. Terminating is the right lever rather than
+    #     merely gating the airborne reward: the exploit's value came from
+    #     SURVIVING in the resting posture (episode length 980 of 1000 while
+    #     `fell_over` read 0.114), so removing the reward alone would leave the
+    #     robot free to keep lying there for the rest of the episode. Ending the
+    #     episode prices the posture correctly -- it is a fall, and the robot
+    #     already pays for falls by losing the remaining reward.
+    #
+    #     `exclude` carries the foot assembly, which is what makes the rule
+    #     "only the boots may touch the ground" rather than "nothing may touch
+    #     the ground". See _GROUND_CONTACT_ALLOWED for why it is by body.
+    #
+    #     force_threshold is deliberately absent: `illegal_contact` falls back
+    #     to `data.found` when no force history is configured, so ANY contact
+    #     counts. A threshold would let the robot rest lightly on its head.
+    cfg.scene.sensors = tuple(cfg.scene.sensors) + (
+        ContactSensorCfg(
+            name=BODY_SENSOR_NAME,
+            primary=ContactMatch(
+                mode="body",
+                pattern=r".*",
+                entity="robot",
+                exclude=_GROUND_CONTACT_ALLOWED,
+            ),
+            secondary=ContactMatch(mode="body", pattern="terrain"),
+            fields=("found",),
+            reduce="none",
+            num_slots=1,
+        ),
+    )
+    cfg.terminations["body_ground_contact"] = TerminationTermCfg(
+        func=mdp.illegal_contact,
+        params={"sensor_name": BODY_SENSOR_NAME},
+        time_out=False,
+    )
+
+    # 0c. And tighten the fall angle, because 70 deg is what made the resting
+    #     posture reachable in the first place. A hopping robot has no business
+    #     past 50 deg, and the exploit parked at 52.8 deg mean precisely because
+    #     it was under the old threshold.
+    fell = cfg.terminations.get("fell_over")
+    if fell is not None and "limit_angle" in fell.params:
+        fell.params["limit_angle"] = FALL_LIMIT_ANGLE
 
     # 1. Cyclic phase command, reusing the class already on develop.
     #
