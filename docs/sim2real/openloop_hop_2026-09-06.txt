@@ -1,0 +1,38 @@
+memory.used [MiB], memory.total [MiB]
+75 MiB, 8188 MiB
+[openloop] iter  0  best  11.38 mm  elite-mean   5.47 mm  airborne 72.7%  fell  0.0%
+[openloop] iter  1  best   8.69 mm  elite-mean   5.35 mm  airborne 75.6%  fell  0.0%
+[openloop] iter  2  best   8.92 mm  elite-mean   5.46 mm  airborne 77.0%  fell  0.0%
+[openloop] iter  3  best   9.18 mm  elite-mean   5.97 mm  airborne 76.7%  fell  0.0%
+[openloop] iter  4  best  11.47 mm  elite-mean   7.31 mm  airborne 81.2%  fell  0.0%
+[openloop] iter  5  best  14.84 mm  elite-mean   7.99 mm  airborne 83.1%  fell  0.0%
+[openloop] iter  6  best  13.09 mm  elite-mean   9.38 mm  airborne 86.6%  fell  0.0%
+[openloop] iter  7  best  13.93 mm  elite-mean  11.07 mm  airborne 86.4%  fell  0.0%
+[openloop] iter  8  best  14.54 mm  elite-mean  11.75 mm  airborne 88.3%  fell  0.0%
+[openloop] iter  9  best  17.81 mm  elite-mean  13.42 mm  airborne 89.8%  fell  0.0%
+[openloop] iter 10  best  16.22 mm  elite-mean  13.37 mm  airborne 88.8%  fell  0.0%
+[openloop] iter 11  best  16.92 mm  elite-mean  13.36 mm  airborne 87.9%  fell  0.0%
+[openloop] iter 12  best  17.06 mm  elite-mean  14.19 mm  airborne 88.2%  fell  0.0%
+[openloop] iter 13  best  18.03 mm  elite-mean  13.96 mm  airborne 90.4%  fell  0.0%
+[openloop] iter 14  best  17.41 mm  elite-mean  14.13 mm  airborne 89.1%  fell  0.0%
+[openloop] iter 15  best  17.00 mm  elite-mean  14.60 mm  airborne 90.3%  fell  0.0%
+[openloop] iter 16  best  16.64 mm  elite-mean  14.57 mm  airborne 88.7%  fell  0.0%
+[openloop] iter 17  best  16.41 mm  elite-mean  14.57 mm  airborne 90.5%  fell  0.0%
+[openloop] iter 18  best  17.74 mm  elite-mean  14.07 mm  airborne 89.8%  fell  0.0%
+[openloop] iter 19  best  17.55 mm  elite-mean  14.67 mm  airborne 90.1%  fell  0.0%
+RESULT open-loop ceiling: 18.03 mm CoM rise
+RESULT best parameters:
+RESULT   crouch_hip     +0.5911
+RESULT   crouch_knee    +0.9340
+RESULT   crouch_ankle   +0.6263
+RESULT   push_hip       +1.1551
+RESULT   push_knee      +0.6902
+RESULT   push_ankle     +0.9934
+RESULT   t_sink         +0.2103
+RESULT   t_hold         +0.1067
+RESULT   t_push         +0.1077
+RESULT   head_amp       +0.6654
+RESULT   head_lead      +0.0010
+RESULT written openloop_hop_best.npz
+
+[exited with code 0]
