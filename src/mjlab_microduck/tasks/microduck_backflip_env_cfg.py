@@ -76,12 +76,21 @@ fails OPEN, so a renamed sensor silently disables the gate with no error. That
 name is asserted in ``tests/test_backflip_cfg.py``; keep it that way.
   Known, bounded exposure: the plate is a separate entity, so standing on it is
   "airborne" by this sensor. A policy could in principle rock backward off the
-  parked plate to bank rotation without flipping. It is bounded — the fall from
-  z0 buys well under 180 deg before terrain contact freezes the frontier, the
-  progress term is potential-based (the frontier only pays once), and the
-  landing annuity needs 300 deg — so a real flip strictly dominates it. If a
-  run shows pre-launch rocking, the fix is to add the plate body to the
-  ``robot_ground_contact`` sensor's secondary match, not to tax rotation.
+  parked plate to bank rotation without flipping. It is bounded because the
+  accumulator measures ONE CONTINUOUS AIRBORNE ARC: terrain contact resets it
+  to zero (``mdp._update_backflip_accum``, clamp 2), so the fall from z0 buys
+  well under 180 deg and the next rock starts from zero rather than adding to
+  it. The frontier is the best single arc, the progress term is
+  potential-based (the frontier only pays once), and the landing annuity needs
+  300 deg — so a real flip strictly dominates. That reset is load-bearing, not
+  tidiness: the earlier version only zeroed the per-step delta on contact,
+  which left the frontier RATCHETABLE (bank 20-30 deg airborne, land, unwind
+  on the ground for free, repeat ~11 times, collect the annuity with no flip).
+  The accumulator is also floored at zero so a launch that comes out FORWARD
+  cannot dig a hole the policy must climb out of before the frontier moves.
+  Both clamps have regression tests. If a run shows pre-launch rocking anyway,
+  the next fix is to add the plate body to the ``robot_ground_contact``
+  sensor's secondary match, not to tax rotation.
 
 DESIGN CHOICES AND WHERE THEY CAME FROM
   * ONE dense signal: ``flip_progress`` pays increments of the max-so-far

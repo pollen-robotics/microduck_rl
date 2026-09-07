@@ -514,3 +514,114 @@ def test_landing_does_not_pay_on_a_bounce_with_high_linear_velocity():
     env.robot.data.root_link_lin_vel_w[:, 2] = 3.0  # m/s: mid-bounce rebound
     reward = microduck_mdp.backflip_landing(env)
     assert float(reward[0]) < 0.05
+
+
+# --- The two accumulator clamps (fix wave: CRITICAL 2 + IMPORTANT 3). ---------
+
+
+def _accum_env(num_envs=1):
+    """Env whose ground-contact sensor tensor can be flipped between steps."""
+    found = torch.zeros(num_envs, 1)
+    env = _FakeEnvWithScene(
+        num_envs=num_envs,
+        sensors={"robot_ground_contact": _FakeSensor(found)},
+    )
+    microduck_mdp._backflip_state(env)
+    return env, found
+
+
+def _accum_steps(env, found, n, omega_y, contact):
+    """Advance the accumulator n control steps at a fixed rate and contact state.
+
+    omega_y is the BODY-frame lateral rate: negative = backward (a real flip),
+    positive = forward. common_step_counter must move or the step guard makes
+    every extra call a no-op.
+    """
+    env.robot.data.root_link_ang_vel_b[:, 1] = omega_y
+    found[:] = 1.0 if contact else 0.0
+    for _ in range(n):
+        env.common_step_counter += 1
+        microduck_mdp._update_backflip_accum(env, env.robot)
+
+
+def test_accum_is_floored_at_zero_so_a_forward_arc_digs_no_hole():
+    # A launch that comes out FORWARD is not hypothetical: the measured
+    # standing-spawn envelope reaches -275 deg. Unfloored, the signed
+    # accumulator would sit at about -4.8 rad while the frontier stayed at 0,
+    # and the policy would have to buy that back before the only dense term in
+    # the task produced any signal at all.
+    env, found = _accum_env()
+    _accum_steps(env, found, 30, omega_y=+10.0, contact=False)  # forward, airborne
+    assert float(env._backflip_accum[0]) == 0.0
+    assert float(env._backflip_max[0]) == 0.0
+
+
+def test_a_forward_launch_then_a_real_backward_flip_still_earns_progress():
+    # The regression CRITICAL 2 asks for: the forward half must not mortgage
+    # the backward half. 30 steps at 10 rad/s backward = 6.0 rad of frontier,
+    # which is what a fresh accumulator would have earned.
+    env, found = _accum_env()
+    _accum_steps(env, found, 30, omega_y=+10.0, contact=False)
+    _accum_steps(env, found, 30, omega_y=-10.0, contact=False)
+    earned = float(env._backflip_max[0])
+    assert abs(earned - 30 * 10.0 * env.step_dt) < 1e-4
+
+    fresh, fresh_found = _accum_env()
+    _accum_steps(fresh, fresh_found, 30, omega_y=-10.0, contact=False)
+    assert abs(earned - float(fresh._backflip_max[0])) < 1e-6
+
+    # And it actually pays: progress is potential-based off the frontier.
+    paid = microduck_mdp._backflip_pay(env, 2 * math.pi, 1e9)
+    assert float(paid[0]) > 0.0
+
+
+def test_terrain_contact_resets_the_arc_but_keeps_the_frontier():
+    env, found = _accum_env()
+    _accum_steps(env, found, 10, omega_y=-10.0, contact=False)
+    banked = float(env._backflip_accum[0])
+    assert banked > 0.0
+    assert abs(float(env._backflip_max[0]) - banked) < 1e-9
+
+    _accum_steps(env, found, 1, omega_y=-10.0, contact=True)
+    assert float(env._backflip_accum[0]) == 0.0            # the arc ended
+    assert abs(float(env._backflip_max[0]) - banked) < 1e-9  # the peak survives
+
+
+def test_airborne_bank_grounded_unwind_cycling_does_not_advance_the_frontier():
+    # THE RATCHET, which zeroing delta on contact (rather than resetting the
+    # accumulator) left open: hop, nod ~23 deg backward in the air, land,
+    # unwind it on the ground for free, repeat. ~11 cycles used to reach the
+    # landing gate's 300 deg with no flip anywhere, and then collect the
+    # landing annuity. One continuous arc is the fix.
+    env, found = _accum_env()
+    bank_steps, bank_rate = 2, -10.0            # 0.4 rad = ~23 deg per hop
+    for _ in range(11):
+        _accum_steps(env, found, bank_steps, omega_y=bank_rate, contact=False)
+        _accum_steps(env, found, 4, omega_y=+10.0, contact=True)   # grounded unwind
+
+    one_hop = bank_steps * abs(bank_rate) * env.step_dt
+    frontier = float(env._backflip_max[0])
+    assert abs(frontier - one_hop) < 1e-6
+    assert frontier < math.radians(30.0)
+    # Nowhere near the landing gate, so the annuity stays shut.
+    gate = microduck_mdp._backflip_completion_gate(
+        env,
+        microduck_mdp.BACKFLIP_LANDING_GATE_LO,
+        microduck_mdp.BACKFLIP_LANDING_GATE_HI,
+    )
+    assert float(gate[0]) == 0.0
+
+
+def test_one_continuous_arc_of_the_same_total_rotation_does_advance_it():
+    # The control for the ratchet test: identical per-step rotation, flown in
+    # one arc instead of 11 hops, must clear the landing gate. The fix has to
+    # refuse the exploit without refusing the maneuver.
+    env, found = _accum_env()
+    _accum_steps(env, found, 32, omega_y=-10.0, contact=False)   # 6.4 rad = 367 deg
+    assert float(env._backflip_max[0]) > microduck_mdp.BACKFLIP_LANDING_GATE_HI
+    gate = microduck_mdp._backflip_completion_gate(
+        env,
+        microduck_mdp.BACKFLIP_LANDING_GATE_LO,
+        microduck_mdp.BACKFLIP_LANDING_GATE_HI,
+    )
+    assert float(gate[0]) == 1.0

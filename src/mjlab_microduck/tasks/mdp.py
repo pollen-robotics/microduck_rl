@@ -7465,15 +7465,45 @@ BACKFLIP_LANDING_GATE_HI = math.radians(345.0)
 
 
 def _update_backflip_accum(env: ManagerBasedRlEnv, asset: Entity) -> None:
-    """Integrate BACKWARD pitch rate while AIRBORNE, step-guarded.
+    """Integrate BACKWARD pitch rate over ONE CONTINUOUS AIRBORNE ARC.
 
     Airborne gate (the mirror of roulade's support gate): rotation only counts
     while nothing touches the terrain. Without it the cheapest way to collect
     2*pi is to flop onto the back and roll along the floor, which is not a
-    backflip. The frontier (max) only moves forward, so rocking neither pays
-    nor un-pays. Step-guarded via _backflip_last_update_step so that multiple
+    backflip. Step-guarded via _backflip_last_update_step so that multiple
     reward terms reading the accumulator in the same control step don't
     double-integrate.
+
+    Two clamps, each closing an exploit found by review. Both are cheap and
+    both have regression tests (tests/test_backflip_mdp.py) — do not "simplify"
+    either away:
+
+    1. FLOOR AT ZERO. The accumulator is signed, so a launch that comes out
+       FORWARD drives it deeply negative (the measured standing-spawn launch
+       reaches -275 deg, i.e. ~-4.8 rad) while the frontier stays at 0. Without
+       a floor the policy would then have to buy back ~4.8 rad of airborne
+       BACKWARD rotation before the frontier moved at all — impossible once it
+       is on the floor — so the episode yields exactly zero signal from the
+       only dense term in the task and is indistinguishable from doing nothing.
+       Clamped at 0, a forward arc simply pays nothing and a genuine backward
+       flip starts earning immediately.
+
+    2. THE ARC RESETS ON TERRAIN CONTACT. Merely zeroing `delta` while grounded
+       (the previous behaviour) makes the frontier RATCHETABLE: airborne
+       backward rotation banks, grounded forward rotation is free, so
+       hop / nod back 20-30 deg in the air / land / unwind on the ground /
+       repeat reaches the landing gate's 300 deg in ~11 cycles with no flip
+       anywhere, and then collects the landing annuity. Resetting the
+       accumulator on terrain contact makes the frontier the best SINGLE
+       continuous airborne arc, which is what a backflip is. `delta` is still
+       zeroed while grounded as well, so grounded rotation cannot accumulate
+       from the fresh zero either (that is the log-roll the airborne gate
+       exists to refuse).
+
+    The frontier (max) itself still only moves forward and is read as a
+    potential, so rocking neither pays nor un-pays, and the peak of a completed
+    arc survives the landing that ends it (max is updated from the last
+    airborne step before contact zeroes the accumulator).
     """
     _backflip_state(env)
     step = int(env.common_step_counter)
@@ -7482,14 +7512,18 @@ def _update_backflip_accum(env: ManagerBasedRlEnv, asset: Entity) -> None:
     omega_bwd = _BACKFLIP_BWD_SIGN * asset.data.root_link_ang_vel_b[:, 1]
     delta = torch.nan_to_num(omega_bwd, nan=0.0) * env.step_dt
     contact = _sensor_any_contact(env, _BACKFLIP_GROUND_SENSOR)
-    if contact is not None:
-        delta = delta * (~contact).float()
+    airborne = None if contact is None else (~contact).float()
+    if airborne is not None:
+        delta = delta * airborne
     # Sagittal flatness gate: a sideways tumble is not a backflip.
     y_z = torch.nan_to_num(_lateral_axis_z(asset.data.root_link_quat_w), nan=1.0).abs()
     t = torch.clamp((_FLAT_ZERO - y_z) / (_FLAT_ZERO - _FLAT_FULL), 0.0, 1.0)
     delta = delta * (t * t * (3.0 - 2.0 * t))
-    env._backflip_accum = env._backflip_accum + delta
-    env._backflip_max = torch.maximum(env._backflip_max, env._backflip_accum)
+    accum = torch.clamp(env._backflip_accum + delta, min=0.0)   # clamp 1
+    if airborne is not None:
+        accum = accum * airborne                                # clamp 2
+    env._backflip_accum = accum
+    env._backflip_max = torch.maximum(env._backflip_max, accum)
     env._backflip_last_update_step = step
 
 
