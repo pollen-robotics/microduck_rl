@@ -198,6 +198,14 @@ _COLLISION_CLASS = "collision"
 #   local z -> world [ 0.000, 0.996,-0.087]  = lateral
 _PAD_HALF_EXTENTS = (0.0125, 0.004, 0.020)
 
+# Fore-aft sole length of the CURRENT prototype, and of the next one. The tip
+# angle at the boot's CoM height is atan(half_length / 150.9 mm): 4.4 deg at
+# 25 mm, which the robot cannot hold passively, 9.1 deg at 50 mm. Kept as
+# named lengths because the two boots coexist -- one on the robot, one on the
+# printer -- and a policy is trained for one of them.
+SOLE_LENGTH_V1 = 0.025
+SOLE_LENGTH_V2 = 0.050
+
 
 def make_sprung_foot_spec_fn(
     stiffness: float,
@@ -207,6 +215,7 @@ def make_sprung_foot_spec_fn(
     pad_mass: float = PAD_MASS,
     preload: float = SPRING_PRELOAD,
     damping_ratio: float = DAMPING_RATIO,
+    sole_length: float = SOLE_LENGTH_V1,
 ) -> Callable[[], mujoco.MjSpec]:
     """Build a zero-argument ``spec_fn`` for a sprung-foot MicroDuck.
 
@@ -308,7 +317,12 @@ def make_sprung_foot_spec_fn(
                 spec.find_default(_COLLISION_CLASS),
                 name=f"{side}_foot_collision",
                 type=mujoco.mjtGeom.mjGEOM_BOX,
-                size=list(_PAD_HALF_EXTENTS),
+                # (fore-aft, thickness, lateral) half-extents; only fore-aft varies
+                # between boot versions. NOTE: ANKLE_TO_SOLE cancels the contact-
+                # penetration difference between mesh sole and box pad, and
+                # penetration depends on contact PRESSURE, so a longer sole sits
+                # ~1-2 mm higher than the 30 mm H_ADD target until re-tuned.
+                size=[sole_length / 2.0, _PAD_HALF_EXTENTS[1], _PAD_HALF_EXTENTS[2]],
                 pos=[0.0, 0.0, 0.0],
                 mass=pad_mass,
             )
@@ -325,6 +339,7 @@ def make_sprung_foot_robot_cfg(
     h_add: float = H_ADD,
     pad_mass: float = PAD_MASS,
     preload: float = SPRING_PRELOAD,
+    sole_length: float = SOLE_LENGTH_V1,
 ) -> EntityCfg:
     """EntityCfg for a sprung-foot MicroDuck, spawned h_add higher.
 
@@ -338,7 +353,8 @@ def make_sprung_foot_robot_cfg(
     )
     return EntityCfg(
         spec_fn=make_sprung_foot_spec_fn(
-            stiffness, travel, damping, h_add, pad_mass, preload
+            stiffness, travel, damping, h_add, pad_mass, preload,
+            sole_length=sole_length,
         ),
         init_state=init_state,
         collisions=(FULL_COLLISION,),

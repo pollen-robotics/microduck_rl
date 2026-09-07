@@ -34,7 +34,7 @@ import os
 from pathlib import Path
 
 from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.managers import RewardTermCfg, TerminationTermCfg
+from mjlab.managers import EventTermCfg, RewardTermCfg, SceneEntityCfg, TerminationTermCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.tasks.velocity import mdp
 
@@ -706,6 +706,48 @@ def make_hop_variant(
     return cfg
 
 
+# Actuator-stiffness randomisation for the pause tasks. The stance-sag
+# measurement on the real robot (2026-09-07) found hip_roll holding 6-13x
+# TIGHTER than the model (0.3-0.7 deg error vs 4.4 deg), and the first
+# stand attempts diverged -- each correction overshooting the last -- exactly
+# what a policy trained on a fixed, too-soft plant does on a stiffer one. The
+# velocity env ships ENABLE_KP_RANDOMIZATION = False, so the hop policies had
+# ZERO robustness to this. The range is deliberately skewed stiff: the error
+# we measured is one-sided.
+HOLD_KP_SCALE_RANGE = (0.7, 2.5)
+HOLD_KD_SCALE_RANGE = (0.7, 1.5)
+
+# Weight for the hold-gated action-rate penalty. Heavy: while standing there is
+# nothing to be gained by moving, and every degree of chatter is current, heat
+# and loop gain on hardware. The task-wide action_rate_l2 (-0.6) stays weak so
+# the hop is unaffected.
+HOLD_ACTION_RATE_WEIGHT = -3.0
+
+
+def make_robust_stand_variant(cfg):
+    """Robustness for the pause tasks: gain randomisation + a quiet hold.
+
+    Applied on top of make_hop_variant(hold_prob > 0). See the two constants
+    above for the hardware evidence behind each.
+    """
+    cfg.events["randomize_motor_gains"] = EventTermCfg(
+        func=microduck_mdp.randomize_delayed_actuator_gains,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "operation": "scale",
+            "kp_range": HOLD_KP_SCALE_RANGE,
+            "kd_range": HOLD_KD_SCALE_RANGE,
+        },
+    )
+    cfg.rewards["hold_action_rate_l2"] = RewardTermCfg(
+        func=microduck_mdp.hold_action_rate_l2,
+        weight=HOLD_ACTION_RATE_WEIGHT,
+        params={"command_name": "twist"},
+    )
+    return cfg
+
+
 def make_symmetric_variant(cfg):
     """Pay for a TWO-FOOTED launch, so the hop stops being a skip.
 
@@ -856,7 +898,10 @@ HOP_KP_FW = 400.0          # was 200. Measured on the bench: achieved amplitude
 _MEASURED_PARAMS = "xl330_m6_measured_friction.json"
 
 
-def apply_hop_corrections(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
+def apply_hop_corrections(
+    cfg: ManagerBasedRlEnvCfg,
+    actuator: str = "bench",
+) -> ManagerBasedRlEnvCfg:
     """Apply the bench-measured corrections to a composed hop cfg.
 
     Call AFTER make_sprung_variant, since that swaps the robot entity.
@@ -928,14 +973,29 @@ def apply_hop_corrections(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
         print(f"  [hop] WARNING could not compute body weight ({exc}); "
               f"the force terms keep their defaults")
 
+    # WHICH ACTUATOR MODEL. "bench" is the hop family's: kp_fw 400 and the
+    # measured-friction JSON (load_friction_external_stribeck 0.75, 9x the
+    # published 0.081), both from the XL330 bench. "standard" leaves the
+    # velocity env's actuator untouched -- kp_fw 200, published friction -- and
+    # only rescales the delay for the finer timestep.
+    #
+    # WHY THE CHOICE EXISTS. The standard walking/standing policies TRANSFER to
+    # the robot; the first hop-family policy on hardware did not stand -- each
+    # correction overshot the last -- and the stance-sag measurement found the
+    # hop sim 6-13x more compliant than the real robot. The 0.75 friction was
+    # measured under 137 g at 160 mm, a heavy load; the Stribeck term scales
+    # with load, so at standing loads it plausibly makes the sim joint far too
+    # sluggish, teaching the policy to over-command. "standard" is the control
+    # that tests exactly that, holding everything else in the task fixed.
+    if actuator not in ("bench", "standard"):
+        raise ValueError(f"actuator must be 'bench' or 'standard', got {actuator!r}")
     robot = cfg.scene.entities["robot"]
     new_acts = []
     for act in robot.articulation.actuators:
         a = deepcopy(act)
-        for field, value in (("kp_fw", HOP_KP_FW),
-                             ("json_path", params),
-                             ("motor_name", None),
-                             ("model", None)):
+        overrides = (("kp_fw", HOP_KP_FW), ("json_path", params),
+                     ("motor_name", None), ("model", None)) if actuator == "bench" else ()
+        for field, value in overrides:
             if hasattr(a, field):
                 object.__setattr__(a, field, value) if dataclasses.is_dataclass(a) and \
                     getattr(type(a), "__dataclass_params__", None) and \

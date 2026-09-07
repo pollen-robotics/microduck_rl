@@ -6951,6 +6951,34 @@ def hop_energy_monitor(
     return zeros
 
 
+def hold_action_rate_l2(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+) -> torch.Tensor:
+    """action_rate_l2, applied ONLY while the phase is held (i.e. standing).
+
+    The hop needs fast actions, so the task-wide action_rate_l2 is deliberately
+    weak (-0.6). Nothing then asks the policy to be CALM when it is only
+    standing -- and it is not: HopPause held in sim commands ~260 deg/s of
+    target motion around a stationary pose (mean |delta action| 5.2 deg per
+    20 ms step, p95 21 deg). On the robot that busyness met real servo lag and a
+    plant stiffer than modelled, and rang: "corrections getting larger and
+    larger until it falls".
+
+    Gating on the command term's own hold state (`_hold_left > 0`) keeps the hop
+    unrestricted and makes the stand quiet. A quiet stand is also a lower-gain
+    loop, which is what survives plant mismatch.
+    """
+    term = env.command_manager.get_term(command_name)
+    held = getattr(term, "_hold_left", None)
+    rate = torch.sum(
+        torch.square(env.action_manager.action - env.action_manager.prev_action), dim=1
+    )
+    if held is None:
+        return torch.zeros_like(rate)
+    return torch.where(held > 0.0, rate, torch.zeros_like(rate))
+
+
 def hop_symmetric_push(
     env: ManagerBasedRlEnv,
     sensor_name: str = "feet_ground_contact",

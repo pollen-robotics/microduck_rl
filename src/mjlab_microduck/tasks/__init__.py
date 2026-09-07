@@ -86,9 +86,10 @@ from .hop import (
     hop_rl_cfg,
     make_hop_variant,
     make_in_place_variant,
+    make_robust_stand_variant,
     make_symmetric_variant,
 )
-from mjlab_microduck.robot.sprung_foot import H_ADD, K_MEASURED, PAD_MASS, TRAVEL
+from mjlab_microduck.robot.sprung_foot import H_ADD, K_MEASURED, PAD_MASS, SOLE_LENGTH_V2, TRAVEL
 
 # Standard velocity task
 register_mjlab_task(
@@ -271,19 +272,37 @@ for _sym, _suffix in ((False, "InPlace"), (True, "InPlaceSym")):
 #                length 241 of 1000 in 1500 iters; the hop arms reach 865-980).
 #   HopPause  -- hold_prob 0.5, holds of 1-5 s: stands AND hops on demand. The
 #                deliverable. Runs remotely.
-for _label, _hp, _hr in (("HopStand", 1.0, (60.0, 60.0)), ("HopPause", 0.5, (1.0, 5.0))):
-    def _build_pause(play: bool, _hp=_hp, _hr=_hr):
+for _label, _hp, _hr, _robust, _sole, _act in (
+        ("HopStand", 1.0, (60.0, 60.0), False, None, "bench"),
+        ("HopPause", 0.5, (1.0, 5.0), False, None, "bench"),
+        ("HopPauseR", 0.5, (1.0, 8.0), True, None, "bench"),
+        # The NEXT boot: 50 mm fore-aft sole (tip angle 9.1 deg vs 4.4). Printing 2026-09-07.
+        ("HopPauseR-S50", 0.5, (1.0, 8.0), True, SOLE_LENGTH_V2, "bench"),
+        # STANDARD ACTUATOR: kp_fw 200 + published friction, the model the
+        # walking/standing policies that DO transfer were trained on. The hop
+        # family's bench-derived actuator (kp 400, friction 0.75) is the prime
+        # suspect for the stand not transferring -- see apply_hop_corrections.
+        ("HopPause-StdAct", 0.5, (1.0, 8.0), False, None, "standard"),
+        ("HopPauseR-StdAct", 0.5, (1.0, 8.0), True, None, "standard"),
+        ("HopPauseR-S50-StdAct", 0.5, (1.0, 8.0), True, SOLE_LENGTH_V2, "standard")):
+    def _build_pause(play: bool, _hp=_hp, _hr=_hr, _robust=_robust, _sole=_sole, _act=_act):
         cfg = make_in_place_variant(make_symmetric_variant(make_hop_variant(
             make_microduck_velocity_env_cfg(play=play), stiffness=K_MEASURED,
             hold_prob=_hp, hold_range=_hr)))
+        if _robust:
+            # HopPauseR: kp randomisation (0.7-2.5x) + hold-gated action-rate
+            # penalty -- the two things the first hardware stand showed missing.
+            cfg = make_robust_stand_variant(cfg)
         # The head cannot deliver the whip on hardware (real neck sags 5.4 deg
         # under static load, ~15x the model), so it is tracked, not freed.
         # make_in_place_variant popped these; put the tracking term back.
         if "head_pose_tracking" not in cfg.rewards:
             base = make_microduck_velocity_env_cfg(play=play)
             cfg.rewards["head_pose_tracking"] = base.rewards["head_pose_tracking"]
-        return apply_hop_corrections(make_sprung_variant(
-            cfg, stiffness=K_MEASURED, travel=TRAVEL, pad_mass=PAD_MASS, h_add=H_ADD))
+        sprung_kw = dict(stiffness=K_MEASURED, travel=TRAVEL, pad_mass=PAD_MASS, h_add=H_ADD)
+        if _sole is not None:
+            sprung_kw["sole_length"] = _sole
+        return apply_hop_corrections(make_sprung_variant(cfg, **sprung_kw), actuator=_act)
     _tid = f"Mjlab-{_label}-Sym-K3344-MicroDuck"
     register_mjlab_task(task_id=_tid, env_cfg=_build_pause(False), play_env_cfg=_build_pause(True),
                         rl_cfg=hop_rl_cfg("k3344"), runner_cls=MicroduckOnPolicyRunner)
