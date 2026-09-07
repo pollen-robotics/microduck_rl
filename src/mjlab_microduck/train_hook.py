@@ -40,8 +40,15 @@ def _invoked_as_train() -> bool:
     `play --hf-jobs` must NOT submit a training job; let that command's own
     parser reject the flag instead.
     """
+    # Windows console scripts are `train.exe`, so the bare name never equals
+    # "train" and the flag silently fell through to tyro's
+    # `Unrecognized options: --hf-jobs` — the same failure this hook exists to
+    # fix, one platform over (2026-09-02).
     prog = Path(sys.argv[0]).name
-    return prog.removesuffix(".py").removesuffix("-script") == "train"
+    return (
+        prog.removesuffix(".exe").removesuffix(".py").removesuffix("-script")
+        == "train"
+    )
 
 
 def maybe_submit_to_hf_jobs() -> None:
