@@ -18,6 +18,7 @@ from mjlab_microduck.tasks.microduck_backflip_env_cfg import (
     MicroduckBackflipRlCfg,
     PLATE_HALF_THICKNESS,
     STAND_Z,
+    Z0_RANGE,
     make_microduck_backflip_env_cfg,
 )
 from mjlab_microduck.tasks.microduck_roulade_env_cfg import (
@@ -359,3 +360,60 @@ def test_backlash_variant_keeps_the_plate_and_the_entity_order():
     assert names[0] == "robot"
     assert "plate" in names
     assert bl.scene.entities["robot"] is MICRODUCK_BACKLASH_ROBOT_CFG
+
+
+# --- Fix-wave additions. -----------------------------------------------------
+
+
+def test_arrival_damping_curriculum_keeps_the_cost_sign_at_every_stage(cfg):
+    # The one staged table whose signs were unchecked while the other two were.
+    # body_ang_vel_at_height is an mjlab-style POSITIVE cost, so every stage
+    # must be <= 0; a positive stage would pay for trunk thrash at the landing.
+    stages = cfg.curriculum["arrival_damping_weight"].params["weight_stages"]
+    assert stages[0]["step"] == 0 and stages[0]["weight"] == 0.0
+    assert all(s["weight"] <= 0.0 for s in stages)
+    assert stages[-1]["weight"] < stages[0]["weight"]   # ramps DOWN (stronger)
+    assert stages[-1]["step"] > 0                       # after skill discovery
+
+
+def test_arrival_damping_is_a_height_window_not_a_floor(cfg):
+    # body_ang_vel_at_height's height_low/height_high pair is a FLOOR: without
+    # an upper edge every airborne step of the flip pays full cost, and the
+    # tilt gate alone lets a rotating robot through twice per revolution. The
+    # window must also exclude standing on the plate during HOLD (trunk at
+    # z0 + PLATE_HALF_THICKNESS + STAND_Z, i.e. >= 0.225 m).
+    params = cfg.rewards["arrival_damping"].params
+    assert params["height_high"] < params["height_full_max"] < params["height_zero_max"]
+    lowest_hold_trunk_z = Z0_RANGE[0] + PLATE_HALF_THICKNESS + STAND_Z
+    assert params["height_zero_max"] < lowest_hold_trunk_z
+
+
+def test_plate_reset_event_passes_t_zero_explicitly(cfg):
+    # episode_length_buf is zeroed AFTER reset events, so without an explicit
+    # t=0 this event reads the terminal episode's time, the phase comes out
+    # GONE, and it parks the plate 5 m away instead of placing it at z0.
+    # (The placement itself is measured in test_backflip_mdp.py.)
+    assert cfg.events["backflip_plate_reset"].params["t_override"] == 0.0
+
+
+def test_critic_plate_terms_are_the_gone_masked_ones(cfg):
+    # The parked plate sits ~8.7 m away for ~85% of every episode's steps; an
+    # unmasked plate_position normalizer converges to std ~3 m and squashes the
+    # informative 0-0.3 m HOLD/LAUNCH range into noise. The mask itself is
+    # measured in test_backflip_mdp.py.
+    critic = cfg.observations["critic"].terms
+    assert critic["plate_position"].func is microduck_mdp.backflip_plate_pos_obs
+    assert critic["plate_velocity"].func is microduck_mdp.backflip_plate_vel_obs
+    # The actor must still carry no plate term at all, masked or not.
+    assert not any("plate" in name for name in cfg.observations["actor"].terms)
+
+
+def test_z0_dr_tail_does_not_extrapolate_far_past_the_probe(cfg):
+    # The probe measured z0 in [0.10, 0.20]; landing speed rises monotonically
+    # with z0, so the tail extrapolates toward the hardware damage threshold.
+    z0 = cfg.curriculum["backflip_z0_range"].params["param_stages"]
+    assert z0[0]["params"]["z0_range"] == Z0_RANGE
+    assert z0[-1]["params"]["z0_range"][1] <= 0.25
+    assert [s["params"]["z0_range"][1] for s in z0] == sorted(
+        s["params"]["z0_range"][1] for s in z0
+    )

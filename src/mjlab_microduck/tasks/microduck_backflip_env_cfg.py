@@ -384,17 +384,31 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["angular_momentum"].weight = -0.001
     cfg.rewards.pop("soft_landing", None)
 
-    # Arrival damper — trunk omega_xy^2 gated on standing height AND low tilt,
-    # so the flip itself is never taxed. Introduced at 0, ramped by curriculum.
+    # Arrival damper — trunk omega_xy^2 inside an arrival WINDOW around standing
+    # height, and only at low tilt. Introduced at 0, ramped by curriculum.
+    #
+    # The height band needs BOTH edges here, and the reason is a correction:
+    # body_ang_vel_at_height's height_low/height_high pair is a FLOOR, not a
+    # window — everything above height_high pays FULL cost. The whole flight of
+    # a backflip is above 0.11 m (apex 0.4-1.2 m measured), and so is standing
+    # on the plate during HOLD (z0 + 0.125 = 0.23-0.43 m). So the original
+    # "gated on standing height AND low tilt, so the flip itself is never
+    # taxed" was wrong twice over: only the tilt gate was protecting the flip,
+    # and a rotating robot passes tilt < 20 deg twice per revolution. The
+    # height_full_max/height_zero_max ceiling (full cost to 0.16 m, zero at and
+    # above 0.22 m) closes the band, so this term now fires only where its name
+    # says: on a robot that is back down at standing height and nearly upright.
     cfg.rewards["arrival_damping"] = RewardTermCfg(
         func=microduck_mdp.body_ang_vel_at_height,
         weight=0.0,
         params={
-            "height_low":    0.09,
-            "height_high":   0.11,
-            "tilt_full_deg": 20.0,
-            "tilt_zero_deg": 45.0,
-            "asset_cfg":     SceneEntityCfg("robot", body_names=("trunk_base",)),
+            "height_low":      0.09,
+            "height_high":     0.11,
+            "height_full_max": 0.16,
+            "height_zero_max": 0.22,
+            "tilt_full_deg":   20.0,
+            "tilt_zero_deg":   45.0,
+            "asset_cfg":       SceneEntityCfg("robot", body_names=("trunk_base",)),
         },
     )
 
@@ -495,13 +509,21 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # plate-blind — there is no launcher sensor on the real robot — while the
     # critic gets the plate's relative pose/velocity and the phase, which is
     # what makes the value function's job tractable across a randomized toss.
-    # (ball_pos_in_base / ball_vel_in_base are generic in the asset name; they
-    # are the ball-kick env's critic-only ball terms, reused verbatim.)
+    #
+    # The terms are the ball-kick env's critic-only ball terms wrapped in a
+    # phase mask (backflip_plate_pos_obs / _vel_obs) that ZEROES them once the
+    # plate is GONE. That mask is not about hiding information, it is about the
+    # obs normalizer: the plate sits ~8.7 m away for ~85% of every episode's
+    # steps, so an unmasked plate_position normalizer converges to std ~3 m and
+    # squashes the informative HOLD/LAUNCH range (0-0.3 m) into under 0.1
+    # normalized units, destroying the z0 signal the value function needs to
+    # price a randomized toss. Do NOT add a plate term to the actor group,
+    # masked or not.
     cfg.observations["critic"].terms["plate_position"] = ObservationTermCfg(
-        func=microduck_mdp.ball_pos_in_base, params={"asset_name": "plate"},
+        func=microduck_mdp.backflip_plate_pos_obs, params={"asset_name": "plate"},
     )
     cfg.observations["critic"].terms["plate_velocity"] = ObservationTermCfg(
-        func=microduck_mdp.ball_vel_in_base, params={"asset_name": "plate"},
+        func=microduck_mdp.backflip_plate_vel_obs, params={"asset_name": "plate"},
     )
     cfg.observations["critic"].terms["plate_phase"] = ObservationTermCfg(
         func=microduck_mdp.backflip_phase_obs,
@@ -592,10 +614,17 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # z0 — up to 5 cm of interpenetration with a 50 kg prop on step one. Same
     # function, reset mode; it ignores env_ids and rewrites every env's plate
     # from the prescription, which is exactly what the step event does anyway.
+    #
+    # t_override=0.0 is REQUIRED here, not decoration: episode_length_buf is
+    # zeroed AFTER reset events run, so without it this event reads the
+    # terminal episode's time, the phase comes out GONE, and it parks the plate
+    # 5 m away instead of at z0 — for one control step after any manual
+    # reset(env_ids=...), which is what play/eval do. See the function's
+    # docstring.
     cfg.events["backflip_plate_reset"] = EventTermCfg(
         func=microduck_mdp.backflip_plate_step,
         mode="reset",
-        params={"asset_name": "plate"},
+        params={"asset_name": "plate", "t_override": 0.0},
     )
 
     # The plate is a PROP: its pose and velocity are rewritten every control
@@ -705,19 +734,23 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
 
-    # Launch-height DR tail. [0.10, 0.20] is the MEASURED box; 0.20-0.30 is the
+    # Launch-height DR tail. [0.10, 0.20] is the MEASURED box; 0.20-0.25 is the
     # spec's operator tail and is EXTRAPOLATION beyond the probe — a higher
     # launch means a higher apex and a harder landing, so it is introduced late
-    # and only as a tail. If landings get violent, cut this back to 0.25 (or to
-    # the measured box) before touching the reward weights.
+    # and only as a tail. The final stage was cut from 0.30 to 0.25: measured
+    # landing speed rises monotonically with z0 (e.g. 1.86 -> 1.98 m/s from
+    # z0=0.15 to 0.20 at the box's best cell), so extrapolating 50% past the
+    # probe's ceiling extrapolates in the direction of the hardware damage
+    # threshold. If a probe run ever measures 0.25-0.30, put the stage back
+    # then; do not extend it on the strength of the reward weights looking fine.
     cfg.curriculum["backflip_z0_range"] = CurriculumTermCfg(
         func=microduck_mdp.event_param_curriculum,
         params={
             "event_name": "backflip_launch_params",
             "param_stages": [
                 {"step": 0,         "params": {"z0_range": (0.10, 0.20)}},
-                {"step": 2000 * 24, "params": {"z0_range": (0.10, 0.25)}},
-                {"step": 4000 * 24, "params": {"z0_range": (0.10, 0.30)}},
+                {"step": 2000 * 24, "params": {"z0_range": (0.10, 0.225)}},
+                {"step": 4000 * 24, "params": {"z0_range": (0.10, 0.25)}},
             ],
         },
     )

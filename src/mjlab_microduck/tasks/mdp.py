@@ -767,6 +767,8 @@ def body_ang_vel_at_height(
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     tilt_full_deg: float | None = None,
     tilt_zero_deg: float = 45.0,
+    height_full_max: float | None = None,
+    height_zero_max: float | None = None,
 ) -> torch.Tensor:
     """Trunk ``sum(ω_xy²)`` penalty gated by trunk z (and optionally tilt).
 
@@ -775,6 +777,15 @@ def body_ang_vel_at_height(
     ``height_high``. Same formula as mjlab's body_angular_velocity_penalty
     (world-frame ω_xy, z-rotation free) but returns the gated POSITIVE cost;
     use a negative weight.
+
+    ``height_full_max``/``height_zero_max`` (optional, both or neither) add a
+    CEILING to that band: full cost up to ``height_full_max``, zero at and
+    above ``height_zero_max``, smoothstep between. The lower gate alone is a
+    FLOOR — everything above ``height_high`` pays full cost — which is wrong
+    for any task that goes airborne: a backflip's entire flight is metres
+    above ``height_high``, so "damp the arrival" silently became "damp the
+    maneuver", and a rotating robot passes any tilt gate twice per revolution.
+    A ceiling makes the gate an actual arrival WINDOW around standing height.
 
     ``tilt_full_deg`` (optional but STRONGLY recommended): additionally gate
     by tilt — full cost only when tilt ≤ tilt_full_deg, zero when
@@ -786,6 +797,11 @@ def body_ang_vel_at_height(
     tilt gate, the approach TO vertical is free; only residual wobble
     AROUND vertical (the overshoot→tip→retry oscillation) is damped.
     """
+    if (height_full_max is None) != (height_zero_max is None):
+        raise ValueError(
+            "body_ang_vel_at_height: height_full_max and height_zero_max must be "
+            "given together (an upper band needs both edges)"
+        )
     asset = env.scene[asset_cfg.name]
     ang_vel = asset.data.body_link_ang_vel_w[:, asset_cfg.body_ids, :].squeeze(1)
     cost = torch.sum(torch.square(ang_vel[:, :2]), dim=1)
@@ -794,6 +810,13 @@ def body_ang_vel_at_height(
     )
     t = torch.clamp((z - height_low) / max(height_high - height_low, 1e-6), 0.0, 1.0)
     gate = t * t * (3.0 - 2.0 * t)
+    if height_full_max is not None and height_zero_max is not None:
+        u = torch.clamp(
+            (height_zero_max - z) / max(height_zero_max - height_full_max, 1e-6),
+            0.0,
+            1.0,
+        )
+        gate = gate * (u * u * (3.0 - 2.0 * u))
     if tilt_full_deg is not None:
         quat = asset.data.root_link_quat_w
         cos_tilt = 1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2)
@@ -7411,6 +7434,7 @@ def backflip_plate_step(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor | None = None,
     asset_name: str = "plate",
+    t_override: float | None = None,
 ) -> None:
     """mode="step" event: rewrite the plate's prescribed pose and velocity.
 
@@ -7422,10 +7446,26 @@ def backflip_plate_step(
     In HOLD and LAUNCH the plate sits over its env origin. Once GONE it is also
     moved LATERALLY by BACKFLIP_GONE_POS[:2]; see that constant for why the
     parking spot is above and beside the floor rather than beneath it.
+
+    ``t_override`` exists for the mode="reset" registration of this same
+    function, which MUST pass 0.0. mjlab zeroes ``episode_length_buf`` AFTER
+    running reset events, so at reset-event time ``_backflip_time`` still
+    returns the TERMINAL episode's time: the phase reads GONE and the event
+    parks the plate at +5 m instead of placing it at ``z0``. That is benign
+    under ``auto_reset=True`` (the step event re-places it inside the same
+    ``step()``) and correct at construction, but wrong for one control step
+    after a manual ``reset(env_ids=...)`` — which is exactly what ``play`` and
+    the eval scripts do. Passing the intended time explicitly removes the
+    dependency on a buffer that has not been cleared yet.
     """
     t_hold, t_launch, z0, vz, w0, *_ = _backflip_state(env)
+    t = (
+        _backflip_time(env)
+        if t_override is None
+        else torch.full_like(t_hold, float(t_override))
+    )
     z, pitch, vz_t, w_t, phase = backflip_plate_kinematics(
-        _backflip_time(env), t_hold, t_launch, z0, vz, w0
+        t, t_hold, t_launch, z0, vz, w0
     )
     plate: Entity = env.scene[asset_name]
     n = env.num_envs
@@ -7666,6 +7706,46 @@ def backflip_landing(
     )
     settle = torch.exp(-(lin_vel**2) / (lin_vel_std**2))
     return gate * feet_f * up * height * calm * settle
+
+
+def _backflip_present_mask(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """1.0 while the plate is in the episode (HOLD/LAUNCH), 0.0 once GONE."""
+    return (backflip_phase(env) != BACKFLIP_PHASE_GONE).float().unsqueeze(-1)
+
+
+def backflip_plate_pos_obs(
+    env: ManagerBasedRlEnv, asset_name: str = "plate"
+) -> torch.Tensor:
+    """CRITIC-ONLY plate position in the base frame, ZEROED once GONE.
+
+    Same quantity as ``ball_pos_in_base``, masked by phase. The mask is about
+    the OBS NORMALIZER, not about hiding information: the plate is parked
+    ~8.7 m from the robot for ~85% of every episode's steps, so the running
+    normalizer for this term converges to a std of ~3 m and squashes the
+    informative HOLD/LAUNCH range (0-0.3 m) to under 0.1 normalized units —
+    destroying the ``z0`` signal the value function needs in order to price a
+    randomized toss. Zeroing the parked value collapses that 85% onto a single
+    constant instead, leaving the normalizer to describe the range that
+    actually varies.
+
+    Never mirror this into the actor group. The actor is plate-blind by design
+    (the real robot has no launcher sensing); a masked observation is still an
+    observation.
+    """
+    return ball_pos_in_base(env, asset_name=asset_name) * _backflip_present_mask(env)
+
+
+def backflip_plate_vel_obs(
+    env: ManagerBasedRlEnv, asset_name: str = "plate"
+) -> torch.Tensor:
+    """CRITIC-ONLY plate velocity in the base frame, ZEROED once GONE.
+
+    Same rationale as ``backflip_plate_pos_obs``. The parked plate's velocity
+    is re-zeroed every control step anyway, so the mask matters less here than
+    for position — but it is applied for the same reason and so the two terms
+    cannot drift apart.
+    """
+    return ball_vel_in_base(env, asset_name=asset_name) * _backflip_present_mask(env)
 
 
 def backflip_phase_obs(env: ManagerBasedRlEnv) -> torch.Tensor:

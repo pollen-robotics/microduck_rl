@@ -1,5 +1,6 @@
 import math
 
+import pytest
 import torch
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
@@ -625,3 +626,140 @@ def test_one_continuous_arc_of_the_same_total_rotation_does_advance_it():
         microduck_mdp.BACKFLIP_LANDING_GATE_HI,
     )
     assert float(gate[0]) == 1.0
+
+
+# --- Fix-wave additions: the arrival-damper window, the reset-time plate
+# placement, and the GONE-masked critic plate observations. -------------------
+
+
+class _StubAssetCfg:
+    """SceneEntityCfg stand-in: name/body_ids are all the function reads."""
+
+    name = "robot"
+    body_ids = [0]
+
+
+class _FakePlateData:
+    def __init__(self, pos, vel):
+        self.root_link_pos_w = torch.tensor([pos])
+        self.root_link_lin_vel_w = torch.tensor([vel])
+
+
+def _arrival_gate_at(z):
+    """body_ang_vel_at_height at the backflip cfg's own numbers, unit omega_x."""
+    env = _FakeEnvWithScene(num_envs=1)
+    env.robot.data.root_link_pos_w[:, 2] = z
+    env.robot.data.body_link_ang_vel_w = torch.zeros(1, 1, 3)
+    env.robot.data.body_link_ang_vel_w[:, 0, 0] = 1.0
+    return float(
+        microduck_mdp.body_ang_vel_at_height(
+            env,
+            height_low=0.09,
+            height_high=0.11,
+            asset_cfg=_StubAssetCfg(),
+            tilt_full_deg=20.0,
+            tilt_zero_deg=45.0,
+            height_full_max=0.16,
+            height_zero_max=0.22,
+        )[0]
+    )
+
+
+def test_arrival_damper_is_free_in_flight_and_active_at_standing_height():
+    # The bug this pins: height_low/height_high alone is a FLOOR, so the whole
+    # flight of a backflip (apex 0.4-1.2 m measured) paid FULL cost while the
+    # comment claimed "the flip itself is never taxed". Only the tilt gate was
+    # protecting it, and a rotating robot passes tilt < 20 deg twice per turn.
+    assert _arrival_gate_at(0.115) > 0.9   # settled at standing height: damped
+    assert _arrival_gate_at(0.50) == 0.0   # mid-flight: free
+    assert _arrival_gate_at(1.00) == 0.0   # high apex: free
+    assert _arrival_gate_at(0.275) == 0.0  # standing on the plate in HOLD: free
+    assert _arrival_gate_at(0.05) == 0.0   # down on the ground: free
+
+
+def test_arrival_damper_without_a_ceiling_is_still_a_floor():
+    # Guard against someone "simplifying" the ceiling away: with no upper edge
+    # the gate is wide open at flight altitude.
+    env = _FakeEnvWithScene(num_envs=1)
+    env.robot.data.root_link_pos_w[:, 2] = 0.50
+    env.robot.data.body_link_ang_vel_w = torch.zeros(1, 1, 3)
+    env.robot.data.body_link_ang_vel_w[:, 0, 0] = 1.0
+    no_ceiling = float(
+        microduck_mdp.body_ang_vel_at_height(
+            env, height_low=0.09, height_high=0.11, asset_cfg=_StubAssetCfg()
+        )[0]
+    )
+    assert no_ceiling == 1.0
+
+
+def test_arrival_damper_ceiling_needs_both_edges():
+    env = _FakeEnvWithScene(num_envs=1)
+    env.robot.data.body_link_ang_vel_w = torch.zeros(1, 1, 3)
+    with pytest.raises(ValueError):
+        microduck_mdp.body_ang_vel_at_height(
+            env, height_low=0.09, height_high=0.11,
+            asset_cfg=_StubAssetCfg(), height_full_max=0.16,
+        )
+
+
+def test_plate_reset_places_the_plate_at_z0_despite_a_stale_episode_buffer():
+    # episode_length_buf[env_ids] = 0 runs AFTER reset events, so at
+    # reset-event time _backflip_time returns the TERMINAL episode's time and
+    # the phase reads GONE. Benign under auto_reset (the step event re-places
+    # the plate in the same step()), wrong for one control step after a manual
+    # reset(env_ids=...) — which play/eval use.
+    env = _FakeEnvWithScene(num_envs=2)
+    microduck_mdp.reset_backflip_launch_params(
+        env, torch.arange(2), hold_range=(0.3, 0.3), launch_range=(0.1, 0.1),
+        z0_range=(0.17, 0.17), vz_range=(2.0, 2.0), w0_range=(24.0, 24.0),
+    )
+    env.episode_length_buf[:] = 199          # a whole terminal episode of steps
+
+    microduck_mdp.backflip_plate_step(env, asset_name="plate", t_override=0.0)
+    pose, _ = env.plate.pose_calls[-1]
+    assert abs(float(pose[0, 2]) - 0.17) < 1e-6
+    assert float(pose[0, 0]) == 0.0          # not the +5 m parking spot
+    assert float(pose[0, 1]) == 0.0
+    vel, _ = env.plate.vel_calls[-1]
+    assert float(vel.abs().sum()) == 0.0     # parked, still
+
+    # Without the override the stale buffer really does park it away: that is
+    # the bug, kept here so the fix cannot be quietly reverted.
+    microduck_mdp.backflip_plate_step(env, asset_name="plate")
+    stale, _ = env.plate.pose_calls[-1]
+    assert float(stale[0, 0]) == microduck_mdp.BACKFLIP_GONE_POS[0]
+
+
+def _plate_obs_env():
+    env = _FakeEnvWithScene(num_envs=1)
+    env.plate.data = _FakePlateData((5.0, 5.0, 5.0), (1.0, 2.0, 3.0))
+    microduck_mdp.reset_backflip_launch_params(
+        env, torch.arange(1), hold_range=(0.3, 0.3), launch_range=(0.1, 0.1),
+        z0_range=(0.15, 0.15), vz_range=(2.0, 2.0), w0_range=(24.0, 24.0),
+    )
+    return env
+
+
+def test_critic_plate_obs_are_zeroed_once_the_plate_is_gone():
+    # Not about hiding information — about the obs normalizer. The plate is
+    # parked ~8.7 m from the robot for ~85% of every episode's steps, so an
+    # unmasked plate_position normalizer converges to std ~3 m and squashes the
+    # informative HOLD/LAUNCH range (0-0.3 m) below 0.1 normalized units,
+    # destroying the z0 signal the value function needs.
+    env = _plate_obs_env()
+    env.episode_length_buf[:] = 0                       # HOLD: plate present
+    assert float(microduck_mdp.backflip_plate_pos_obs(env).abs().sum()) > 0.0
+    assert float(microduck_mdp.backflip_plate_vel_obs(env).abs().sum()) > 0.0
+
+    env.episode_length_buf[:] = 100                     # GONE: masked
+    assert float(microduck_mdp.backflip_plate_pos_obs(env).abs().sum()) == 0.0
+    assert float(microduck_mdp.backflip_plate_vel_obs(env).abs().sum()) == 0.0
+
+
+def test_masked_plate_obs_keep_the_unmasked_shape_and_values_while_present():
+    env = _plate_obs_env()
+    env.episode_length_buf[:] = 0
+    masked = microduck_mdp.backflip_plate_pos_obs(env)
+    raw = microduck_mdp.ball_pos_in_base(env, asset_name="plate")
+    assert masked.shape == raw.shape == (1, 3)
+    assert torch.allclose(masked, raw)
