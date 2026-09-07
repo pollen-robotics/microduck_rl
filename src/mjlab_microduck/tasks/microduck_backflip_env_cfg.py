@@ -1,55 +1,15 @@
 """Microduck backflip task — launched by the operator's hands, land on the feet.
 
-STATUS (2026-09-07). The env is coherent and trainable. What is known, and
-what is not:
-  * The hold posture is STANDING, and the spawn is geometrically valid: the
-    feet are the lowest geoms, so placing the trunk at STAND_Z above the plate
-    top puts the soles ON the surface by construction. Four CPU tests assert
-    it (no geom below the plate top inside its footprint, penetration within
-    loaded-contact tolerance, z0-invariant, feet lowest).
-  * A TUCKED hold was tried and reverted. It appeared to fly at 1.5-2.2 m/s
-    against standing's 3.4, which is why it was adopted — but that number came
-    from a spawn with the robot's FEET TUNNELLED UNDER the plate slab (the tuck
-    kneels on its shins, so its feet are not its lowest point and a spawn
-    placed by trunk height put them through the 2 cm slab). Measured from a
-    valid rest the tuck lands at 3.38 m/s and standing at 3.43: equivalent. The
-    tuck bought nothing and cost the entire geometric problem.
-  * OPEN-LOOP LANDING IS 3.1-3.9 m/s, ABOVE the ~2.6 m/s the operator named.
-    This is accepted knowingly, not hidden. THE PROBE MEASURES THE LAUNCH, NOT
-    THE SKILL: it holds a fixed pose and folds once at the flick. A trained
-    policy tucks to spin faster — needing less altitude, so a lower apex and a
-    slower touchdown — and extends to brake before landing. Whether that closes
-    the 1.3 m/s gap is a TRAINING question and nothing measured here predicts
-    it either way. Watch the landing speed in the first run.
-  * The launch is KNIFE-EDGE in w0: rotation swings 100-300 deg between
-    neighbouring values, so W0_RANGE carries no DR width. That is a real
-    sim2real risk (a human's flick does not repeat to +-0.5 rad/s) and the
-    honest state of the measurement.
-  * The 64-env / 5-iteration smoke test has NOT been run on this branch.
-
-Episodic policy. The robot starts TUCKED (folded, chin in) on a prescribed
-"launcher plate" (``launcher.xml``, an 18x18x2 cm 50 kg prop whose pose and
-velocity are rewritten every control step — see the BACKFLIP section of
-``mdp.py``). The plate holds still for ``hold`` seconds, then accelerates
-upward to ``vz`` while pitching backward at ``w0`` over ``launch`` seconds,
-then teleports away. The robot must ride that toss through a full 360 deg
-BACKWARD rotation and land on its FEET, standing.
-
-WHY THE HOLD IS TUCKED AND NOT STANDING — the measurement, not a preference.
-An earlier version of this env held the robot STANDING on the plate and paid
-``ready_stance`` to keep it there, while the launch envelope had been measured
-from a TUCKED probe spawn. Those are different maneuvers. Re-measured from a
-standing spawn (BAM actuators, ~700 direction-checked cells over
-vz [2, 4] x w0 [3, 36] x t_launch [0.08, 0.15], with and without tucking at
-the flick), NO launch setting closes 360 deg below the ~2.6 m/s hardware
-landing limit, and the box that was configured rotated the robot FORWARD
-(to -275 deg, face-down, orientation-verified). A standing robot has a ~11 cm
-CoM and a large pitch inertia, so the flick overdrives the sole contact
-instead of tipping it over its heels. Tucked (~3 cm CoM) the same class of box
-closes 393-484 deg at 1.68-2.51 m/s. So the SPAWN, the pose ``ready_stance``
-pays for, and the posture the envelope is measured from are now one posture —
-and the probe imports the constants from this file so they cannot drift apart
-again. Full tables: docs/backflip_envelope_results.md, "Tucked hold".
+STATUS (2026-09-07). This is a v0: a platform under the robot's feet that
+lifts and flicks it, with launch parameters randomized across the spread a
+human throw plausibly delivers. The spawn is geometrically valid (the feet are
+the lowest geoms, so placing the trunk at STAND_Z above the plate top puts the
+soles on the surface by construction; four CPU tests assert it). Open-loop —
+holding a fixed pose and folding once at the flick — the robot lands at roughly
+3-4 m/s, above the ~2.6 m/s the operator would like; a trained policy that
+tucks to spin faster and extends to brake before contact may do better, and
+that, along with how much of the box it can actually complete, is answered by
+training rather than by more probing.
 
 WHY THE PLATE IS HELD 7-9 cm UP AND NOT LYING ON THE GROUND. A user watching
 the env asked for the plate to sit ON the ground. Measured, it cannot: with the
@@ -335,38 +295,24 @@ TUCK_Z = 0.029
 # its top surface — where the feet are — is one half-thickness above that.
 PLATE_HALF_THICKNESS = 0.01
 
-# ── Launch envelope — WHOLE-BOX verified from the STANDING spawn ─────────────
-# Every range is checked at its corners AND midpoints, jointly, from the exact
-# posture reset_backflip_robot_on_plate produces (probe mode
-# `--posture standing --tuck-at-flick --bam --box-check`). The acceptance rule
-# is WHOLE-BOX: every sampled combination must close >= 360 deg BACKWARD, and
-# no cell may pass the landing gate by never landing.
+# ── Launch envelope — a plausible human throw ────────────────────────────────
+# These are v0 ranges: the spread a person's hands plausibly deliver, centred
+# on what the CPU probe measured. They are NOT tuned so that an unskilled robot
+# completes every throw.
 #
-# MEASURED ACROSS THE BOX: rotation 361-458 deg, landing 3.2-3.9 m/s.
+# WHY NOT. An earlier revision required WHOLE-BOX OPEN-LOOP CLOSURE — every
+# sampled combination had to complete 360 deg with the robot holding a fixed
+# pose. That squeezed w0 to the single value 18.5 rad/s, which no human hand
+# reproduces, and it is the wrong bar besides: compensating for an imperfect
+# throw is exactly the policy's job. Open-loop closure is now reported as
+# INFORMATION about starting difficulty, not a gate.
 #
-# !! READ THIS BEFORE WIDENING ANYTHING. THE STANDING LAUNCH IS KNIFE-EDGE.
-# Rotation swings 100-300 deg between NEIGHBOURING w0 values: at
-# t_launch=0.16, vz=2.85 the whole-box minimum is 379 deg at w0=17.5, 342 at
-# 18.0, 366 at 18.5 and 248 at 19.0. w0 therefore carries NO DR width at all —
-# the box is a single value — and vz carries 0.1 m/s. That is a real sim2real
-# risk (a human's flick does not repeat to +-0.5 rad/s) and it is the honest
-# state of the measurement, not a tuning failure: a 3x wider search
-# (w0 in [15, 24] x vz in [2.3, 3.0] x t_launch in [0.12, 0.17]) found no
-# rectangle with more width that closes whole-box.
-#
-# LANDING IS ABOVE THE OPERATOR'S COMFORT THRESHOLD. 3.2-3.9 m/s against the
-# ~2.6 m/s the user named. This is accepted for now, knowingly. The open
-# question the probe CANNOT answer: it holds a fixed pose and folds once at the
-# flick, so it measures THE LAUNCH, NOT THE SKILL. A trained policy tucks to
-# spin faster (needing less altitude, so a lower apex and a slower touchdown)
-# and extends to brake before landing. Whether that buys the missing 1.3 m/s
-# is a training question, and nothing measured here predicts it either way.
-#
-# HISTORY, so nobody re-derives a superseded box: a TUCKED hold was measured at
-# 1.5-2.2 m/s and adopted, then reverted — that number came from a state with
-# the robot's FEET TUNNELLED UNDER the plate slab. From a valid rest the tuck
-# lands at 3.38 m/s and standing at 3.43: equivalent, so the tuck bought
-# nothing and cost the whole geometric problem. See the module docstring.
+# THE ONE HARD LIMIT IS DIRECTION. Above roughly w0 = 24-27 rad/s from a
+# standing hold the flick overdrives the sole contact and the robot comes out
+# FORWARD, face-down — a different maneuver that the rotation accumulator would
+# have to be re-signed to even score. The w0 ceiling stays inside that measured
+# boundary with margin. Every corner of this box is direction-checked backward;
+# re-check with `--box-check` if you move it.
 HOLD_RANGE    = (0.1, 0.3)     # widened to (0.1, 0.5) by curriculum, and no
                                # further: MEASURED open-loop standing drift on
                                # the plate under BAM is 3.5 deg of tilt at
@@ -376,11 +322,12 @@ HOLD_RANGE    = (0.1, 0.3)     # widened to (0.1, 0.5) by curriculum, and no
                                # policy balances — the walking and stand-up
                                # policies hold far longer — so this is a floor
                                # on what is safe, not a claim about the limit.
-LAUNCH_RANGE  = (0.155, 0.16)
-Z0_RANGE      = (0.07, 0.09)   # rotation varies < 6 deg across this: the plate
-                               # height is the one benign axis
-VZ_RANGE      = (2.80, 2.90)
-W0_RANGE      = (18.5, 18.5)   # NO width — see the knife-edge note above
+LAUNCH_RANGE  = (0.12, 0.16)   # how long the hands stay with the robot
+Z0_RANGE      = (0.07, 0.09)   # plate top 0.08-0.10; rotation varies < 6 deg
+                               # across this, the one benign DR axis
+VZ_RANGE      = (2.50, 3.50)   # lift
+W0_RANGE      = (15.0, 24.0)   # backward flick; 24 keeps clear of the
+                               # measured 24-27 direction reversal
 MAX_PAID_RATE = 25.0           # rad/s; measured peak in the box is 23.0,
                                # mean over a flip 15.6-20.1 — 25 forfeits
                                # nothing a real flip needs

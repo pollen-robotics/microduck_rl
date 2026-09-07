@@ -46,7 +46,14 @@ survive?
 > after the flop audit found the side-lying tuck outscoring the upright one.
 > See "**Flop audit, and two corrections**".
 
-> **CURRENT BOX — the final section, "Back to standing" (2026-09-07):**
+> **CURRENT BOX — the final section, "v0 — a plausible human throw":**
+> STANDING hold, `z0` in [0.07, 0.09], `vz` in [2.50, 3.50], `w0` in
+> [15, 24], `t_launch` in [0.12, 0.16]. Direction-verified backward in every
+> cell; 37% close 360 deg open-loop, which is information about starting
+> difficulty rather than a gate; landing 2.4-4.4 m/s. Whole-box open-loop
+> closure is NO LONGER an acceptance criterion — see that section for why.
+
+> **Superseded box — "Back to standing" (2026-09-07):**
 > STANDING hold, `z0` in [0.07, 0.09], `vz` in [2.80, 2.90], `w0` = 18.5,
 > `t_launch` in [0.155, 0.16]. Rotation 363-458 deg, landing 3.1-3.9 m/s,
 > whole-box closure, 33/33 direction checks backward, spawn geometrically
@@ -4704,3 +4711,66 @@ uv run python scripts/backflip_envelope.py --bam --posture standing --tuck-at-fl
     --check-vz 2.85 --check-w0 18.5 --check-tuck 1.0
 uv run --with pytest pytest tests/test_backflip_cfg.py -q
 ```
+
+
+# v0 — a plausible human throw, and closure as information
+
+Change of direction from the user: the acceptance bar was over-engineered.
+**Whole-box open-loop closure is dropped as a criterion.** It demanded that a
+robot with NO skill complete every throw, when compensating for an imperfect
+throw is precisely the policy's job — and it is what squeezed `w0` to the
+single knife-edge value 18.5 rad/s that no human hand reproduces.
+
+The launch ranges are now the spread a person's hands plausibly deliver,
+centred on what was already measured. No new sweep was run to justify them.
+
+| | v0 range | previous |
+|---|---|---|
+| `z0` | 0.07-0.09 m | 0.07-0.09 |
+| `vz` | **2.50-3.50** m/s | 2.80-2.90 |
+| `w0` | **15.0-24.0** rad/s | 18.5 (single value) |
+| `t_launch` | **0.12-0.16** s | 0.155-0.16 |
+| `HOLD_RANGE` | 0.1-0.3 s, curriculum to 0.5 | unchanged |
+
+**The one hard limit is DIRECTION.** Above roughly `w0` 24-27 rad/s from a
+standing hold the flick overdrives the sole contact and the robot comes out
+FORWARD, face-down. The ceiling stays inside that measured boundary.
+
+Verified cheaply, corners and midpoints of all four ranges crossed with the
+hold extremes and midpoint (243 cells):
+
+```
+# box-check posture=standing bam=True dt=0.005
+#   z0 (0.07, 0.09) vz (2.5, 3.5) w0 (15.0, 24.0) launch (0.12, 0.16)
+#   z0 grid (0.07, 0.08, 0.09)
+#   hold (0.1, 0.2, 0.5) tuck (1.0,)
+  243 cells | rot 40.5-572.3 deg | max landing = 4.41 m/s | short of 360: 154 | over 2.6 m/s: 232 | never landed: 0
+  worst by rotation:
+    rot=   40.5 land= 2.84 apex=0.473 tilt0=  3.0  z0=0.070 vz=2.500 w0=15.00 launch=0.120 hold=0.20 tuck=1.00
+    rot=   40.8 land= 2.89 apex=0.483 tilt0=  3.0  z0=0.080 vz=2.500 w0=15.00 launch=0.120 hold=0.20 tuck=1.00
+    rot=   40.8 land= 2.89 apex=0.493 tilt0=  3.0  z0=0.090 vz=2.500 w0=15.00 launch=0.120 hold=0.20 tuck=1.00
+    rot=   43.5 land= 2.38 apex=0.426 tilt0=  1.2  z0=0.070 vz=2.500 w0=15.00 launch=0.120 hold=0.10 tuck=1.00
+    rot=   44.5 land= 2.43 apex=0.436 tilt0=  1.2  z0=0.080 vz=2.500 w0=15.00 launch=0.120 hold=0.10 tuck=1.00
+  worst by landing speed:
+    rot=  370.6 land= 4.41 apex=0.993 tilt0=  8.9  z0=0.080 vz=3.500 w0=15.00 launch=0.160 hold=0.50 tuck=1.00
+    rot=  370.6 land= 4.41 apex=1.003 tilt0=  8.9  z0=0.090 vz=3.500 w0=15.00 launch=0.160 hold=0.50 tuck=1.00
+    rot=  350.8 land= 4.38 apex=0.933 tilt0=  3.0  z0=0.090 vz=3.500 w0=15.00 launch=0.140 hold=0.20 tuck=1.00
+    rot=  350.8 land= 4.38 apex=0.923 tilt0=  3.0  z0=0.080 vz=3.500 w0=15.00 launch=0.140 hold=0.20 tuck=1.00
+    rot=  368.6 land= 4.38 apex=0.983 tilt0=  8.9  z0=0.070 vz=3.500 w0=15.00 launch=0.160 hold=0.50 tuck=1.00
+  DIRECTION: PASS — 0 cells rotate FORWARD (min rot 40.5 deg)
+  OPEN-LOOP CLOSURE (information, not a gate): 89/243 cells reach 360 deg = 37%; 0 never land
+  LANDING: 2.38-4.41 m/s (operator comfort threshold 2.6 m/s; 232/243 cells over)
+```
+
+- **DIRECTION: PASS — 0 of 243 cells rotate forward** (minimum rotation
+  +40.5 deg).
+- **Open-loop closure: 89/243 = 37%.** This is INFORMATION about starting
+  difficulty, not a gate. A fixed-pose robot completes about a third of the
+  throws it will be handed; the rest are what the policy has to learn to
+  rescue. A low fraction here is expected and fine.
+- Landing 2.38-4.41 m/s open-loop, against the operator's ~2.6 m/s preference.
+  A trained policy that tucks to spin faster and extends to brake before
+  contact may do better; nothing measured open-loop predicts that.
+
+`--box-check` now prints DIRECTION as the only PASS/FAIL and reports closure as
+a percentage, so the tool cannot re-impose the bar that was just removed.

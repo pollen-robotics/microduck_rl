@@ -714,16 +714,23 @@ def box_check_report(model, data, bam_ctrl=None, posture="tucked_env"):
     # TWO SEPARATE VERDICTS, deliberately. Closure is a correctness property
     # of the box; landing speed is a hardware trade-off the user owns. Fusing
     # them into one PASS/FAIL hid which of the two was failing.
-    closes = n_short == 0 and n_never == 0
+    # DIRECTION is the only gate. Open-loop closure is INFORMATION about
+    # starting difficulty, not a pass/fail bar: requiring an unskilled robot to
+    # complete every throw is the wrong ask (compensating for an imperfect
+    # throw is the policy's job) and it once squeezed w0 to a single value no
+    # human hand could reproduce.
+    n_forward = sum(1 for r in rows if r[0] < 0.0)
     min_land = min(r[1] for r in rows)
-    over = "" if n_hard == 0 else f"; {n_hard}/{len(rows)} cells over"
-    within = "within" if n_hard == 0 else "ABOVE"
-    print(f"  CLOSURE: {'PASS' if closes else 'FAIL'} — "
-          f"{n_short} cells short of {BOX_MIN_ROT_DEG:.0f} deg, "
-          f"{n_never} that never land")
-    print(f"  LANDING: {min_land:.2f}-{max_land:.2f} m/s ({within} the "
-          f"{BOX_MAX_LAND} m/s operator comfort threshold{over})")
-    return rows, closes and n_hard == 0
+    closed = len(rows) - n_short
+    print(f"  DIRECTION: {'PASS' if n_forward == 0 else 'FAIL'} — "
+          f"{n_forward} cells rotate FORWARD (min rot {min_rot:.1f} deg)")
+    print(f"  OPEN-LOOP CLOSURE (information, not a gate): "
+          f"{closed}/{len(rows)} cells reach {BOX_MIN_ROT_DEG:.0f} deg "
+          f"= {100.0 * closed / len(rows):.0f}%; {n_never} never land")
+    print(f"  LANDING: {min_land:.2f}-{max_land:.2f} m/s "
+          f"(operator comfort threshold {BOX_MAX_LAND} m/s; "
+          f"{n_hard}/{len(rows)} cells over)")
+    return rows, n_forward == 0
 
 
 # Flop basins audited by --flop-audit. AGENTS.md: "audit each positive term

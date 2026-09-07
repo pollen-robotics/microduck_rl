@@ -187,15 +187,15 @@ def test_sampled_params_stay_inside_the_requested_ranges():
 
 
 def test_sampled_params_use_measured_envelope_defaults():
-    # Defaults must be the WHOLE-BOX-verified tucked-spawn launch box, not the
-    # stale placeholders and not the superseded standing-probe box.
+    # Defaults must be the v0 human-throw ranges, not any of the superseded
+    # boxes and not the pre-measurement placeholders.
     env = _FakeEnv(num_envs=256)
     microduck_mdp.reset_backflip_launch_params(env, torch.arange(256))
-    assert torch.all((env._backflip_vz >= 2.80) & (env._backflip_vz <= 2.90))
-    assert torch.all((env._backflip_w0 >= 18.5) & (env._backflip_w0 <= 18.5))
-    # A short flick is the violent one: t_launch=0.08 lands at up to 3.97 m/s.
-    # 0.14 under-rotates at this (retuned, lower) vz.
-    assert torch.all(env._backflip_t_launch >= 0.155)
+    assert torch.all((env._backflip_vz >= 2.50) & (env._backflip_vz <= 3.50))
+    assert torch.all((env._backflip_w0 >= 15.0) & (env._backflip_w0 <= 24.0))
+    # A short flick is the violent one: t_launch=0.08 lands at up to 3.97 m/s,
+    # which is why the low end sits at 0.12.
+    assert torch.all(env._backflip_t_launch >= 0.12)
     assert torch.all(env._backflip_t_launch <= 0.16)
     # z0 is floored at 0.07 by the hold pose's geometry and capped at 0.09 by
     # the retune (the plate is now less than half as high as it was).

@@ -7360,10 +7360,10 @@ def _backflip_state(env: ManagerBasedRlEnv) -> tuple:
         # feet"). They now describe a plausible mid-box toss instead.
         z = torch.zeros(env.num_envs, device=env.device)
         env._backflip_t_hold = torch.full_like(z, 0.2)
-        env._backflip_t_launch = torch.full_like(z, 0.157)
+        env._backflip_t_launch = torch.full_like(z, 0.14)
         env._backflip_z0 = torch.full_like(z, 0.08)
-        env._backflip_vz = torch.full_like(z, 2.85)
-        env._backflip_w0 = torch.full_like(z, 18.5)
+        env._backflip_vz = torch.full_like(z, 3.0)
+        env._backflip_w0 = torch.full_like(z, 19.5)
         env._backflip_accum = z.clone()
         env._backflip_max = z.clone()
         env._backflip_paid = z.clone()
@@ -7389,38 +7389,34 @@ def reset_backflip_launch_params(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
     hold_range: tuple = (0.1, 0.3),
-    launch_range: tuple = (0.155, 0.16),
+    launch_range: tuple = (0.12, 0.16),
     z0_range: tuple = (0.07, 0.09),
-    vz_range: tuple = (2.80, 2.90),
-    w0_range: tuple = (18.5, 18.5),
+    vz_range: tuple = (2.50, 3.50),
+    w0_range: tuple = (15.0, 24.0),
 ) -> None:
     """Sample this episode's toss and clear the rotation accounting.
 
-    Defaults are the WHOLE-BOX-VERIFIED launch envelope, measured from the
-    ACTUAL spawn ``reset_backflip_robot_on_plate`` produces (the STANDING hold)
-    with BAM actuators, with the policy modelled as folding into a full tuck at
-    the flick: ``z0 in [0.07, 0.09]`` m, ``vz in [2.80, 2.90]`` m/s,
-    ``w0 = 18.5`` rad/s, ``t_launch in [0.155, 0.16]`` s. Every sampled
-    combination of the corners and midpoints closes >= 360 deg BACKWARD and
-    none passes the landing gate by never landing. Measured across the box:
-    rotation 361-458 deg, landing 3.2-3.9 m/s.
+    Defaults are v0 ranges: the spread a human throw plausibly delivers,
+    centred on what the CPU probe measured from the standing hold. They are
+    NOT tuned so that an unskilled robot completes every throw — compensating
+    for an imperfect throw is the policy's job, and requiring open-loop closure
+    everywhere once squeezed ``w0`` to a single value no hand could reproduce.
 
-    ``w0`` has NO width on purpose. The standing launch is knife-edge —
-    rotation swings 100-300 deg between neighbouring w0 values — and a wider
-    search found no rectangle that closes whole-box with more. Do not widen
-    any range without re-running ``--box-check``.
+    THE ONE HARD LIMIT IS DIRECTION: above roughly ``w0`` 24-27 rad/s from a
+    standing hold the flick overdrives the sole contact and the robot comes out
+    FORWARD, face-down. The ceiling stays inside that measured boundary and
+    every corner of the box is direction-checked backward.
 
     History worth not repeating, all in
     ``docs/backflip_envelope_results.md``:
       * ``vz in [2, 3]``, ``w0 in [8, 14]`` (pre-measurement placeholders) do
         not close a flip at all.
-      * every box measured from a TUCKED hold (``vz in [1.9, 2.25]``,
-        ``w0 in [21, 30]``, landing 1.5-2.2 m/s) came from a state with the
-        robot's FEET TUNNELLED UNDER the launcher plate. From a valid rest the
-        tuck lands at 3.38 m/s, i.e. the same as standing, so the posture was
+      * every box measured from a TUCKED hold (landing 1.5-2.2 m/s) came from a
+        spawn with the robot's FEET TUNNELLED UNDER the launcher plate. From a
+        valid rest the tuck lands the same as standing, so the posture was
         reverted.
       * ``t_launch`` down at 0.08 lands at up to 3.97 m/s: a SHORT flick is the
-        violent one.
+        violent one, which is why the low end sits at 0.12.
     """
     if env_ids is None or len(env_ids) == 0:
         return

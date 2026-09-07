@@ -487,17 +487,27 @@ def test_there_is_no_z0_dr_tail(cfg):
     assert Z0_RANGE == (0.07, 0.09)
 
 
-def test_the_standing_box_is_the_measured_one(cfg):
-    # Whole-box verified from the STANDING spawn with the policy folding at
-    # the flick: rotation 361-458 deg, landing 3.2-3.9 m/s. w0 has NO width
-    # because the launch is knife-edge -- rotation swings 100-300 deg between
-    # neighbouring w0 values -- and a 3x wider search found nothing wider that
-    # closes. Do not widen without re-running --box-check.
+def test_the_standing_box_is_a_plausible_human_throw(cfg):
+    # v0 ranges: the spread a person's hands plausibly deliver, NOT ranges
+    # tuned so an unskilled robot completes every throw. Requiring whole-box
+    # open-loop closure once squeezed w0 to the single value 18.5 rad/s, which
+    # no hand reproduces, and it is the wrong bar -- compensating for an
+    # imperfect throw is the policy's job. Measured over 243 cells: 0 rotate
+    # forward, 37% close 360 deg open-loop, landing 2.4-4.4 m/s.
     p = cfg.events["backflip_launch_params"].params
-    assert p["vz_range"] == VZ_RANGE == (2.80, 2.90)
-    assert p["w0_range"] == W0_RANGE == (18.5, 18.5)
-    assert p["launch_range"] == LAUNCH_RANGE == (0.155, 0.16)
+    assert p["vz_range"] == VZ_RANGE == (2.50, 3.50)
+    assert p["w0_range"] == W0_RANGE == (15.0, 24.0)
+    assert p["launch_range"] == LAUNCH_RANGE == (0.12, 0.16)
     assert p["z0_range"] == Z0_RANGE == (0.07, 0.09)
+
+
+def test_the_flick_stays_inside_the_direction_reversal_boundary(cfg):
+    # THE one hard limit. Above roughly w0 24-27 rad/s from a standing hold the
+    # flick overdrives the sole contact and the robot comes out FORWARD,
+    # face-down -- a different maneuver the accumulator would have to be
+    # re-signed to score. Every corner of the box is direction-checked backward;
+    # widening w0 past this needs a fresh --box-check.
+    assert cfg.events["backflip_launch_params"].params["w0_range"][1] <= 24.0
 
 
 def test_the_hold_window_is_capped_where_standing_holds_itself(cfg):
