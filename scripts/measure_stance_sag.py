@@ -70,8 +70,12 @@ def main():
     except OSError as e:
         sys.exit(f"cannot connect to {args.socket}: {e}\n"
                  "Is robotd running? (systemctl is-active robotd)")
-    s.sendall(json.dumps(
-        {"jsonrpc": "2.0", "id": 1, "method": "robot.subscribe"}).encode() + b"\n")
+    # `params` is REQUIRED: robot.subscribe deserialises SubscribeParams and a
+    # null params is rejected with -32602 "expected struct SubscribeParams".
+    # `hz: null` inside it means every tick, which is what we want -- the whole
+    # point is to catch a topple that takes under two seconds.
+    s.sendall(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "robot.subscribe",
+                          "params": {"hz": None}}).encode() + b"\n")
 
     f = s.makefile("r", encoding="utf-8")
     rows = []

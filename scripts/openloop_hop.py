@@ -63,18 +63,33 @@ UPRIGHT_MAX = 0.5236  # 30 deg
 # Parameter vector, in order. Ranges are the search box; CEM samples inside it
 # and clips. Amplitudes are radians of joint offset from HOME_FRAME, times in
 # seconds.
+# THE CROUCH AND THE EXTENSION ARE INDEPENDENT POSES, and the first version's
+# failure to make them so is why it never jumped. It scaled one crouch pose by
+# +sink and then by -push, which forces the extended posture onto the opposite
+# RAY from the crouch. That is a crippling constraint here, because HOME_FRAME
+# already sits near maximum extension: measured kinematically, stance height is
+# 145.4 mm at home and EVERY single-joint offset lowers it -- the best any one
+# direction gives back is +0.9 mm. Hip and ankle lower the body in BOTH
+# directions. So "push = -crouch" mostly meant "crouch a different way", which
+# is precisely the backward, non-jumping push the trajectory showed.
+#
+# The ~14 mm of real headroom (hop.py records a coordinated grid search reaching
+# 161.3 mm against home's 147.1) is only reachable by a COMBINATION of joints,
+# so the extended pose has to be free to be anywhere -- hence its own signed
+# amplitudes rather than a scalar times the crouch.
 PARAMS = (
-    ("crouch_hip",   0.00, 0.90),   # sink: hip flexion
-    ("crouch_knee",  0.00, 1.20),   # sink: knee flexion
-    ("crouch_ankle", 0.00, 0.80),   # sink: ankle dorsiflexion
-    ("push_hip",     0.00, 1.20),   # drive: hip extension past home
-    ("push_knee",    0.00, 1.60),   # drive: knee extension past home
-    ("push_ankle",   0.00, 1.20),   # drive: ankle plantarflexion past home
+    ("crouch_hip",  -0.90, 0.90),   # sink pose, signed: the sign that lowers
+    ("crouch_knee", -1.20, 1.20),   #   the CoM is for the optimiser to find
+    ("crouch_ankle",-0.90, 0.90),
+    ("ext_hip",     -1.20, 1.20),   # extended pose, INDEPENDENT of the crouch
+    ("ext_knee",    -1.60, 1.60),
+    ("ext_ankle",   -1.20, 1.20),
     ("t_sink",       0.06, 0.60),   # seconds to reach full crouch
     ("t_hold",       0.00, 0.20),   # pause at the bottom
     ("t_push",       0.04, 0.40),   # seconds to drive through
-    ("head_amp",     0.00, 1.20),   # neck+head pitch swing amplitude
-    ("head_lead",   -0.15, 0.15),   # head swing lead (-) or lag (+) vs the push
+    ("neck_amp",    -1.60, 1.60),   # neck and head pitch are separate joints
+    ("head_amp",    -1.60, 1.60),   #   with different ranges; do not tie them
+    ("head_lead",   -0.20, 0.20),   # head swing lead (-) or lag (+) vs the push
 )
 NAMES = [p[0] for p in PARAMS]
 LO = np.array([p[1] for p in PARAMS], dtype=np.float32)
@@ -101,18 +116,20 @@ def actions_at(t: np.ndarray, p: np.ndarray, n_act: int) -> np.ndarray:
     t = t - T_SETTLE
     if np.all(t < 0.0):
         return a  # still settling: hold HOME_FRAME
-    (c_hip, c_knee, c_ank, k_hip, k_knee, k_ank,
-     t_sink, t_hold, t_push, h_amp, h_lead) = [p[:, i] for i in range(len(PARAMS))]
+    (c_hip, c_knee, c_ank, e_hip, e_knee, e_ank,
+     t_sink, t_hold, t_push, n_amp, h_amp, h_lead) = [p[:, i] for i in range(len(PARAMS))]
 
-    # Phase: sink (0 -> 1), hold, then push (1 -> -push amplitude).
+    # Phase: sink (home -> crouch), hold, then push (crouch -> extended).
     sink = _smooth(t / np.maximum(t_sink, 1e-3))
     t_push_start = t_sink + t_hold
     push = _smooth((t - t_push_start) / np.maximum(t_push, 1e-3))
 
-    # Leg chain: crouch scaled by `sink`, then driven the other way by `push`.
-    hip = c_hip * sink - (c_hip + k_hip) * push
-    knee = c_knee * sink - (c_knee + k_knee) * push
-    ank = c_ank * sink - (c_ank + k_ank) * push
+    # Interpolate home -> crouch -> extended. Both poses are free, so the
+    # optimiser can put the extension anywhere in joint space rather than on
+    # the ray through the crouch.
+    hip = c_hip * sink + (e_hip - c_hip) * push
+    knee = c_knee * sink + (e_knee - c_knee) * push
+    ank = c_ank * sink + (e_ank - c_ank) * push
 
     a[:, L_HIP_PITCH] = hip
     a[:, L_KNEE] = knee
@@ -123,10 +140,14 @@ def actions_at(t: np.ndarray, p: np.ndarray, n_act: int) -> np.ndarray:
 
     # Head: the countermovement's other half. Pitches DOWN with the crouch and
     # whips UP through the push, offset by `head_lead` so the timing is free.
+    # Head: down with the crouch, whipped the other way through the push. neck
+    # and head pitch get their own amplitudes -- they are different joints with
+    # different ranges (neck_pitch has 110 deg of down-travel from home against
+    # only 40 deg up), and tying them made the swing a small translation
+    # instead of the rotation the neck can actually deliver.
     hs = _smooth((t - (t_push_start + h_lead)) / np.maximum(t_push, 1e-3))
-    head = h_amp * sink - 2.0 * h_amp * hs
-    a[:, NECK_PITCH] = head
-    a[:, HEAD_PITCH] = head
+    a[:, NECK_PITCH] = n_amp * sink - 2.0 * n_amp * hs
+    a[:, HEAD_PITCH] = h_amp * sink - 2.0 * h_amp * hs
     return a
 
 
@@ -188,6 +209,52 @@ def rollout(env, p: np.ndarray, duration: float, dt: float, check: bool = False)
             roll_max.cpu().numpy(), sink_drop.cpu().numpy())
 
 
+def replay(args):
+    """Watch the optimised trajectory, driven open-loop, on repeat.
+
+    Reuses mjlab's own viewer by handing it a `policy` that ignores the
+    observation entirely -- which is the whole point of an open-loop probe, and
+    a useful thing to SEE: the robot commits to the same joint trajectory
+    whatever happens to it, so every stumble is uncorrected.
+    """
+    from mjlab.rl import RslRlVecEnvWrapper
+    from mjlab.tasks.registry import load_rl_cfg
+    from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
+
+    saved = np.load(args.out, allow_pickle=True)
+    p = saved["params"].astype(np.float32).reshape(1, -1)
+    print(f"[openloop] replaying {args.out}: "
+          f"{float(saved['score'])*1000:.2f} mm CoM rise")
+    for name, v in zip(NAMES, p[0]):
+        print(f"[openloop]   {name:14s} {v:+.4f}")
+
+    cfg = load_env_cfg(args.task, play=True)
+    cfg.scene.num_envs = 1
+    # Same reasoning as the search: an episode reset mid-trajectory would hand
+    # the viewer a robot part-way through someone else's jump.
+    cfg.terminations = type(cfg.terminations)()
+    acfg = load_rl_cfg(args.task)
+    env = RslRlVecEnvWrapper(
+        ManagerBasedRlEnv(cfg=cfg, device=args.device),
+        clip_actions=acfg.clip_actions,
+    )
+    dt = cfg.sim.mujoco.timestep * cfg.decimation
+    n_act = env.unwrapped.action_manager.total_action_dim
+    state = {"i": 0}
+
+    def scripted(_obs):
+        t = np.float32((state["i"] * dt) % args.loop)
+        state["i"] += 1
+        a = actions_at(np.array([t], dtype=np.float32), p, n_act)
+        return torch.as_tensor(a, device=args.device)
+
+    if args.viewer == "viser":
+        ViserPlayViewer(env, scripted).run()
+    else:
+        NativeMujocoViewer(env, scripted).run()
+    env.close()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", default="Mjlab-Hop-InPlaceSym-K3344-MicroDuck")
@@ -197,10 +264,19 @@ def main():
     ap.add_argument("--duration", type=float, default=1.6)
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--out", default="openloop_hop_best.npz")
+    ap.add_argument("--view", action="store_true",
+                    help="Replay the saved best trajectory in the viewer instead "
+                         "of searching. Loops the countermovement forever.")
+    ap.add_argument("--viewer", default="native", choices=("native", "viser"))
+    ap.add_argument("--loop", type=float, default=2.2,
+                    help="Seconds per replayed hop cycle, including the settle.")
     ap.add_argument("--check", action="store_true",
                     help="Report crouch depth and roll, to confirm the mirror "
                          "sign produces a symmetric sink rather than a pike.")
     args = ap.parse_args()
+
+    if args.view:
+        return replay(args)
 
     cfg = load_env_cfg(args.task)
     cfg.scene.num_envs = args.pop
