@@ -46,7 +46,14 @@ survive?
 > after the flop audit found the side-lying tuck outscoring the upright one.
 > See "**Flop audit, and two corrections**".
 
-> **CURRENT BOX (2026-09-07, after the user watched the env): `z0` in
+> **!! ALL BOXES IN THIS DOCUMENT ARE INVALID (2026-09-07).** Every launch
+> envelope here — including the one below and the original Task 3 tables — was
+> measured with the robot's FEET TUNNELLED UNDER the launcher plate slab. The
+> geometrically valid rest does not close a backflip under the hardware landing
+> limit in any posture measured. Read the FINAL section, "**The feet are under
+> the plate**", before using any number in this file.
+
+> **SUPERSEDED BOX (2026-09-07, after the user watched the env): `z0` in
 > [0.07, 0.09], `vz` in [1.90, 2.00], `w0` in [23, 24], `t_launch` in
 > [0.12, 0.13]** — retuned for ONE clean turn from the lowest plate the hold
 > pose allows: rotation 372-457 deg, apex 0.29-0.40 m, worst landing 2.15 m/s.
@@ -4113,4 +4120,291 @@ uv run python scripts/backflip_envelope.py --flop-audit --bam --z0 0.09 --tuck 0
 
 # the minimum plate-top height (contact-trace and clearance scans are two-line
 # drivers over run_settle(); the tables above carry their parameters)
+```
+
+
+# The feet are under the plate — every envelope on this branch is invalid
+
+**STOP-AND-REPORT SECTION.** A reviewer reproduced the user's "the plate is
+still not at the level of the feet" complaint in one command, and following it
+down invalidates every launch-envelope table above. No fix is shipped here;
+this section is the evidence and the options.
+
+## 1. What the spawn actually writes
+
+At the env's own spawn (`Z0_RANGE` midpoint 0.08 → plate slab spanning
+z 0.070-0.090; robot trunk at `z0 + PLATE_HALF_THICKNESS + TUCK_Z` = 0.119,
+joints at `TUCK_OVERRIDES x TUCK_FACTOR`, orientation from `reset_base`, i.e.
+near identity):
+
+```
+plate center z 0.08 -> top 0.09
+trunk z 0.119
+left_foot_collision  center z 0.0657  x 0.0574  -> relative to plate top: -0.0243
+right_foot_collision center z 0.0657  x 0.0574  -> relative to plate top: -0.0243
+ncon 8
+    plate_geom <-> 9                    dist -0.01038  (x2)
+    plate_geom <-> 26                   dist -0.00602
+    plate_geom <-> left_foot_collision  dist -0.02198  (x2)
+    plate_geom <-> 76                   dist -0.00602
+    plate_geom <-> right_foot_collision dist -0.02198  (x2)
+```
+
+Six to nine simultaneously penetrating contacts, the deepest **20-22 mm**. The
+feet are at x = 0.057 against a plate half-width of 0.09 — **inside** the
+footprint, not overhanging its edge.
+
+## 2. Where the feet actually are: UNDER the slab
+
+`geom_xpos` z of the foot geoms against the slab's own extent, at every
+configuration this branch has used:
+
+```
+plate slab: z in [0.070, 0.090], footprint |x|<0.09, |y|<0.09
+
+A. the ORIGINAL probe spawn (SPAWN_OFFSET = 0.02 above the plate top):
+  at t=0, before any stepping
+      left_foot_collision x=+0.0574 y=+0.0455 z=+0.0541  footprint=IN  UNDER the slab
+     right_foot_collision x=+0.0574 y=-0.0455 z=+0.0541  footprint=IN  UNDER the slab
+
+B. the env's spawn (TUCK_Z = 0.029, level):
+  at t=0
+      left_foot_collision x=+0.0574 y=+0.0455 z=+0.0631  footprint=IN  UNDER the slab
+     right_foot_collision x=+0.0574 y=-0.0455 z=+0.0631  footprint=IN  UNDER the slab
+
+C. the env's spawn WITH the equilibrium pitch (14 deg):
+  at t=0
+      left_foot_collision x=+0.0422 y=+0.0455 z=+0.0509  footprint=IN  UNDER the slab
+     right_foot_collision x=+0.0422 y=-0.0455 z=+0.0509  footprint=IN  UNDER the slab
+
+D. the settled 'working' equilibrium (what every envelope table used):
+  after 2 s, trunk-top=+0.0286 tilt=14.1
+      left_foot_collision x=+0.0512 y=+0.0459 z=+0.0469  footprint=IN  UNDER the slab
+     right_foot_collision x=+0.0510 y=-0.0460 z=+0.0469  footprint=IN  UNDER the slab
+
+E. the geometrically VALID rest (clearance height 0.0792, level):
+  at t=0 (zero penetrating contacts)
+      left_foot_collision x=+0.0574 y=+0.0455 z=+0.1133  footprint=IN  above the top
+     right_foot_collision x=+0.0574 y=-0.0455 z=+0.1133  footprint=IN  above the top
+  after 2 s, trunk-top=+0.0654 tilt=13.0
+      left_foot_collision x=+0.0541 y=+0.0483 z=+0.1101  footprint=IN  above the top
+     right_foot_collision x=+0.0540 y=-0.0487 z=+0.1100  footprint=IN  above the top
+```
+
+The feet are **under the plate slab, inside its footprint**, in the original
+Task 3 probe spawn (A — at t=0, before a single step), in the env's spawn (B),
+with the equilibrium pitch added (C), and in the settled "working" equilibrium
+that every envelope table was measured from (D). Only the geometrically valid
+rest (E) has them above the plate top.
+
+**This is the root cause, and it is original.** The first probe's
+`SPAWN_OFFSET = 0.02` was chosen by watching the trunk settle, and at that
+offset the feet were already through the slab at t=0. Every measurement since
+inherited it: the tucked tables, the standing comparison, the "whole-box
+verified" boxes, all of it. The `--measure-tuck-z` mode reported a settled
+TRUNK height and never once looked at a contact distance, which is why it
+produced `TUCK_Z = 0.029` — a height at which the feet are 2.6 cm below the
+surface they are supposed to be resting on.
+
+## 3. Why the trunk height and the orientation disagree
+
+Two separate errors compound:
+
+- **Mixed configurations.** `TUCK_Z` is the settled trunk height of a pose
+  pitched 14 deg forward, but the spawn writes it at `reset_base`'s near-level
+  orientation. Spawn penetration vs pitch, at that height:
+
+```
+ pitch       h  spawn worst  npen/  n  peak|az|  end tilt    end h  end worst
+   0.0   0.029     -0.02035     6/  6       3.7      14.1  +0.0286   -0.00441
+   0.0   0.033     -0.02435     6/  6       8.4      13.8  +0.0286   -0.00433
+   0.0   0.037     -0.02835     6/  6      17.6      14.1  +0.0286   -0.00443
+   0.0   0.045     -0.03422     4/  4      43.7      14.1  +0.0264   -0.01571
+   8.0   0.029     -0.01136     8/  8       3.0      14.1  +0.0286   -0.00445
+   8.0   0.033     -0.01536     6/  6      12.4      14.0  +0.0286   -0.00439
+   8.0   0.037     -0.01936     4/  4      27.6      14.1  +0.0286   -0.00439
+   8.0   0.045     -0.02736     4/  4      42.7      14.0  +0.0286   -0.00440
+  12.0   0.029     -0.00713     9/  9       2.6      13.9  +0.0286   -0.00445
+  12.0   0.033     -0.01113     6/  6      15.3      14.3  +0.0285   -0.00458
+  12.0   0.037     -0.01513     4/  4      26.1      14.4  +0.0286   -0.00455
+  12.0   0.045     -0.02313     4/  4      50.3      14.0  +0.0286   -0.00443
+  14.0   0.029     -0.00509     8/  8       3.8      13.8  +0.0286   -0.00437
+  14.0   0.033     -0.00909     6/  6      16.9      14.1  +0.0286   -0.00446
+  14.0   0.037     -0.01309     4/  4      30.5      13.8  +0.0286   -0.00438
+  14.0   0.045     -0.02109     4/  4      47.7      13.9  +0.0286   -0.00441
+  16.0   0.029     -0.00490     8/  8       4.3      13.8  +0.0287   -0.00435
+  16.0   0.033     -0.00710     6/  6      14.8      13.8  +0.0286   -0.00440
+  16.0   0.037     -0.01110     4/  4      30.8      14.0  +0.0286   -0.00446
+  16.0   0.045     -0.01910     4/  4      48.0      14.0  +0.0286   -0.00442
+  20.0   0.029     -0.00593     4/  4       3.4      13.8  +0.0286   -0.00438
+  20.0   0.033     -0.00694     6/  6      13.9      13.8  +0.0286   -0.00436
+  20.0   0.037     -0.01094     4/  4      31.6      13.8  +0.0286   -0.00436
+  20.0   0.045     -0.01894     4/  4      48.6      13.8  +0.0286   -0.00441
+
+best penetration-free spawn: None
+```
+
+  Adding the equilibrium pitch takes the deepest penetration from **20.4 mm to
+  5.1 mm** — essentially the equilibrium's own 4.4 mm of loaded soft-contact
+  compression. **But it does not lift the feet out from under the slab** (C
+  above), so it is not a fix.
+
+- **No penetration-free rest exists at that height.** Bisecting for the
+  clearance height at the target pose gives **0.0792 m** above the plate top,
+  5 cm higher than `TUCK_Z`, with the shins and feet co-planar at the surface —
+  a proper flat kneel. Raising the trunk part-way is worse than either end
+  (−31 mm at +11 mm of height, and a 48 m/s² settling transient) because the
+  dangling feet close on the pad's underside on the way up.
+
+**One thing the penetration is NOT: the cause of the violent departure.**
+Resolving the 20 mm overlap peaks at |a_z| = 3.7 m/s² and |v_z| = 0.02 m/s —
+below gravity. The "part beaucoup trop loin et fort" is the launch itself, not
+an ejection.
+
+## 4. The valid configuration does not fly
+
+540 cells from the geometrically valid rest (trunk 0.0654-0.0792 m above the
+plate top, zero penetrating contacts at spawn), `vz` in [1.5, 3.5],
+`w0` in [6, 38], `t_launch` in [0.10, 0.15], tuck depth 0.5/1.0, with and
+without folding at the flick:
+
+```
+540 cells from the corrected spawn (trunk 6.5 cm above the plate top)
+  cells rotating BACKWARD at all (rot > 0): 98
+  cells closing >= 360 deg:                 4
+  ... AND landing <= 2.6 m/s:               0
+  best (max) rotation: 390.6 deg
+
+top 12 by rotation:
+  rot=  390.6 land= 4.13 apex=0.942 vz=3.5 w0= 18.0 lau=0.15 tuck=0.5 tuck_at_flick=False
+  rot=  390.6 land= 4.13 apex=0.942 vz=3.5 w0= 18.0 lau=0.15 tuck=0.5 tuck_at_flick=True
+  rot=  374.8 land= 3.21 apex=0.507 vz=3.0 w0= 38.0 lau=0.15 tuck=0.5 tuck_at_flick=False
+  rot=  374.8 land= 3.21 apex=0.507 vz=3.0 w0= 38.0 lau=0.15 tuck=0.5 tuck_at_flick=True
+  rot=  345.1 land= 4.41 apex=1.030 vz=3.5 w0= 14.0 lau=0.15 tuck=0.5 tuck_at_flick=False
+  rot=  345.1 land= 4.41 apex=1.030 vz=3.5 w0= 14.0 lau=0.15 tuck=0.5 tuck_at_flick=True
+  rot=  324.5 land= 3.86 apex=0.752 vz=3.0 w0= 18.0 lau=0.15 tuck=0.5 tuck_at_flick=False
+  rot=  324.5 land= 3.86 apex=0.752 vz=3.0 w0= 18.0 lau=0.15 tuck=0.5 tuck_at_flick=True
+  rot=  290.8 land= 4.14 apex=0.863 vz=3.5 w0= 22.0 lau=0.15 tuck=0.5 tuck_at_flick=False
+  rot=  290.8 land= 4.14 apex=0.863 vz=3.5 w0= 22.0 lau=0.15 tuck=0.5 tuck_at_flick=True
+  rot=  290.6 land= 4.45 apex=1.011 vz=3.5 w0= 14.0 lau=0.12 tuck=0.5 tuck_at_flick=False
+  rot=  290.6 land= 4.45 apex=1.011 vz=3.5 w0= 14.0 lau=0.12 tuck=0.5 tuck_at_flick=True
+```
+
+**4 cells close 360 deg; ZERO land under 2.6 m/s.** Best rotation 390.6 deg at
+4.13 m/s.
+
+Folding DEEPER at the flick (hold at 0.75, fold to 1.0 or 1.15) helps rotation
+and not landing — 80 more cells:
+
+```
+80 cells: hold at 0.75, fold deeper at the flick
+  backward at all: 69
+  closing >= 360:  11
+  ... under 2.6:   0
+  best rotation:   487.7 deg
+
+top 8 by rotation:
+  rot=  487.7 land= 3.38 apex=0.828 vz=3.0 w0= 22.0 lau=0.12 flick_depth=1.0
+  rot=  458.7 land= 3.87 apex=0.910 vz=3.0 w0= 18.0 lau=0.12 flick_depth=1.15
+  rot=  448.3 land= 3.60 apex=0.828 vz=3.0 w0= 18.0 lau=0.15 flick_depth=1.15
+  rot=  433.2 land= 3.43 apex=0.742 vz=3.0 w0= 26.0 lau=0.12 flick_depth=1.0
+  rot=  426.1 land= 3.45 apex=0.849 vz=3.0 w0= 22.0 lau=0.12 flick_depth=1.15
+  rot=  416.1 land= 3.58 apex=0.775 vz=3.0 w0= 26.0 lau=0.12 flick_depth=1.15
+  rot=  383.7 land= 4.09 apex=0.833 vz=3.0 w0= 18.0 lau=0.15 flick_depth=1.0
+  rot=  373.2 land= 3.89 apex=0.753 vz=3.0 w0= 22.0 lau=0.15 flick_depth=1.15
+```
+
+11 cells close; **zero under 2.6 m/s**; every closing cell needs `vz` = 3.0 and
+lands at 3.38-4.09 m/s.
+
+And the whole retuned box, re-run from the valid spawn, inverts completely:
+
+```
+# box-check posture=tucked_env bam=True dt=0.005
+#   z0 (0.07, 0.09) vz (1.9, 2.0) w0 (23.0, 24.0) launch (0.12, 0.13)
+#   z0 grid (0.07, 0.08, 0.09)
+#   hold (0.1, 1.0) tuck (0.5, 0.75, 1.0)
+  486 cells | min rot = -521.6 deg | max landing = 3.86 m/s | short of 360: 486 | over 2.6 m/s: 229 | never landed: 0
+  worst by rotation:
+    rot= -521.6 land= 3.80 apex=0.615 tilt0=  6.7  z0=0.090 vz=2.000 w0=23.50 launch=0.120 hold=0.10 tuck=1.00
+    rot= -517.4 land= 3.78 apex=0.605 tilt0=  6.7  z0=0.080 vz=2.000 w0=23.50 launch=0.120 hold=0.10 tuck=1.00
+    rot= -516.8 land= 3.78 apex=0.613 tilt0=  6.7  z0=0.090 vz=2.000 w0=24.00 launch=0.120 hold=0.10 tuck=1.00
+    rot= -516.8 land= 3.78 apex=0.603 tilt0=  6.7  z0=0.080 vz=2.000 w0=24.00 launch=0.120 hold=0.10 tuck=1.00
+    rot= -514.1 land= 3.86 apex=0.619 tilt0=  6.7  z0=0.090 vz=2.000 w0=23.00 launch=0.120 hold=0.10 tuck=1.00
+  worst by landing speed:
+    rot= -514.1 land= 3.86 apex=0.619 tilt0=  6.7  z0=0.090 vz=2.000 w0=23.00 launch=0.120 hold=0.10 tuck=1.00
+    rot= -507.2 land= 3.84 apex=0.594 tilt0=  6.7  z0=0.080 vz=1.950 w0=23.00 launch=0.120 hold=0.10 tuck=1.00
+    rot= -507.2 land= 3.84 apex=0.604 tilt0=  6.7  z0=0.090 vz=1.950 w0=23.00 launch=0.120 hold=0.10 tuck=1.00
+    rot= -509.9 land= 3.83 apex=0.609 tilt0=  6.7  z0=0.080 vz=2.000 w0=23.00 launch=0.120 hold=0.10 tuck=1.00
+    rot= -509.9 land= 3.83 apex=0.599 tilt0=  6.7  z0=0.070 vz=2.000 w0=23.00 launch=0.120 hold=0.10 tuck=1.00
+  RESULT: FAIL — whole box does NOT close 360 deg under 2.6 m/s
+```
+
+All 486 cells rotate FORWARD (−514 to −522 deg), 229 of them over the landing
+limit.
+
+## 5. Every hold posture measured, one table
+
+CoM height is the trunk above the surface it rests on.
+
+| hold posture | trunk above support | best 360-closing landing | safe under 2.6 m/s? |
+|---|---|---|---|
+| standing (HOME at `STAND_Z`) | 0.115 m | 3.43 m/s | **no** (0 of ~700) |
+| feet-flat squat, `HOLD_LERP` 0.65 | 0.066 m | 3.09 m/s | **no** (0 of 420) |
+| tuck, correctly resting on the plate | 0.065-0.079 m | 3.38 m/s | **no** (0 of 620) |
+| tuck, feet TUNNELLED under the plate | 0.029 m | 1.72-2.15 m/s | yes — **and it is not a physical configuration** |
+
+The only posture that flies is the one whose feet are inside the launcher.
+Every posture that rests validly on the plate has a trunk 6.5-11.5 cm above it,
+and at that CoM the flick overdrives the sole contact and the robot comes out
+forward — the same mechanism that killed the standing hold two waves ago.
+
+## 6. What was left in the repo
+
+No fix, deliberately. The user has already rejected two designs from the
+viewer and a third guess is worse than this table.
+
+- The cfg module docstring opens with a **DO NOT TRAIN** warning carrying the
+  measurement.
+- Three acceptance tests in `tests/test_backflip_cfg.py`
+  (`test_the_spawn_is_not_jammed_into_the_plate`,
+  `test_the_spawn_is_clean_at_every_sampled_launch_height`,
+  `test_the_feet_are_not_inside_the_plate_footprint_and_below_its_top`) build
+  the spawn state in CPU MuJoCo and measure every plate-robot contact. They are
+  **strict xfail** against the current design, so they turn RED the moment a
+  spawn becomes valid and must be unmarked then. A fourth
+  (`test_pitching_the_spawn_reduces_but_does_not_remove_the_penetration`)
+  passes today and pins the 20 mm → 5 mm pitch effect.
+- `--box-check` now reports the rotation RANGE and a `never landed` counter.
+
+## 7. The four directions, with what is already measured about each
+
+1. **Change the tuck so the feet are genuinely the lowest point** (a deeper
+   ankle fold), keeping the compactness. Not measured. The requirement is a
+   pose whose lowest geoms are the FEET, whose trunk is under ~4 cm above them,
+   and which is a stable equilibrium. Nothing in the current tuck family
+   satisfies the first two together — that is the search.
+2. **Shrink the pad so the feet overhang the edge while the shins are
+   supported.** Partially measured and it looks hard: at the target pose the
+   feet occupy x ≈ 0.02-0.09 and the supporting shin contacts sit at
+   x ≈ -0.036 to +0.02, so the pad's front edge must fall inside a ~4 cm
+   window, and trimming the footprint that far made the robot slide off in
+   every configuration tried (wave 4, "solid block" scan).
+3. **Accept a 6.5 cm trunk and give up the 2.6 m/s limit.** The valid tuck
+   closes 360 deg at 3.38 m/s (≈58 cm of free fall). This is the user's call,
+   not a simulation call.
+4. **Give up the plate-flick launch for this pose.** Every measurement says
+   the flick only transfers at a ~3 cm CoM, and no valid resting pose puts the
+   duck that low on a 2 cm plate.
+
+## 8. Reproducing this section
+
+```bash
+# the spawn state and its contacts (the reviewer's repro)
+uv run python scripts/backflip_envelope.py --measure-tuck-z --bam --z0 0.08 --tuck 0.75
+uv run --with pytest pytest tests/test_backflip_cfg.py -q -rx   # the xfail reasons
+
+# the valid-rest sweeps and the pitch scan are short drivers over
+# backflip_envelope.run_cell()/run_settle(); the tables above carry their
+# exact parameters.
 ```

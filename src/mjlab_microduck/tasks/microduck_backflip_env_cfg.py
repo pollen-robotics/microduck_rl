@@ -1,5 +1,30 @@
 """Microduck backflip task — launched by the operator's hands, land on the feet.
 
+!! DO NOT TRAIN THIS YET. MEASURED 2026-09-07, NOT YET FIXED:
+!! THE SPAWN TUNNELS THE ROBOT'S FEET UNDER THE LAUNCHER PLATE, AND EVERY
+!! LAUNCH-ENVELOPE NUMBER IN THIS FILE WAS MEASURED FROM THAT CONFIGURATION.
+  The tuck folds the legs so that the FEET hang ~4.7 cm below the plane the
+  shins rest on. The spawn places the trunk TUCK_Z = 0.029 m above the plate
+  top, which puts the foot geoms at z = plate_top - 0.026 — i.e. BELOW the 2 cm
+  slab and INSIDE its 18x18 cm footprint. They are through it. Measured at the
+  spawn: 6-9 simultaneously penetrating plate contacts, the deepest 20 mm. The
+  robot then settles into a kneel with its feet still underneath the plate, and
+  that is the state the whole envelope was measured from — including the
+  original Task 3 probe, whose SPAWN_OFFSET = 0.02 already had the feet under
+  the slab at t=0 before a single step.
+  The geometrically VALID rest — feet and shins co-planar ON the plate top,
+  trunk 0.0792 m above it, zero penetrating contacts — does NOT fly: 540 cells
+  over vz in [1.5, 3.5] x w0 in [6, 38] x t_launch in [0.10, 0.15] x tuck
+  depth, with and without folding at the flick, produce 4 cells that close
+  360 deg and ZERO that land under the 2.6 m/s hardware limit (best 390.6 deg
+  at 4.13 m/s). Nor does the feet-flat squat (0 of 420 safe) or the standing
+  hold (0 of ~700 safe).
+  So the launch envelope this env is built on does not exist in a physically
+  valid configuration. Three acceptance tests in tests/test_backflip_cfg.py
+  are marked strict xfail against this defect and become the criteria for
+  whatever replaces it. Full evidence and the four candidate directions:
+  docs/backflip_envelope_results.md, "The feet are under the plate".
+
 Episodic policy. The robot starts TUCKED (folded, chin in) on a prescribed
 "launcher plate" (``launcher.xml``, an 18x18x2 cm 50 kg prop whose pose and
 velocity are rewritten every control step — see the BACKFLIP section of

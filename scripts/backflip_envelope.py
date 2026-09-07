@@ -696,7 +696,8 @@ def box_check_report(model, data, bam_ctrl=None, posture="tucked_env"):
     # the <= 2.6 m/s test by not being measured at all. Count them explicitly
     # rather than trusting the max.
     n_never = sum(1 for r in rows if r[1] == 0.0)
-    print(f"  {len(rows)} cells | min rot = {min_rot:.1f} deg | "
+    max_rot = max(r[0] for r in rows)
+    print(f"  {len(rows)} cells | rot {min_rot:.1f}-{max_rot:.1f} deg | "
           f"max landing = {max_land:.2f} m/s | "
           f"short of 360: {n_short} | over 2.6 m/s: {n_hard} | "
           f"never landed: {n_never}")

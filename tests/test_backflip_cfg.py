@@ -10,6 +10,7 @@ reset-event ordering that puts the robot on the plate at the sampled ``z0``.
 
 import math
 
+import mujoco
 import pytest
 import torch
 
@@ -592,3 +593,143 @@ def test_the_named_tuck_matches_the_indexed_one(cfg):
     assert set(by_name) == set(index_to_name.values())
     for idx, name in index_to_name.items():
         assert by_name[name] == pytest.approx(TUCK_OVERRIDES[idx])
+
+
+# --- The spawn must sit ON the plate, not jammed INTO it. -------------------
+#
+# THE TEST WHOSE ABSENCE LET IT THROUGH. The spawn wrote the equilibrium's
+# trunk HEIGHT while leaving reset_base's near-identity orientation, so the
+# robot spawned 20 mm inside the plate on 6-9 simultaneous penetrating
+# contacts, and nothing checked. This builds the exact spawn state on CPU
+# MuJoCo and measures every plate-robot contact.
+#
+# Note the bar: NOT "zero penetration". A robot resting under load compresses
+# MuJoCo's contact constraint by ~4.4 mm at this pose, whatever height it is
+# placed at, and spawning high enough to clear the plate geometrically is
+# WORSE (-21 mm at +16 mm of height, because the dangling feet close on the
+# pad's underside) as well as dropping the robot. The bar is that the spawn is
+# ON the equilibrium manifold rather than jammed through it.
+
+_SCENE = "src/mjlab_microduck/robot/microduck/scene_backflip.xml"
+
+# The equilibrium's own loaded soft-contact compression, measured. Anything at
+# or under this is "resting"; the un-pitched spawn was 4x deeper.
+_RESTING_PENETRATION_M = 0.006
+
+# MEASURED forward pitch of the tuck's resting equilibrium on the plate. The
+# spawn does NOT currently write it (reset_base leaves the orientation near
+# identity), which is one of the two things wrong with the spawn; adding it
+# takes the penetration from 20 mm to 5 mm but does NOT lift the feet out from
+# under the slab, so it is not a fix on its own. See _TUNNEL_REASON.
+_EQUILIBRIUM_PITCH_DEG = 14.0
+
+
+def _spawn_state(pitch_deg=0.0, z0=None):
+    """Build the env's spawn state in plain MuJoCo and return the model/data.
+
+    Mirrors reset_backflip_robot_on_plate exactly: trunk at
+    z0 + PLATE_HALF_THICKNESS + TUCK_Z, pitched by TUCK_PITCH_DEG, joints at
+    TUCK_OVERRIDES x TUCK_FACTOR, plate prescribed at z0.
+    """
+    if z0 is None:
+        z0 = 0.5 * (Z0_RANGE[0] + Z0_RANGE[1])
+    model = mujoco.MjModel.from_xml_path(_SCENE)
+    data = mujoco.MjData(model)
+    data.qpos[0:3] = [0.0, 0.0, z0 + PLATE_HALF_THICKNESS + TUCK_Z]
+    half = math.radians(pitch_deg) * 0.5
+    data.qpos[3:7] = [math.cos(half), 0.0, math.sin(half), 0.0]
+    for idx, angle in TUCK_OVERRIDES.items():
+        data.qpos[7 + idx] = angle * TUCK_FACTOR
+    pj = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "plate_free")
+    qa = model.jnt_qposadr[pj]
+    data.qpos[qa : qa + 3] = [0.0, 0.0, z0]
+    data.qpos[qa + 3 : qa + 7] = [1.0, 0.0, 0.0, 0.0]
+    mujoco.mj_forward(model, data)
+    return model, data
+
+
+def _plate_penetration(model, data):
+    """(deepest penetration as a POSITIVE depth, number of penetrating pairs)."""
+    plate_g = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "plate_geom")
+    depths = [
+        -float(data.contact.dist[i])
+        for i in range(data.ncon)
+        if plate_g in (int(data.contact.geom1[i]), int(data.contact.geom2[i]))
+        and float(data.contact.dist[i]) < 0.0
+    ]
+    return (max(depths) if depths else 0.0), len(depths)
+
+
+_TUNNEL_REASON = (
+    "KNOWN DEFECT, measured 2026-09-07 and not yet fixed: the spawn writes the "
+    "tuck at a height whose FEET are tunnelled UNDER the launcher plate slab, "
+    "inside its footprint. Every launch-envelope table on this branch was "
+    "measured from that configuration. The geometrically valid rest (feet ON "
+    "the plate top, trunk 0.0792 m above it) does NOT close a backflip: 540 "
+    "cells, 0 under the 2.6 m/s landing limit. These tests are the acceptance "
+    "criteria for whatever design replaces it -- they are strict xfail, so "
+    "they turn RED the moment the spawn becomes valid and must then be "
+    "unmarked. See docs/backflip_envelope_results.md, 'The feet are under the "
+    "plate'."
+)
+
+
+@pytest.mark.xfail(strict=True, reason=_TUNNEL_REASON)
+def test_the_spawn_is_not_jammed_into_the_plate():
+    model, data = _spawn_state(_EQUILIBRIUM_PITCH_DEG)
+    depth, n = _plate_penetration(model, data)
+    assert depth <= _RESTING_PENETRATION_M, (
+        f"spawn penetrates the plate by {depth * 1000:.1f} mm on {n} contacts; "
+        "the resting equilibrium's own compression is ~4.4 mm. Either the "
+        "spawn height, the spawn pitch and the tuck pose disagree, or the "
+        "plate geometry changed -- re-measure, do not raise this bound."
+    )
+
+
+def test_pitching_the_spawn_reduces_but_does_not_remove_the_penetration():
+    # The regression: writing the equilibrium's height at reset_base's
+    # near-level orientation is what jammed it. Removing the pitch must fail
+    # the check above, so this test cannot pass vacuously.
+    _, level = _spawn_state(0.0)
+    level_depth, level_n = _plate_penetration(*_spawn_state(0.0))
+    del level
+    assert level_depth > 3 * _RESTING_PENETRATION_M
+    assert level_n >= 4
+    pitched_depth, _ = _plate_penetration(*_spawn_state(_EQUILIBRIUM_PITCH_DEG))
+    assert pitched_depth < 0.5 * level_depth
+
+
+@pytest.mark.xfail(strict=True, reason=_TUNNEL_REASON)
+def test_the_spawn_is_clean_at_every_sampled_launch_height():
+    # z0 shifts the plate AND the robot together, so the penetration should be
+    # z0-invariant -- assert it, since a z0-dependent spawn would mean the two
+    # heights had drifted apart again.
+    depths = []
+    for z0 in (Z0_RANGE[0], 0.5 * sum(Z0_RANGE), Z0_RANGE[1]):
+        depth, _ = _plate_penetration(*_spawn_state(_EQUILIBRIUM_PITCH_DEG, z0=z0))
+        depths.append(depth)
+        assert depth <= _RESTING_PENETRATION_M
+    assert max(depths) - min(depths) < 1e-6
+
+
+@pytest.mark.xfail(strict=True, reason=_TUNNEL_REASON)
+def test_the_feet_are_not_inside_the_plate_footprint_and_below_its_top():
+    # The specific geometry the user reported: feet under the plate's top
+    # surface while still inside its footprint is a hard interpenetration.
+    # At the equilibrium pitch the feet hang past the FRONT EDGE instead,
+    # which is a real resting configuration on an 18 cm pad.
+    model, data = _spawn_state(_EQUILIBRIUM_PITCH_DEG)
+    plate_g = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "plate_geom")
+    half_x, half_y, half_z = model.geom_size[plate_g]
+    z0 = 0.5 * (Z0_RANGE[0] + Z0_RANGE[1])
+    plate_top = z0 + half_z
+    for name in ("left_foot_collision", "right_foot_collision"):
+        g = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+        x, y, z = (float(v) for v in data.geom_xpos[g])
+        inside_footprint = abs(x) < half_x and abs(y) < half_y
+        below_top = z < plate_top
+        assert not (inside_footprint and below_top), (
+            f"{name} centre is at x={x:+.4f} z={z:+.4f}, i.e. below the plate "
+            f"top ({plate_top:.4f}) AND inside its {half_x * 2:.2f} m "
+            "footprint -- that is interpenetration, not resting"
+        )
