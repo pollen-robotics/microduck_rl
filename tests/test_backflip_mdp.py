@@ -191,12 +191,12 @@ def test_sampled_params_use_measured_envelope_defaults():
     # stale placeholders and not the superseded standing-probe box.
     env = _FakeEnv(num_envs=256)
     microduck_mdp.reset_backflip_launch_params(env, torch.arange(256))
-    assert torch.all((env._backflip_vz >= 1.90) & (env._backflip_vz <= 2.00))
-    assert torch.all((env._backflip_w0 >= 23.0) & (env._backflip_w0 <= 24.0))
+    assert torch.all((env._backflip_vz >= 2.80) & (env._backflip_vz <= 2.90))
+    assert torch.all((env._backflip_w0 >= 18.5) & (env._backflip_w0 <= 18.5))
     # A short flick is the violent one: t_launch=0.08 lands at up to 3.97 m/s.
     # 0.14 under-rotates at this (retuned, lower) vz.
-    assert torch.all(env._backflip_t_launch >= 0.12)
-    assert torch.all(env._backflip_t_launch <= 0.13)
+    assert torch.all(env._backflip_t_launch >= 0.155)
+    assert torch.all(env._backflip_t_launch <= 0.16)
     # z0 is floored at 0.07 by the hold pose's geometry and capped at 0.09 by
     # the retune (the plate is now less than half as high as it was).
     assert torch.all((env._backflip_z0 >= 0.07) & (env._backflip_z0 <= 0.09))
@@ -819,151 +819,61 @@ def test_masked_plate_obs_keep_the_unmasked_shape_and_values_while_present():
     assert torch.allclose(masked, raw)
 
 
-# --- The TUCKED hold: spawn pose, hold reward, and their shared numbers. -----
+# --- The STANDING hold: spawn height, hold reward, and their shared number. --
 
-_TUCK = {2: -1.15, 3: 1.25, 4: 1.05, 5: -1.0, 6: 1.0, 11: 1.15, 12: -1.25, 13: -1.05}
-_TUCK_FACTOR = 0.75
-_TUCK_Z = 0.029
+_STAND_Z = 0.115
 _PHT = 0.01
 
 
-def _spawned_env(num_envs=2, z0=0.15, joint_noise=0.0):
+def _spawned_env(num_envs=2, z0=0.08):
     env = _FakeEnvWithScene(num_envs=num_envs)
     ids = torch.arange(num_envs)
     microduck_mdp.reset_backflip_launch_params(
-        env, ids, hold_range=(0.3, 0.3), launch_range=(0.13, 0.13),
-        z0_range=(z0, z0), vz_range=(2.05, 2.05), w0_range=(22.0, 22.0),
+        env, ids, hold_range=(0.2, 0.2), launch_range=(0.157, 0.157),
+        z0_range=(z0, z0), vz_range=(2.85, 2.85), w0_range=(18.5, 18.5),
     )
-    if joint_noise:
-        # What reset_robot_joints leaves behind: HOME + scatter.
-        env.sim.data.qpos[:, 7:21] += joint_noise
     microduck_mdp.reset_backflip_robot_on_plate(
-        env, ids, tuck_overrides=_TUCK, tuck_factor=_TUCK_FACTOR,
-        tuck_z=_TUCK_Z, plate_half_thickness=_PHT,
+        env, ids, stand_z=_STAND_Z, plate_half_thickness=_PHT,
     )
     return env
 
 
-def test_spawn_puts_the_trunk_at_the_measured_tucked_height_not_stand_z():
-    # The height must be the MEASURED tucked resting height above the plate
-    # top, never STAND_Z: the two poses differ by ~8.6 cm, and AGENTS.md
-    # records a 5 mm height carried across poses costing days.
-    env = _spawned_env(z0=0.15)
-    assert float(env.sim.data.qpos[0, 2]) == pytest.approx(0.15 + _PHT + _TUCK_Z)
-    assert float(env.sim.data.qpos[0, 2]) < 0.15 + _PHT + 0.115 - 0.05
-    # root velocity is zeroed, as before
+def test_spawn_puts_the_trunk_at_standing_height_on_the_plate_top():
+    env = _spawned_env(z0=0.08)
+    assert float(env.sim.data.qpos[0, 2]) == pytest.approx(0.08 + _PHT + _STAND_Z)
     assert float(env.sim.data.qvel[0, :6].abs().sum()) == 0.0
 
 
 def test_spawn_height_follows_the_sampled_z0():
-    for z0 in (0.10, 0.20):
+    for z0 in (0.07, 0.09):
         env = _spawned_env(z0=z0)
-        assert float(env.sim.data.qpos[0, 2]) == pytest.approx(z0 + _PHT + _TUCK_Z)
+        assert float(env.sim.data.qpos[0, 2]) == pytest.approx(z0 + _PHT + _STAND_Z)
 
 
-def test_spawn_folds_exactly_the_tuck_joints_to_the_tuck_target():
-    env = _spawned_env()
-    qpos = env.sim.data.qpos[0, 7:21]
-    default = env.robot.data.default_joint_pos[0]
-    for idx in range(14):
-        if idx in _TUCK:
-            assert float(qpos[idx]) == pytest.approx(_TUCK[idx] * _TUCK_FACTOR)
-        else:
-            assert float(qpos[idx]) == pytest.approx(float(default[idx]))
+def test_spawn_leaves_the_joints_to_reset_robot_joints():
+    # The standing spawn writes HEIGHT only. The servos are HOME +- 0.05 rad
+    # from the base event, and touching them here would silently delete that DR
+    # (which is what the reverted tucked spawn had to work around).
+    env = _FakeEnvWithScene(num_envs=2)
+    ids = torch.arange(2)
+    microduck_mdp.reset_backflip_launch_params(env, ids)
+    before = env.sim.data.qpos[:, 7:21].clone()
+    microduck_mdp.reset_backflip_robot_on_plate(env, ids)
+    assert torch.equal(env.sim.data.qpos[:, 7:21], before)
 
 
-def test_spawn_preserves_the_joint_scatter_reset_robot_joints_applied():
-    # Overwriting the joints outright would silently delete DR on exactly the
-    # eight joints that define the hold posture. The spawn SHIFTS instead.
-    noise = 0.04
-    env = _spawned_env(joint_noise=noise)
-    qpos = env.sim.data.qpos[0, 7:21]
-    for idx in _TUCK:
-        assert float(qpos[idx]) == pytest.approx(_TUCK[idx] * _TUCK_FACTOR + noise)
-
-
-def _stance_env(z0=0.15, hold=0.3):
+def _stance_env(z0=0.08, hold=0.2):
     env = _FakeEnvWithScene(num_envs=1)
     microduck_mdp.reset_backflip_launch_params(
-        env, torch.arange(1), hold_range=(hold, hold), launch_range=(0.13, 0.13),
-        z0_range=(z0, z0), vz_range=(2.05, 2.05), w0_range=(22.0, 22.0),
+        env, torch.arange(1), hold_range=(hold, hold),
+        launch_range=(0.157, 0.157), z0_range=(z0, z0),
+        vz_range=(2.85, 2.85), w0_range=(18.5, 18.5),
     )
     return env
 
 
-def _stance(env, joints, trunk_z):
-    env.robot.data.joint_pos = joints.clone()
-    env.robot.data.root_link_pos_w[:, 2] = trunk_z
-    return float(
-        microduck_mdp.backflip_ready_stance(
-            env, tuck_overrides=_TUCK, tuck_factor=_TUCK_FACTOR,
-            tuck_z=_TUCK_Z + _PHT, joint_std=0.35, height_std=0.03,
-        )[0]
-    )
-
-
-def _tuck_joints(env, factor=_TUCK_FACTOR):
-    j = env.robot.data.default_joint_pos.clone()
-    for idx, angle in _TUCK.items():
-        j[:, idx] = angle * factor
-    return j
-
-
-def test_ready_stance_pays_for_the_tuck_and_not_for_standing():
-    env = _stance_env(z0=0.15)
-    tucked = _stance(env, _tuck_joints(env), 0.15 + _PHT + _TUCK_Z)
-    standing = _stance(env, env.robot.data.default_joint_pos.clone(),
-                       0.15 + _PHT + 0.115)
-    assert tucked > 0.95
-    assert standing < 1e-3
-    assert tucked > 1000 * standing
-
-
-def test_ready_stance_needs_BOTH_the_pose_and_the_height():
-    # Multiplicative: tucked joints held a standing height away, or standing
-    # joints at the tucked height, must each collapse the term. Otherwise
-    # there is a compromise basin.
-    env = _stance_env(z0=0.15)
-    right = _stance(env, _tuck_joints(env), 0.15 + _PHT + _TUCK_Z)
-    wrong_height = _stance(env, _tuck_joints(env), 0.15 + _PHT + 0.115)
-    wrong_pose = _stance(env, env.robot.data.default_joint_pos.clone(),
-                         0.15 + _PHT + _TUCK_Z)
-    assert wrong_height < 0.01 * right
-    assert wrong_pose < 0.2 * right
-
-
-def test_ready_stance_is_hold_phase_only_so_it_cannot_oppose_the_flip():
-    env = _stance_env(z0=0.15, hold=0.3)
-    joints = _tuck_joints(env)
-    env.episode_length_buf[:] = 0                       # HOLD
-    assert _stance(env, joints, 0.15 + _PHT + _TUCK_Z) > 0.95
-    env.episode_length_buf[:] = 20                      # LAUNCH / GONE
-    assert _stance(env, joints, 0.15 + _PHT + _TUCK_Z) == 0.0
-
-
-def test_ready_stance_height_target_tracks_the_sampled_z0():
-    # The plate height is per-episode DR, so a fixed height target would score
-    # a correctly-held tuck as wrong at every z0 but one.
-    for z0 in (0.10, 0.20):
-        env = _stance_env(z0=z0)
-        assert _stance(env, _tuck_joints(env), z0 + _PHT + _TUCK_Z) > 0.95
-
-
-def test_ready_stance_tolerates_a_realistically_imperfect_tuck():
-    # joint_std=0.35 rad prices only the escapable part: a tuck held within
-    # ~0.1 rad must still score most of the term, or the gradient punishes the
-    # policy for physics it cannot beat.
-    env = _stance_env(z0=0.15)
-    joints = _tuck_joints(env)
-    joints += 0.1
-    assert _stance(env, joints, 0.15 + _PHT + _TUCK_Z) > 0.85
-
-
-# --- The flop audit AGENTS.md mandates, run through the real reward. ---------
-
-
 def _quat_rpy(roll, pitch, yaw):
-    """[w, x, y, z] for intrinsic ZYX (yaw * pitch * roll), as elsewhere here."""
+    """[w, x, y, z] for intrinsic ZYX (yaw * pitch * roll)."""
     cy, sy = math.cos(yaw * 0.5), math.sin(yaw * 0.5)
     cp, sp = math.cos(pitch * 0.5), math.sin(pitch * 0.5)
     cr, sr = math.cos(roll * 0.5), math.sin(roll * 0.5)
@@ -975,77 +885,83 @@ def _quat_rpy(roll, pitch, yaw):
     ]])
 
 
-def _stance_with_quat(env, joints, trunk_z, quat):
-    env.robot.data.root_link_quat_w = quat
-    return _stance(env, joints, trunk_z)
+def _stance(env, trunk_z, quat=None):
+    env.robot.data.root_link_pos_w[:, 2] = trunk_z
+    if quat is not None:
+        env.robot.data.root_link_quat_w = quat
+    return float(
+        microduck_mdp.backflip_ready_stance(
+            env, stand_z=_STAND_Z + _PHT, height_std=0.03,
+            tilt_full_deg=40.0, tilt_zero_deg=70.0,
+        )[0]
+    )
 
 
-def test_ready_stance_collapses_for_a_tucked_but_inverted_trunk():
-    # THE CRITICAL this test exists for. pose and height CANNOT tell an upright
-    # tuck from an inverted one: measured on the plate, a side-lying tuck holds
-    # pose 0.997 and height 0.994 (its joints are LESS load-sagged than the
-    # upright tuck's), so without an upright factor it scored 0.991 against
-    # upright's 0.950 -- a premium for flopping, in a passively stable basin
-    # that needs no balancing. Every flop must collapse the term while sitting
-    # at exactly the right height with exactly the right joints.
-    env = _stance_env(z0=0.15)
-    joints = _tuck_joints(env)
-    z = 0.15 + _PHT + _TUCK_Z
+def test_ready_stance_pays_for_standing_on_the_plate():
+    env = _stance_env(z0=0.08)
+    good = _stance(env, 0.08 + _PHT + _STAND_Z, _quat_rpy(0, 0, 0))
+    assert good > 0.99
 
-    upright = _stance_with_quat(env, joints, z, _quat_rpy(0.0, 0.0, 0.0))
-    # the tuck's own measured resting tilt must stay free of charge
-    rest_tilt = _stance_with_quat(env, joints, z, _quat_rpy(0.0, math.radians(14.1), 0.0))
-    assert upright > 0.9
-    assert rest_tilt == pytest.approx(upright, rel=1e-6)
 
+def test_ready_stance_dies_off_the_plate_and_on_the_floor():
+    env = _stance_env(z0=0.08)
+    on_plate = 0.08 + _PHT + _STAND_Z
+    # standing on the FLOOR beside the plate, same posture, 9 cm lower
+    assert _stance(env, _STAND_Z, _quat_rpy(0, 0, 0)) < 1e-3
+    # crouched on the plate: 5 cm low is ~1.7 sigma, so it must be well down
+    assert _stance(env, on_plate - 0.05, _quat_rpy(0, 0, 0)) < 0.2 * _stance(
+        env, on_plate, _quat_rpy(0, 0, 0)
+    )
+
+
+def test_ready_stance_collapses_for_a_non_upright_trunk():
+    # THE FLOP AUDIT, through the real reward. height alone cannot tell an
+    # upright robot from an inverted one at the same trunk height; the upright
+    # factor is what refuses every lying-down basin. It was dropped once and
+    # the side-lying pose outscored the intended one.
+    env = _stance_env(z0=0.08)
+    z = 0.08 + _PHT + _STAND_Z
+    upright = _stance(env, z, _quat_rpy(0, 0, 0))
+    assert upright > 0.99
     for name, rpy in {
-        "side_left":  (math.radians(102.8), 0.0, 0.0),
-        "side_right": (math.radians(-102.8), 0.0, 0.0),
-        "on_back":    (0.0, math.radians(-91.1), 0.0),
-        "face_down":  (0.0, math.radians(101.6), 0.0),
-        "inverted":   (math.radians(141.4), 0.0, 0.0),
+        "side_left":  (math.radians(90.0), 0.0, 0.0),
+        "side_right": (math.radians(-90.0), 0.0, 0.0),
+        "on_back":    (0.0, math.radians(-95.0), 0.0),
+        "face_down":  (0.0, math.radians(95.0), 0.0),
+        "inverted":   (math.radians(175.0), 0.0, 0.0),
     }.items():
-        flopped = _stance_with_quat(env, joints, z, _quat_rpy(*rpy))
-        assert flopped == 0.0, f"{name} still pays {flopped}"
+        assert _stance(env, z, _quat_rpy(*rpy)) == 0.0, name
 
 
-def test_ready_stance_upright_gate_is_wide_enough_not_to_tax_the_tuck():
-    # The mistake that opened the hole was assuming any upright factor must
-    # fight a 12-15 deg equilibrium. A WIDE gate does not: it must be exactly
-    # 1.0 out to 40 deg, and only then start falling.
-    env = _stance_env(z0=0.15)
-    joints = _tuck_joints(env)
-    z = 0.15 + _PHT + _TUCK_Z
-    flat = _stance_with_quat(env, joints, z, _quat_rpy(0.0, 0.0, 0.0))
-    for tilt in (5.0, 12.0, 15.0, 20.0, 39.0):
-        assert _stance_with_quat(
-            env, joints, z, _quat_rpy(0.0, math.radians(tilt), 0.0)
-        ) == pytest.approx(flat, rel=1e-6)
-    # ... and monotonically decreasing through the transition band
+def test_ready_stance_upright_gate_is_wide_enough_not_to_tax_standing():
+    # Standing is ~0 deg of tilt, so the gate must cost exactly nothing there,
+    # stay flat out to 40 deg, and fall monotonically to 0 by 70.
+    env = _stance_env(z0=0.08)
+    z = 0.08 + _PHT + _STAND_Z
+    flat = _stance(env, z, _quat_rpy(0, 0, 0))
+    for tilt in (2.0, 10.0, 25.0, 39.0):
+        assert _stance(env, z, _quat_rpy(0.0, math.radians(tilt), 0.0)) == \
+            pytest.approx(flat, rel=1e-6)
     band = [
-        _stance_with_quat(env, joints, z, _quat_rpy(0.0, math.radians(t), 0.0))
+        _stance(env, z, _quat_rpy(0.0, math.radians(t), 0.0))
         for t in (45.0, 55.0, 65.0, 70.0)
     ]
     assert band == sorted(band, reverse=True)
     assert band[-1] == 0.0
 
 
-def test_ready_stance_side_basin_no_longer_outscores_upright():
-    # The audit's bottom line, with the MEASURED settled states of each basin
-    # (probe --flop-audit, z0=0.15, tuck 0.75): pose and height as measured,
-    # so this test fails if the upright factor is ever weakened enough to let
-    # the side basin back over the upright pose.
-    env = _stance_env(z0=0.15)
-    z = 0.15 + _PHT + _TUCK_Z
+def test_ready_stance_is_hold_phase_only_so_it_cannot_oppose_the_flip():
+    env = _stance_env(z0=0.08, hold=0.3)
+    z = 0.08 + _PHT + _STAND_Z
+    env.episode_length_buf[:] = 0                       # HOLD
+    assert _stance(env, z, _quat_rpy(0, 0, 0)) > 0.99
+    env.episode_length_buf[:] = 30                      # LAUNCH / GONE
+    assert _stance(env, z, _quat_rpy(0, 0, 0)) == 0.0
 
-    def basin(tilt_deg, joint_err):
-        joints = _tuck_joints(env) + joint_err
-        return _stance_with_quat(
-            env, joints, z, _quat_rpy(0.0, math.radians(tilt_deg), 0.0)
-        )
 
-    upright = basin(14.1, 0.08)      # measured pose 0.950 at rest
-    side = basin(102.8, 0.02)        # measured pose 0.997 -- LESS sagged
-    assert upright > 0.0
-    assert side == 0.0
-    assert upright > side
+def test_ready_stance_height_target_tracks_the_sampled_z0():
+    # The plate height is per-episode DR, so a fixed height target would score
+    # a correctly-held stance as wrong at every z0 but one.
+    for z0 in (0.07, 0.09):
+        env = _stance_env(z0=z0)
+        assert _stance(env, z0 + _PHT + _STAND_Z, _quat_rpy(0, 0, 0)) > 0.99

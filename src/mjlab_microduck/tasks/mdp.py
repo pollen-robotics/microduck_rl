@@ -7359,11 +7359,11 @@ def _backflip_state(env: ManagerBasedRlEnv) -> tuple:
         # ("the plate is stuck in the middle of the robot, not under its
         # feet"). They now describe a plausible mid-box toss instead.
         z = torch.zeros(env.num_envs, device=env.device)
-        env._backflip_t_hold = torch.full_like(z, 0.3)
-        env._backflip_t_launch = torch.full_like(z, 0.125)
+        env._backflip_t_hold = torch.full_like(z, 0.2)
+        env._backflip_t_launch = torch.full_like(z, 0.157)
         env._backflip_z0 = torch.full_like(z, 0.08)
-        env._backflip_vz = torch.full_like(z, 1.95)
-        env._backflip_w0 = torch.full_like(z, 23.5)
+        env._backflip_vz = torch.full_like(z, 2.85)
+        env._backflip_w0 = torch.full_like(z, 18.5)
         env._backflip_accum = z.clone()
         env._backflip_max = z.clone()
         env._backflip_paid = z.clone()
@@ -7388,46 +7388,39 @@ def _uniform(env, env_ids, rng: tuple) -> torch.Tensor:
 def reset_backflip_launch_params(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
-    hold_range: tuple = (0.1, 0.4),
-    launch_range: tuple = (0.12, 0.13),
+    hold_range: tuple = (0.1, 0.3),
+    launch_range: tuple = (0.155, 0.16),
     z0_range: tuple = (0.07, 0.09),
-    vz_range: tuple = (1.90, 2.00),
-    w0_range: tuple = (23.0, 24.0),
+    vz_range: tuple = (2.80, 2.90),
+    w0_range: tuple = (18.5, 18.5),
 ) -> None:
     """Sample this episode's toss and clear the rotation accounting.
 
     Defaults are the WHOLE-BOX-VERIFIED launch envelope, measured from the
-    ACTUAL spawn ``reset_backflip_robot_on_plate`` produces (the TUCKED hold
-    posture) with BAM actuators: ``z0 in [0.07, 0.09]`` m,
-    ``vz in [1.90, 2.00]`` m/s, ``w0 in [23, 24]`` rad/s,
-    ``t_launch in [0.12, 0.13]`` s. "Whole-box" is the acceptance rule that
-    matters: EVERY sampled combination of the corners and midpoints of all
-    four ranges (486 cells, crossed with hold and tuck depth) closes >= 360 deg
-    BACKWARD at <= 2.6 m/s. Measured across the box: rotation 372.5-457.3 deg,
-    worst landing 2.15 m/s. A box whose interior contains one 3 deg cell is not
-    a box — that is how an earlier, best-corner-chosen box got here.
+    ACTUAL spawn ``reset_backflip_robot_on_plate`` produces (the STANDING hold)
+    with BAM actuators, with the policy modelled as folding into a full tuck at
+    the flick: ``z0 in [0.07, 0.09]`` m, ``vz in [2.80, 2.90]`` m/s,
+    ``w0 = 18.5`` rad/s, ``t_launch in [0.155, 0.16]`` s. Every sampled
+    combination of the corners and midpoints closes >= 360 deg BACKWARD and
+    none passes the landing gate by never landing. Measured across the box:
+    rotation 361-458 deg, landing 3.2-3.9 m/s.
 
-    History worth not repeating, both in
+    ``w0`` has NO width on purpose. The standing launch is knife-edge —
+    rotation swings 100-300 deg between neighbouring w0 values — and a wider
+    search found no rectangle that closes whole-box with more. Do not widen
+    any range without re-running ``--box-check``.
+
+    History worth not repeating, all in
     ``docs/backflip_envelope_results.md``:
       * ``vz in [2, 3]``, ``w0 in [8, 14]`` (pre-measurement placeholders) do
         not close a flip at all.
-      * ``vz in [2.00, 2.25]``, ``w0 in [24, 30]`` came from a probe that
-        spawned the robot TUCKED while the env spawned it STANDING. From a
-        standing spawn those ranges rotate the robot FORWARD
-        (orientation-verified, to -275 deg) and NOTHING in vz [2, 4] x
-        w0 [3, 36] closes 360 deg under the hardware landing limit. That is
-        why the hold posture is now tucked.
-      * ``t_launch`` down at 0.08 lands at up to 3.97 m/s: a SHORT flick is
-        the violent one, so the low end moved up to 0.12.
-      * ``z0 in [0.10, 0.20]`` with ``vz in [2.00, 2.10]``, ``w0 in [21, 23]``
-        was the first whole-box-verified box. It works, but the user watched it
-        and called it "far too hard and too far": 393-476 deg of rotation, a
-        0.52-0.63 m apex and a plate hovering 11-21 cm up. The current defaults
-        are the retune — see the cfg's Launch envelope block for what moved.
-      * ``z0`` CANNOT go below 0.07. The kneeling tuck rests on its shins with
-        its feet hanging ~8 cm below the surface it sits on, so under a 0.08 m
-        plate top the feet reach the ground and the robot settles at 41 deg and
-        slides 5.5 cm. A plate lying ON the floor cannot hold this pose at all.
+      * every box measured from a TUCKED hold (``vz in [1.9, 2.25]``,
+        ``w0 in [21, 30]``, landing 1.5-2.2 m/s) came from a state with the
+        robot's FEET TUNNELLED UNDER the launcher plate. From a valid rest the
+        tuck lands at 3.38 m/s, i.e. the same as standing, so the posture was
+        reverted.
+      * ``t_launch`` down at 0.08 lands at up to 3.97 m/s: a SHORT flick is the
+        violent one.
     """
     if env_ids is None or len(env_ids) == 0:
         return
@@ -7644,25 +7637,6 @@ def backflip_hold_window(env: ManagerBasedRlEnv) -> torch.Tensor:
     return (backflip_phase(env) == BACKFLIP_PHASE_HOLD).float()
 
 
-def _backflip_tuck_target(
-    env: ManagerBasedRlEnv,
-    asset: Entity,
-    tuck_overrides: dict,
-    tuck_factor: float,
-) -> torch.Tensor:
-    """Servo-space target pose for the HOLD tuck: default pose + tuck overrides.
-
-    Shaped (num_envs, n_servo_joints) in the canonical 14-servo order, so it
-    lines up with ``_servo_joint_pos``. Joints the tuck does not name keep the
-    model's default (HOME) value — the tuck folds the legs and tucks the chin,
-    it does not re-pose the whole robot.
-    """
-    target = _servo_default_joint_pos(env, asset).clone()
-    for idx, angle in tuck_overrides.items():
-        target[:, idx] = angle * tuck_factor
-    return target
-
-
 def _trunk_tilt_smoothstep(
     quat: torch.Tensor, tilt_full_deg: float, tilt_zero_deg: float
 ) -> torch.Tensor:
@@ -7684,90 +7658,48 @@ def _trunk_tilt_smoothstep(
 
 def backflip_ready_stance(
     env: ManagerBasedRlEnv,
-    tuck_overrides: dict,
-    tuck_factor: float = 0.75,
-    tuck_z: float = 0.029,
-    joint_std: float = 0.35,
+    stand_z: float = 0.115,
     height_std: float = 0.03,
     tilt_full_deg: float = 40.0,
     tilt_zero_deg: float = 70.0,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Pay for HOLDING THE TUCK on the operator's hands. HOLD phase only.
+    """Pay for STANDING STILL on the operator's hands. HOLD phase only.
 
-    ``pose x height x upright``, gated by the HOLD window:
-      * ``pose``  — exp on the MEAN SQUARED servo-joint error against the tuck
-        target (mean, not sum, so the number does not depend on how many joints
-        the model has). ``joint_std=0.35`` rad is set from the escapable part:
-        a held tuck sits within ~0.1 rad of target and scores ~0.92, while the
-        HOME pose (i.e. "did not tuck") scores ~0.12 on this factor alone.
-      * ``height`` — exp on trunk z against ``z0 + tuck_z`` (the plate CENTRE
-        plus the MEASURED tucked resting height above the plate top; the caller
-        passes ``TUCK_Z + PLATE_HALF_THICKNESS``). This is what makes standing
-        up worthless: a standing trunk is ~8.6 cm high here, i.e. ~2.9 sigma
-        out, scoring ~3e-4.
-
+    ``upright x height``, gated by the HOLD window:
+      * ``height`` — exp on trunk z against ``z0 + stand_z`` (the caller passes
+        ``STAND_Z + PLATE_HALF_THICKNESS``, because the robot stands on the
+        plate's TOP surface while the term measures against its centre ``z0``).
       * ``upright`` — smoothstep on trunk TILT: 1 below ``tilt_full_deg`` (40
-        deg), 0 above ``tilt_zero_deg`` (70 deg). This factor is load-bearing
-        and it was missing once; the reason is worth the paragraph.
+        deg), 0 above ``tilt_zero_deg`` (70). WIDE on purpose: it costs exactly
+        zero for a robot that is actually standing, and hard-zeroes every
+        lying-down basin.
 
-    THE SIDE-LYING BASIN (why ``upright`` is not optional). An earlier version
-    of this term deliberately dropped the upright factor, reasoning that the
-    tuck's own equilibrium is a trunk pitched 12-15 deg and an upright term
-    would fight the pose it exists to hold. The reasoning was right about a
-    TIGHT Gaussian and wrong about the term as a whole, because ``pose`` and
-    ``height`` cannot tell an upright tuck from an INVERTED one. Measured on
-    the plate at z0=0.15 (probe mode ``--flop-audit``):
-
-        upright tuck (the spawn):  tilt  14.1 deg  pose 0.950  height 1.000
-        tucked, ON ITS SIDE:       tilt 102.8 deg  pose 0.997  height 0.994
-        tucked, on its back:       tilt  91.1 deg  pose 0.983  height 0.827
-        tucked, face down:         tilt 101.6 deg  pose 0.781  height 0.975
-        tucked, inverted:          tilt 141.4 deg  pose 0.985  height 0.527
-
-    Without ``upright`` the side-lying tuck scores 0.991 against the upright
-    tuck's 0.950 — a 4% PREMIUM for flopping. It is worse than a tie: the side
-    basin is PASSIVELY STABLE on the plate (held 3 s it stays at 102.8 deg with
-    15 mm of drift and does not fall off), it needs no balancing at all, its
-    joints are less load-sagged than the upright tuck's so its ``pose`` factor
-    is actually HIGHER, and it costs less ``action_rate``. And it bites hardest
-    during discovery, when ``flip_progress`` pays ~0 because the flip does not
-    exist yet and this is the only paying term — after which the launch is a
-    SIDE flip, the exact failure the cfg narrows yaw scatter to +-0.05 to
-    prevent. This is the audit AGENTS.md mandates ("audit each positive term
-    against every stable flop") and it is now a probe mode and a test.
-
-    The gate is deliberately WIDE, not a Gaussian: at the tuck's 14 deg
-    equilibrium it costs exactly ZERO (14 < 40), so it does not fight the pose,
-    while 102.8 deg is hard-zeroed. cos(tilt) would also work but charges 3%
-    for holding the correct pose. Do not tighten ``tilt_full_deg`` below the
-    tuck's measured resting tilt plus a margin.
+    DO NOT DROP THE UPRIGHT FACTOR. It was dropped once, when the hold posture
+    was briefly a tuck, on the reasoning that a tight upright term would fight
+    a pose whose own equilibrium is pitched. Measured consequence: ``height``
+    alone cannot tell an upright robot from an inverted one at the same trunk
+    height, and the side-lying basin — passively stable, needing no balancing,
+    costing less ``action_rate`` — outscored the intended pose. The flop audit
+    that proves it is a probe mode (``--flop-audit``) and a test.
 
     WHY THIS IS NOT THE "positive reward for being in a bad state" TRAP that
-    AGENTS.md warns about, even though it pays a crouched robot per step:
-      1. The tuck is the GOOD state here, not a cheap degenerate one. It is the
-         launch posture the whole maneuver is measured from — from a STANDING
-         hold no launch setting closes a safe 360 deg at all
-         (docs/backflip_envelope_results.md). The cheap degenerate versions of
-         it (on the side / back / face) are what the ``upright`` factor is
-         there to refuse; see THE SIDE-LYING BASIN above.
+    AGENTS.md warns about:
+      1. Standing on the launcher is the GOOD state — it is the launch posture
+         the envelope is measured from, and the pose the operator actually
+         hands the robot over in.
       2. It cannot be camped. The payout is multiplied by
          ``backflip_hold_window``, which the plate's PRESCRIBED schedule closes
-         at ``t_hold`` regardless of what the policy does. There is no action
-         that extends the paying window, so "hold the tuck forever" is not an
-         available strategy — unlike a rest-pose reward on the floor, which the
-         policy controls the duration of.
-      3. It is small: episode-summed it is worth at most ~1.0 (weight x the
-         longest hold) against the flip's 8.0 and the landing's ~8.0.
+         at ``t_hold`` regardless of what the policy does. No action extends
+         the paying window.
+      3. It is small: episode-summed at most ~0.5 (weight x the longest hold)
+         against the flip's 8.0 and the landing's ~8.0.
       4. It dies at launch, so it can never oppose the flip itself.
     """
     asset: Entity = env.scene[asset_cfg.name]
-    target = _backflip_tuck_target(env, asset, tuck_overrides, tuck_factor)
-    err = torch.nan_to_num(_servo_joint_pos(env, asset) - target, nan=0.0)
-    pose = torch.exp(-err.pow(2).mean(dim=-1) / (joint_std**2))
     z_err = (
         asset.data.root_link_pos_w[:, 2]
-        - (env.scene.terrain.env_origins[:, 2] + env._backflip_z0 + tuck_z)
+        - (env.scene.terrain.env_origins[:, 2] + env._backflip_z0 + stand_z)
     )
     height = torch.exp(-(z_err**2) / (height_std**2))
     upright = _trunk_tilt_smoothstep(
@@ -7775,7 +7707,7 @@ def backflip_ready_stance(
         tilt_full_deg,
         tilt_zero_deg,
     )
-    return backflip_hold_window(env) * pose * height * upright
+    return backflip_hold_window(env) * height * upright
 
 
 def backflip_landing(
@@ -7898,13 +7830,11 @@ def backflip_phase_obs(env: ManagerBasedRlEnv) -> torch.Tensor:
 def reset_backflip_robot_on_plate(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
-    tuck_overrides: dict,
-    tuck_factor: float = 0.75,
-    tuck_z: float = 0.029,
+    stand_z: float = 0.115,
     plate_half_thickness: float = 0.01,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> None:
-    """Place the robot TUCKED on the plate TOP, at the z0 sampled this episode.
+    """Place the robot STANDING on the plate TOP, at the z0 sampled this episode.
 
     MUST run AFTER ``reset_backflip_launch_params`` (events fire in dict
     insertion order): it reads that episode's ``env._backflip_z0``.
@@ -7913,57 +7843,41 @@ def reset_backflip_robot_on_plate(
     sampled per-env per-episode. Nothing else in the reset chain knows that
     number — the base ``reset_base`` event draws the root height from a fixed
     uniform range, independent of ``z0``. With two independent draws the robot
-    would spawn up to 10 cm above the plate (a free-fall onto the launcher
-    before the flick, at up to 1.4 m/s) or 10 cm inside it (contact-solver
-    ejection). Both are silent: nothing errors, the episodes just start wrong.
-    Deriving the spawn height from the same sample is the only way to keep the
-    feet on the plate across the whole ``z0`` range.
+    would spawn up to 10 cm above the plate (a free fall onto the launcher
+    before the flick) or 10 cm inside it (contact-solver ejection). Both are
+    silent: nothing errors, the episodes just start wrong.
 
-    Trunk z = origin_z + z0 + plate_half_thickness + tuck_z: ``z0`` is the
+    Trunk z = origin_z + z0 + plate_half_thickness + stand_z: ``z0`` is the
     plate BODY centre, its top surface sits one half-thickness above that, and
-    ``tuck_z`` is the MEASURED trunk height of the TUCKED pose resting on that
-    surface. It is NOT ``STAND_Z``: this env holds the robot folded, and the
-    two heights differ by ~8.6 cm. Carrying a height across poses is the exact
-    failure AGENTS.md records as having cost days.
+    ``stand_z`` is the measured trunk height above the SOLE contact plane.
 
-    WHY TUCKED. Measured, not stylistic: from a STANDING hold no launch setting
-    in vz [2, 4] x w0 [3, 36] closes 360 deg below the ~2.6 m/s hardware
-    landing limit, and the configured box rotates a standing robot FORWARD.
-    From this spawn the same class of box closes 393-484 deg at 1.68-2.51 m/s
-    (docs/backflip_envelope_results.md, "Tucked hold"). A tucked duck has a
-    much smaller pitch inertia and a ~3 cm CoM, which is what lets the hand's
-    angular impulse transfer instead of overdriving the sole contact.
+    WHY STANDING AND NOT TUCKED. A tucked hold was tried and reverted. It was
+    adopted because it appeared to fly at 1.5-2.2 m/s where standing needed
+    3.4 — but that measurement was taken from a state with the robot's FEET
+    TUNNELLED UNDER the launcher plate (the tuck kneels on its shins, and its
+    feet are not its lowest point, so a spawn placed by trunk height put them
+    through the 2 cm slab). From a geometrically valid rest the tuck lands at
+    3.38 m/s and standing at 3.43 — equivalent. Standing then wins on
+    everything else: the feet are on the plate BY CONSTRUCTION, so no spawn can
+    tunnel; it is how the operator actually hands the robot over; and the spawn
+    and ``backflip_ready_stance`` are plain arithmetic on one measured height.
+    Evidence: docs/backflip_envelope_results.md, "The feet are under the plate"
+    and "Back to standing".
 
-    The joint write ADDS the tuck offset to whatever ``reset_robot_joints``
-    left in qpos, rather than overwriting it: that keeps the +-0.05 rad of
-    joint scatter the base event applies (overwriting would silently delete DR
-    on exactly the eight joints that define the pose). Servo columns are
-    resolved through ``_servo_joint_ids`` so backlash/roller models with
-    interleaved ``passive_*`` joints stay correct.
-
-    Orientation, x/y and root velocity are left to ``reset_base`` (which the
-    backflip cfg narrows to a small on-plate scatter with near-zero yaw).
-    Writes ``qpos[:, 2]`` directly, like ``set_random_ground_state``: this
-    relies on the robot being the FIRST scene entity.
+    Joint angles, orientation, x/y and root velocity are all left to the base
+    reset events (``reset_robot_joints`` puts the servos at HOME +- 0.05 rad;
+    the backflip cfg narrows ``reset_base`` to a small on-plate scatter with
+    near-zero yaw). Writes ``qpos[:, 2]`` directly, like
+    ``set_random_ground_state``: this relies on the robot being the FIRST
+    scene entity.
     """
+    del asset_cfg
     if env_ids is None or len(env_ids) == 0:
         return
     _backflip_state(env)
-    asset: Entity = env.scene[asset_cfg.name]
     env_ids = env_ids.to(env.device, dtype=torch.long)
     origin_z = env.scene.terrain.env_origins[env_ids, 2]
     env.sim.data.qpos[env_ids, 2] = (
-        origin_z + env._backflip_z0[env_ids] + plate_half_thickness + tuck_z
+        origin_z + env._backflip_z0[env_ids] + plate_half_thickness + stand_z
     )
     env.sim.data.qvel[env_ids, :6] = 0.0
-
-    servo_ids = _servo_joint_ids(env, asset)
-    default = asset.data.default_joint_pos
-    for idx, angle in tuck_overrides.items():
-        joint_id = servo_ids[idx]
-        col = 7 + joint_id
-        # Preserve reset_robot_joints' per-joint scatter: shift by the
-        # (target - default) delta instead of assigning the target outright.
-        env.sim.data.qpos[env_ids, col] += (
-            angle * tuck_factor - default[env_ids, joint_id]
-        )

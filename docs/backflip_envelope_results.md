@@ -46,7 +46,14 @@ survive?
 > after the flop audit found the side-lying tuck outscoring the upright one.
 > See "**Flop audit, and two corrections**".
 
-> **!! ALL BOXES IN THIS DOCUMENT ARE INVALID (2026-09-07).** Every launch
+> **CURRENT BOX — the final section, "Back to standing" (2026-09-07):**
+> STANDING hold, `z0` in [0.07, 0.09], `vz` in [2.80, 2.90], `w0` = 18.5,
+> `t_launch` in [0.155, 0.16]. Rotation 363-458 deg, landing 3.1-3.9 m/s,
+> whole-box closure, 33/33 direction checks backward, spawn geometrically
+> valid. Landing is ABOVE the operator's ~2.6 m/s comfort threshold and that is
+> knowingly accepted; the probe measures the launch, not the skill.
+
+> **!! EVERY OTHER BOX IN THIS DOCUMENT IS INVALID (2026-09-07).** Every launch
 > envelope here — including the one below and the original Task 3 tables — was
 > measured with the robot's FEET TUNNELLED UNDER the launcher plate slab. The
 > geometrically valid rest does not close a backflip under the hardware landing
@@ -4407,4 +4414,293 @@ uv run --with pytest pytest tests/test_backflip_cfg.py -q -rx   # the xfail reas
 # the valid-rest sweeps and the pitch scan are short drivers over
 # backflip_envelope.run_cell()/run_settle(); the tables above carry their
 # exact parameters.
+```
+
+
+# Back to standing — the env's current, valid box
+
+The user's call, on the previous section's numbers: the tucked hold was adopted
+because it flew at 1.5-2.2 m/s where standing needed 3.4, and that advantage
+turned out to come from a spawn with the feet tunnelled under the plate. From a
+valid rest the tuck lands at 3.38 m/s and standing at 3.43 — equivalent — so
+the tuck bought nothing and cost the whole geometric problem. **This section is
+the standing hold, re-measured from scratch. It is the env's current box; every
+box above it is history.**
+
+## 1. The box
+
+`--posture standing --tuck-at-flick --bam --box-check`, corners and midpoints of
+`z0` / `vz` / `w0` / `t_launch`, crossed with the hold extremes and midpoint:
+
+```
+# box-check posture=standing bam=True dt=0.005
+#   z0 (0.07, 0.09) vz (2.8, 2.9) w0 (18.5, 18.5) launch (0.155, 0.16)
+#   z0 grid (0.07, 0.08, 0.09)
+#   hold (0.1, 0.2, 0.5) tuck (1.0,)
+  243 cells | rot 363.3-457.8 deg | max landing = 3.93 m/s | short of 360: 0 | over 2.6 m/s: 243 | never landed: 0
+  worst by rotation:
+    rot=  363.3 land= 3.48 apex=0.627 tilt0=  1.2  z0=0.080 vz=2.800 w0=18.50 launch=0.158 hold=0.10 tuck=1.00
+    rot=  363.3 land= 3.48 apex=0.627 tilt0=  1.2  z0=0.080 vz=2.800 w0=18.50 launch=0.158 hold=0.10 tuck=1.00
+    rot=  363.3 land= 3.48 apex=0.627 tilt0=  1.2  z0=0.080 vz=2.800 w0=18.50 launch=0.158 hold=0.10 tuck=1.00
+    rot=  363.3 land= 3.48 apex=0.617 tilt0=  1.2  z0=0.070 vz=2.800 w0=18.50 launch=0.158 hold=0.10 tuck=1.00
+    rot=  363.3 land= 3.48 apex=0.617 tilt0=  1.2  z0=0.070 vz=2.800 w0=18.50 launch=0.158 hold=0.10 tuck=1.00
+  worst by landing speed:
+    rot=  383.0 land= 3.93 apex=0.732 tilt0=  8.9  z0=0.080 vz=2.850 w0=18.50 launch=0.158 hold=0.50 tuck=1.00
+    rot=  383.0 land= 3.93 apex=0.732 tilt0=  8.9  z0=0.080 vz=2.850 w0=18.50 launch=0.158 hold=0.50 tuck=1.00
+    rot=  383.0 land= 3.93 apex=0.732 tilt0=  8.9  z0=0.080 vz=2.850 w0=18.50 launch=0.158 hold=0.50 tuck=1.00
+    rot=  383.0 land= 3.93 apex=0.742 tilt0=  8.9  z0=0.090 vz=2.850 w0=18.50 launch=0.158 hold=0.50 tuck=1.00
+    rot=  383.0 land= 3.93 apex=0.742 tilt0=  8.9  z0=0.090 vz=2.850 w0=18.50 launch=0.158 hold=0.50 tuck=1.00
+  CLOSURE: PASS — 0 cells short of 360 deg, 0 that never land
+  LANDING: 3.07-3.93 m/s (ABOVE the 2.6 m/s operator comfort threshold; 243/243 cells over)
+```
+
+| | value |
+|---|---|
+| `z0` | **0.07-0.09** m (plate top 0.08-0.10) |
+| `vz` | **2.80-2.90** m/s |
+| `w0` | **18.5** rad/s — no width, see below |
+| `t_launch` | **0.155-0.16** s |
+| `HOLD_RANGE` | 0.1-0.3 s, curriculum to 0.5 |
+| rotation across the box | **363.3-457.8 deg** |
+| landing across the box | **3.07-3.93 m/s** |
+| cells short of 360 / never landing | **0 / 0** (243 cells) |
+| direction checks | **33/33 backward** |
+
+Direction traces, all 16 `(z0, vz, w0, t_launch)` corners x both hold extremes
+plus the box centre:
+
+```
+   z0    vz    w0   lau  hold  tuck     rot  land  verdict
+ 0.07  2.80  18.5 0.155  0.10  1.00   374.8  3.50  BACKWARD ok  (+z=(-0.984,0.132,-0.117))
+ 0.07  2.80  18.5 0.155  0.50  1.00   406.5  3.72  BACKWARD ok  (+z=(-1.000,0.006,0.014))
+ 0.07  2.80  18.5 0.160  0.10  1.00   392.4  3.46  BACKWARD ok  (+z=(-0.986,-0.076,-0.151))
+ 0.07  2.80  18.5 0.160  0.50  1.00   405.1  3.68  BACKWARD ok  (+z=(-0.999,-0.044,-0.003))
+ 0.07  2.80  18.5 0.155  0.10  1.00   374.8  3.50  BACKWARD ok  (+z=(-0.984,0.132,-0.117))
+ 0.07  2.80  18.5 0.155  0.50  1.00   406.5  3.72  BACKWARD ok  (+z=(-1.000,0.006,0.014))
+ 0.07  2.80  18.5 0.160  0.10  1.00   392.4  3.46  BACKWARD ok  (+z=(-0.986,-0.076,-0.151))
+ 0.07  2.80  18.5 0.160  0.50  1.00   405.1  3.68  BACKWARD ok  (+z=(-0.999,-0.044,-0.003))
+ 0.07  2.90  18.5 0.155  0.10  1.00   389.5  3.66  BACKWARD ok  (+z=(-0.989,0.010,-0.150))
+ 0.07  2.90  18.5 0.155  0.50  1.00   373.7  3.85  BACKWARD ok  (+z=(-0.994,0.099,0.051))
+ 0.07  2.90  18.5 0.160  0.10  1.00   406.7  3.42  BACKWARD ok  (+z=(-0.983,-0.079,-0.168))
+ 0.07  2.90  18.5 0.160  0.50  1.00   391.8  3.81  BACKWARD ok  (+z=(-0.994,-0.104,-0.024))
+ 0.07  2.90  18.5 0.155  0.10  1.00   389.5  3.66  BACKWARD ok  (+z=(-0.989,0.010,-0.150))
+ 0.07  2.90  18.5 0.155  0.50  1.00   373.7  3.85  BACKWARD ok  (+z=(-0.994,0.099,0.051))
+ 0.07  2.90  18.5 0.160  0.10  1.00   406.7  3.42  BACKWARD ok  (+z=(-0.983,-0.079,-0.168))
+ 0.07  2.90  18.5 0.160  0.50  1.00   391.8  3.81  BACKWARD ok  (+z=(-0.994,-0.104,-0.024))
+ 0.09  2.80  18.5 0.155  0.10  1.00   381.1  3.56  BACKWARD ok  (+z=(-0.984,0.132,-0.117))
+ 0.09  2.80  18.5 0.155  0.50  1.00   409.8  3.75  BACKWARD ok  (+z=(-1.000,0.006,0.014))
+ 0.09  2.80  18.5 0.160  0.10  1.00   395.8  3.49  BACKWARD ok  (+z=(-0.986,-0.076,-0.151))
+ 0.09  2.80  18.5 0.160  0.50  1.00   408.5  3.71  BACKWARD ok  (+z=(-0.999,-0.044,-0.003))
+ 0.09  2.80  18.5 0.155  0.10  1.00   381.1  3.56  BACKWARD ok  (+z=(-0.984,0.132,-0.117))
+ 0.09  2.80  18.5 0.155  0.50  1.00   409.8  3.75  BACKWARD ok  (+z=(-1.000,0.006,0.014))
+ 0.09  2.80  18.5 0.160  0.10  1.00   395.8  3.49  BACKWARD ok  (+z=(-0.986,-0.076,-0.151))
+ 0.09  2.80  18.5 0.160  0.50  1.00   408.5  3.71  BACKWARD ok  (+z=(-0.999,-0.044,-0.003))
+ 0.09  2.90  18.5 0.155  0.10  1.00   392.8  3.69  BACKWARD ok  (+z=(-0.989,0.010,-0.150))
+ 0.09  2.90  18.5 0.155  0.50  1.00   376.6  3.89  BACKWARD ok  (+z=(-0.994,0.099,0.051))
+ 0.09  2.90  18.5 0.160  0.10  1.00   410.1  3.44  BACKWARD ok  (+z=(-0.983,-0.079,-0.168))
+ 0.09  2.90  18.5 0.160  0.50  1.00   394.9  3.84  BACKWARD ok  (+z=(-0.994,-0.104,-0.024))
+ 0.09  2.90  18.5 0.155  0.10  1.00   392.8  3.69  BACKWARD ok  (+z=(-0.989,0.010,-0.150))
+ 0.09  2.90  18.5 0.155  0.50  1.00   376.6  3.89  BACKWARD ok  (+z=(-0.994,0.099,0.051))
+ 0.09  2.90  18.5 0.160  0.10  1.00   410.1  3.44  BACKWARD ok  (+z=(-0.983,-0.079,-0.168))
+ 0.09  2.90  18.5 0.160  0.50  1.00   394.9  3.84  BACKWARD ok  (+z=(-0.994,-0.104,-0.024))
+ 0.08  2.85  18.5 0.158  0.30  1.00   375.0  3.72  BACKWARD ok  (+z=(-0.990,0.116,-0.074))
+
+33 cells checked, 0 not confirmed backward
+```
+
+## 2. Two things to be honest about
+
+**The landing is above the operator's comfort threshold.** 3.1-3.9 m/s against
+the ~2.6 m/s named. Accepted knowingly. `--box-check` now reports CLOSURE and
+LANDING as separate verdicts rather than one fused PASS/FAIL, because closure
+is a correctness property of the box while the landing speed is a trade-off the
+user owns, and fusing them hid which was failing.
+
+**THE PROBE MEASURES THE LAUNCH, NOT THE SKILL.** It holds a fixed pose and
+folds once, instantaneously, at the flick. A trained policy tucks to spin
+faster — needing less altitude, so a lower apex and a slower touchdown — and
+extends to brake before landing. Whether that closes the 1.3 m/s gap is a
+training question and nothing here predicts it either way.
+
+**The launch is knife-edge in `w0`.** Whole-box minimum rotation against `w0`
+at `t_launch` = 0.16, `vz` = 2.85: 379 deg at 17.5, **342 at 18.0**, 366 at
+18.5, **248 at 19.0**. A 100-300 deg swing between neighbouring values, so
+`W0_RANGE` carries no DR width at all. A 3x wider search
+(`w0` in [15, 24] x `vz` in [2.3, 3.0] x `t_launch` in [0.12, 0.17]) found no
+rectangle with more width that closes whole-box:
+
+```
+  lau    vz    w0   minrot   maxrot  maxland  never  ok
+ 0.15  2.60  18.0    342.2    405.7     3.83      0  no
+ 0.15  2.60  21.0    221.7    397.0     3.44      0  no
+ 0.15  2.80  18.0    360.4    457.5     3.92      0  YES
+ 0.15  2.80  21.0    284.7    439.1     3.46      0  no
+ 0.15  3.00  18.0    285.0    409.1     3.93      0  no
+ 0.15  3.00  21.0    332.7    498.8     3.89      0  no
+ 0.16  2.60  18.0    267.6    415.4     3.50      0  no
+ 0.16  2.60  21.0    140.9    358.2     3.46      0  no
+ 0.16  2.80  18.0    365.3    413.7     3.71      0  YES
+ 0.16  2.80  21.0    148.2    377.7     3.57      0  no
+ 0.16  3.00  18.0    307.0    403.1     3.84      0  no
+ 0.16  3.00  21.0    131.3    429.8     3.43      0  no
+ 0.17  2.60  18.0    356.6    367.5     3.51      0  no
+ 0.17  2.60  21.0    183.0    391.6     3.38      0  no
+ 0.17  2.80  18.0    354.2    453.2     3.81      0  no
+ 0.17  2.80  21.0    192.9    371.8     3.46      0  no
+ 0.17  3.00  18.0    180.5    491.5     3.47      0  no
+ 0.17  3.00  21.0    342.2    448.2     3.75      0  no
+
+rectangles with min rot >= 360 and no never-landing cell:
+  cells= 2 launch=[0.15, 0.16] vz=[2.8] w0=[18.0] -> rot 360.4-457.5, land <= 3.92
+  cells= 1 launch=[0.16] vz=[2.8] w0=[18.0] -> rot 365.3-413.7, land <= 3.71
+  cells= 1 launch=[0.15] vz=[2.8] w0=[18.0] -> rot 360.4-457.5, land <= 3.92
+```
+
+That is a real sim2real risk — a human's flick does not repeat to +-0.5 rad/s —
+and it is the honest state of the measurement, not a tuning failure.
+
+**The fold depth is the policy's action, not DR.** At `t_launch` = 0.15,
+`vz` = 2.8, `w0` = 18 a 0.75 fold gives 209-254 deg where a full fold gives
+357-458. `z0` and `t_hold` shift rotation by under 10 deg over the same cells.
+The box is therefore verified at the full fold — the way the task requires it
+to be flown — and the fold depth is what the policy has to learn:
+
+```
+### launch=0.15 vz=2.8 w0=18.0
+     z0  hold  fold      rot   land   apex  tilt0
+   0.07  0.10  0.75    250.8   3.53  0.639    1.2
+   0.07  0.10  1.00    360.4   3.71  0.636    1.2
+   0.07  0.15  0.75    225.5   3.28  0.619    2.1
+   0.07  0.15  1.00    356.9   3.66  0.625    2.1
+   0.07  0.20  0.75    208.7   3.01  0.615    3.0
+   0.07  0.20  1.00    450.0   3.21  0.680    3.0
+   0.08  0.10  0.75    252.4   3.59  0.649    1.2
+   0.08  0.10  1.00    360.4   3.71  0.646    1.2
+   0.08  0.15  0.75    225.5   3.28  0.629    2.1
+   0.08  0.15  1.00    360.0   3.71  0.635    2.1
+   0.08  0.20  0.75    208.7   3.01  0.625    3.0
+   0.08  0.20  1.00    453.7   3.23  0.690    3.0
+   0.09  0.10  0.75    253.9   3.65  0.659    1.2
+   0.09  0.10  1.00    363.5   3.75  0.656    1.2
+   0.09  0.15  0.75    227.0   3.34  0.639    2.1
+   0.09  0.15  1.00    360.0   3.71  0.645    2.1
+   0.09  0.20  0.75    210.5   3.06  0.635    3.0
+   0.09  0.20  1.00    457.5   3.25  0.700    3.0
+### launch=0.16 vz=2.8 w0=18.0
+     z0  hold  fold      rot   land   apex  tilt0
+   0.07  0.10  0.75    303.1   3.65  0.662    1.2
+   0.07  0.10  1.00    368.5   3.55  0.625    1.2
+   0.07  0.15  0.75    325.9   3.80  0.691    2.1
+   0.07  0.15  1.00    389.5   3.52  0.636    2.1
+   0.07  0.20  0.75    334.5   3.80  0.699    3.0
+   0.07  0.20  1.00    365.3   3.67  0.652    3.0
+   0.08  0.10  0.75    305.6   3.71  0.672    1.2
+   0.08  0.10  1.00    371.7   3.58  0.635    1.2
+   0.08  0.15  0.75    325.9   3.80  0.701    2.1
+   0.08  0.15  1.00    392.8   3.55  0.646    2.1
+   0.08  0.20  0.75    334.5   3.80  0.709    3.0
+   0.08  0.20  1.00    368.3   3.71  0.662    3.0
+   0.09  0.10  0.75    305.6   3.71  0.682    1.2
+   0.09  0.10  1.00    374.8   3.62  0.645    1.2
+   0.09  0.15  0.75    328.5   3.85  0.711    2.1
+   0.09  0.15  1.00    396.2   3.58  0.656    2.1
+   0.09  0.20  0.75    337.2   3.85  0.719    3.0
+   0.09  0.20  1.00    368.3   3.71  0.672    3.0
+### launch=0.15 vz=2.6 w0=18.0
+     z0  hold  fold      rot   land   apex  tilt0
+   0.07  0.10  0.75    280.2   3.33  0.601    1.2
+   0.07  0.10  1.00    402.1   3.38  0.602    1.2
+   0.07  0.15  0.75    298.0   3.47  0.614    2.1
+   0.07  0.15  1.00    318.4   3.52  0.590    2.1
+   0.07  0.20  0.75    289.9   3.43  0.622    3.0
+   0.07  0.20  1.00    342.2   3.51  0.586    3.0
+   0.08  0.10  0.75    280.3   3.33  0.611    1.2
+   0.08  0.10  1.00    402.1   3.38  0.612    1.2
+   0.08  0.15  0.75    298.0   3.47  0.624    2.1
+   0.08  0.15  1.00    321.1   3.57  0.600    2.1
+   0.08  0.20  0.75    289.9   3.43  0.632    3.0
+   0.08  0.20  1.00    345.0   3.55  0.596    3.0
+   0.09  0.10  0.75    282.8   3.39  0.621    1.2
+   0.09  0.10  1.00    405.7   3.41  0.622    1.2
+   0.09  0.15  0.75    300.5   3.53  0.634    2.1
+   0.09  0.15  1.00    323.7   3.63  0.610    2.1
+   0.09  0.20  0.75    292.4   3.49  0.642    3.0
+```
+
+## 3. `HOLD_RANGE`, capped from the drift measurement
+
+Open-loop standing drift on the plate under BAM, 32 noisy trials: **3.5 deg of
+tilt at 0.3 s, 7.3 at 0.5 s, 11.6 at 0.7 s, 23.2 (max 42.4) at 1.0 s.**
+`HOLD_RANGE` is 0.1-0.3 s and the curriculum widens it to 0.5 and no further —
+the last point the pose holds itself unaided. This is a floor on what is safe,
+not a claim about the limit: a trained policy balances, and this robot's
+walking and stand-up policies hold far longer than a second.
+
+## 4. Flop audit, standing
+
+Run over the HOLD window (0.5 s) rather than 3 s, because that is the window
+`ready_stance` pays in — standing is not a passive basin and topples by 3 s,
+which is why the hold is capped above.
+
+```
+# flop-audit: z0=0.08 tuck=0.75 duration=0.5s dt=0.005 bam=True
+ orientation   clr    tilt   drift  trunk_z    pose  height    pre  upright   TOTAL  on?
+     upright 0.045     8.4   0.009    0.200   1.000   0.975  0.975    1.000   0.975  yes
+   side_left 0.045   126.1   0.018    0.115   1.000   0.000  0.000    0.000   0.000  yes
+  side_right 0.045   126.1   0.018    0.115   1.000   0.000  0.000    0.000   0.000  yes
+   face_down 0.035    99.4   0.002    0.112   1.000   0.000  0.000    0.000   0.000  yes
+     on_back 0.035   120.2   0.025    0.142   1.000   0.012  0.012    0.000   0.000  yes
+    inverted 0.005   115.9   0.049    0.157   1.000   0.079  0.079    0.000   0.000  yes
+  upright: pre=0.975 TOTAL=0.975   best flop: pre=0.079 TOTAL=0.000
+  WITHOUT the upright factor: upright would win (0.079 vs 0.975)
+  RESULT: PASS - upright wins (0.975 vs 0.000)
+```
+
+| basin | settled tilt | trunk z | height | upright | **TOTAL** |
+|---|---|---|---|---|---|
+| **upright** (the spawn) | 8.4 deg | 0.200 | 0.975 | 1.000 | **0.975** |
+| side_left | 126.1 deg | 0.115 | 0.000 | 0.000 | **0.000** |
+| side_right | 126.1 deg | 0.115 | 0.000 | 0.000 | **0.000** |
+| face_down | 99.4 deg | 0.112 | 0.000 | 0.000 | **0.000** |
+| on_back | 120.2 deg | 0.142 | 0.012 | 0.000 | **0.000** |
+| inverted | 115.9 deg | 0.157 | 0.079 | 0.000 | **0.000** |
+
+Every flop scores exactly 0.000 against the upright hold's 0.975. Note that for
+a STANDING hold the height factor alone would already have won (0.975 vs
+0.079), because a fallen robot's trunk is much lower — unlike the tucked hold,
+where height could not tell upright from inverted and the side basin outscored
+the intended pose. The upright factor is kept anyway: it costs exactly zero at
+0 deg of tilt, and it is the guard whose absence cost a whole wave.
+
+## 5. The spawn-validity tests now PASS
+
+The three tests left as strict xfail in the previous section are ordinary
+passing tests again, and a fourth was added:
+
+- `test_the_spawn_is_not_jammed_into_the_plate` — deepest plate penetration at
+  the spawn is within loaded-contact tolerance (6 mm).
+- `test_the_spawn_is_clean_at_every_sampled_launch_height` — and it is
+  `z0`-invariant, so the two heights cannot drift apart again.
+- `test_no_robot_geom_is_below_the_plate_top_inside_its_footprint` — the exact
+  geometry the tuck produced.
+- `test_the_feet_are_the_lowest_geoms_so_the_spawn_cannot_tunnel` — **why
+  standing is structurally safe rather than merely fixed.** The tuck kneels on
+  its shins, so placing it by trunk height put the feet through the slab.
+  Standing's lowest geoms are the feet, so "trunk at STAND_Z above the surface"
+  puts the soles on it by construction.
+
+Full suite: **298 passed, 1 skipped, 0 xfailed.**
+
+## 6. Reproducing this section
+
+```bash
+uv run python scripts/backflip_envelope.py --box-check --bam
+uv run python scripts/backflip_envelope.py --flop-audit --bam --posture standing \
+    --z0 0.08 --settle-duration 0.5
+uv run python scripts/backflip_envelope.py --settle --bam --posture standing \
+    --z0 0.08 --settle-trials 32
+uv run python scripts/backflip_envelope.py --bam --posture standing --tuck-at-flick \
+    --z0 0.08 --hold 0.3 --launch 0.158 --check-direction \
+    --check-vz 2.85 --check-w0 18.5 --check-tuck 1.0
+uv run --with pytest pytest tests/test_backflip_cfg.py -q
 ```

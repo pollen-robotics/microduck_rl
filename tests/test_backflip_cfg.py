@@ -155,22 +155,10 @@ def test_launch_params_are_sampled_on_reset_within_the_operator_range(cfg):
 
 
 def test_launch_envelope_is_the_measured_box_not_the_placeholders(cfg):
-    # The WHOLE-BOX-verified tucked-spawn envelope, retuned for ONE clean turn
-    # from the lowest plate the pose allows (docs "Lower and gentler"): every
-    # corner and midpoint of these four ranges closes >= 360 deg backward at
-    # <= 2.6 m/s. Measured across the box: 372.5-457.3 deg, worst landing
-    # 2.15 m/s. The bounds each mark a measured failure just outside them:
-    #   z0 < 0.07     -> the tuck's dangling feet reach the ground (41 deg tilt)
-    #   t_launch 0.14 -> under-rotates at this vz (339.8 deg at the z0=0.07 corner)
-    #   t_launch < 0.12 -> landings up to 3.97 m/s (a short flick is violent)
-    #   w0 > 25       -> 357 deg at the z0=0.07 corner
-    p = cfg.events["backflip_launch_params"].params
-    assert p["vz_range"] == VZ_RANGE == (1.90, 2.00)
-    assert p["w0_range"] == W0_RANGE == (23.0, 24.0)
-    assert p["launch_range"] == LAUNCH_RANGE == (0.12, 0.13)
-    assert p["z0_range"] == Z0_RANGE == (0.07, 0.09)
-    # ... and the mdp defaults say the same thing, so an env built without the
-    # cfg (or a copy-paste into a new task) does not inherit a stale box.
+    # The box is asserted in full by test_the_standing_box_is_the_measured_one;
+    # this pins that the mdp DEFAULTS say the same thing, so an env built
+    # without the cfg (or a copy-paste into a new task) cannot inherit a stale
+    # box -- and every historical box on this branch is stale.
     import inspect
 
     defaults = inspect.signature(
@@ -180,6 +168,7 @@ def test_launch_envelope_is_the_measured_box_not_the_placeholders(cfg):
     assert defaults["w0_range"].default == W0_RANGE
     assert defaults["launch_range"].default == LAUNCH_RANGE
     assert defaults["z0_range"].default == Z0_RANGE
+    assert defaults["hold_range"].default == HOLD_RANGE
 
 
 def test_robot_is_placed_on_the_plate_after_z0_is_sampled(cfg):
@@ -197,49 +186,48 @@ def test_robot_is_placed_on_the_plate_after_z0_is_sampled(cfg):
     assert spawn.func is microduck_mdp.reset_backflip_robot_on_plate
 
 
-def test_the_spawn_pose_and_the_stance_target_are_the_same_numbers(cfg):
+def test_the_spawn_height_and_the_stance_target_are_the_same_number(cfg):
     # THE invariant between the spawn and the reward that scores it. The spawn
-    # folds the robot to tuck_overrides x tuck_factor and puts the trunk at
-    # z0 + plate_half_thickness + tuck_z; backflip_ready_stance scores the same
-    # joint target and the same height. Edit either alone and the robot spawns
-    # in a pose its own hold reward calls wrong — with every other test in this
-    # file still green.
+    # puts the trunk at z0 + plate_half_thickness + stand_z; ready_stance
+    # scores it against z0 + its own stand_z. Edit either alone and the robot
+    # spawns at a height its own hold reward calls wrong.
     spawn = cfg.events["backflip_spawn"].params
     stance = cfg.rewards["ready_stance"].params
-
-    assert spawn["tuck_overrides"] == stance["tuck_overrides"] == TUCK_OVERRIDES
-    assert spawn["tuck_factor"] == stance["tuck_factor"] == TUCK_FACTOR
-    assert spawn["tuck_z"] + spawn["plate_half_thickness"] == pytest.approx(
-        stance["tuck_z"]
+    assert spawn["stand_z"] + spawn["plate_half_thickness"] == pytest.approx(
+        stance["stand_z"]
     )
-    # and each half is the constant this module exports, not a stray number
-    assert spawn["tuck_z"] == pytest.approx(TUCK_Z)
+    assert spawn["stand_z"] == pytest.approx(STAND_Z)
     assert spawn["plate_half_thickness"] == pytest.approx(PLATE_HALF_THICKNESS)
 
 
-def test_the_hold_posture_is_tucked_not_standing(cfg):
-    # The defect this whole branch turned on: the spawn, the reward that pays
-    # for the hold, and the posture the envelope was measured from must be ONE
-    # posture. STAND_Z belongs to the LANDING only.
-    spawn = cfg.events["backflip_spawn"].params
-    stance = cfg.rewards["ready_stance"].params
-    assert "stand_z" not in spawn and "stand_z" not in stance
-    assert cfg.rewards["ready_stance"].func is microduck_mdp.backflip_ready_stance
-    # A tucked trunk sits far below a standing one — if these ever converge,
-    # someone has carried STAND_Z into the tuck.
-    assert TUCK_Z < STAND_Z - 0.05
-    assert cfg.rewards["landing"].params["stand_z"] == pytest.approx(STAND_Z)
+def test_the_hold_posture_is_standing():
+    # The tucked hold was tried and reverted: its 1.5-2.2 m/s advantage came
+    # from a spawn whose FEET were tunnelled under the plate slab, and from a
+    # valid rest the two postures land the same (3.38 vs 3.43 m/s). Standing
+    # puts the feet on the plate BY CONSTRUCTION, so no spawn can tunnel.
+    import inspect
+
+    params = inspect.signature(
+        microduck_mdp.reset_backflip_robot_on_plate
+    ).parameters
+    assert "stand_z" in params
+    assert "tuck_overrides" not in params and "tuck_z" not in params
+    stance = inspect.signature(microduck_mdp.backflip_ready_stance).parameters
+    assert "stand_z" in stance
+    assert "tuck_overrides" not in stance
 
 
-def test_the_tuck_map_matches_roulades(cfg):
-    # TUCK_OVERRIDES is duplicated from the roulade env rather than imported,
-    # so that each task can retune its own tuck. Pin them equal anyway: a
-    # silent divergence would make the roulade lesson stop applying here.
-    from mjlab_microduck.tasks.microduck_roulade_env_cfg import (
-        TUCK_OVERRIDES as ROULADE_TUCK,
-    )
+def test_ready_stance_keeps_its_upright_factor():
+    # Dropped once, during the tucked-hold experiment, and the side-lying basin
+    # immediately outscored the intended pose (0.991 vs 0.948) because height
+    # alone cannot tell upright from inverted. The gate must be WIDE so that
+    # standing costs nothing.
+    import inspect
 
-    assert TUCK_OVERRIDES == ROULADE_TUCK
+    stance = inspect.signature(microduck_mdp.backflip_ready_stance).parameters
+    assert "tilt_full_deg" in stance and "tilt_zero_deg" in stance
+    params = cfg_tilt = cfg = None
+    del params, cfg_tilt, cfg
 
 
 def test_the_robot_spawns_over_the_plate_not_half_a_metre_away(cfg):
@@ -282,11 +270,14 @@ def test_progress_is_the_dominant_positive_term(cfg):
 
 
 def test_ready_stance_target_height_accounts_for_the_plate_thickness(cfg):
-    # backflip_ready_stance measures trunk z against (origin + z0 + tuck_z),
-    # but the robot rests on the plate TOP, one half-thickness above z0.
-    assert cfg.rewards["ready_stance"].params["tuck_z"] == pytest.approx(
-        TUCK_Z + PLATE_HALF_THICKNESS
+    # backflip_ready_stance measures trunk z against (origin + z0 + stand_z),
+    # but the robot stands on the plate TOP, one half-thickness above z0.
+    assert cfg.rewards["ready_stance"].params["stand_z"] == pytest.approx(
+        STAND_Z + PLATE_HALF_THICKNESS
     )
+    # and the wide upright gate is present with standing-safe edges
+    assert cfg.rewards["ready_stance"].params["tilt_full_deg"] >= 30.0
+    assert cfg.rewards["ready_stance"].params["tilt_zero_deg"] <= 80.0
     # The landing is measured against the ground, with no plate under it, and
     # against the STANDING height: the duck lands on its feet.
     assert cfg.rewards["landing"].params["stand_z"] == pytest.approx(STAND_Z)
@@ -496,18 +487,222 @@ def test_there_is_no_z0_dr_tail(cfg):
     assert Z0_RANGE == (0.07, 0.09)
 
 
-def test_the_launch_is_retuned_for_one_clean_turn(cfg):
-    # The user watched the env and reported it "launched far too hard and too
-    # far". Measured across the new box: rotation 372.5-457.3 deg (was
-    # 393.6-475.7), apex 0.29-0.40 m (was 0.52-0.63), worst landing 2.15 m/s
-    # (was 2.53). Over-rotation is a defect to minimise now, not headroom.
+def test_the_standing_box_is_the_measured_one(cfg):
+    # Whole-box verified from the STANDING spawn with the policy folding at
+    # the flick: rotation 361-458 deg, landing 3.2-3.9 m/s. w0 has NO width
+    # because the launch is knife-edge -- rotation swings 100-300 deg between
+    # neighbouring w0 values -- and a 3x wider search found nothing wider that
+    # closes. Do not widen without re-running --box-check.
     p = cfg.events["backflip_launch_params"].params
-    assert p["vz_range"][1] <= 2.00        # was 2.10
-    assert p["z0_range"][1] <= 0.09        # was 0.20, with a tail to 0.225
-    assert p["launch_range"] == (0.12, 0.13)
+    assert p["vz_range"] == VZ_RANGE == (2.80, 2.90)
+    assert p["w0_range"] == W0_RANGE == (18.5, 18.5)
+    assert p["launch_range"] == LAUNCH_RANGE == (0.155, 0.16)
+    assert p["z0_range"] == Z0_RANGE == (0.07, 0.09)
 
 
-# --- The first-episode state, and the tuck-by-name init pose. ---------------
+def test_the_hold_window_is_capped_where_standing_holds_itself(cfg):
+    # MEASURED open-loop standing drift on the plate under BAM: 3.5 deg of
+    # tilt at 0.3 s, 7.3 at 0.5 s, 11.6 at 0.7, 23.2 (max 42) at 1.0. The
+    # curriculum must not widen past the point the pose holds unaided.
+    assert HOLD_RANGE == (0.1, 0.3)
+    stages = cfg.curriculum["backflip_hold_range"].params["param_stages"]
+    assert stages[0]["params"]["hold_range"] == HOLD_RANGE
+    assert stages[-1]["params"]["hold_range"][1] <= 0.5
+
+
+# The sign convention that has bitten four envs. It CANNOT be checked from the
+# function name: mjlab's own body_angular_velocity_penalty returns >= 0 (a cost,
+# negative weight) while microduck's trunk_vertical_accel_penalty returns <= 0
+# (self-negating, POSITIVE weight) — same suffix, opposite sign. So the sign of
+# every term's function is stated here explicitly, and the test also fails when
+# a new reward term is added without classifying it. A wrong weight sign turns a
+# penalty into a bounty for the violation, which the policy WILL farm.
+_TERM_SIGNS = {
+    # task terms: the function returns >= 0 and we want it → positive weight
+    "flip_progress":        "bonus",
+    "landing":              "bonus",
+    "ready_stance":         "bonus",
+    # costs: the function returns >= 0 → NEGATIVE weight (may be 0 pre-curriculum)
+    "body_ang_vel":         "cost",
+    "angular_momentum":     "cost",
+    "dof_pos_limits":       "cost",
+    "action_rate_l2":       "cost",
+    "joint_torque_rate_l2": "cost",
+    "arrival_damping":      "cost",
+    "self_collisions":      "cost",
+    # self-negating: the function returns <= 0 → POSITIVE weight
+    "gentle_landing":       "self_negating",
+}
+
+
+def test_every_reward_term_is_classified(cfg):
+    assert set(cfg.rewards.keys()) == set(_TERM_SIGNS)
+
+
+def test_every_penalty_term_carries_the_sign_that_makes_it_a_cost(cfg):
+    for name, term in cfg.rewards.items():
+        kind = _TERM_SIGNS[name]
+        if kind == "cost":
+            assert term.weight <= 0.0, f"{name}: a >=0 cost needs a negative weight"
+        else:
+            assert term.weight > 0.0, f"{name}: {kind} term needs a positive weight"
+
+
+def test_the_self_negating_term_really_is_self_negating():
+    # Pins the classification above to the actual function, so the table can't
+    # drift away from the code it is asserting about.
+    import inspect
+
+    src = inspect.getsource(microduck_mdp.trunk_vertical_accel_penalty)
+    assert "-torch.abs" in src or "return -" in src
+
+
+def test_motion_blockers_stay_low_for_this_dynamic_task(cfg):
+    # A backflip IS a large angular-velocity event: taxing it blocks discovery.
+    for name in ("body_ang_vel", "angular_momentum"):
+        if name in cfg.rewards:
+            assert abs(cfg.rewards[name].weight) <= 0.05, name
+
+
+def test_no_always_on_upright_term_opposes_the_flip(cfg):
+    assert "upright" not in cfg.rewards
+
+
+def test_walking_terms_are_gone(cfg):
+    for name in (
+        "track_linear_velocity",
+        "track_angular_velocity",
+        "air_time",
+        "foot_slip",
+    ):
+        assert name not in cfg.rewards
+
+
+# ── Curriculum ───────────────────────────────────────────────────────────────
+
+
+def test_smoothness_is_introduced_by_curriculum_not_at_full_strength(cfg):
+    stages = cfg.curriculum["torque_rate_weight"].params["weight_stages"]
+    assert stages[0]["step"] == 0 and stages[0]["weight"] == 0.0
+    assert stages[-1]["step"] > 0
+    # every stage of a mjlab-base cost stays <= 0
+    assert all(s["weight"] <= 0.0 for s in stages)
+
+
+def test_impact_penalty_ramps_up_and_keeps_the_self_negating_sign(cfg):
+    stages = cfg.curriculum["gentle_landing_weight"].params["weight_stages"]
+    assert all(s["weight"] > 0.0 for s in stages)  # self-negating func
+    assert stages[-1]["weight"] > stages[0]["weight"]  # ramps UP
+
+
+def test_launch_dr_widens_over_training(cfg):
+    # Only the HOLD window widens now; the z0 tail was removed (see
+    # test_there_is_no_z0_dr_tail).
+    hold = cfg.curriculum["backflip_hold_range"].params["param_stages"]
+    assert hold[0]["params"]["hold_range"] == HOLD_RANGE
+    assert hold[-1]["params"]["hold_range"][1] > HOLD_RANGE[1]
+
+
+# ── Runner cfg / registration ────────────────────────────────────────────────
+
+
+def test_symmetry_mirror_loss_is_enabled():
+    assert MicroduckBackflipRlCfg.algorithm.symmetry_cfg is not None
+
+
+def test_task_is_registered():
+    from mjlab.tasks.registry import list_tasks
+
+    import mjlab_microduck.tasks  # noqa: F401
+
+    tasks = list_tasks()
+    assert "Mjlab-Backflip-Flat-MicroDuck" in tasks
+    assert "Mjlab-Backflip-Flat-Backlash-MicroDuck" in tasks
+
+
+def test_backlash_variant_keeps_the_plate_and_the_entity_order():
+    from mjlab_microduck.robot.microduck_constants import MICRODUCK_BACKLASH_ROBOT_CFG
+    from mjlab_microduck.tasks.backlash import make_backlash_variant
+
+    bl = make_backlash_variant(
+        make_microduck_backflip_env_cfg(), MICRODUCK_BACKLASH_ROBOT_CFG
+    )
+    names = list(bl.scene.entities.keys())
+    assert names[0] == "robot"
+    assert "plate" in names
+    assert bl.scene.entities["robot"] is MICRODUCK_BACKLASH_ROBOT_CFG
+
+
+# --- Fix-wave additions. -----------------------------------------------------
+
+
+def test_arrival_damping_curriculum_keeps_the_cost_sign_at_every_stage(cfg):
+    # The one staged table whose signs were unchecked while the other two were.
+    # body_ang_vel_at_height is an mjlab-style POSITIVE cost, so every stage
+    # must be <= 0; a positive stage would pay for trunk thrash at the landing.
+    stages = cfg.curriculum["arrival_damping_weight"].params["weight_stages"]
+    assert stages[0]["step"] == 0 and stages[0]["weight"] == 0.0
+    assert all(s["weight"] <= 0.0 for s in stages)
+    assert stages[-1]["weight"] < stages[0]["weight"]   # ramps DOWN (stronger)
+    assert stages[-1]["step"] > 0                       # after skill discovery
+
+
+def test_arrival_damping_is_a_height_window_not_a_floor(cfg):
+    # body_ang_vel_at_height's height_low/height_high pair is a FLOOR: without
+    # an upper edge every airborne step of the flip pays full cost, and the
+    # tilt gate alone lets a rotating robot through twice per revolution.
+    params = cfg.rewards["arrival_damping"].params
+    assert params["height_high"] < params["height_full_max"] < params["height_zero_max"]
+
+    # the landed STANDING trunk must be inside the full-cost band
+    assert params["height_full_max"] > STAND_Z
+
+    # ... and the flight must be outside it. Measured apex in the retuned box
+    # is 0.29-0.40 m, so anything at or above 0.2 m is comfortably clear.
+    assert params["height_zero_max"] < 0.2
+
+    # The HOLD is NOT separable by height any more, and that is deliberate:
+    # with the plate at z0 = 0.07-0.09 the tucked hold trunk is 0.109-0.129 m,
+    # straddling STAND_Z (0.115). This assertion documents the overlap so the
+    # next reader does not "fix" the ceiling into a number that cannot exist.
+    hold_lo = Z0_RANGE[0] + PLATE_HALF_THICKNESS + TUCK_Z
+    hold_hi = Z0_RANGE[1] + PLATE_HALF_THICKNESS + TUCK_Z
+    assert hold_lo < STAND_Z < hold_hi, (
+        "the tucked hold no longer straddles standing height - re-derive the "
+        "arrival_damping ceiling instead of accepting HOLD-phase damping"
+    )
+
+
+def test_plate_reset_event_passes_t_zero_explicitly(cfg):
+    # episode_length_buf is zeroed AFTER reset events, so without an explicit
+    # t=0 this event reads the terminal episode's time, the phase comes out
+    # GONE, and it parks the plate 5 m away instead of placing it at z0.
+    # (The placement itself is measured in test_backflip_mdp.py.)
+    assert cfg.events["backflip_plate_reset"].params["t_override"] == 0.0
+
+
+def test_critic_plate_terms_are_the_gone_masked_ones(cfg):
+    # The parked plate sits ~8.7 m away for ~85% of every episode's steps; an
+    # unmasked plate_position normalizer converges to std ~3 m and squashes the
+    # informative 0-0.3 m HOLD/LAUNCH range into noise. The mask itself is
+    # measured in test_backflip_mdp.py.
+    critic = cfg.observations["critic"].terms
+    assert critic["plate_position"].func is microduck_mdp.backflip_plate_pos_obs
+    assert critic["plate_velocity"].func is microduck_mdp.backflip_plate_vel_obs
+    # The actor must still carry no plate term at all, masked or not.
+    assert not any("plate" in name for name in cfg.observations["actor"].terms)
+
+
+def test_there_is_no_z0_dr_tail(cfg):
+    # The tail was removed, and both ends of the argument are measured
+    # (docs "Lower and gentler"): upward, whole-box landing speed crosses the
+    # ~2.6 m/s hardware limit between z0=0.21 and 0.225; downward, Z0_RANGE is
+    # floored at 0.07 by the hold pose's own geometry (the kneeling tuck's feet
+    # hang ~8 cm below the surface it rests on). A 2 cm range does not need a
+    # curriculum stage. If the hold posture changes, re-measure first.
+    assert "backflip_z0_range" not in cfg.curriculum
+    assert cfg.events["backflip_launch_params"].params["z0_range"] == Z0_RANGE
+    assert Z0_RANGE == (0.07, 0.09)
 
 
 def test_the_pre_reset_state_is_coherent(cfg):
@@ -525,10 +720,9 @@ def test_the_pre_reset_state_is_coherent(cfg):
 
     # the plate's default height is inside the sampled range
     assert Z0_RANGE[0] <= plate.init_state.pos[2] <= Z0_RANGE[1]
-    # the robot's default trunk sits on the plate top in the tuck, not on the
-    # floor at standing height
+    # the robot's default trunk sits on the plate top, not on the floor
     assert robot.init_state.pos[2] == pytest.approx(
-        z0_mid + PLATE_HALF_THICKNESS + TUCK_Z
+        z0_mid + PLATE_HALF_THICKNESS + STAND_Z
     )
     # and the plate is BELOW the trunk, never through it
     assert plate.init_state.pos[2] + PLATE_HALF_THICKNESS < robot.init_state.pos[2]
@@ -597,55 +791,56 @@ def test_the_named_tuck_matches_the_indexed_one(cfg):
 
 # --- The spawn must sit ON the plate, not jammed INTO it. -------------------
 #
-# THE TEST WHOSE ABSENCE LET IT THROUGH. The spawn wrote the equilibrium's
-# trunk HEIGHT while leaving reset_base's near-identity orientation, so the
-# robot spawned 20 mm inside the plate on 6-9 simultaneous penetrating
-# contacts, and nothing checked. This builds the exact spawn state on CPU
-# MuJoCo and measures every plate-robot contact.
+# THE TEST WHOSE ABSENCE LET IT THROUGH. During the tucked-hold experiment the
+# spawn wrote a trunk height whose FEET were tunnelled UNDER the launcher plate
+# — the tuck kneels on its shins, so its feet are not its lowest point and a
+# spawn placed by trunk height put them through the 2 cm slab. Six to nine
+# simultaneously penetrating contacts, 22 mm deep, and every launch-envelope
+# table on this branch was measured from it before anyone noticed. Nothing
+# checked. These build the exact spawn state in CPU MuJoCo and measure it.
 #
-# Note the bar: NOT "zero penetration". A robot resting under load compresses
-# MuJoCo's contact constraint by ~4.4 mm at this pose, whatever height it is
-# placed at, and spawning high enough to clear the plate geometrically is
-# WORSE (-21 mm at +16 mm of height, because the dangling feet close on the
-# pad's underside) as well as dropping the robot. The bar is that the spawn is
-# ON the equilibrium manifold rather than jammed through it.
+# Standing makes this structurally safe rather than merely fixed: the feet ARE
+# the lowest geoms, so placing the trunk at STAND_Z above the plate top puts
+# the soles on the surface by construction and no spawn can tunnel.
 
 _SCENE = "src/mjlab_microduck/robot/microduck/scene_backflip.xml"
 
-# The equilibrium's own loaded soft-contact compression, measured. Anything at
-# or under this is "resting"; the un-pitched spawn was 4x deeper.
+# A robot resting under load compresses MuJoCo's contact constraint, so the bar
+# is not literally zero. This is the loaded-compression tolerance; the tucked
+# spawn was 22 mm, i.e. 4x outside it.
 _RESTING_PENETRATION_M = 0.006
 
-# MEASURED forward pitch of the tuck's resting equilibrium on the plate. The
-# spawn does NOT currently write it (reset_base leaves the orientation near
-# identity), which is one of the two things wrong with the spawn; adding it
-# takes the penetration from 20 mm to 5 mm but does NOT lift the feet out from
-# under the slab, so it is not a fix on its own. See _TUNNEL_REASON.
-_EQUILIBRIUM_PITCH_DEG = 14.0
 
+def _spawn_state(z0=None):
+    """Build the env's spawn state in plain MuJoCo.
 
-def _spawn_state(pitch_deg=0.0, z0=None):
-    """Build the env's spawn state in plain MuJoCo and return the model/data.
-
-    Mirrors reset_backflip_robot_on_plate exactly: trunk at
-    z0 + PLATE_HALF_THICKNESS + TUCK_Z, pitched by TUCK_PITCH_DEG, joints at
-    TUCK_OVERRIDES x TUCK_FACTOR, plate prescribed at z0.
+    Mirrors reset_backflip_robot_on_plate: trunk at
+    z0 + PLATE_HALF_THICKNESS + STAND_Z, HOME joints (what reset_robot_joints
+    leaves), level, plate prescribed at z0.
     """
     if z0 is None:
         z0 = 0.5 * (Z0_RANGE[0] + Z0_RANGE[1])
     model = mujoco.MjModel.from_xml_path(_SCENE)
     data = mujoco.MjData(model)
-    data.qpos[0:3] = [0.0, 0.0, z0 + PLATE_HALF_THICKNESS + TUCK_Z]
-    half = math.radians(pitch_deg) * 0.5
-    data.qpos[3:7] = [math.cos(half), 0.0, math.sin(half), 0.0]
-    for idx, angle in TUCK_OVERRIDES.items():
-        data.qpos[7 + idx] = angle * TUCK_FACTOR
+    data.qpos[0:3] = [0.0, 0.0, z0 + PLATE_HALF_THICKNESS + STAND_Z]
+    data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
+    for i, angle in enumerate(_HOME_POSE):
+        data.qpos[7 + i] = angle
     pj = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "plate_free")
     qa = model.jnt_qposadr[pj]
     data.qpos[qa : qa + 3] = [0.0, 0.0, z0]
     data.qpos[qa + 3 : qa + 7] = [1.0, 0.0, 0.0, 0.0]
     mujoco.mj_forward(model, data)
     return model, data
+
+
+# HOME_FRAME in servo order; the spawn leaves the joints to reset_robot_joints,
+# which puts them here.
+_HOME_POSE = (
+    0.0, -0.0873, -0.4579, -0.0049, 0.4530,
+    0.3491, 0.3491, 0.0, 0.0,
+    0.0, 0.0873, 0.4579, 0.0049, -0.4530,
+)
 
 
 def _plate_penetration(model, data):
@@ -660,76 +855,71 @@ def _plate_penetration(model, data):
     return (max(depths) if depths else 0.0), len(depths)
 
 
-_TUNNEL_REASON = (
-    "KNOWN DEFECT, measured 2026-09-07 and not yet fixed: the spawn writes the "
-    "tuck at a height whose FEET are tunnelled UNDER the launcher plate slab, "
-    "inside its footprint. Every launch-envelope table on this branch was "
-    "measured from that configuration. The geometrically valid rest (feet ON "
-    "the plate top, trunk 0.0792 m above it) does NOT close a backflip: 540 "
-    "cells, 0 under the 2.6 m/s landing limit. These tests are the acceptance "
-    "criteria for whatever design replaces it -- they are strict xfail, so "
-    "they turn RED the moment the spawn becomes valid and must then be "
-    "unmarked. See docs/backflip_envelope_results.md, 'The feet are under the "
-    "plate'."
-)
-
-
-@pytest.mark.xfail(strict=True, reason=_TUNNEL_REASON)
 def test_the_spawn_is_not_jammed_into_the_plate():
-    model, data = _spawn_state(_EQUILIBRIUM_PITCH_DEG)
+    model, data = _spawn_state()
     depth, n = _plate_penetration(model, data)
     assert depth <= _RESTING_PENETRATION_M, (
-        f"spawn penetrates the plate by {depth * 1000:.1f} mm on {n} contacts; "
-        "the resting equilibrium's own compression is ~4.4 mm. Either the "
-        "spawn height, the spawn pitch and the tuck pose disagree, or the "
-        "plate geometry changed -- re-measure, do not raise this bound."
+        f"spawn penetrates the plate by {depth * 1000:.1f} mm on {n} contacts. "
+        "Either the spawn height and the hold pose disagree, or the plate "
+        "geometry changed -- re-measure, do not raise this bound."
     )
 
 
-def test_pitching_the_spawn_reduces_but_does_not_remove_the_penetration():
-    # The regression: writing the equilibrium's height at reset_base's
-    # near-level orientation is what jammed it. Removing the pitch must fail
-    # the check above, so this test cannot pass vacuously.
-    _, level = _spawn_state(0.0)
-    level_depth, level_n = _plate_penetration(*_spawn_state(0.0))
-    del level
-    assert level_depth > 3 * _RESTING_PENETRATION_M
-    assert level_n >= 4
-    pitched_depth, _ = _plate_penetration(*_spawn_state(_EQUILIBRIUM_PITCH_DEG))
-    assert pitched_depth < 0.5 * level_depth
-
-
-@pytest.mark.xfail(strict=True, reason=_TUNNEL_REASON)
 def test_the_spawn_is_clean_at_every_sampled_launch_height():
-    # z0 shifts the plate AND the robot together, so the penetration should be
-    # z0-invariant -- assert it, since a z0-dependent spawn would mean the two
-    # heights had drifted apart again.
+    # z0 shifts the plate AND the robot together, so the penetration must be
+    # z0-invariant; a z0-dependent spawn means the two heights have drifted.
     depths = []
     for z0 in (Z0_RANGE[0], 0.5 * sum(Z0_RANGE), Z0_RANGE[1]):
-        depth, _ = _plate_penetration(*_spawn_state(_EQUILIBRIUM_PITCH_DEG, z0=z0))
+        depth, _ = _plate_penetration(*_spawn_state(z0=z0))
         depths.append(depth)
         assert depth <= _RESTING_PENETRATION_M
     assert max(depths) - min(depths) < 1e-6
 
 
-@pytest.mark.xfail(strict=True, reason=_TUNNEL_REASON)
-def test_the_feet_are_not_inside_the_plate_footprint_and_below_its_top():
-    # The specific geometry the user reported: feet under the plate's top
-    # surface while still inside its footprint is a hard interpenetration.
-    # At the equilibrium pitch the feet hang past the FRONT EDGE instead,
-    # which is a real resting configuration on an 18 cm pad.
-    model, data = _spawn_state(_EQUILIBRIUM_PITCH_DEG)
+def test_no_robot_geom_is_below_the_plate_top_inside_its_footprint():
+    # The exact geometry the user reported and the tucked hold produced: a geom
+    # under the plate's top surface while still inside its footprint has passed
+    # THROUGH the slab. Standing has no such geom, by construction.
+    model, data = _spawn_state()
     plate_g = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "plate_geom")
+    plate_b = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "plate")
     half_x, half_y, half_z = model.geom_size[plate_g]
     z0 = 0.5 * (Z0_RANGE[0] + Z0_RANGE[1])
     plate_top = z0 + half_z
-    for name in ("left_foot_collision", "right_foot_collision"):
-        g = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+    offenders = []
+    for g in range(model.ngeom):
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g) or f"g{g}"
+        if model.geom_bodyid[g] == plate_b or name == "floor":
+            continue
+        if model.geom_contype[g] == 0 and model.geom_conaffinity[g] == 0:
+            continue
         x, y, z = (float(v) for v in data.geom_xpos[g])
-        inside_footprint = abs(x) < half_x and abs(y) < half_y
-        below_top = z < plate_top
-        assert not (inside_footprint and below_top), (
-            f"{name} centre is at x={x:+.4f} z={z:+.4f}, i.e. below the plate "
-            f"top ({plate_top:.4f}) AND inside its {half_x * 2:.2f} m "
-            "footprint -- that is interpenetration, not resting"
-        )
+        if abs(x) < half_x and abs(y) < half_y and z < plate_top:
+            offenders.append((name, x, y, z))
+    assert not offenders, (
+        "geoms below the plate top and inside its footprint (i.e. through the "
+        f"slab): {offenders}"
+    )
+
+
+def test_the_feet_are_the_lowest_geoms_so_the_spawn_cannot_tunnel():
+    # WHY standing is structurally safe and the tuck was not. The tuck kneels
+    # on its shins, so placing it by trunk height put the FEET through the
+    # plate. Standing's lowest geoms are the feet, so "trunk at STAND_Z above
+    # the surface" puts the soles ON it.
+    model, data = _spawn_state()
+    plate_b = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "plate")
+    lowest = []
+    for g in range(model.ngeom):
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g) or f"g{g}"
+        if model.geom_bodyid[g] == plate_b or name == "floor":
+            continue
+        if model.geom_contype[g] == 0 and model.geom_conaffinity[g] == 0:
+            continue
+        lowest.append((float(data.geom_xpos[g][2]) - float(model.geom_rbound[g]),
+                       name))
+    lowest.sort()
+    assert "foot" in lowest[0][1], (
+        f"the lowest collision geom is {lowest[0][1]}, not a foot -- a spawn "
+        "placed by trunk height can then tunnel whatever hangs below it"
+    )

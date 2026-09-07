@@ -51,6 +51,39 @@ Status: approved design, ready for implementation planning
 >   episode on the compiled default — robot at 0.12 m, plate at 0.15 m through
 >   its body. Entity init states and the lazy launch params are now coherent.
 
+> **AMENDMENT 3 — 2026-09-07 — back to the STANDING hold. Amendment 1 is
+> withdrawn: its evidence was non-physical.**
+> Amendment 1 switched the hold to a tuck because the tuck flew at 1.5-2.2 m/s
+> where standing needed 3.4. That measurement is void. It came from a spawn
+> with the robot's **feet tunnelled under the launcher plate**: the tuck kneels
+> on its shins, so its feet are not its lowest point, and a spawn placed by
+> trunk height put them through the 2 cm slab (6-9 penetrating contacts, 22 mm
+> deep). Measured from a geometrically valid rest the tuck lands at 3.38 m/s
+> and standing at 3.43 — equivalent. With its only advantage gone the tuck buys
+> nothing and costs the whole geometric problem, so the hold is standing again,
+> as this document originally specified.
+> - **Restored:** standing spawn at `STAND_Z` above the plate top;
+>   `ready_stance` pays `upright x height` again. The wide upright factor added
+>   during the tuck experiment is KEPT — it is free at 0 deg of tilt and it is
+>   what refuses the lying-down basins.
+> - **`HOLD_RANGE` capped at 0.1-0.3 s, curriculum to 0.5 [AMENDED]** (the
+>   original document said 0.1-1.0). Measured open-loop standing drift under
+>   BAM: 3.5 deg of tilt at 0.3 s, 7.3 at 0.5, 11.6 at 0.7, 23.2 at 1.0. This
+>   is a floor on what is safe unaided, not a claim about a trained policy.
+> - **Box [AMENDED]:** `z0` 0.07-0.09, `vz` 2.80-2.90, `w0` = 18.5,
+>   `t_launch` 0.155-0.16. Rotation 363-458 deg, landing 3.1-3.9 m/s, whole-box
+>   closure, 33/33 direction checks backward, no cell passing by never landing.
+> - **Landing is above the 2.6 m/s comfort threshold and that is accepted.**
+>   The probe measures the launch, not the skill: a trained policy that tucks
+>   to spin faster needs less altitude and may land softer than any fixed-pose
+>   sweep predicts. Unknown until it trains.
+> - **The spawn-validity tests are the lasting fix**: four CPU-MuJoCo checks
+>   that no geom sits below the plate top inside its footprint, that the
+>   penetration is within loaded-contact tolerance at every `z0`, and that the
+>   FEET are the lowest geoms — which is what makes standing structurally
+>   immune to the tunnelling that killed the tuck.
+> Evidence: `docs/backflip_envelope_results.md`, "Back to standing".
+
 ## Problem
 
 Microduck (~800 g, ~25 cm, 14 XL330 servos) cannot generate the vertical
