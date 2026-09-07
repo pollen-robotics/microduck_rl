@@ -78,6 +78,7 @@ from .microduck_roulade_env_cfg import (
 from .backlash import make_backlash_variant
 from .run import make_run_variant, MicroduckRunRlCfg
 from .sprung import SWEEP_ARMS, make_sprung_variant, sprung_rl_cfg, ARM_TASK_SUFFIX
+from .stand import make_stand_variant
 from .hop import (
     HOP_ARMS,
     HOP_ARM_SUFFIX,
@@ -256,6 +257,25 @@ for _sym, _suffix in ((False, "InPlace"), (True, "InPlaceSym")):
         runner_cls=MicroduckOnPolicyRunner,
     )
     print(f"✓ Hop task registered: {_tid}")
+
+# ── Stand-Sprung: the active "stable home" for the boot robot ────────────────
+# See tasks/stand.py. Same robot as the hop arms (sprung, all-collisions, 893 g,
+# kp 400), zero velocity command, no stepping rewards, boots-only ground contact.
+_stand_tid = "Mjlab-Stand-Sprung-K3344-MicroDuck"
+register_mjlab_task(
+    task_id=_stand_tid,
+    env_cfg=apply_hop_corrections(make_sprung_variant(
+        make_stand_variant(make_microduck_velocity_env_cfg()),
+        stiffness=K_MEASURED, travel=TRAVEL, pad_mass=PAD_MASS, h_add=H_ADD,
+    )),
+    play_env_cfg=apply_hop_corrections(make_sprung_variant(
+        make_stand_variant(make_microduck_velocity_env_cfg(play=True)),
+        stiffness=K_MEASURED, travel=TRAVEL, pad_mass=PAD_MASS, h_add=H_ADD,
+    )),
+    rl_cfg=hop_rl_cfg("stand"),
+    runner_cls=MicroduckOnPolicyRunner,
+)
+print(f"✓ Stand task registered: {_stand_tid}")
 
 # Velocity2 REMOVED, not broken: develop's 4d34d845 ("merge velocity2 into
 # velocity: one walking recipe") folded that recipe into the velocity task and

@@ -398,6 +398,62 @@ _WALKING_GAIT_REWARDS = ("air_time",)
 # and make the hop rewards harder to balance against it.
 
 
+def add_boots_only_ground_contact(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
+    """Only the spring boots may touch the ground; anything else terminates.
+
+    Shared by every boot task -- the hop arms and the stand -- so the rule is
+    defined once. See BODY_SENSOR_NAME for the exploit that motivated it and
+    _GROUND_CONTACT_ALLOWED for why the exclusion is by body.
+    """
+    #
+    #     This is the fix for the head-rest exploit described on
+    #     BODY_SENSOR_NAME above. Terminating is the right lever rather than
+    #     merely gating the airborne reward: the exploit's value came from
+    #     SURVIVING in the resting posture (episode length 980 of 1000 while
+    #     `fell_over` read 0.114), so removing the reward alone would leave the
+    #     robot free to keep lying there for the rest of the episode. Ending the
+    #     episode prices the posture correctly -- it is a fall, and the robot
+    #     already pays for falls by losing the remaining reward.
+    #
+    #     `exclude` carries the foot assembly, which is what makes the rule
+    #     "only the boots may touch the ground" rather than "nothing may touch
+    #     the ground". See _GROUND_CONTACT_ALLOWED for why it is by body.
+    #
+    #     force_threshold is deliberately absent: `illegal_contact` falls back
+    #     to `data.found` when no force history is configured, so ANY contact
+    #     counts. A threshold would let the robot rest lightly on its head.
+    cfg.scene.sensors = tuple(cfg.scene.sensors) + (
+        ContactSensorCfg(
+            name=BODY_SENSOR_NAME,
+            primary=ContactMatch(
+                mode="body",
+                pattern=r".*",
+                entity="robot",
+                exclude=_GROUND_CONTACT_ALLOWED,
+            ),
+            secondary=ContactMatch(mode="body", pattern="terrain"),
+            fields=("found",),
+            reduce="none",
+            num_slots=1,
+        ),
+    )
+    cfg.terminations["body_ground_contact"] = TerminationTermCfg(
+        func=mdp.illegal_contact,
+        params={"sensor_name": BODY_SENSOR_NAME},
+        time_out=False,
+    )
+
+    # And tighten the fall angle, because 70 deg is what made the resting
+    #     posture reachable in the first place. A hopping robot has no business
+    #     past 50 deg, and the exploit parked at 52.8 deg mean precisely because
+    #     it was under the old threshold.
+    fell = cfg.terminations.get("fell_over")
+    if fell is not None and "limit_angle" in fell.params:
+        fell.params["limit_angle"] = FALL_LIMIT_ANGLE
+
+    return cfg
+
+
 def make_hop_variant(
     cfg: ManagerBasedRlEnvCfg,
     stiffness: float = 3900.0,
@@ -444,52 +500,7 @@ def make_hop_variant(
         "robot": replace(robot, spec_fn=get_allcollisions_spec),
     }
 
-    # 0b. Any non-boot contact with the ground is a FALL, and terminates.
-    #
-    #     This is the fix for the head-rest exploit described on
-    #     BODY_SENSOR_NAME above. Terminating is the right lever rather than
-    #     merely gating the airborne reward: the exploit's value came from
-    #     SURVIVING in the resting posture (episode length 980 of 1000 while
-    #     `fell_over` read 0.114), so removing the reward alone would leave the
-    #     robot free to keep lying there for the rest of the episode. Ending the
-    #     episode prices the posture correctly -- it is a fall, and the robot
-    #     already pays for falls by losing the remaining reward.
-    #
-    #     `exclude` carries the foot assembly, which is what makes the rule
-    #     "only the boots may touch the ground" rather than "nothing may touch
-    #     the ground". See _GROUND_CONTACT_ALLOWED for why it is by body.
-    #
-    #     force_threshold is deliberately absent: `illegal_contact` falls back
-    #     to `data.found` when no force history is configured, so ANY contact
-    #     counts. A threshold would let the robot rest lightly on its head.
-    cfg.scene.sensors = tuple(cfg.scene.sensors) + (
-        ContactSensorCfg(
-            name=BODY_SENSOR_NAME,
-            primary=ContactMatch(
-                mode="body",
-                pattern=r".*",
-                entity="robot",
-                exclude=_GROUND_CONTACT_ALLOWED,
-            ),
-            secondary=ContactMatch(mode="body", pattern="terrain"),
-            fields=("found",),
-            reduce="none",
-            num_slots=1,
-        ),
-    )
-    cfg.terminations["body_ground_contact"] = TerminationTermCfg(
-        func=mdp.illegal_contact,
-        params={"sensor_name": BODY_SENSOR_NAME},
-        time_out=False,
-    )
-
-    # 0c. And tighten the fall angle, because 70 deg is what made the resting
-    #     posture reachable in the first place. A hopping robot has no business
-    #     past 50 deg, and the exploit parked at 52.8 deg mean precisely because
-    #     it was under the old threshold.
-    fell = cfg.terminations.get("fell_over")
-    if fell is not None and "limit_angle" in fell.params:
-        fell.params["limit_angle"] = FALL_LIMIT_ANGLE
+    add_boots_only_ground_contact(cfg)
 
     # 1. Cyclic phase command, reusing the class already on develop.
     #
