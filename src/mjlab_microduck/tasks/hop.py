@@ -48,6 +48,12 @@ from mjlab_microduck.tasks import mdp as microduck_mdp
 # spring oscillation. Provisional -- sweep only if the first result is ambiguous.
 HOP_PERIOD = 1.0
 
+# Where the phase pauses to mean "stand": mid-recovery, where every launch gate
+# (sin > 0) and the load/symmetry gate (cos > 0) are shut, so the only rewards
+# live are the stance ones -- com_height_target (recovery-gated), stillness,
+# upright, pose. This is the value `hop_phase_driver.py --hold` must send.
+HOLD_PHASE = 0.65
+
 # NO STANDING-HEIGHT DATUM IS ON THE REWARD PATH ANY MORE, and that is the
 # single most important thing to know about this file's history.
 #
@@ -457,6 +463,8 @@ def add_boots_only_ground_contact(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEn
 def make_hop_variant(
     cfg: ManagerBasedRlEnvCfg,
     stiffness: float = 3900.0,
+    hold_prob: float = 0.0,
+    hold_range: tuple[float, float] = (1.0, 5.0),
 ) -> ManagerBasedRlEnvCfg:
     """Convert a velocity env cfg into the periodic hop task.
 
@@ -539,6 +547,11 @@ def make_hop_variant(
             **command_kwargs,
             "class_type": microduck_mdp.GroundPickPhaseCommand,
             "period": HOP_PERIOD,
+            # Pausable phase -- see GroundPickPhaseCommand. 0.0 is the historical
+            # always-advancing hop; every published arm keeps that.
+            "hold_prob": hold_prob,
+            "hold_at": HOLD_PHASE,
+            "hold_range": hold_range,
         }
     )
 

@@ -4989,22 +4989,70 @@ class GroundPickPhaseCommand(UniformVelocityCommand):
         # behavior (random phase to decorrelate envs).
         self._randomize_phase = bool(getattr(cfg, "randomize_phase", True))
 
+        # PAUSABLE PHASE. The deployed hop is driven from outside by
+        # `hop_phase_driver.py`, which sends a FROZEN phase to mean "stand" and
+        # an advancing one to mean "hop". A policy that never saw a stationary
+        # phase cannot stand on one -- measured: the u2ck51xg hop policy, phase
+        # frozen at 0.55-0.85, terminated 4.8x per env in 15 s, 5-7% never
+        # falling. So the phase must PAUSE during training too.
+        #
+        # Each time the phase crosses `hold_at`, with probability `hold_prob` it
+        # freezes there for a duration drawn from `hold_range` seconds, then
+        # resumes. hold_prob = 1.0 with a huge hold_range is a pure stand task;
+        # hold_prob = 0.0 is the historical always-advancing hop.
+        self._hold_prob = float(getattr(cfg, "hold_prob", 0.0))
+        self._hold_at = float(getattr(cfg, "hold_at", 0.65))
+        self._hold_range = tuple(getattr(cfg, "hold_range", (1.0, 5.0)))
+        self._hold_left = torch.zeros(self.num_envs, device=self.device)  # seconds
+
     @property
     def command(self) -> torch.Tensor:
         return self.vel_command_b
 
     def compute(self, dt: float) -> None:
-        self._gp_phase = (self._gp_phase + dt / self._period) % 1.0
+        holding = self._hold_left > 0.0
+        self._hold_left = torch.clamp(self._hold_left - dt, min=0.0)
+        before = self._gp_phase
+        after = (before + dt / self._period) % 1.0
+        # Freeze where we are while holding; otherwise advance.
+        self._gp_phase = torch.where(holding, before, after)
+        if self._hold_prob > 0.0:
+            # Crossed hold_at this step (and not already holding): maybe start a hold,
+            # snapping the phase onto hold_at so every hold is at the same command.
+            crossed = (~holding) & (((before < self._hold_at) & (after >= self._hold_at))
+                                    | ((before > after) & (self._hold_at >= before)))
+            start = crossed & (torch.rand(self.num_envs, device=self.device) < self._hold_prob)
+            lo, hi = self._hold_range
+            dur = lo + (hi - lo) * torch.rand(self.num_envs, device=self.device)
+            self._hold_left = torch.where(start, dur, self._hold_left)
+            self._gp_phase = torch.where(start, torch.full_like(self._gp_phase, self._hold_at),
+                                         self._gp_phase)
         self.vel_command_b[:, 0] = torch.cos(2 * torch.pi * self._gp_phase)
         self.vel_command_b[:, 1] = torch.sin(2 * torch.pi * self._gp_phase)
         self.vel_command_b[:, 2] = 0.0
 
     def reset(self, env_ids: torch.Tensor | None) -> dict:
-        if env_ids is not None and len(env_ids) > 0:
+        # The construction-time reset passes None. The historical guard skipped
+        # it, leaving every env at phase 0 for its first episode -- harmless for
+        # the always-advancing hop, but it made a "pure stand" task spend its
+        # first 0.65 s marching through the launch half. None means all envs.
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+        if len(env_ids) > 0:
             if self._randomize_phase:
                 self._gp_phase[env_ids] = torch.rand(len(env_ids), device=self.device)
             else:
                 self._gp_phase[env_ids] = 0.0
+            # A fresh episode may begin INSIDE a hold, so the policy also learns
+            # to stand from a reset rather than only after a landing.
+            if self._hold_prob > 0.0:
+                n = len(env_ids)
+                start_held = torch.rand(n, device=self.device) < self._hold_prob
+                lo, hi = self._hold_range
+                dur = lo + (hi - lo) * torch.rand(n, device=self.device)
+                self._hold_left[env_ids] = torch.where(start_held, dur, torch.zeros_like(dur))
+                self._gp_phase[env_ids] = torch.where(
+                    start_held, torch.full_like(dur, self._hold_at), self._gp_phase[env_ids])
         return {}
 
     def _resample_command(self, env_ids: torch.Tensor) -> None:
@@ -5024,6 +5072,11 @@ class GroundPickPhaseCommandCfg(UniformVelocityCommandCfg):
     class_type: type = GroundPickPhaseCommand
     period: float = 4.0  # cycle length in seconds; sitstand uses 8.0
     randomize_phase: bool = True  # False -> each episode starts at phase 0 (standing)
+    # Pausable phase -- see GroundPickPhaseCommand.__init__. Defaults keep every
+    # existing task's behaviour exactly (hold_prob 0 = never pauses).
+    hold_prob: float = 0.0
+    hold_at: float = 0.65
+    hold_range: tuple[float, float] = (1.0, 5.0)
 
     def build(self, env: ManagerBasedRlEnv) -> "GroundPickPhaseCommand":
         return GroundPickPhaseCommand(self, env)

@@ -258,6 +258,37 @@ for _sym, _suffix in ((False, "InPlace"), (True, "InPlaceSym")):
     )
     print(f"✓ Hop task registered: {_tid}")
 
+# ── Pausable-phase hop tasks ─────────────────────────────────────────────────
+#
+# The deployed hop is phase-driven from outside (scripts/hop_phase_driver.py):
+# frozen phase = stand, advancing = hop. A policy that never saw a stationary
+# phase cannot stand on one (u2ck51xg frozen: 4.8 terminations/env in 15 s), so
+# the phase must pause in training.
+#
+#   HopStand  -- hold_prob 1.0, held for the whole episode: a pure STAND with the
+#                hop reward set, which balances this robot far faster than the
+#                velocity env's standing recipe (Stand-Sprung reached episode
+#                length 241 of 1000 in 1500 iters; the hop arms reach 865-980).
+#   HopPause  -- hold_prob 0.5, holds of 1-5 s: stands AND hops on demand. The
+#                deliverable. Runs remotely.
+for _label, _hp, _hr in (("HopStand", 1.0, (60.0, 60.0)), ("HopPause", 0.5, (1.0, 5.0))):
+    def _build_pause(play: bool, _hp=_hp, _hr=_hr):
+        cfg = make_in_place_variant(make_symmetric_variant(make_hop_variant(
+            make_microduck_velocity_env_cfg(play=play), stiffness=K_MEASURED,
+            hold_prob=_hp, hold_range=_hr)))
+        # The head cannot deliver the whip on hardware (real neck sags 5.4 deg
+        # under static load, ~15x the model), so it is tracked, not freed.
+        # make_in_place_variant popped these; put the tracking term back.
+        if "head_pose_tracking" not in cfg.rewards:
+            base = make_microduck_velocity_env_cfg(play=play)
+            cfg.rewards["head_pose_tracking"] = base.rewards["head_pose_tracking"]
+        return apply_hop_corrections(make_sprung_variant(
+            cfg, stiffness=K_MEASURED, travel=TRAVEL, pad_mass=PAD_MASS, h_add=H_ADD))
+    _tid = f"Mjlab-{_label}-Sym-K3344-MicroDuck"
+    register_mjlab_task(task_id=_tid, env_cfg=_build_pause(False), play_env_cfg=_build_pause(True),
+                        rl_cfg=hop_rl_cfg("k3344"), runner_cls=MicroduckOnPolicyRunner)
+    print(f"✓ Hop task registered: {_tid}")
+
 # ── Stand-Sprung: the active "stable home" for the boot robot ────────────────
 # See tasks/stand.py. Same robot as the hop arms (sprung, all-collisions, 893 g,
 # kp 400), zero velocity command, no stepping rewards, boots-only ground contact.
