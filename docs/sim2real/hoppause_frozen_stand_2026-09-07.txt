@@ -1,0 +1,6 @@
+ok
+RESULT ADVANCING (normal hop)   terminations/env in 30s = 0.08   never-fell =  92.6%
+RESULT frozen 0.65 (the hold)   terminations/env in 30s = 0.08   never-fell =  93.0%
+RESULT frozen 0.75              terminations/env in 30s = 0.09   never-fell =  91.8%
+
+[exited with code 0]
