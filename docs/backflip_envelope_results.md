@@ -44,7 +44,15 @@ survive?
 > re-review: the `z0` curriculum tail is **0.21**, not 0.225 (whole-box margin
 > 0.07 m/s vs 0.01), and `backflip_ready_stance` regained an upright factor
 > after the flop audit found the side-lying tuck outscoring the upright one.
-> See the final section, "**Flop audit, and two corrections**".
+> See "**Flop audit, and two corrections**".
+
+> **CURRENT BOX (2026-09-07, after the user watched the env): `z0` in
+> [0.07, 0.09], `vz` in [1.90, 2.00], `w0` in [23, 24], `t_launch` in
+> [0.12, 0.13]** — retuned for ONE clean turn from the lowest plate the hold
+> pose allows: rotation 372-457 deg, apex 0.29-0.40 m, worst landing 2.15 m/s.
+> Every box above it is history. The last section, "**Lower and gentler**",
+> also records why the plate CANNOT lie on the ground with this hold pose, and
+> the real bug behind "the plate is not under the feet".
 
 ## Commands run
 
@@ -3646,4 +3654,463 @@ uv run python scripts/backflip_envelope.py --box-check --bam
 # the HOLD trunk heights the damper ceiling is derived from: run_settle() with
 # posture="tucked_env" at z0 = 0.10 / 0.15 / 0.21, 32 noisy trials each, and
 # take the min over the sampled times (table above).
+```
+
+
+# Lower and gentler — and why the plate cannot lie on the ground
+
+The user watched the env for the first time
+(`uv run play Mjlab-Backflip-Flat-MicroDuck --agent zero --num-envs 1`) and
+reported three things: the plate is not under the feet, it starts up in the
+air, and the robot is launched far too hard and too far. All three are
+answered below. CPU MuJoCo, BAM actuators, training sim timestep throughout.
+
+## 1. "The plate is not under the feet" — a real bug, and not the one expected
+
+**Cause: mjlab never calls `env.reset()` before the viewer's first episode.**
+`ManagerBasedRlEnv.__init__` does not reset, and `mjlab/viewer/base.py` calls
+`reset_environment()` only from `_process_actions` on the RESET action. So
+`uv run play` runs a whole 4 s episode on the **compiled default state** plus
+`_backflip_state`'s lazy defaults, and only episode 2 onward uses the reset
+events.
+
+That state was incoherent in exactly the reported way:
+
+| | old default | why it looks broken |
+|---|---|---|
+| robot trunk | 0.12 m (`robot_groundcontact.xml`: `trunk_base pos="0 0 0.12"`) | standing on the floor |
+| plate | 0.15 m (`launcher.xml` / `MICRODUCK_LAUNCHER_CFG`) | 3 cm ABOVE the trunk origin, i.e. **through the robot's body** |
+| `_backflip_state` lazy defaults | `t_hold=0`, `vz=0`, `w0=0`, `z0=0.15` | phase is past HOLD at t=0, so the plate hovers motionless for 0.1 s and then teleports away **without ever launching** |
+
+"Stuck at the level of the robot's body, in the middle of the robot" is
+literally the 0.15-vs-0.12 overlap.
+
+**The competing hypothesis is REFUTED.** The robot does NOT unfold and slide
+off the plate under a zero action. `play --agent zero` commands HOME (the
+joint-position action's offset is the model's default pose) while the reset
+folds the robot into the tuck, so it *ought* to unfold — measured, it does not
+budge, because the BAM servos cannot lift it out of the fold against gravity:
+
+```
+# settle: posture=tucked_env tuck=0.75 ctrl=HOME (zero action) on plate z0=0.15 trials=16 noisy=True duration=4.0s dt=0.005 bam=True
+  t[s]  tilt_mean  tilt_max  xy_mean  xy_max  z_mean  n_fallen
+  0.10       12.7      13.2    0.007   0.008   0.188         0
+  0.30       11.7      12.1    0.006   0.007   0.188         0
+  0.50       11.5      11.7    0.006   0.006   0.189         0
+  0.70       11.5      11.7    0.006   0.006   0.189         0
+  1.00       11.6      11.7    0.006   0.006   0.189         0
+  4.00       11.6      11.7    0.006   0.007   0.189         0
+```
+
+Trunk height pinned at 0.189 m (= the tucked rest height), tilt 11.6 deg, 6 mm
+of drift, 0/16 fallen, for the full 4 s episode. So the HOLD phase IS robust
+under an untrained policy; the placement complaint was entirely the pre-reset
+state.
+
+**Fixed** by making the compiled state coherent: the launcher's default height
+is 0.08 m (the middle of `Z0_RANGE`), the backflip env gives its robot entity
+its own tucked init state on the plate top, and the lazy launch params became a
+plausible mid-box toss with a real HOLD phase. Pinned by
+`test_the_pre_reset_state_is_coherent` and
+`test_the_default_launch_params_are_a_plausible_toss`.
+
+## 2. "It starts up in the air" — the plate CANNOT lie on the ground
+
+This is the design, not a bug — and the request to put the plate on the ground
+runs into a measured geometric wall.
+
+**The kneeling tuck rests on its SHINS with its FEET HANGING ~8 cm BELOW the
+surface it sits on.** Contact trace of the settled hold at four plate heights
+(`on FLOOR` lists robot geoms touching the terrain):
+
+```
+--- z0=0.01 (plate top at 0.020)
+  t=1.00 tilt= 40.5 z=0.086 x=+0.055 | on FLOOR: ['g49', 'left_foot_collision', 'right_foot_collision']
+--- z0=0.03 (plate top at 0.040)
+  t=1.00 tilt= 13.6 z=0.069 x=+0.013 | on FLOOR: ['g76', 'left_foot_collision', 'right_foot_collision']
+--- z0=0.05 (plate top at 0.060)
+  t=1.00 tilt= 14.2 z=0.088 x=+0.009 | on FLOOR: ['left_foot_collision', 'right_foot_collision']
+--- z0=0.10 (plate top at 0.110)
+  t=1.00 tilt= 13.8 z=0.139 x=+0.008 | on FLOOR: []
+```
+
+The lowest foot geom sits 0.079 m below the plate top, at x = +0.051 — off the
+front edge of an 18 cm plate. Minimum plate-top height for the feet to clear
+the floor, scanned at three tuck depths:
+
+```
+   top     z0    tilt       h     |x|   floor-touching steps
+-- tuck 0.5
+ 0.020  0.010    49.1  0.0643  0.0629      261 / 260
+ 0.060  0.050    13.2  0.0281  0.0052      261 / 260
+ 0.080  0.070    12.5  0.0285  0.0064        0 / 260
+ 0.090  0.080    12.5  0.0285  0.0064        0 / 260
+ 0.100  0.090    12.5  0.0285  0.0064        0 / 260
+ 0.110  0.100    12.5  0.0285  0.0064        0 / 260
+ 0.120  0.110    12.5  0.0285  0.0064        0 / 260
+ 0.150  0.140    12.5  0.0285  0.0064        0 / 260
+-- tuck 0.75
+ 0.020  0.010    40.6  0.0661  0.0555      261 / 260
+ 0.060  0.050    13.8  0.0283  0.0089      261 / 260
+ 0.080  0.070    13.9  0.0286  0.0083        0 / 260
+ 0.090  0.080    13.9  0.0286  0.0083        0 / 260
+ 0.100  0.090    13.9  0.0286  0.0083        0 / 260
+ 0.110  0.100    13.9  0.0286  0.0083        0 / 260
+ 0.120  0.110    13.9  0.0286  0.0083        0 / 260
+ 0.150  0.140    13.9  0.0286  0.0083        0 / 260
+-- tuck 1.0
+ 0.020  0.010    31.0  0.0628  0.0367      260 / 260
+ 0.060  0.050    15.4  0.0254  0.0097        0 / 260
+ 0.080  0.070    15.4  0.0254  0.0097        0 / 260
+ 0.090  0.080    15.4  0.0254  0.0097        0 / 260
+ 0.100  0.090    15.4  0.0254  0.0097        0 / 260
+ 0.110  0.100    15.4  0.0254  0.0097        0 / 260
+ 0.120  0.110    15.4  0.0254  0.0097        0 / 260
+ 0.150  0.140    15.4  0.0254  0.0097        0 / 260
+```
+
+**0.08 m is the floor**: at a 0.06 m top the feet still touch (261/261 steps at
+tuck 0.5 and 0.75); at 0.08 and above the hold is clean and identical to the
+elevated case (tilt 12.5-15.4 deg, h = 0.0285, 6-9 mm of drift) at every tuck
+depth.
+
+Three ways out were measured, and two fail:
+
+- **A wider pad does not help.** The feet are BELOW the surface, not merely
+  beyond its edge. Pads of 18x18, 28x22 and 40x28 cm at a 2 cm thickness on the
+  floor all leave the hold at 33-49 deg with the floor still being hit.
+- **A solid ground-resting block is worse.** Body origin at the top face,
+  9-11 cm tall: the dangling feet strike the block's side and the robot slides
+  off — tilt 23-93 deg and up to 14 cm of drift; only tuck 0.75 with the full
+  footprint stays put, and then it perches ON its own feet at h = 0.065 rather
+  than kneeling. Trimming the footprint in x makes it slide off every time.
+- **A feet-flat SQUAT hold DOES sit on a ground-level plate.** `HOLD_LERP` is
+  HOME lerped toward the tuck per joint (roulade's mid-roll parametrisation),
+  which keeps the soles down:
+
+```
+### rest height scan (noiseless, spawned 0.10 above the plate top)
+    f   h@0.5   h@3.0  tilt@0.5  tilt@3.0  floorhits
+ 0.50  0.0559  0.0551      33.8      35.9          0
+ 0.55  0.0629  0.0630      15.4      15.4          0
+ 0.60  0.0653  0.0650       6.1       5.7          0
+ 0.65  0.0661  0.0657       1.5       0.3          0
+ 0.70  0.0665  0.0661       8.2      11.2          0
+ 0.75  0.0725  0.0799      28.8      60.3        479
+ 0.80  0.0791  0.0778      48.5      60.6        523
+ 0.85  0.0789  0.0766      54.4      59.5        538
+ 0.90  0.0827  0.0764      64.1      58.7        544
+
+### settle from the measured rest height, 16 noisy trials
+-- f=0.6 spawn_h=0.065
+   t=0.10 tilt    3.5/   5.2 xy 0.010/0.012 h 0.0720 fallen=0
+   t=0.30 tilt   11.1/  12.3 xy 0.021/0.024 h 0.0644 fallen=0
+   t=0.50 tilt   10.4/  11.7 xy 0.021/0.024 h 0.0647 fallen=0
+   t=0.70 tilt   10.2/  11.5 xy 0.020/0.023 h 0.0647 fallen=0
+   t=1.00 tilt    9.8/  10.9 xy 0.020/0.023 h 0.0647 fallen=0
+   t=3.00 tilt    9.6/  10.5 xy 0.020/0.022 h 0.0644 fallen=0
+   floor-touching steps: 0 over 16 trials
+-- f=0.65 spawn_h=0.0657
+   t=0.10 tilt    3.5/   5.0 xy 0.010/0.011 h 0.0683 fallen=0
+   t=0.30 tilt    5.1/   6.4 xy 0.013/0.016 h 0.0658 fallen=0
+   t=0.50 tilt    3.5/   4.8 xy 0.012/0.015 h 0.0659 fallen=0
+   t=0.70 tilt    3.0/   4.5 xy 0.011/0.015 h 0.0658 fallen=0
+   t=1.00 tilt    2.1/   2.9 xy 0.010/0.013 h 0.0658 fallen=0
+   t=3.00 tilt    0.8/   1.4 xy 0.009/0.012 h 0.0657 fallen=0
+   floor-touching steps: 0 over 16 trials
+-- f=0.7 spawn_h=0.0661
+   t=0.10 tilt    2.5/   3.6 xy 0.007/0.009 h 0.0668 fallen=0
+   t=0.30 tilt    2.0/   3.8 xy 0.005/0.008 h 0.0667 fallen=0
+   t=0.50 tilt    6.7/   8.0 xy 0.002/0.004 h 0.0667 fallen=0
+   t=0.70 tilt    7.9/   9.1 xy 0.002/0.004 h 0.0665 fallen=0
+   t=1.00 tilt    8.7/   9.7 xy 0.002/0.004 h 0.0663 fallen=0
+   t=3.00 tilt   11.0/  12.0 xy 0.004/0.006 h 0.0661 fallen=0
+   floor-touching steps: 0 over 16 trials
+-- f=0.75 spawn_h=0.0799
+   t=0.10 tilt    0.8/   1.4 xy 0.004/0.006 h 0.0671 fallen=0
+   t=0.30 tilt   12.5/  14.7 xy 0.007/0.010 h 0.0673 fallen=0
+   t=0.50 tilt   22.2/  26.0 xy 0.016/0.021 h 0.0690 fallen=0
+   t=0.70 tilt   37.6/  47.2 xy 0.037/0.055 h 0.0749 fallen=5
+   t=1.00 tilt   49.2/  52.3 xy 0.064/0.072 h 0.0798 fallen=15
+   t=3.00 tilt   53.1/  58.4 xy 0.073/0.087 h 0.0810 fallen=16
+   floor-touching steps: 7143 over 16 trials
+```
+
+  `HOLD_LERP = 0.65` is a genuinely good hold on a plate lying on the floor:
+  tilt 3.5 deg at 0.1 s and 0.5 s, 2.1 at 1.0 s, **0.8 at 3.0 s** (it converges
+  toward upright), 9-13 mm of drift, 0/16 fallen, and **zero robot-floor
+  contacts**. 0.60 and 0.70 also hold; 0.75 and deeper topple.
+
+**But the squat does not fly.** 420 launch cells from that hold at ground
+level, with the policy folding to a full tuck at the flick,
+`t_launch` in [0.09, 0.13], `vz` in [2.0, 2.5], `w0` in [18, 30]:
+
+```
+420 cells scanned
+cells with rot >= 340 AND land <= 2.6: 0
+
+cells with rot >= 340: 28; softest 10 landings:
+  land= 3.09 rot= 364.6 launch=0.11 vz=2.5 w0=26.0 tuck=1.0 apex=0.501
+  land= 3.20 rot= 342.0 launch=0.12 vz=2.4 w0=22.0 tuck=1.0 apex=0.495
+  land= 3.22 rot= 352.8 launch=0.12 vz=2.5 w0=22.0 tuck=1.0 apex=0.512
+  land= 3.24 rot= 342.5 launch=0.11 vz=2.3 w0=20.0 tuck=1.0 apex=0.501
+  land= 3.26 rot= 386.3 launch=0.1 vz=2.5 w0=22.0 tuck=1.0 apex=0.574
+  land= 3.26 rot= 349.1 launch=0.09 vz=2.3 w0=26.0 tuck=1.0 apex=0.521
+  land= 3.28 rot= 345.8 launch=0.1 vz=2.5 w0=26.0 tuck=1.0 apex=0.535
+  land= 3.29 rot= 368.5 launch=0.1 vz=2.4 w0=22.0 tuck=1.0 apex=0.544
+  land= 3.29 rot= 343.6 launch=0.1 vz=2.5 w0=30.0 tuck=1.0 apex=0.534
+  land= 3.30 rot= 346.8 launch=0.11 vz=2.4 w0=20.0 tuck=1.0 apex=0.536
+```
+
+**Zero cells close 360 deg under the 2.6 m/s hardware limit.** The softest
+360-closing cell lands at **3.09 m/s**, 19% over. The mechanism is the same one
+that killed the standing hold: a 6.6 cm CoM (vs the kneeling tuck's 2.9) does
+not transfer the flick, and the reduced airtime of a ground launch has to be
+paid for with more `vz`, which lands harder.
+
+So the plate stays elevated — but pushed down to the geometric floor.
+`HOLD_LERP`, `HOLD_Z` and the probe's `squat_env` posture are kept so this
+measurement stays reproducible, not because the env uses them.
+
+## 3. "Launched far too hard and too far" — the retune
+
+Over-rotation is now a defect to minimise. New whole-box-verified box, from the
+lowest plate the hold pose allows:
+
+```
+# box-check posture=tucked_env bam=True dt=0.005
+#   z0 (0.07, 0.09) vz (1.9, 2.0) w0 (23.0, 24.0) launch (0.12, 0.13)
+#   z0 grid (0.07, 0.08, 0.09)
+#   hold (0.1, 1.0) tuck (0.5, 0.75, 1.0)
+  486 cells | min rot = 372.5 deg | max landing = 2.15 m/s | short of 360: 0 | over 2.6 m/s: 0 | never landed: 0
+  worst by rotation:
+    rot=  372.5 land= 1.83 apex=0.329 tilt0= 13.9  z0=0.070 vz=1.900 w0=24.00 launch=0.130 hold=0.10 tuck=1.00
+    rot=  378.3 land= 1.81 apex=0.339 tilt0= 13.9  z0=0.080 vz=1.900 w0=24.00 launch=0.130 hold=0.10 tuck=1.00
+    rot=  381.3 land= 1.72 apex=0.336 tilt0= 13.9  z0=0.070 vz=1.950 w0=24.00 launch=0.130 hold=0.10 tuck=1.00
+    rot=  381.8 land= 1.85 apex=0.338 tilt0= 13.9  z0=0.070 vz=1.900 w0=23.00 launch=0.130 hold=0.10 tuck=1.00
+    rot=  383.5 land= 1.79 apex=0.335 tilt0= 13.9  z0=0.070 vz=1.900 w0=23.50 launch=0.130 hold=0.10 tuck=1.00
+  worst by landing speed:
+    rot=  387.4 land= 2.15 apex=0.390 tilt0= 15.9  z0=0.070 vz=1.900 w0=23.00 launch=0.130 hold=1.00 tuck=1.00
+    rot=  397.5 land= 2.14 apex=0.400 tilt0= 15.9  z0=0.080 vz=1.900 w0=23.00 launch=0.130 hold=1.00 tuck=1.00
+    rot=  402.6 land= 2.13 apex=0.410 tilt0= 15.9  z0=0.090 vz=1.900 w0=23.00 launch=0.130 hold=1.00 tuck=1.00
+    rot=  401.5 land= 2.11 apex=0.398 tilt0= 15.9  z0=0.070 vz=1.900 w0=23.00 launch=0.125 hold=1.00 tuck=1.00
+    rot=  384.1 land= 2.11 apex=0.381 tilt0= 15.9  z0=0.070 vz=1.900 w0=23.50 launch=0.130 hold=1.00 tuck=1.00
+  RESULT: PASS — whole box closes 360 deg under 2.6 m/s
+```
+
+| | old box | **new box** |
+|---|---|---|
+| `z0` | 0.10-0.20 (tail to 0.225) | **0.07-0.09** |
+| plate top | 0.11-0.21 m | **0.08-0.10 m** |
+| `vz` | 2.00-2.10 | **1.90-2.00** |
+| `w0` | 21-23 | **23-24** |
+| `t_launch` | 0.12-0.14 | **0.12-0.13** |
+| rotation (whole box) | 393.6-475.7 deg | **372.5-457.3 deg** |
+| apex | 0.52-0.63 m | **0.29-0.40 m** |
+| worst landing | 2.53 m/s | **2.15 m/s** |
+| `never landed` cells | 0 | **0** |
+
+Rotation is down at both ends, apex is down by a third, the worst landing has
+0.45 m/s of margin instead of 0.09, and the plate is less than half as high.
+**The target of 360-400 deg across the whole box is not reachable**: ~85 deg of
+the spread is irreducible DR (`z0` x tuck depth x hold length), so a box tight
+enough to hold 360-400 everywhere has no DR width left. 457 deg is 1.27 turns.
+
+The scan behind the choice (worst rotation and worst landing over
+`z0` in {0.07, 0.08, 0.09} x tuck x hold, per `(t_launch, vz, w0)`):
+
+```
+  lau    vz    w0   minrot   maxrot  maxland  verdict
+ 0.12  1.70  20.0    338.1    380.3     2.68  no
+ 0.12  1.70  22.0    357.8    375.0     2.43  no
+ 0.12  1.70  24.0    351.2    376.7     2.23  no
+ 0.12  1.70  26.0    330.7    373.3     2.15  no
+ 0.12  1.70  28.0    298.7    351.5     2.26  no
+ 0.12  1.80  20.0    364.7    400.4     2.62  no
+ 0.12  1.80  22.0    364.7    393.6     2.26  ok
+ 0.12  1.80  24.0    380.5    402.6     2.09  ok
+ 0.12  1.80  26.0    349.0    402.1     1.99  no
+ 0.12  1.80  28.0    326.6    389.9     2.04  no
+ 0.12  1.90  20.0    388.2    416.7     2.54  ok
+ 0.12  1.90  22.0    407.2    422.3     2.22  ok
+ 0.12  1.90  24.0    400.6    424.1     1.98  GENTLE
+ 0.12  1.90  26.0    381.3    420.0     1.79  GENTLE
+ 0.12  1.90  28.0    347.3    414.4     1.82  no
+ 0.12  2.00  20.0    399.3    440.3     2.41  no
+ 0.12  2.00  22.0    415.2    443.0     2.14  no
+ 0.12  2.00  24.0    425.3    443.9     1.93  no
+ 0.12  2.00  26.0    410.7    437.3     1.74  no
+ 0.12  2.00  28.0    384.1    439.2     1.61  no
+ 0.14  1.70  20.0    314.8    344.6     2.67  no
+ 0.14  1.70  22.0    309.3    343.5     2.53  no
+ 0.14  1.70  24.0    288.4    332.5     2.43  no
+ 0.14  1.70  26.0    270.5    313.0     2.42  no
+ 0.14  1.70  28.0    244.8    292.6     2.49  no
+ 0.14  1.80  20.0    345.3    362.2     2.61  no
+ 0.14  1.80  22.0    337.9    362.0     2.41  no
+ 0.14  1.80  24.0    317.4    354.0     2.30  no
+ 0.14  1.80  26.0    289.2    333.3     2.31  no
+ 0.14  1.80  28.0    258.1    316.5     2.40  no
+ 0.14  1.90  20.0    368.4    383.3     2.54  ok
+ 0.14  1.90  22.0    360.0    387.8     2.31  no
+ 0.14  1.90  24.0    339.8    384.6     2.15  no
+ 0.14  1.90  26.0    311.6    370.6     2.14  no
+ 0.14  1.90  28.0    285.8    333.1     2.28  no
+ 0.14  2.00  20.0    389.1    402.3     2.44  ok
+ 0.14  2.00  22.0    387.3    408.5     2.17  ok
+ 0.14  2.00  24.0    363.1    408.5     2.00  GENTLE
+ 0.14  2.00  26.0    331.5    388.8     1.95  no
+ 0.14  2.00  28.0    311.4    366.9     2.05  no
+```
+
+and the whole-box evaluation of the four final candidates:
+
+```
+### A: z0(0.07, 0.09) vz(1.9, 2.0) w0(23.0, 25.0) launch(0.12, 0.13)
+    486 cells | rot 357.3-457.3 | max land 2.15
+    worst rot  cell: z0=0.07 vz=1.9 w0=25.0 lau=0.13 hold=0.1 tuck=1.0 land=1.89 apex=0.316
+    worst land cell: z0=0.07 vz=1.9 w0=23.0 lau=0.13 hold=1.0 tuck=1.0 rot=387.4 apex=0.390
+### B: z0(0.07, 0.09) vz(1.95, 2.05) w0(23.0, 25.0) launch(0.12, 0.14)
+    486 cells | rot 335.1-463.3 | max land 2.16
+    worst rot  cell: z0=0.07 vz=1.95 w0=25.0 lau=0.14 hold=0.1 tuck=1.0 land=2.00 apex=0.302
+    worst land cell: z0=0.07 vz=1.95 w0=23.0 lau=0.14 hold=1.0 tuck=1.0 rot=373.9 apex=0.383
+### C: z0(0.07, 0.09) vz(1.85, 1.95) w0(24.0, 26.0) launch(0.11, 0.13)
+    486 cells | rot 332.6-466.1 | max land 2.13
+    worst rot  cell: z0=0.07 vz=1.9 w0=26.0 lau=0.13 hold=0.1 tuck=1.0 land=1.99 apex=0.292
+    worst land cell: z0=0.07 vz=1.85 w0=24.0 lau=0.13 hold=1.0 tuck=1.0 rot=374.9 apex=0.360
+### A2: z0(0.07, 0.09) vz(1.9, 2.0) w0(23.0, 24.0) launch(0.12, 0.13)
+    486 cells | rot 372.5-457.3 | max land 2.15
+    worst rot  cell: z0=0.07 vz=1.9 w0=24.0 lau=0.13 hold=0.1 tuck=1.0 land=1.83 apex=0.329
+    worst land cell: z0=0.07 vz=1.9 w0=23.0 lau=0.13 hold=1.0 tuck=1.0 rot=387.4 apex=0.390
+### A3: z0(0.07, 0.09) vz(1.95, 2.05) w0(23.0, 24.0) launch(0.12, 0.13)
+    486 cells | rot 381.3-463.7 | max land 2.08
+    worst rot  cell: z0=0.07 vz=1.95 w0=24.0 lau=0.13 hold=0.1 tuck=1.0 land=1.72 apex=0.336
+    worst land cell: z0=0.07 vz=1.95 w0=23.0 lau=0.13 hold=1.0 tuck=1.0 rot=402.3 apex=0.402
+```
+
+`A2` was taken: the only candidate whose minimum rotation stays above 360 deg
+with a real `w0` and `t_launch` width. `w0 = 25` drops the `z0=0.07` corner to
+357 deg; `t_launch = 0.14` drops it to 340.
+
+**Direction checks: 20/20 backward** — all 16 `(z0, vz, w0, t_launch)` corners
+plus the box's two worst cells and both tuck extremes:
+
+```
+   z0    vz    w0   lau  hold  tuck     rot  land  verdict
+ 0.07  1.90  23.0 0.120  0.40  0.75   428.8  1.83  BACKWARD ok  (+z=(-0.518,-0.010,-0.855))
+ 0.07  1.90  23.0 0.130  0.40  0.75   407.6  1.81  BACKWARD ok  (+z=(-0.460,-0.013,-0.888))
+ 0.07  1.90  24.0 0.120  0.40  0.75   426.3  1.75  BACKWARD ok  (+z=(-0.508,-0.023,-0.861))
+ 0.07  1.90  24.0 0.130  0.40  0.75   400.8  1.77  BACKWARD ok  (+z=(-0.376,0.009,-0.926))
+ 0.07  2.00  23.0 0.120  0.40  0.75   443.1  1.81  BACKWARD ok  (+z=(-0.530,-0.015,-0.848))
+ 0.07  2.00  23.0 0.130  0.40  0.75   428.0  1.77  BACKWARD ok  (+z=(-0.463,-0.008,-0.886))
+ 0.07  2.00  24.0 0.120  0.40  0.75   443.0  1.71  BACKWARD ok  (+z=(-0.518,0.006,-0.856))
+ 0.07  2.00  24.0 0.130  0.40  0.75   428.6  1.69  BACKWARD ok  (+z=(-0.347,-0.012,-0.938))
+ 0.09  1.90  23.0 0.120  0.40  0.75   439.5  1.88  BACKWARD ok  (+z=(-0.518,-0.010,-0.855))
+ 0.09  1.90  23.0 0.130  0.40  0.75   418.6  1.83  BACKWARD ok  (+z=(-0.460,-0.013,-0.888))
+ 0.09  1.90  24.0 0.120  0.40  0.75   437.3  1.79  BACKWARD ok  (+z=(-0.508,-0.023,-0.861))
+ 0.09  1.90  24.0 0.130  0.40  0.75   412.1  1.78  BACKWARD ok  (+z=(-0.376,0.009,-0.926))
+ 0.09  2.00  23.0 0.120  0.40  0.75   453.8  1.88  BACKWARD ok  (+z=(-0.530,-0.015,-0.848))
+ 0.09  2.00  23.0 0.130  0.40  0.75   433.4  1.80  BACKWARD ok  (+z=(-0.463,-0.008,-0.886))
+ 0.09  2.00  24.0 0.120  0.40  0.75   448.5  1.75  BACKWARD ok  (+z=(-0.518,0.006,-0.856))
+ 0.09  2.00  24.0 0.130  0.40  0.75   434.3  1.71  BACKWARD ok  (+z=(-0.347,-0.012,-0.938))
+ 0.07  1.90  24.0 0.130  0.10  1.00   372.5  1.83  BACKWARD ok  (+z=(-0.229,0.033,-0.973))
+ 0.07  1.90  23.0 0.130  1.00  1.00   387.4  2.15  BACKWARD ok  (+z=(-0.499,-0.042,-0.866))
+ 0.08  1.95  23.5 0.125  0.55  0.50   420.9  1.88  BACKWARD ok  (+z=(-0.443,0.006,-0.896))
+ 0.08  1.95  23.5 0.125  0.55  1.00   417.4  1.85  BACKWARD ok  (+z=(-0.429,0.005,-0.903))
+
+20 cells checked, 0 not confirmed backward
+```
+
+**Settle and flop audit re-run at the new heights** (the hold trunk moved from
+0.139-0.249 m to 0.109-0.129 m, and `ready_stance`'s height factor moves with
+it):
+
+```
+# flop-audit: z0=0.07 tuck=0.75 duration=3.0s dt=0.005 bam=True
+ orientation   clr    tilt   drift  trunk_z    pose  height    pre  upright   TOTAL  on?
+     upright 0.005    14.1   0.009    0.109   0.948   1.000  0.948    1.000   0.948  yes
+   side_left 0.015   102.8   0.016    0.111   0.997   0.994  0.991    0.000   0.000  yes
+  side_right 0.015   102.8   0.016    0.111   0.997   0.994  0.991    0.000   0.000  yes
+   face_down 0.015    79.1   0.018    0.120   0.913   0.867  0.791    0.000   0.000  yes
+     on_back 0.015    91.0   0.002    0.122   0.982   0.829  0.814    0.000   0.000  yes
+    inverted 0.035   175.2   0.012    0.111   0.990   0.994  0.984    0.000   0.000  yes
+  upright: pre=0.948 TOTAL=0.948   best flop: pre=0.991 TOTAL=0.000
+  WITHOUT the upright factor: a flop would pay MORE (0.991 vs 0.948)
+  RESULT: PASS - upright wins (0.948 vs 0.000)
+# flop-audit: z0=0.09 tuck=0.75 duration=3.0s dt=0.005 bam=True
+ orientation   clr    tilt   drift  trunk_z    pose  height    pre  upright   TOTAL  on?
+     upright 0.005    14.1   0.009    0.129   0.948   1.000  0.948    1.000   0.948  yes
+   side_left 0.015   102.8   0.016    0.131   0.997   0.994  0.991    0.000   0.000  yes
+  side_right 0.015   102.8   0.016    0.131   0.997   0.994  0.991    0.000   0.000  yes
+   face_down 0.015    88.5   0.021    0.134   0.880   0.977  0.860    0.000   0.000  yes
+     on_back 0.015    91.0   0.002    0.142   0.982   0.829  0.814    0.000   0.000  yes
+    inverted 0.005   178.3   0.012    0.127   0.991   0.994  0.985    0.000   0.000  yes
+  upright: pre=0.948 TOTAL=0.948   best flop: pre=0.991 TOTAL=0.000
+  WITHOUT the upright factor: a flop would pay MORE (0.991 vs 0.948)
+  RESULT: PASS - upright wins (0.948 vs 0.000)
+# settle: posture=tucked_env tuck=0.75 ctrl=spawn pose on plate z0=0.07 trials=32 noisy=True duration=3.0s dt=0.005 bam=True
+  t[s]  tilt_mean  tilt_max  xy_mean  xy_max  z_mean  n_fallen
+  0.10       13.7      14.4    0.008   0.009   0.108         0
+  0.30       14.3      14.6    0.008   0.009   0.109         0
+  0.50       14.1      14.5    0.008   0.009   0.109         0
+  0.70       14.0      14.5    0.008   0.009   0.109         0
+  1.00       13.9      14.4    0.008   0.010   0.109         0
+  3.00       14.0      14.5    0.008   0.011   0.109         0
+# settle: posture=tucked_env tuck=0.75 ctrl=spawn pose on plate z0=0.09 trials=32 noisy=True duration=3.0s dt=0.005 bam=True
+  t[s]  tilt_mean  tilt_max  xy_mean  xy_max  z_mean  n_fallen
+  0.10       13.7      14.4    0.008   0.009   0.128         0
+  0.30       14.3      14.6    0.008   0.009   0.129         0
+  0.50       14.1      14.5    0.008   0.009   0.129         0
+  0.70       14.0      14.5    0.008   0.009   0.129         0
+  1.00       13.9      14.4    0.008   0.010   0.129         0
+  3.00       14.0      14.5    0.008   0.011   0.129         0
+```
+
+Both unchanged: the hold still settles at 14.0 deg with 0/32 fallen at both
+`z0` extremes, and every flop basin still scores exactly 0.000 against the
+upright hold's 0.948.
+
+## 4. Two consequences of the lower plate, recorded
+
+- **The `z0` DR tail is deleted.** Upward it crosses the landing limit
+  (whole-box worst landing 2.59 m/s at `z0=0.225`); downward the range is now
+  2 cm wide. A curriculum stage that widens a 2 cm range is not worth its
+  pacing risk.
+- **`arrival_damping` now also acts during HOLD, deliberately.** The tucked
+  hold trunk is 0.109-0.129 m, straddling `STAND_Z` = 0.115, so NO height
+  ceiling can separate "held tuck" from "landed stand" any more — they are the
+  same height. The ceiling (0.121 / 0.132) is kept for the FLIGHT, which the
+  retune moved to a 0.29-0.40 m apex, comfortably outside. The accepted cost is
+  ~0: a held tuck's trunk omega_xy is negligible (8-11 mm of drift over 3 s)
+  and the weight is 0 until iteration 2000. A cfg test asserts the overlap so
+  the next reader does not try to re-derive a number that cannot exist.
+- **`ready_stance`'s height factor is a weaker discriminator now.** At
+  `z0 = 0.07` a standing trunk (0.115 m) is only 6 mm from the tucked target
+  (0.109), so the height Gaussian scores standing at 0.96 instead of 3e-4. The
+  POSE factor still separates them (0.95 tucked vs 0.12 standing), so the
+  composite prefers the tuck about 8:1 rather than 1000:1. Watch it if the
+  policy stands up during HOLD.
+
+## 5. Reproducing this section
+
+```bash
+# the zero-action hold (what `play --agent zero` commands)
+uv run python scripts/backflip_envelope.py --settle --bam --z0 0.15 \
+    --settle-trials 16 --settle-ctrl-home --settle-duration 4.0
+
+# the ground-level squat hold, and the launch sweep from it
+uv run python scripts/backflip_envelope.py --settle --bam --z0 0.01 --posture squat_env \
+    --settle-trials 16
+uv run python scripts/backflip_envelope.py --posture squat_env --tuck-at-flick --bam \
+    --z0 0.01 --vz 2.0,2.25,2.5 --w0 18,22,26,30 --tuck 1.0
+
+# the retuned box, whole-box
+uv run python scripts/backflip_envelope.py --box-check --bam
+
+# settle + flop audit at both z0 extremes
+uv run python scripts/backflip_envelope.py --settle --bam --z0 0.07 --settle-trials 32 --tuck 0.75
+uv run python scripts/backflip_envelope.py --flop-audit --bam --z0 0.09 --tuck 0.75
+
+# the minimum plate-top height (contact-trace and clearance scans are two-line
+# drivers over run_settle(); the tables above carry their parameters)
 ```

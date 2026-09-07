@@ -24,6 +24,24 @@ pays for, and the posture the envelope is measured from are now one posture —
 and the probe imports the constants from this file so they cannot drift apart
 again. Full tables: docs/backflip_envelope_results.md, "Tucked hold".
 
+WHY THE PLATE IS HELD 7-9 cm UP AND NOT LYING ON THE GROUND. A user watching
+the env asked for the plate to sit ON the ground. It cannot, and the reason is
+geometry, measured (docs/backflip_envelope_results.md, "Lower and gentler"):
+the kneeling tuck rests on its SHINS with its FEET HANGING ~8 cm BELOW the
+surface it sits on. Put the plate top under 0.08 m and those feet reach the
+floor: the robot settles at 41 deg of tilt and slides 5.5 cm. Widening the
+plate does not help (the feet are below the surface, not merely beyond its
+edge), and a SOLID block resting on the ground is worse — the feet hit its
+side and the robot slides off (23-93 deg tilt, up to 14 cm of drift).
+A feet-flat SQUAT hold does sit on a ground-level plate (measured: tilt 3.5 deg
+at 0.5 s, 0.8 deg at 3 s, zero floor contact at HOLD_LERP = 0.65) — but it does
+not fly: 420 launch cells at ground level, ZERO closing 360 deg under the
+2.6 m/s hardware landing limit, the softest 360-closing cell landing at
+3.09 m/s. So the plate stays elevated, and Z0_RANGE is pushed down to the
+geometric floor (0.07-0.09, plate top 0.08-0.10) instead — less than half its
+previous height. HOLD_LERP / HOLD_Z and the probe's ``squat_env`` posture are
+kept so that measurement is reproducible, not to be used.
+
 HAND-OFF PREMISE. On the real robot there is no launcher and no launcher
 sensing: a human picks the duck up, holds it on two flat palms, and flicks.
 The policy therefore gets NO plate observation — it feels the toss through the
@@ -159,6 +177,19 @@ and random yaw are narrowed to a small on-plate jitter with near-zero yaw: the
 plate is only 18 cm across, and the flick axis is world +y, so a random heading
 would turn the backflip into a side flip.
 
+FIRST EPISODE UNDER ``play``. mjlab never calls ``env.reset()`` before the
+viewer's first episode (``ManagerBasedRlEnv.__init__`` does not reset, and
+``mjlab/viewer/base.py`` calls it only on the RESET action), so
+``uv run play`` runs a whole 4 s episode on the COMPILED default state plus
+``_backflip_state``'s lazy defaults. That state used to be nonsense — robot
+standing at its compiled 0.12 m trunk height, plate hovering motionless at
+0.15 m, i.e. through its body, then teleporting away without launching — and
+it is what a user reported as "the plate is stuck in the middle of the robot,
+not under its feet". The entity init states and the lazy defaults are now
+coherent (tucked on the plate at the middle of Z0_RANGE, with a mid-box toss),
+so the first episode looks like an episode. Press the viewer's reset key for a
+properly sampled one.
+
 DR / obs / noise / NaN guard mirror the roulade env (which mirrors standup,
 which mirrors velocity — the recipe with proven transfer). Velocity pushes are
 OFF: a shove mid-flip is incoherent.
@@ -226,12 +257,49 @@ TUCK_OVERRIDES = {
     13: -1.05,  # right ankle
 }
 
+# Same tuck, keyed by joint NAME instead of servo index — for the entity's
+# init_state (mjlab matches joint_pos by regex, not by index). Kept adjacent to
+# TUCK_OVERRIDES and pinned equal to it by a cfg test.
+_TUCK_BY_NAME = {
+    r"^left_hip_pitch$":  -1.15,
+    r"^left_knee$":        1.25,
+    r"^left_ankle$":       1.05,
+    r"^neck_pitch$":      -1.0,
+    r"^head_pitch$":       1.0,
+    r"^right_hip_pitch$":  1.15,
+    r"^right_knee$":      -1.25,
+    r"^right_ankle$":     -1.05,
+}
+
 # Tuck depth, as a fraction of TUCK_OVERRIDES. MEASURED CHOICE (2026-09-07, CPU
 # MuJoCo + BAM): 0.5 / 0.75 / 1.0 all settle without falling on the plate, at
 # equilibrium tilts of 12.3 / 14.0 / 15.3 deg and 3 s x/y drifts of 7 / 11 /
 # 15 mm. 0.75 sits in the middle of the whole-box closure region on both the
 # stability and the rotation axes.
 TUCK_FACTOR = 0.75
+
+# ── The GROUND-LEVEL hold: a feet-flat SQUAT ─────────────────────────────────
+# HOLD_LERP is HOME lerped this far toward TUCK_OVERRIDES, per joint (the same
+# parametrisation roulade's mid-roll spawn uses) — NOT a scaling of the tuck
+# targets. The distinction is the whole reason this pose exists: the lerp keeps
+# the SOLES DOWN, and a feet-flat squat is the only pose measured to rest on a
+# plate lying on the ground. The deep kneeling tuck hangs its feet ~8 cm BELOW
+# whatever it rests on, which is fine on a plate held 10 cm up and impossible
+# on one lying on the floor (measured: the feet reach the floor and the robot
+# settles at 41 deg, sliding 5.5 cm).
+#
+# 0.65 is MEASURED (2026-09-07, CPU MuJoCo + BAM, 16 noisy trials): it settles
+# UPRIGHT and stays there — tilt 3.5 deg at 0.1 s and 0.5 s, 2.1 at 1.0 s, 0.8
+# at 3.0 s, x/y drift 9-13 mm, 0/16 fallen, and ZERO robot-floor contacts
+# through the whole hold. 0.60 and 0.70 also hold (10-11 deg); 0.75 and deeper
+# topple (49 deg by 1.0 s, 15/16 fallen) as the soles start to leave the plate.
+HOLD_LERP = 0.65
+
+# MEASURED resting trunk height of that squat above the plate TOP (same run:
+# 0.0657-0.0661 m at HOLD_LERP 0.65, reached within 0.3 s from every spawn
+# height tried). Do NOT derive it from STAND_Z or TUCK_Z — three different
+# poses, three different heights.
+HOLD_Z = 0.066
 
 # MEASURED tucked trunk height above the plate TOP (2026-09-07, CPU MuJoCo with
 # BAM actuators; `uv run python scripts/backflip_envelope.py --measure-tuck-z
@@ -251,40 +319,40 @@ TUCK_Z = 0.029
 PLATE_HALF_THICKNESS = 0.01
 
 # ── Launch envelope — WHOLE-BOX verified from the ACTUAL tucked spawn ────────
-# Every one of these ranges was checked at its corners AND midpoints, jointly,
-# from the exact posture reset_backflip_robot_on_plate produces (probe mode
-# `--posture tucked_env --bam`, 486 cells). The acceptance rule is
+# Every range is checked at its corners AND midpoints, jointly, from the exact
+# posture reset_backflip_robot_on_plate produces (probe mode
+# `--posture tucked_env --bam --box-check`, 486 cells). The acceptance rule is
 # WHOLE-BOX: every sampled combination must close >= 360 deg BACKWARD with a
-# landing speed <= 2.6 m/s, not just the best corner. Measured worst case
-# inside the box: 393.6 deg (33.6 deg of margin) and 2.51 m/s (0.09 m/s of
-# margin). See docs/backflip_envelope_results.md, "Tucked hold".
+# landing speed <= 2.6 m/s. Measured across the box: rotation 372.5-457.3 deg,
+# worst landing 2.15 m/s. See docs/backflip_envelope_results.md, "Lower and
+# gentler".
 #
-# What moved and why, versus the previous (tucked-probe, best-corner) box:
-#   * LAUNCH_RANGE 0.08 -> 0.12 at the low end. A SHORT flick is the violent
-#     one: t_launch=0.08 lands at up to 3.97 m/s, half again over the hardware
-#     limit. The operator's flick duration is not free DR.
-#   * VZ_RANGE 2.25 -> 2.10 at the top: vz 2.20-2.25 pushes the z0=0.20 corner
-#     to 2.65-2.70 m/s.
-#   * W0_RANGE 24-30 -> 21-23: w0=30 with a long ramp only reaches 279 deg at
-#     the z0=0.10 corner (it trades apex for spin and runs out of airtime),
-#     and w0 >= 25 with t_launch=0.14 drops to 372 deg.
-# Do not widen any of them without re-running the whole-box check.
+# RETUNED for ONE CLEAN TURN and the LOWEST plate the pose allows, after the
+# user watched the env and reported it "launched far too hard and too far":
+#   * Z0_RANGE 0.10-0.20 -> 0.07-0.09. 0.07 is a MEASURED floor, not taste:
+#     the kneeling tuck rests on its shins with its FEET HANGING ~8 cm below
+#     the surface it sits on, so with the plate top under 0.08 m the feet reach
+#     the ground, the robot settles at 41 deg and slides 5.5 cm. A plate lying
+#     ON the floor cannot hold this pose at all (see the docstring).
+#   * VZ_RANGE 2.00-2.10 -> 1.90-2.00 and W0_RANGE 21-23 -> 23-24: less lift,
+#     a slightly sharper flick. Apex drops from 0.52-0.63 m to 0.29-0.40 m and
+#     the worst landing from 2.53 to 2.15 m/s.
+#   * Rotation 393-476 deg -> 372-457. Over-rotation is now a DEFECT to
+#     minimise, not headroom: 457 deg is 1.27 turns. ~85 deg of that spread is
+#     irreducible DR (z0 x tuck depth x hold length); a box tight enough to
+#     hold 360-400 across all of it has no DR width left.
+#   * LAUNCH_RANGE 0.12-0.14 -> 0.12-0.13: 0.14 under-rotates at the new,
+#     lower vz (339.8 deg at the z0=0.07 corner).
+# Do not widen any of them without re-running --box-check.
 HOLD_RANGE    = (0.1, 0.4)     # widened to (0.1, 1.0) by curriculum; the tuck
                                # holds 3 s without falling, so 1.0 is safe
-LAUNCH_RANGE  = (0.12, 0.14)   # a shorter flick is the violent one
-Z0_RANGE      = (0.10, 0.20)   # DR tail extended to Z0_CURRICULUM_MAX below
-VZ_RANGE      = (2.00, 2.10)
-W0_RANGE      = (21.0, 23.0)
+LAUNCH_RANGE  = (0.12, 0.13)
+Z0_RANGE      = (0.07, 0.09)   # 0.07 is the geometric floor for this pose
+VZ_RANGE      = (1.90, 2.00)
+W0_RANGE      = (23.0, 24.0)
 MAX_PAID_RATE = 25.0           # rad/s; measured peak in the box is 23.0,
                                # mean over a flip 15.6-20.1 — 25 forfeits
                                # nothing a real flip needs
-
-# Ceiling the z0 curriculum widens the launch-height tail to. It is part of the
-# BOX, not a footnote: after the tail opens, this is the state the env actually
-# trains into, so --box-check sweeps it and the whole-box rule has to hold
-# there too. See the curriculum term below for the landing-speed measurement
-# that sets it.
-Z0_CURRICULUM_MAX = 0.21
 
 # Spawn scatter on the plate. x/y: the plate is 18 cm across and the robot's
 # feet span ~8 cm, so 1 cm of jitter is what fits. yaw: the flick axis is world
@@ -378,8 +446,29 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # anything can hit the floor, so foot-pad-only collisions are not enough.
     # Robot MUST stay the FIRST entity — the base reset events and
     # reset_backflip_robot_on_plate write robot root state at qpos[:, 0:7].
+    # The robot entity is the standup one with a BACKFLIP-SPECIFIC initial
+    # state: tucked, on the plate top, at the middle of Z0_RANGE. That init
+    # state is normally irrelevant (every episode's reset events overwrite it)
+    # — except for the FIRST episode under `uv run play`, which mjlab runs
+    # without ever calling reset (see _backflip_state's comment). Before this,
+    # play's first 4 s showed a robot standing on the floor with the plate
+    # hovering through its body, which is what got reported as broken. deepcopy
+    # so standup/roulade keep MICRODUCK_STANDUP_ROBOT_CFG's own HOME init.
+    _z0_mid = 0.5 * (Z0_RANGE[0] + Z0_RANGE[1])
+    backflip_robot_cfg = deepcopy(MICRODUCK_STANDUP_ROBOT_CFG)
+    backflip_robot_cfg.init_state = deepcopy(backflip_robot_cfg.init_state)
+    backflip_robot_cfg.init_state.pos = (
+        0.0, 0.0, _z0_mid + PLATE_HALF_THICKNESS + TUCK_Z,
+    )
+    backflip_robot_cfg.init_state.joint_pos = {
+        **backflip_robot_cfg.init_state.joint_pos,
+        **{
+            name: angle * TUCK_FACTOR
+            for name, angle in _TUCK_BY_NAME.items()
+        },
+    }
     cfg.scene.entities = {
-        "robot": MICRODUCK_STANDUP_ROBOT_CFG,
+        "robot": backflip_robot_cfg,
         "plate": MICRODUCK_LAUNCHER_CFG,
     }
     cfg.scene.sensors = (feet_ground_cfg, self_collision_cfg, robot_ground_cfg)
@@ -505,27 +594,25 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # The height band needs BOTH edges here, and the reason is a correction:
     # body_ang_vel_at_height's height_low/height_high pair is a FLOOR, not a
     # window — everything above height_high pays FULL cost. The whole flight of
-    # a backflip is above 0.11 m (apex 0.4-1.2 m measured), so the original
-    # "gated on standing height AND low tilt, so the flip itself is never
-    # taxed" was wrong twice over: only the tilt gate was protecting the flip,
-    # and a rotating robot passes tilt < 20 deg twice per revolution.
+    # a backflip is above 0.11 m (apex 0.29-0.40 m measured in the new box), so
+    # the original "gated on standing height AND low tilt, so the flip itself
+    # is never taxed" was wrong twice over: only the tilt gate was protecting
+    # the flip, and a rotating robot passes tilt < 20 deg twice per revolution.
+    # 0.121 / 0.132 keeps the landed STANDING trunk (~STAND_Z = 0.115) inside
+    # the full-cost band and the flight outside it.
     #
-    # The ceiling is DERIVED, and it was re-derived when the hold posture went
-    # tucked. It has to sit strictly between two measured heights:
-    #   * the landed STANDING trunk, ~STAND_Z = 0.115 m, which MUST be inside
-    #     the full-cost band — damping the arrival is the whole point;
-    #   * the lowest TUCKED HOLD trunk, at z0=0.10 that is
-    #     Z0_RANGE[0] + PLATE_HALF_THICKNESS + TUCK_Z = 0.139 m (measured
-    #     minimum over 32 noisy trials: 0.1381 m), which must be OUTSIDE it, or
-    #     the damper fires during HOLD.
-    # 0.121 / 0.132 gives 6 mm of clearance under the hold and 6 mm over the
-    # landing. The earlier 0.16 / 0.22 pair was derived against the STANDING
-    # hold (trunk >= 0.225 m) and taxed the tucked hold at every z0 <= 0.181.
-    # Practical magnitude was small (omega ~ 0 in a held tuck, and the weight
-    # only ramps from iteration 2000) but the number was simply wrong, and its
-    # test passed on 0.22 < 0.225 while the quantity it meant to bound was
-    # 0.139 — so it asserted nothing. A cfg test now bounds it against the
-    # tucked constants directly.
+    # HOLD-PHASE DAMPING IS NOW DELIBERATELY ACCEPTED. When the plate sat at
+    # z0 = 0.10-0.20 the tucked hold trunk was 0.139-0.249 m and the ceiling
+    # could separate the two cleanly. The retune dropped the plate to
+    # z0 = 0.07-0.09, so the hold trunk is 0.109-0.129 m — i.e. straddling
+    # STAND_Z. No ceiling can separate "held tuck" from "landed stand" by
+    # HEIGHT any more; they are the same height. The term therefore also acts
+    # during HOLD. That is priced and small: a held tuck's trunk omega_xy is
+    # ~0 (measured x/y drift over 3 s is 8-11 mm), the weight is 0 until
+    # iteration 2000, and what it does charge for — thrashing while waiting on
+    # the launcher — is behaviour this env wants suppressed anyway. If a run
+    # shows ready_stance being fought, gate this term on
+    # backflip_phase == GONE rather than reaching for the height numbers.
     cfg.rewards["arrival_damping"] = RewardTermCfg(
         func=microduck_mdp.body_ang_vel_at_height,
         weight=0.0,
@@ -533,7 +620,7 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "height_low":      0.09,
             "height_high":     0.11,
             "height_full_max": 0.121,   # > STAND_Z: the landing IS damped
-            "height_zero_max": 0.132,   # < the tucked HOLD trunk (0.1381 min)
+            "height_zero_max": 0.132,   # < the flight; NOT below the hold
             "tilt_full_deg":   20.0,
             "tilt_zero_deg":   45.0,
             "asset_cfg":       SceneEntityCfg("robot", body_names=("trunk_base",)),
@@ -870,36 +957,16 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
 
-    # Launch-height DR tail, MEASURED rather than extrapolated, and measured
-    # WHOLE-BOX rather than along one corner. The spec asked for an operator
-    # tail to 0.30 m; the honest ceiling is Z0_CURRICULUM_MAX = 0.21, and it is
-    # the HARDWARE landing limit that sets it, not caution.
-    #
-    # Whole-box worst landing speed (162 cells of vz x w0 x t_launch x hold x
-    # tuck at each height): 2.51 m/s at z0=0.200, 2.53 at 0.210, 2.57 at 0.215,
-    # 2.57 at 0.220, 2.59 at 0.225. Against the ~2.6 m/s threshold that is
-    # 0.09 / 0.07 / 0.03 / 0.03 / 0.01 m/s of margin, so 0.21 is the last
-    # height with margin worth the name and 0.225 has essentially none.
-    # A previous revision claimed 0.04 m/s at 0.225 from a single-corner 1-D
-    # scan — the exact method the whole-box rule above exists to reject. The
-    # 1-D scan reads 2.56 there; the whole box reads 2.59.
-    # NOTE the tail is therefore only 1 cm wide. The spec's operator tail is
-    # not available at this landing limit; if the user would rather not carry a
-    # curriculum stage for 1 cm, deleting this term and living with
-    # Z0_RANGE is the honest alternative (max landing 2.51 m/s).
-    # (Tables: docs/backflip_envelope_results.md, "Tucked hold".)
-    # Introduced late, and only as a tail: a higher launch is a higher apex.
-    cfg.curriculum["backflip_z0_range"] = CurriculumTermCfg(
-        func=microduck_mdp.event_param_curriculum,
-        params={
-            "event_name": "backflip_launch_params",
-            "param_stages": [
-                {"step": 0,         "params": {"z0_range": Z0_RANGE}},
-                {"step": 3000 * 24,
-                 "params": {"z0_range": (Z0_RANGE[0], Z0_CURRICULUM_MAX)}},
-            ],
-        },
-    )
+    # NO launch-height DR tail. There used to be one, widening z0 from the
+    # measured box toward the spec's 0.30 m "operator tail". It is gone, and
+    # both ends of the argument are measured:
+    #   * upward, landing speed is the binding constraint — at the old box the
+    #     whole-box worst landing was 2.51 / 2.53 / 2.57 / 2.59 m/s at
+    #     z0 = 0.200 / 0.210 / 0.215 / 0.225 against a ~2.6 m/s hardware limit;
+    #   * downward, Z0_RANGE now spans 2 cm total, because the pose's own
+    #     geometry floors it at 0.07 and the retune wants it as low as possible.
+    # A curriculum stage that widens a 2 cm range is not worth its pacing risk.
+    # If the hold posture ever changes, re-measure before adding one back.
 
     if ENABLE_COM_RANDOMIZATION:
         cfg.curriculum["com_range"] = CurriculumTermCfg(

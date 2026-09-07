@@ -26,6 +26,31 @@ Status: approved design, ready for implementation planning
 > unchanged — the duck still lands on its feet, standing.
 > Evidence: `docs/backflip_envelope_results.md`, section "Tucked hold".
 
+> **AMENDMENT 2 — 2026-09-07 — the launch is LOWER and GENTLER, and the plate
+> still cannot lie on the ground.**
+> The user watched the env for the first time and reported it "launched far too
+> hard and too far", and asked for the plate to sit ON the ground. The retune
+> is done; the ground-level request is measured to be impossible for this hold
+> pose, and that is a design answer rather than a refusal:
+> - **Retuned [AMENDED]:** `z0` 0.10-0.20 → **0.07-0.09**, `vz` 2.00-2.10 →
+>   **1.90-2.00**, `ω0` 21-23 → **23-24**, `t_launch` 0.12-0.14 →
+>   **0.12-0.13**. Whole-box: rotation 372-457° (was 393-476), apex 0.29-0.40 m
+>   (was 0.52-0.63), worst landing 2.15 m/s (was 2.53). The plate is less than
+>   half as high. Over-rotation is now a defect to minimise; ~85° of the
+>   remaining spread is irreducible DR.
+> - **The `z0` DR tail is deleted [AMENDED]:** upward it crosses the landing
+>   limit, downward the range is only 2 cm wide.
+> - **The plate cannot rest on the ground with this hold [AMENDED]:** the
+>   kneeling tuck's feet hang ~8 cm below the surface it sits on, so a plate
+>   top under 0.08 m puts them through the floor (41° tilt, 5.5 cm slide). A
+>   solid ground-resting block is worse; a wider pad does not help. A
+>   feet-flat squat DOES sit on a ground-level plate but does not fly — 420
+>   cells, none closing 360° under 2.6 m/s, softest 3.09 m/s.
+> - **The "plate not under the feet" complaint was a real bug [AMENDED]:**
+>   mjlab never resets before the viewer's first episode, so `play` ran a whole
+>   episode on the compiled default — robot at 0.12 m, plate at 0.15 m through
+>   its body. Entity init states and the lazy launch params are now coherent.
+
 ## Problem
 
 Microduck (~800 g, ~25 cm, 14 XL330 servos) cannot generate the vertical

@@ -191,11 +191,15 @@ def test_sampled_params_use_measured_envelope_defaults():
     # stale placeholders and not the superseded standing-probe box.
     env = _FakeEnv(num_envs=256)
     microduck_mdp.reset_backflip_launch_params(env, torch.arange(256))
-    assert torch.all((env._backflip_vz >= 2.00) & (env._backflip_vz <= 2.10))
-    assert torch.all((env._backflip_w0 >= 21.0) & (env._backflip_w0 <= 23.0))
+    assert torch.all((env._backflip_vz >= 1.90) & (env._backflip_vz <= 2.00))
+    assert torch.all((env._backflip_w0 >= 23.0) & (env._backflip_w0 <= 24.0))
     # A short flick is the violent one: t_launch=0.08 lands at up to 3.97 m/s.
+    # 0.14 under-rotates at this (retuned, lower) vz.
     assert torch.all(env._backflip_t_launch >= 0.12)
-    assert torch.all(env._backflip_t_launch <= 0.14)
+    assert torch.all(env._backflip_t_launch <= 0.13)
+    # z0 is floored at 0.07 by the hold pose's geometry and capped at 0.09 by
+    # the retune (the plate is now less than half as high as it was).
+    assert torch.all((env._backflip_z0 >= 0.07) & (env._backflip_z0 <= 0.09))
 
 
 def test_phase_of_env_follows_episode_time():

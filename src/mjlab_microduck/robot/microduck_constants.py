@@ -254,11 +254,15 @@ MICRODUCK_BALL_CFG = EntityCfg(
 )
 
 # Launcher plate prop for the Backflip task. Its pose/velocity are rewritten
-# every control step by the backflip_plate step event; the init pos here only
-# matters for the pristine pre-first-reset state.
+# every control step by the backflip_plate step event, so this init pos only
+# describes the pre-first-reset state — which is NOT a don't-care: mjlab does
+# not reset before the viewer's first episode, so `uv run play` shows exactly
+# this until the first timeout. 0.08 is the middle of the backflip env's
+# Z0_RANGE; the old 0.15 put the plate above the robot's compiled trunk height
+# and through its body.
 MICRODUCK_LAUNCHER_CFG = EntityCfg(
     spec_fn=get_launcher_spec,
-    init_state=EntityCfg.InitialStateCfg(pos=(0.0, 0.0, 0.15)),
+    init_state=EntityCfg.InitialStateCfg(pos=(0.0, 0.0, 0.08)),
 )
 
 # Roller skate robot: the 4 passive wheel joints (passive_*wheel) have no XML

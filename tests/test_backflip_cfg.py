@@ -15,16 +15,16 @@ import torch
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.microduck_backflip_env_cfg import (
+    HOLD_RANGE,
     LAUNCH_RANGE,
-    Z0_CURRICULUM_MAX,
+    VZ_RANGE,
+    W0_RANGE,
     MicroduckBackflipRlCfg,
     PLATE_HALF_THICKNESS,
     STAND_Z,
     TUCK_FACTOR,
     TUCK_OVERRIDES,
     TUCK_Z,
-    VZ_RANGE,
-    W0_RANGE,
     Z0_RANGE,
     make_microduck_backflip_env_cfg,
 )
@@ -148,23 +148,26 @@ def test_launch_params_are_sampled_on_reset_within_the_operator_range(cfg):
     assert term.mode == "reset"
     assert term.func is microduck_mdp.reset_backflip_launch_params
     lo, hi = term.params["z0_range"]
-    assert lo >= 0.10 and hi <= 0.30  # the operator's hands, per the spec
+    # 0.07 is the geometric floor for the kneeling hold (its feet hang ~8 cm
+    # below the surface it rests on); the retune pushed the top down from 0.20.
+    assert lo >= 0.07 and hi <= 0.09
 
 
 def test_launch_envelope_is_the_measured_box_not_the_placeholders(cfg):
-    # The WHOLE-BOX-verified tucked-spawn envelope
-    # (docs/backflip_envelope_results.md "Tucked hold"): every corner and
-    # midpoint of these four ranges closes >= 360 deg backward at <= 2.6 m/s.
-    # The bounds each mark a measured failure just outside them:
-    #   vz  < 2.00 -> the flip stops closing;  vz > 2.10 -> the z0=0.20 corner
-    #                                          lands at 2.65-2.70 m/s.
-    #   w0  > 23   -> t_launch=0.14 drops to 372 deg, w0=30 to 279 deg.
-    #   t_launch < 0.12 -> landings up to 3.97 m/s (a short flick is violent).
+    # The WHOLE-BOX-verified tucked-spawn envelope, retuned for ONE clean turn
+    # from the lowest plate the pose allows (docs "Lower and gentler"): every
+    # corner and midpoint of these four ranges closes >= 360 deg backward at
+    # <= 2.6 m/s. Measured across the box: 372.5-457.3 deg, worst landing
+    # 2.15 m/s. The bounds each mark a measured failure just outside them:
+    #   z0 < 0.07     -> the tuck's dangling feet reach the ground (41 deg tilt)
+    #   t_launch 0.14 -> under-rotates at this vz (339.8 deg at the z0=0.07 corner)
+    #   t_launch < 0.12 -> landings up to 3.97 m/s (a short flick is violent)
+    #   w0 > 25       -> 357 deg at the z0=0.07 corner
     p = cfg.events["backflip_launch_params"].params
-    assert p["vz_range"] == VZ_RANGE == (2.00, 2.10)
-    assert p["w0_range"] == W0_RANGE == (21.0, 23.0)
-    assert p["launch_range"] == LAUNCH_RANGE == (0.12, 0.14)
-    assert p["z0_range"] == Z0_RANGE == (0.10, 0.20)
+    assert p["vz_range"] == VZ_RANGE == (1.90, 2.00)
+    assert p["w0_range"] == W0_RANGE == (23.0, 24.0)
+    assert p["launch_range"] == LAUNCH_RANGE == (0.12, 0.13)
+    assert p["z0_range"] == Z0_RANGE == (0.07, 0.09)
     # ... and the mdp defaults say the same thing, so an env built without the
     # cfg (or a copy-paste into a new task) does not inherit a stale box.
     import inspect
@@ -383,11 +386,11 @@ def test_impact_penalty_ramps_up_and_keeps_the_self_negating_sign(cfg):
 
 
 def test_launch_dr_widens_over_training(cfg):
+    # Only the HOLD window widens now; the z0 tail was removed (see
+    # test_there_is_no_z0_dr_tail).
     hold = cfg.curriculum["backflip_hold_range"].params["param_stages"]
-    assert hold[0]["params"]["hold_range"] == (0.1, 0.4)
-    assert hold[-1]["params"]["hold_range"][1] > 0.4
-    z0 = cfg.curriculum["backflip_z0_range"].params["param_stages"]
-    assert z0[-1]["params"]["z0_range"][1] <= 0.30
+    assert hold[0]["params"]["hold_range"] == HOLD_RANGE
+    assert hold[-1]["params"]["hold_range"][1] > HOLD_RANGE[1]
 
 
 # ── Runner cfg / registration ────────────────────────────────────────────────
@@ -438,25 +441,26 @@ def test_arrival_damping_is_a_height_window_not_a_floor(cfg):
     # body_ang_vel_at_height's height_low/height_high pair is a FLOOR: without
     # an upper edge every airborne step of the flip pays full cost, and the
     # tilt gate alone lets a rotating robot through twice per revolution.
-    #
-    # The ceiling must sit strictly between the two heights it separates, and
-    # it must be bounded against the TUCKED hold, not the standing one. The
-    # earlier version of this test bounded it against
-    # Z0_RANGE[0] + PLATE_HALF_THICKNESS + STAND_Z = 0.225 and so passed on a
-    # 0.22 ceiling while the quantity it meant to bound was 0.139 — it
-    # asserted nothing at all.
     params = cfg.rewards["arrival_damping"].params
     assert params["height_high"] < params["height_full_max"] < params["height_zero_max"]
 
     # the landed STANDING trunk must be inside the full-cost band
     assert params["height_full_max"] > STAND_Z
 
-    # the lowest TUCKED HOLD trunk must be outside the band entirely
-    lowest_hold_trunk_z = Z0_RANGE[0] + PLATE_HALF_THICKNESS + TUCK_Z
-    assert params["height_zero_max"] < lowest_hold_trunk_z
-    # measured minimum over 32 noisy trials at z0=0.10 is 0.1381 m; keep a few
-    # mm of clearance under it rather than sitting on the nominal value
-    assert params["height_zero_max"] < 0.1381 - 0.003
+    # ... and the flight must be outside it. Measured apex in the retuned box
+    # is 0.29-0.40 m, so anything at or above 0.2 m is comfortably clear.
+    assert params["height_zero_max"] < 0.2
+
+    # The HOLD is NOT separable by height any more, and that is deliberate:
+    # with the plate at z0 = 0.07-0.09 the tucked hold trunk is 0.109-0.129 m,
+    # straddling STAND_Z (0.115). This assertion documents the overlap so the
+    # next reader does not "fix" the ceiling into a number that cannot exist.
+    hold_lo = Z0_RANGE[0] + PLATE_HALF_THICKNESS + TUCK_Z
+    hold_hi = Z0_RANGE[1] + PLATE_HALF_THICKNESS + TUCK_Z
+    assert hold_lo < STAND_Z < hold_hi, (
+        "the tucked hold no longer straddles standing height - re-derive the "
+        "arrival_damping ceiling instead of accepting HOLD-phase damping"
+    )
 
 
 def test_plate_reset_event_passes_t_zero_explicitly(cfg):
@@ -479,18 +483,112 @@ def test_critic_plate_terms_are_the_gone_masked_ones(cfg):
     assert not any("plate" in name for name in cfg.observations["actor"].terms)
 
 
-def test_z0_dr_tail_stops_where_the_landing_speed_measurement_stops_it(cfg):
-    # MEASURED WHOLE-BOX, not along one corner (docs "Tucked hold"): the worst
-    # landing speed over 162 cells of vz x w0 x t_launch x hold x tuck at each
-    # height is 2.51 m/s at z0=0.200, 2.53 at 0.210, 2.57 at 0.215, 2.59 at
-    # 0.225 -- i.e. 0.09 / 0.07 / 0.03 / 0.01 m/s of margin under the ~2.6 m/s
-    # hardware threshold. A single-corner 1-D scan reads 2.56 at 0.225 and once
-    # got quoted as "0.04 m/s of margin"; the whole box is the acceptance rule.
-    z0 = cfg.curriculum["backflip_z0_range"].params["param_stages"]
-    assert z0[0]["params"]["z0_range"] == Z0_RANGE
-    assert z0[-1]["params"]["z0_range"][1] == Z0_CURRICULUM_MAX
-    assert Z0_CURRICULUM_MAX <= 0.21
-    assert Z0_CURRICULUM_MAX >= Z0_RANGE[1]      # a tail, never a narrowing
-    assert [s["params"]["z0_range"][1] for s in z0] == sorted(
-        s["params"]["z0_range"][1] for s in z0
+def test_there_is_no_z0_dr_tail(cfg):
+    # The tail was removed, and both ends of the argument are measured
+    # (docs "Lower and gentler"): upward, whole-box landing speed crosses the
+    # ~2.6 m/s hardware limit between z0=0.21 and 0.225; downward, Z0_RANGE is
+    # floored at 0.07 by the hold pose's own geometry (the kneeling tuck's feet
+    # hang ~8 cm below the surface it rests on). A 2 cm range does not need a
+    # curriculum stage. If the hold posture changes, re-measure first.
+    assert "backflip_z0_range" not in cfg.curriculum
+    assert cfg.events["backflip_launch_params"].params["z0_range"] == Z0_RANGE
+    assert Z0_RANGE == (0.07, 0.09)
+
+
+def test_the_launch_is_retuned_for_one_clean_turn(cfg):
+    # The user watched the env and reported it "launched far too hard and too
+    # far". Measured across the new box: rotation 372.5-457.3 deg (was
+    # 393.6-475.7), apex 0.29-0.40 m (was 0.52-0.63), worst landing 2.15 m/s
+    # (was 2.53). Over-rotation is a defect to minimise now, not headroom.
+    p = cfg.events["backflip_launch_params"].params
+    assert p["vz_range"][1] <= 2.00        # was 2.10
+    assert p["z0_range"][1] <= 0.09        # was 0.20, with a tail to 0.225
+    assert p["launch_range"] == (0.12, 0.13)
+
+
+# --- The first-episode state, and the tuck-by-name init pose. ---------------
+
+
+def test_the_pre_reset_state_is_coherent(cfg):
+    # mjlab never calls env.reset() before the viewer's first episode
+    # (ManagerBasedRlEnv.__init__ does not reset; mjlab/viewer/base.py calls
+    # reset only on the RESET action), so `uv run play` runs a whole 4 s
+    # episode on the COMPILED default state. It used to be nonsense: the robot
+    # standing at its compiled 0.12 m trunk height with the plate hovering at
+    # 0.15 m, i.e. through its body -- reported by a user as "the plate is
+    # stuck in the middle of the robot, not under its feet". Both entities must
+    # therefore compile to a coherent pose, not just reset to one.
+    robot = cfg.scene.entities["robot"]
+    plate = cfg.scene.entities["plate"]
+    z0_mid = 0.5 * (Z0_RANGE[0] + Z0_RANGE[1])
+
+    # the plate's default height is inside the sampled range
+    assert Z0_RANGE[0] <= plate.init_state.pos[2] <= Z0_RANGE[1]
+    # the robot's default trunk sits on the plate top in the tuck, not on the
+    # floor at standing height
+    assert robot.init_state.pos[2] == pytest.approx(
+        z0_mid + PLATE_HALF_THICKNESS + TUCK_Z
     )
+    # and the plate is BELOW the trunk, never through it
+    assert plate.init_state.pos[2] + PLATE_HALF_THICKNESS < robot.init_state.pos[2]
+
+    # standup/roulade must keep their own HOME init: the tuck is a deepcopy
+    from mjlab_microduck.robot.microduck_constants import (
+        MICRODUCK_STANDUP_ROBOT_CFG,
+    )
+
+    assert robot is not MICRODUCK_STANDUP_ROBOT_CFG
+    assert MICRODUCK_STANDUP_ROBOT_CFG.init_state.pos[2] != robot.init_state.pos[2]
+
+
+def test_the_default_launch_params_are_a_plausible_toss(cfg):
+    # Same reason: the lazy _backflip_state defaults are what the un-reset
+    # first episode flies. They must be a real toss inside the box, not zeros
+    # (which put the phase past HOLD at t=0 and made the plate vanish without
+    # ever launching).
+    del cfg
+    import torch
+
+    class _Env:
+        """Minimal stand-in: _backflip_state only needs these three."""
+
+        num_envs = 2
+        device = "cpu"
+        step_dt = 0.02
+
+        def __init__(self):
+            self.episode_length_buf = torch.zeros(2, dtype=torch.long)
+
+    env = _Env()
+    microduck_mdp._backflip_state(env)
+    assert Z0_RANGE[0] <= float(env._backflip_z0[0]) <= Z0_RANGE[1]
+    assert VZ_RANGE[0] <= float(env._backflip_vz[0]) <= VZ_RANGE[1]
+    assert W0_RANGE[0] <= float(env._backflip_w0[0]) <= W0_RANGE[1]
+    assert LAUNCH_RANGE[0] <= float(env._backflip_t_launch[0]) <= LAUNCH_RANGE[1]
+    # a HOLD phase must actually exist at t=0, or the plate leaves immediately
+    assert float(env._backflip_t_hold[0]) > 0.0
+    env.episode_length_buf[:] = 0
+    assert int(microduck_mdp.backflip_phase(env)[0]) == (
+        microduck_mdp.BACKFLIP_PHASE_HOLD
+    )
+    assert torch.all(env._backflip_accum == 0.0)
+
+
+def test_the_named_tuck_matches_the_indexed_one(cfg):
+    # _TUCK_BY_NAME feeds the entity init_state (mjlab matches joint_pos by
+    # regex) while TUCK_OVERRIDES feeds the reset event and the reward (servo
+    # index). A divergence would spawn the pre-reset pose differently from
+    # every reset pose, silently.
+    del cfg
+    from mjlab_microduck.tasks.microduck_backflip_env_cfg import _TUCK_BY_NAME
+
+    index_to_name = {
+        2: "left_hip_pitch", 3: "left_knee", 4: "left_ankle",
+        5: "neck_pitch", 6: "head_pitch",
+        11: "right_hip_pitch", 12: "right_knee", 13: "right_ankle",
+    }
+    assert set(index_to_name) == set(TUCK_OVERRIDES)
+    by_name = {k.strip("^$"): v for k, v in _TUCK_BY_NAME.items()}
+    assert set(by_name) == set(index_to_name.values())
+    for idx, name in index_to_name.items():
+        assert by_name[name] == pytest.approx(TUCK_OVERRIDES[idx])

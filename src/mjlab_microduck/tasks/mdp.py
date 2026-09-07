@@ -7347,12 +7347,23 @@ def _backflip_state(env: ManagerBasedRlEnv) -> tuple:
     here may survive an episode boundary.
     """
     if not hasattr(env, "_backflip_t_hold"):
+        # These lazy defaults are NOT don't-cares. mjlab does not reset before
+        # the viewer's first episode (ManagerBasedRlEnv.__init__ never resets,
+        # and mjlab/viewer/base.py calls env.reset() only on the RESET action),
+        # so `uv run play` runs a whole first episode on whatever is here plus
+        # the model's compiled qpos. The previous values (t_hold=0, vz=0, w0=0,
+        # z0=0.15) made that episode nonsense: phase left HOLD at t=0, the
+        # plate hovered motionless at 0.15 m — above the compiled trunk height
+        # of 0.12, i.e. THROUGH the robot's body — for 0.1 s and then
+        # teleported away without ever launching. A user reported exactly that
+        # ("the plate is stuck in the middle of the robot, not under its
+        # feet"). They now describe a plausible mid-box toss instead.
         z = torch.zeros(env.num_envs, device=env.device)
-        env._backflip_t_hold = z.clone()
-        env._backflip_t_launch = torch.full_like(z, 0.1)
-        env._backflip_z0 = torch.full_like(z, 0.15)
-        env._backflip_vz = z.clone()
-        env._backflip_w0 = z.clone()
+        env._backflip_t_hold = torch.full_like(z, 0.3)
+        env._backflip_t_launch = torch.full_like(z, 0.125)
+        env._backflip_z0 = torch.full_like(z, 0.08)
+        env._backflip_vz = torch.full_like(z, 1.95)
+        env._backflip_w0 = torch.full_like(z, 23.5)
         env._backflip_accum = z.clone()
         env._backflip_max = z.clone()
         env._backflip_paid = z.clone()
@@ -7378,23 +7389,23 @@ def reset_backflip_launch_params(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
     hold_range: tuple = (0.1, 0.4),
-    launch_range: tuple = (0.12, 0.14),
-    z0_range: tuple = (0.10, 0.20),
-    vz_range: tuple = (2.00, 2.10),
-    w0_range: tuple = (21.0, 23.0),
+    launch_range: tuple = (0.12, 0.13),
+    z0_range: tuple = (0.07, 0.09),
+    vz_range: tuple = (1.90, 2.00),
+    w0_range: tuple = (23.0, 24.0),
 ) -> None:
     """Sample this episode's toss and clear the rotation accounting.
 
     Defaults are the WHOLE-BOX-VERIFIED launch envelope, measured from the
     ACTUAL spawn ``reset_backflip_robot_on_plate`` produces (the TUCKED hold
-    posture) with BAM actuators: ``z0 in [0.10, 0.20]`` m,
-    ``vz in [2.00, 2.10]`` m/s, ``w0 in [21, 23]`` rad/s,
-    ``t_launch in [0.12, 0.14]`` s. "Whole-box" is the acceptance rule that
+    posture) with BAM actuators: ``z0 in [0.07, 0.09]`` m,
+    ``vz in [1.90, 2.00]`` m/s, ``w0 in [23, 24]`` rad/s,
+    ``t_launch in [0.12, 0.13]`` s. "Whole-box" is the acceptance rule that
     matters: EVERY sampled combination of the corners and midpoints of all
     four ranges (486 cells, crossed with hold and tuck depth) closes >= 360 deg
-    BACKWARD at <= 2.6 m/s. Measured worst case in the box: 393.6 deg and
-    2.51 m/s. A box whose interior contains one 3 deg cell is not a box —
-    that is how the previous, best-corner-chosen box got here.
+    BACKWARD at <= 2.6 m/s. Measured across the box: rotation 372.5-457.3 deg,
+    worst landing 2.15 m/s. A box whose interior contains one 3 deg cell is not
+    a box — that is how an earlier, best-corner-chosen box got here.
 
     History worth not repeating, both in
     ``docs/backflip_envelope_results.md``:
@@ -7408,6 +7419,15 @@ def reset_backflip_launch_params(
         why the hold posture is now tucked.
       * ``t_launch`` down at 0.08 lands at up to 3.97 m/s: a SHORT flick is
         the violent one, so the low end moved up to 0.12.
+      * ``z0 in [0.10, 0.20]`` with ``vz in [2.00, 2.10]``, ``w0 in [21, 23]``
+        was the first whole-box-verified box. It works, but the user watched it
+        and called it "far too hard and too far": 393-476 deg of rotation, a
+        0.52-0.63 m apex and a plate hovering 11-21 cm up. The current defaults
+        are the retune — see the cfg's Launch envelope block for what moved.
+      * ``z0`` CANNOT go below 0.07. The kneeling tuck rests on its shins with
+        its feet hanging ~8 cm below the surface it sits on, so under a 0.08 m
+        plate top the feet reach the ground and the robot settles at 41 deg and
+        slides 5.5 cm. A plate lying ON the floor cannot hold this pose at all.
     """
     if env_ids is None or len(env_ids) == 0:
         return

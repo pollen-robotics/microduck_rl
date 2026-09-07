@@ -8,8 +8,18 @@
              have to be well-conditioned, not realistic: the large mass keeps
              the intra-step deviation negligible while an 800 g duck pushes off.
              friction: high sliding friction so the pitch flick actually
-             transfers backspin through the soles instead of slipping. -->
-        <body name="plate" pos="0 0 0.15">
+             transfers backspin through the soles instead of slipping.
+
+             pos z = 0.08 is the MIDDLE of Z0_RANGE, not a placeholder. It is
+             the state the scene compiles to, and mjlab does NOT reset before
+             the viewer's first episode (ManagerBasedRlEnv.__init__ never
+             resets; mjlab/viewer/base.py only calls env.reset() on the RESET
+             action), so this pose is what `uv run play` shows until the first
+             timeout. At the old 0.15 the plate hovered ABOVE the robot's
+             compiled trunk height (0.12) and intersected its BODY, which is
+             exactly what a user reported as "the plate is stuck in the middle
+             of the robot, not under its feet". Keep it inside Z0_RANGE. -->
+        <body name="plate" pos="0 0 0.08">
             <freejoint name="plate_free"/>
             <inertial pos="0 0 0" mass="50.0" diaginertia="0.5 0.5 1.0"/>
             <geom type="box" name="plate_geom" size="0.09 0.09 0.01"

@@ -96,7 +96,9 @@ from mjlab_microduck.tasks import mdp as microduck_mdp
 # itself, so `--posture tucked_env` cannot silently stop being what the env
 # does. (The import costs ~6 s; this is not an interactive script.)
 from mjlab_microduck.tasks.microduck_backflip_env_cfg import (  # noqa: E402
+    HOLD_LERP,
     HOLD_RANGE,
+    HOLD_Z,
     LAUNCH_RANGE,
     PLATE_HALF_THICKNESS,
     STAND_Z,
@@ -105,7 +107,6 @@ from mjlab_microduck.tasks.microduck_backflip_env_cfg import (  # noqa: E402
     TUCK_Z,
     VZ_RANGE,
     W0_RANGE,
-    Z0_CURRICULUM_MAX,
     Z0_RANGE,
 )
 
@@ -145,7 +146,7 @@ HOME = np.array([
 TRAINING_TIMESTEP = 0.005
 
 
-_POSTURES = ("standing", "tucked", "tucked_env")
+_POSTURES = ("standing", "tucked", "tucked_env", "squat_env")
 
 
 def _tuck_ctrl(nu, tuck_factor):
@@ -166,6 +167,25 @@ def _home_tuck_ctrl(nu, tuck_factor):
     ctrl[: len(HOME)] = HOME
     for idx, angle in TUCK.items():
         ctrl[idx] = angle * tuck_factor
+    return ctrl
+
+
+def _hold_pose(nu, lerp):
+    """HOME lerped `lerp` of the way toward the full TUCK, per joint.
+
+    The GROUND-LEVEL hold posture. Note this is a LERP from HOME, not the
+    scaling `_home_tuck_ctrl` applies (which drives the tucked joints toward
+    ZERO rather than toward HOME) — the same parametrisation roulade's
+    mid-roll spawn uses. It matters: the lerp keeps the SOLES DOWN, and a
+    feet-flat squat is the only pose measured to rest on a plate lying on the
+    floor. The deep tuck kneels with its feet hanging ~8 cm BELOW whatever it
+    rests on, which is fine on a plate held 10 cm up and impossible on one
+    lying on the ground.
+    """
+    ctrl = np.zeros(nu)
+    ctrl[: len(HOME)] = HOME
+    for idx, angle in TUCK.items():
+        ctrl[idx] = HOME[idx] + lerp * (angle - HOME[idx])
     return ctrl
 
 
@@ -229,7 +249,9 @@ def trunk_tilt_deg(data):
 
 def run_cell(model, data, vz, w0, tuck_factor, z0, t_hold=0.3, t_launch=0.12,
              duration=2.0, on_step=None, posture="standing", tuck_at_flick=False,
-             bam_ctrl=None):
+             bam_ctrl=None, hold_lerp=None):
+    if hold_lerp is None:
+        hold_lerp = HOLD_LERP
     mujoco.mj_resetData(model, data)
     dt = model.opt.timestep
 
@@ -247,9 +269,18 @@ def run_cell(model, data, vz, w0, tuck_factor, z0, t_hold=0.3, t_launch=0.12,
         hold_ctrl = _tuck_ctrl(model.nu, tuck_factor)
     elif posture == "tucked_env":
         hold_ctrl = _home_tuck_ctrl(model.nu, tuck_factor)
+    elif posture == "squat_env":
+        hold_ctrl = _hold_pose(model.nu, hold_lerp)
     else:
         hold_ctrl = np.concatenate([HOME, np.zeros(model.nu - len(HOME))])
-    flick_ctrl = _home_tuck_ctrl(model.nu, tuck_factor) if tuck_at_flick else hold_ctrl
+    if not tuck_at_flick:
+        flick_ctrl = hold_ctrl
+    elif posture == "squat_env":
+        # The policy folds from the squat into the tuck when it feels the
+        # flick; `tuck_factor` is the lerp depth it folds TO.
+        flick_ctrl = _hold_pose(model.nu, tuck_factor)
+    else:
+        flick_ctrl = _home_tuck_ctrl(model.nu, tuck_factor)
     ctrl = hold_ctrl
     # SPAWN_OFFSET: measured, not the brief's guessed 0.10. At 0.10 the tucked
     # robot spawns floating well above the plate: it is still falling at
@@ -264,10 +295,14 @@ def run_cell(model, data, vz, w0, tuck_factor, z0, t_hold=0.3, t_launch=0.12,
     if posture == "tucked":
         spawn_z = z0 + PLATE_HALF_THICKNESS + SPAWN_OFFSET  # feet on the plate top
     elif posture == "tucked_env":
-        # EXACTLY what reset_backflip_robot_on_plate does now: the tuck pose at
-        # its MEASURED resting height on the plate top. Not the legacy probe's
-        # 0.02 guess, and not STAND_Z.
+        # The KNEELING hold, at its MEASURED resting height on the plate top.
+        # Needs the plate held >= 8 cm up: the feet dangle below it.
         spawn_z = z0 + PLATE_HALF_THICKNESS + TUCK_Z
+    elif posture == "squat_env":
+        # EXACTLY what reset_backflip_robot_on_plate does: the feet-flat squat
+        # at its MEASURED resting height on the plate top. Works with the plate
+        # lying on the ground, which is the point.
+        spawn_z = z0 + PLATE_HALF_THICKNESS + HOLD_Z
     else:
         # EXACTLY what reset_backflip_robot_on_plate does: trunk at plate
         # centre + half-thickness + the measured standing trunk height. No
@@ -485,7 +520,7 @@ def _quat_from_rpy(roll, pitch, yaw):
 def run_settle(model, data, z0, rng, bam_ctrl=None, duration=3.0,
                sample_times=SETTLE_SAMPLE_TIMES, noisy=True, on_floor=False,
                posture="tucked_env", tuck_factor=TUCK_FACTOR,
-               spawn_z_override=None):
+               spawn_z_override=None, ctrl_home=False):
     """Hold the HOLD-phase pose on the parked plate from a noisy init.
 
     Returns ``(samples, final)`` where ``samples`` maps each requested time to
@@ -520,6 +555,13 @@ def run_settle(model, data, z0, rng, bam_ctrl=None, duration=3.0,
     else:
         ctrl = np.concatenate([HOME, np.zeros(model.nu - len(HOME))])
     pose_z = TUCK_Z if posture in ("tucked", "tucked_env") else STAND_Z
+    if ctrl_home:
+        # What `play --agent zero` actually does: the joint-position action's
+        # offset is the model's DEFAULT pose (HOME), so a zero action commands
+        # HOME while the reset has just folded the robot into the tuck. The
+        # robot therefore UNFOLDS on the plate from step 0. The spawn pose is
+        # unchanged; only the command differs.
+        ctrl = np.concatenate([HOME, np.zeros(model.nu - len(HOME))])
     if noisy:
         ctrl_noise = rng.uniform(-SPAWN_JOINT_NOISE, SPAWN_JOINT_NOISE, size=len(HOME))
         x0 = rng.uniform(-SPAWN_XY_NOISE, SPAWN_XY_NOISE)
@@ -543,7 +585,12 @@ def run_settle(model, data, z0, rng, bam_ctrl=None, duration=3.0,
     base_z = pose_z if on_floor else z0 + PLATE_HALF_THICKNESS + pose_z
     data.qpos[0:3] = [x0, y0, base_z]
     data.qpos[3:7] = _quat_from_rpy(roll, pitch, yaw)
-    data.qpos[7 : 7 + len(HOME)] = ctrl[: len(HOME)] + ctrl_noise
+    spawn_pose = (
+        _home_tuck_ctrl(model.nu, tuck_factor)
+        if (ctrl_home and posture in ("tucked", "tucked_env"))
+        else ctrl
+    )
+    data.qpos[7 : 7 + len(HOME)] = spawn_pose[: len(HOME)] + ctrl_noise
     if bam_ctrl is not None:
         bam_ctrl.reset(data.qpos)
     _apply_ctrl(data, bam_ctrl, ctrl)
@@ -605,23 +652,23 @@ def box_check_report(model, data, bam_ctrl=None, posture="tucked_env"):
     the policy can deepen or open the tuck during HOLD and LAUNCH, so the box
     should hold across what it might do, not only at the spawn value.
     """
-    # z0 must include the CURRICULUM's widened ceiling, not just Z0_RANGE.
-    # Reading Z0_RANGE alone was a real hole: after the tail opens at iteration
-    # 3000 the env samples up to Z0_CURRICULUM_MAX, so a box check that stops
-    # at Z0_RANGE[1] never sees the state the policy actually trains into, and
-    # a 1-D scan at one corner (the method this very rule rejects) is what got
-    # used instead.
-    z0s = tuple(sorted(set(_edges(Z0_RANGE) + (Z0_CURRICULUM_MAX,))))
+    # z0 must cover everything the env can SAMPLE, curriculum included. There
+    # is no z0 curriculum any more (Z0_RANGE spans 2 cm and the tail was
+    # removed), so Z0_RANGE is the whole story — but if one is ever added,
+    # extend this grid with its ceiling. Reading a stale range here was a real
+    # hole once: the check never saw the state the policy trained into after
+    # the tail opened, and a 1-D corner scan got used instead.
     vzs = _edges(VZ_RANGE)
     w0s = _edges(W0_RANGE)
+    z0s = _edges(Z0_RANGE)
     laus = _edges(LAUNCH_RANGE)
     holds = (HOLD_RANGE[0], HOLD_CURRICULUM_MAX)
     tucks = (0.5, TUCK_FACTOR, 1.0)
 
     print(f"# box-check posture={posture} bam={bam_ctrl is not None} "
           f"dt={model.opt.timestep}")
-    print(f"#   z0 {Z0_RANGE} (curriculum ceiling {Z0_CURRICULUM_MAX}) "
-          f"vz {VZ_RANGE} w0 {W0_RANGE} launch {LAUNCH_RANGE}")
+    print(f"#   z0 {Z0_RANGE} vz {VZ_RANGE} w0 {W0_RANGE} "
+          f"launch {LAUNCH_RANGE}")
     print(f"#   z0 grid {z0s}")
     print(f"#   hold {holds} tuck {tucks}")
     rows = []
@@ -645,12 +692,17 @@ def box_check_report(model, data, bam_ctrl=None, posture="tucked_env"):
     max_land = max(r[1] for r in rows)
     n_short = sum(1 for r in rows if r[0] < BOX_MIN_ROT_DEG)
     n_hard = sum(1 for r in rows if r[1] > BOX_MAX_LAND)
+    # A cell that never lands reports landing_speed 0.0 and would sail through
+    # the <= 2.6 m/s test by not being measured at all. Count them explicitly
+    # rather than trusting the max.
+    n_never = sum(1 for r in rows if r[1] == 0.0)
     print(f"  {len(rows)} cells | min rot = {min_rot:.1f} deg | "
           f"max landing = {max_land:.2f} m/s | "
-          f"short of 360: {n_short} | over 2.6 m/s: {n_hard}")
+          f"short of 360: {n_short} | over 2.6 m/s: {n_hard} | "
+          f"never landed: {n_never}")
     show("worst by rotation:", sorted(rows, key=lambda r: r[0]))
     show("worst by landing speed:", sorted(rows, key=lambda r: -r[1]))
-    ok = n_short == 0 and n_hard == 0
+    ok = n_short == 0 and n_hard == 0 and n_never == 0
     print(f"  RESULT: {'PASS' if ok else 'FAIL'} — whole box "
           f"{'closes' if ok else 'does NOT close'} 360 deg under "
           f"{BOX_MAX_LAND} m/s")
@@ -814,14 +866,16 @@ def measure_tuck_z_report(model, data, z0, tuck_factors, offsets, bam_ctrl=None,
 
 def settle_report(model, data, z0, trials, seed, bam_ctrl=None, duration=3.0,
                   noisy=True, on_floor=False, posture="tucked_env",
-                  tuck_factor=TUCK_FACTOR):
+                  tuck_factor=TUCK_FACTOR, ctrl_home=False):
     rng = np.random.default_rng(seed)
     rows = []
     for _ in range(trials):
         rows.append(run_settle(model, data, z0, rng, bam_ctrl=bam_ctrl,
                                duration=duration, noisy=noisy, on_floor=on_floor,
-                               posture=posture, tuck_factor=tuck_factor))
+                               posture=posture, tuck_factor=tuck_factor,
+                               ctrl_home=ctrl_home))
     print(f"# settle: posture={posture} tuck={tuck_factor} "
+          f"{'ctrl=HOME (zero action)' if ctrl_home else 'ctrl=spawn pose'} "
           f"{'ON FLOOR (control)' if on_floor else f'on plate z0={z0}'} "
           f"trials={trials} noisy={noisy} duration={duration}s "
           f"dt={model.opt.timestep} bam={bam_ctrl is not None}")
@@ -943,6 +997,11 @@ def main():
                          "the TERRAIN and the plate parked away, to separate "
                          "'the plate is a bad perch' from 'open-loop HOME is not "
                          "a passive equilibrium anywhere'.")
+    ap.add_argument("--settle-ctrl-home", action="store_true",
+                    help="Spawn in --posture but COMMAND HOME, which is what "
+                         "`play --agent zero` does (the action offset is the "
+                         "model's default pose). Shows what an untrained policy "
+                         "does to the hold.")
     ap.add_argument("--settle-noiseless", action="store_true",
                     help="Single trial with zero spawn noise (drift baseline).")
     ap.add_argument("--seed", type=int, default=0)
@@ -1003,6 +1062,7 @@ def main():
             1 if args.settle_noiseless else args.settle_trials,
             args.seed, bam_ctrl=bam_ctrl, duration=args.settle_duration,
             noisy=not args.settle_noiseless, on_floor=args.settle_on_floor,
+            ctrl_home=args.settle_ctrl_home,
             posture=args.settle_posture or args.posture,
             tuck_factor=args.tuck[0] if len(args.tuck) == 1 else TUCK_FACTOR,
         )
