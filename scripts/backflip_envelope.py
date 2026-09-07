@@ -74,13 +74,30 @@ import torch
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
 
+# IMPORTED, NOT COPIED. The whole defect this probe was rebuilt to catch was a
+# measurement whose spawn geometry had drifted from the env's. Everything that
+# defines the spawn and the launch box therefore comes from the cfg module
+# itself, so `--posture tucked_env` cannot silently stop being what the env
+# does. (The import costs ~6 s; this is not an interactive script.)
+from mjlab_microduck.tasks.microduck_backflip_env_cfg import (  # noqa: E402
+    HOLD_RANGE,
+    LAUNCH_RANGE,
+    PLATE_HALF_THICKNESS,
+    STAND_Z,
+    TUCK_FACTOR,
+    TUCK_OVERRIDES,
+    TUCK_Z,
+    VZ_RANGE,
+    W0_RANGE,
+    Z0_RANGE,
+)
+
 SCENE = "src/mjlab_microduck/robot/microduck/scene_backflip.xml"
 
-# Servo index -> tuck angle at full tuck (factor 1.0). Same joints the roulade
-# TUCK_OVERRIDES uses: legs folded, chin tucked. A tucked duck has a much
-# smaller pitch inertia, which is exactly how it converts the hand's angular
-# impulse into a fast enough spin.
-TUCK = {2: -1.15, 3: 1.25, 4: 1.05, 5: -1.0, 6: 1.0, 11: 1.15, 12: -1.25, 13: -1.05}
+# Servo index -> tuck angle at full tuck (factor 1.0). The env's own tuck map.
+# A tucked duck has a much smaller pitch inertia, which is exactly how it
+# converts the hand's angular impulse into a fast enough spin.
+TUCK = TUCK_OVERRIDES
 
 # HOME pose, servo index order (= actuator index order on this model). Same
 # numbers as HOME_FRAME in robot/microduck_constants.py and DEFAULT_POSE in
@@ -104,18 +121,14 @@ HOME = np.array([
     -0.4530,  # right_ankle
 ])
 
-# Trunk height above the sole contact plane when standing in HOME, and the
-# launcher plate's box half-thickness. MUST match STAND_Z and
-# PLATE_HALF_THICKNESS in tasks/microduck_backflip_env_cfg.py — the standing
-# spawn below is the same arithmetic reset_backflip_robot_on_plate does.
-STAND_Z = 0.115
-PLATE_HALF_THICKNESS = 0.01
-
 # Physics timestep used in training (mjlab velocity template: sim dt 0.005 with
 # decimation 4 = 50 Hz control). The XML's own default is 0.002, which every
 # pre-existing table in the results doc was measured at; --bam switches the
 # default to this so the BAM runs match the trained dynamics.
 TRAINING_TIMESTEP = 0.005
+
+
+_POSTURES = ("standing", "tucked", "tucked_env")
 
 
 def _tuck_ctrl(nu, tuck_factor):
@@ -210,13 +223,15 @@ def run_cell(model, data, vz, w0, tuck_factor, z0, t_hold=0.3, t_launch=0.12,
     floor_gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
 
     # Robot: free joint at qpos[0:7], 14 servos after it.
-    if posture not in ("tucked", "standing"):
-        raise ValueError(f"posture must be 'tucked' or 'standing', got {posture!r}")
+    if posture not in _POSTURES:
+        raise ValueError(f"posture must be one of {_POSTURES}, got {posture!r}")
     # ctrl held during HOLD (and, unless --tuck-at-flick, for the whole cell).
-    hold_ctrl = (
-        _tuck_ctrl(model.nu, tuck_factor) if posture == "tucked"
-        else np.concatenate([HOME, np.zeros(model.nu - len(HOME))])
-    )
+    if posture == "tucked":
+        hold_ctrl = _tuck_ctrl(model.nu, tuck_factor)
+    elif posture == "tucked_env":
+        hold_ctrl = _home_tuck_ctrl(model.nu, tuck_factor)
+    else:
+        hold_ctrl = np.concatenate([HOME, np.zeros(model.nu - len(HOME))])
     flick_ctrl = _home_tuck_ctrl(model.nu, tuck_factor) if tuck_at_flick else hold_ctrl
     ctrl = hold_ctrl
     # SPAWN_OFFSET: measured, not the brief's guessed 0.10. At 0.10 the tucked
@@ -231,6 +246,11 @@ def run_cell(model, data, vz, w0, tuck_factor, z0, t_hold=0.3, t_launch=0.12,
     SPAWN_OFFSET = 0.02
     if posture == "tucked":
         spawn_z = z0 + PLATE_HALF_THICKNESS + SPAWN_OFFSET  # feet on the plate top
+    elif posture == "tucked_env":
+        # EXACTLY what reset_backflip_robot_on_plate does now: the tuck pose at
+        # its MEASURED resting height on the plate top. Not the legacy probe's
+        # 0.02 guess, and not STAND_Z.
+        spawn_z = z0 + PLATE_HALF_THICKNESS + TUCK_Z
     else:
         # EXACTLY what reset_backflip_robot_on_plate does: trunk at plate
         # centre + half-thickness + the measured standing trunk height. No
@@ -444,14 +464,23 @@ def _quat_from_rpy(roll, pitch, yaw):
 
 
 def run_settle(model, data, z0, rng, bam_ctrl=None, duration=3.0,
-               sample_times=SETTLE_SAMPLE_TIMES, noisy=True, on_floor=False):
-    """Hold HOME on the parked plate from a noisy init; return per-time metrics.
+               sample_times=SETTLE_SAMPLE_TIMES, noisy=True, on_floor=False,
+               posture="tucked_env", tuck_factor=TUCK_FACTOR,
+               spawn_z_override=None):
+    """Hold the HOLD-phase pose on the parked plate from a noisy init.
 
     Returns ``(samples, final)`` where ``samples`` maps each requested time to
     ``(tilt_deg, xy_drift_m, trunk_z)`` and ``final`` is the same triple at
     ``duration``. Tilt is the angle between the robot's own +z and world +z —
     the quantity AGENTS.md insists on, since a toppled robot can sit at a
     perfectly reasonable height.
+
+    ``posture`` selects the pose held: ``tucked_env`` (the env's spawn since
+    the tucked-hold switch) or ``standing`` (the superseded one). READ TILT
+    RELATIVE TO THE POSE'S OWN EQUILIBRIUM for the tuck: a folded robot rests
+    with its trunk pitched ~12-15 deg by geometry, so "tilt 14 deg, unchanged
+    from 0.1 s to 3 s" is a settled tuck, not a falling one. What matters is
+    whether it MOVES; ``n_fallen`` (>45 deg) catches an actual topple.
     """
     mujoco.mj_resetData(model, data)
     dt = model.opt.timestep
@@ -465,7 +494,13 @@ def run_settle(model, data, z0, rng, bam_ctrl=None, duration=3.0,
     # cannot tell you whether the drift is about the plate or about the pose.
     # Running the identical test on the terrain (plate parked out of the way,
     # exactly where backflip_plate_step puts it once GONE) separates the two.
-    ctrl = np.concatenate([HOME, np.zeros(model.nu - len(HOME))])
+    if posture == "tucked_env":
+        ctrl = _home_tuck_ctrl(model.nu, tuck_factor)
+    elif posture == "tucked":
+        ctrl = _tuck_ctrl(model.nu, tuck_factor)
+    else:
+        ctrl = np.concatenate([HOME, np.zeros(model.nu - len(HOME))])
+    pose_z = TUCK_Z if posture in ("tucked", "tucked_env") else STAND_Z
     if noisy:
         ctrl_noise = rng.uniform(-SPAWN_JOINT_NOISE, SPAWN_JOINT_NOISE, size=len(HOME))
         x0 = rng.uniform(-SPAWN_XY_NOISE, SPAWN_XY_NOISE)
@@ -477,16 +512,19 @@ def run_settle(model, data, z0, rng, bam_ctrl=None, duration=3.0,
         ctrl_noise = np.zeros(len(HOME))
         x0 = y0 = roll = pitch = yaw = 0.0
 
-    # reset_robot_joints perturbs the JOINT STATE, not the command: the policy's
-    # zero action still asks for HOME, so ctrl stays HOME and qpos gets the
-    # offset. Getting this backwards would test a different (easier) thing.
+    # The joint NOISE perturbs the joint STATE, not the command: the reset
+    # event writes the target pose into qpos and the policy is what commands
+    # it, so ctrl stays at the clean target and qpos carries the offset.
+    # Getting this backwards would test a different (easier) thing.
     plate_pos = (
         list(microduck_mdp.BACKFLIP_GONE_POS) if on_floor else [0.0, 0.0, z0]
     )
-    base_z = STAND_Z if on_floor else z0 + PLATE_HALF_THICKNESS + STAND_Z
+    if spawn_z_override is not None:
+        pose_z = spawn_z_override
+    base_z = pose_z if on_floor else z0 + PLATE_HALF_THICKNESS + pose_z
     data.qpos[0:3] = [x0, y0, base_z]
     data.qpos[3:7] = _quat_from_rpy(roll, pitch, yaw)
-    data.qpos[7 : 7 + len(HOME)] = HOME + ctrl_noise
+    data.qpos[7 : 7 + len(HOME)] = ctrl[: len(HOME)] + ctrl_noise
     if bam_ctrl is not None:
         bam_ctrl.reset(data.qpos)
     _apply_ctrl(data, bam_ctrl, ctrl)
@@ -519,14 +557,118 @@ def run_settle(model, data, z0, rng, bam_ctrl=None, duration=3.0,
     return samples, final
 
 
+# Hold ceiling the cfg's backflip_hold_range curriculum widens to. The box has
+# to close at the LONGEST hold too, since that is the state the policy trains
+# into last.
+HOLD_CURRICULUM_MAX = 1.0
+
+# Acceptance thresholds for --box-check. 2.6 m/s is the user's hardware limit
+# (~34 cm free fall); 360 deg is a closed flip.
+BOX_MIN_ROT_DEG = 360.0
+BOX_MAX_LAND = 2.6
+
+
+def _edges(rng, mid=True):
+    lo, hi = rng
+    return (lo, 0.5 * (lo + hi), hi) if mid else (lo, hi)
+
+
+def box_check_report(model, data, bam_ctrl=None, posture="tucked_env"):
+    """WHOLE-BOX check of the cfg's DR ranges from the env's actual spawn.
+
+    Reports the WORST cell, not the best. The rule this enforces is the one the
+    previous box failed: every sampled combination of the corners AND midpoints
+    of z0 / vz / w0 / t_launch — crossed with the hold extremes and a range of
+    tuck depths — must close >= 360 deg backward at <= 2.6 m/s. A box whose
+    interior contains one 3 deg cell is not a box.
+
+    Tuck depth is swept 0.5-1.0 even though the spawn is fixed at TUCK_FACTOR:
+    the policy can deepen or open the tuck during HOLD and LAUNCH, so the box
+    should hold across what it might do, not only at the spawn value.
+    """
+    z0s = _edges(Z0_RANGE)
+    vzs = _edges(VZ_RANGE)
+    w0s = _edges(W0_RANGE)
+    laus = _edges(LAUNCH_RANGE)
+    holds = (HOLD_RANGE[0], HOLD_CURRICULUM_MAX)
+    tucks = (0.5, TUCK_FACTOR, 1.0)
+
+    print(f"# box-check posture={posture} bam={bam_ctrl is not None} "
+          f"dt={model.opt.timestep}")
+    print(f"#   z0 {Z0_RANGE} vz {VZ_RANGE} w0 {W0_RANGE} launch {LAUNCH_RANGE}")
+    print(f"#   hold {holds} tuck {tucks}")
+    rows = []
+    for z0, vz, w0, lau, hold, tk in itertools.product(
+        z0s, vzs, w0s, laus, holds, tucks
+    ):
+        rot, land, apex, tilt = run_cell(
+            model, data, vz, w0, tk, z0, t_hold=hold, t_launch=lau,
+            posture=posture, bam_ctrl=bam_ctrl,
+        )
+        rows.append((rot, land, apex, tilt, z0, vz, w0, lau, hold, tk))
+
+    def show(label, ordered):
+        print(f"  {label}")
+        for r in ordered[:5]:
+            print(f"    rot={r[0]:7.1f} land={r[1]:5.2f} apex={r[2]:.3f} "
+                  f"tilt0={r[3]:5.1f}  z0={r[4]:.3f} vz={r[5]:.3f} w0={r[6]:.2f} "
+                  f"launch={r[7]:.3f} hold={r[8]:.2f} tuck={r[9]:.2f}")
+
+    min_rot = min(r[0] for r in rows)
+    max_land = max(r[1] for r in rows)
+    n_short = sum(1 for r in rows if r[0] < BOX_MIN_ROT_DEG)
+    n_hard = sum(1 for r in rows if r[1] > BOX_MAX_LAND)
+    print(f"  {len(rows)} cells | min rot = {min_rot:.1f} deg | "
+          f"max landing = {max_land:.2f} m/s | "
+          f"short of 360: {n_short} | over 2.6 m/s: {n_hard}")
+    show("worst by rotation:", sorted(rows, key=lambda r: r[0]))
+    show("worst by landing speed:", sorted(rows, key=lambda r: -r[1]))
+    ok = n_short == 0 and n_hard == 0
+    print(f"  RESULT: {'PASS' if ok else 'FAIL'} — whole box "
+          f"{'closes' if ok else 'does NOT close'} 360 deg under "
+          f"{BOX_MAX_LAND} m/s")
+    return rows, ok
+
+
+def measure_tuck_z_report(model, data, z0, tuck_factors, offsets, bam_ctrl=None,
+                          duration=3.0):
+    """Re-measure TUCK_Z: drop the tucked robot and read where it comes to rest.
+
+    This is how the TUCK_Z constant above was produced. Reported per (tuck
+    factor, spawn offset): resting trunk height above the plate top, tilt, and
+    x/y drift, at 0.1 s / 1.0 s / the end of the settle.
+    """
+    rng = np.random.default_rng(0)
+    print(f"# measure-tuck-z: z0={z0} duration={duration}s dt={model.opt.timestep} "
+          f"bam={bam_ctrl is not None}   (TUCK_Z in the script = {TUCK_Z})")
+    print(f"{'tuck':>5} {'offset':>7} {'h@0.1':>7} {'h@1.0':>7} {'h@end':>7} "
+          f"{'tilt@0.1':>9} {'tilt@1.0':>9} {'tilt@end':>9} {'xy@end':>7}")
+    for factor in tuck_factors:
+        for offset in offsets:
+            samples, final = run_settle(
+                model, data, z0, rng, bam_ctrl=bam_ctrl, duration=duration,
+                sample_times=(0.1, 1.0), noisy=False, posture="tucked_env",
+                tuck_factor=factor, spawn_z_override=offset,
+            )
+            top = z0 + PLATE_HALF_THICKNESS
+            print(f"{factor:5.2f} {offset:7.3f} "
+                  f"{samples[0.1][2] - top:7.4f} {samples[1.0][2] - top:7.4f} "
+                  f"{final[2] - top:7.4f} "
+                  f"{samples[0.1][0]:9.1f} {samples[1.0][0]:9.1f} {final[0]:9.1f} "
+                  f"{final[1]:7.4f}")
+
+
 def settle_report(model, data, z0, trials, seed, bam_ctrl=None, duration=3.0,
-                  noisy=True, on_floor=False):
+                  noisy=True, on_floor=False, posture="tucked_env",
+                  tuck_factor=TUCK_FACTOR):
     rng = np.random.default_rng(seed)
     rows = []
     for _ in range(trials):
         rows.append(run_settle(model, data, z0, rng, bam_ctrl=bam_ctrl,
-                               duration=duration, noisy=noisy, on_floor=on_floor))
-    print(f"# settle: {'ON FLOOR (control)' if on_floor else f'on plate z0={z0}'} "
+                               duration=duration, noisy=noisy, on_floor=on_floor,
+                               posture=posture, tuck_factor=tuck_factor))
+    print(f"# settle: posture={posture} tuck={tuck_factor} "
+          f"{'ON FLOOR (control)' if on_floor else f'on plate z0={z0}'} "
           f"trials={trials} noisy={noisy} duration={duration}s "
           f"dt={model.opt.timestep} bam={bam_ctrl is not None}")
     print(f"{'t[s]':>6} {'tilt_mean':>10} {'tilt_max':>9} {'xy_mean':>8} "
@@ -580,13 +722,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--z0", type=float, default=0.15)
     ap.add_argument(
-        "--posture", choices=("standing", "tucked"), default="standing",
-        help="Initial posture on the plate. 'standing' (default) reproduces the "
-             "ENV's spawn (reset_backflip_robot_on_plate: HOME pose, trunk at "
-             "z0 + plate half-thickness + STAND_Z). 'tucked' reproduces the "
-             "ORIGINAL probe (pre-squatted 2 cm above the plate top) and the "
-             "docs' pre-'Standing-spawn re-measurement' tables. The two give "
-             "materially different envelopes — see the module docstring.",
+        "--posture", choices=_POSTURES, default="tucked_env",
+        help="Initial posture on the plate. 'tucked_env' (default) reproduces "
+             "the ENV's spawn as of the tucked-hold switch: TUCK_FACTOR tuck "
+             "pose, trunk at z0 + plate half-thickness + the MEASURED TUCK_Z. "
+             "'standing' reproduces the superseded standing spawn (HOME pose at "
+             "STAND_Z). 'tucked' reproduces the ORIGINAL probe (pre-squatted "
+             "0.02 m above the plate top, zeros outside the TUCK map) and the "
+             "docs' oldest tables. They give materially different envelopes — "
+             "see the module docstring.",
     )
     ap.add_argument(
         "--tuck-at-flick", action="store_true",
@@ -621,6 +765,18 @@ def main():
     ap.add_argument("--settle-duration", type=float, default=3.0,
                     help="AGENTS.md asks for a 3 s hold; the curriculum's own "
                          "ceiling is 1.0 s.")
+    ap.add_argument("--box-check", action="store_true",
+                    help="WHOLE-BOX check of the cfg's DR ranges from the env's "
+                         "actual spawn: every corner AND midpoint of z0 / vz / "
+                         "w0 / t_launch, crossed with the hold extremes and "
+                         "tuck depths, must close 360 deg under 2.6 m/s. "
+                         "Reports the worst cell, not the best.")
+    ap.add_argument("--measure-tuck-z", action="store_true",
+                    help="Re-measure TUCK_Z: drop the tucked robot from several "
+                         "offsets above the plate top, hold the tuck ctrl, and "
+                         "report the resting trunk height, tilt and drift.")
+    ap.add_argument("--settle-posture", choices=_POSTURES, default=None,
+                    help="Posture for --settle (defaults to --posture).")
     ap.add_argument("--settle-on-floor", action="store_true",
                     help="Control experiment: same settle test with the robot on "
                          "the TERRAIN and the plate parked away, to separate "
@@ -661,12 +817,25 @@ def main():
         timestep=args.timestep,
     )
 
+    if args.box_check:
+        box_check_report(model, data, bam_ctrl=bam_ctrl, posture=args.posture)
+        return
+
+    if args.measure_tuck_z:
+        measure_tuck_z_report(
+            model, data, args.z0, args.tuck, (0.020, 0.026, 0.029, 0.032),
+            bam_ctrl=bam_ctrl, duration=args.settle_duration,
+        )
+        return
+
     if args.settle:
         settle_report(
             model, data, args.z0,
             1 if args.settle_noiseless else args.settle_trials,
             args.seed, bam_ctrl=bam_ctrl, duration=args.settle_duration,
             noisy=not args.settle_noiseless, on_floor=args.settle_on_floor,
+            posture=args.settle_posture or args.posture,
+            tuck_factor=args.tuck[0] if len(args.tuck) == 1 else TUCK_FACTOR,
         )
         return
 

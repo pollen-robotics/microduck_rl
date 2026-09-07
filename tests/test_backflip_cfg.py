@@ -15,9 +15,15 @@ import torch
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.microduck_backflip_env_cfg import (
+    LAUNCH_RANGE,
     MicroduckBackflipRlCfg,
     PLATE_HALF_THICKNESS,
     STAND_Z,
+    TUCK_FACTOR,
+    TUCK_OVERRIDES,
+    TUCK_Z,
+    VZ_RANGE,
+    W0_RANGE,
     Z0_RANGE,
     make_microduck_backflip_env_cfg,
 )
@@ -145,14 +151,30 @@ def test_launch_params_are_sampled_on_reset_within_the_operator_range(cfg):
 
 
 def test_launch_envelope_is_the_measured_box_not_the_placeholders(cfg):
-    # docs/backflip_envelope_results.md: vz has a CLIFF below 2.0 (1.80 fails
-    # at 347deg) and w0 above ~36-39 reverses the rotation direction.
+    # The WHOLE-BOX-verified tucked-spawn envelope
+    # (docs/backflip_envelope_results.md "Tucked hold"): every corner and
+    # midpoint of these four ranges closes >= 360 deg backward at <= 2.6 m/s.
+    # The bounds each mark a measured failure just outside them:
+    #   vz  < 2.00 -> the flip stops closing;  vz > 2.10 -> the z0=0.20 corner
+    #                                          lands at 2.65-2.70 m/s.
+    #   w0  > 23   -> t_launch=0.14 drops to 372 deg, w0=30 to 279 deg.
+    #   t_launch < 0.12 -> landings up to 3.97 m/s (a short flick is violent).
     p = cfg.events["backflip_launch_params"].params
-    vz_lo, vz_hi = p["vz_range"]
-    w0_lo, w0_hi = p["w0_range"]
-    assert vz_lo >= 2.0
-    assert w0_hi <= 30.0
-    assert w0_lo >= 24.0 and vz_hi <= 2.25
+    assert p["vz_range"] == VZ_RANGE == (2.00, 2.10)
+    assert p["w0_range"] == W0_RANGE == (21.0, 23.0)
+    assert p["launch_range"] == LAUNCH_RANGE == (0.12, 0.14)
+    assert p["z0_range"] == Z0_RANGE == (0.10, 0.20)
+    # ... and the mdp defaults say the same thing, so an env built without the
+    # cfg (or a copy-paste into a new task) does not inherit a stale box.
+    import inspect
+
+    defaults = inspect.signature(
+        microduck_mdp.reset_backflip_launch_params
+    ).parameters
+    assert defaults["vz_range"].default == VZ_RANGE
+    assert defaults["w0_range"].default == W0_RANGE
+    assert defaults["launch_range"].default == LAUNCH_RANGE
+    assert defaults["z0_range"].default == Z0_RANGE
 
 
 def test_robot_is_placed_on_the_plate_after_z0_is_sampled(cfg):
@@ -166,19 +188,49 @@ def test_robot_is_placed_on_the_plate_after_z0_is_sampled(cfg):
     assert spawn.func is microduck_mdp.reset_backflip_robot_on_plate
 
 
-def test_the_spawn_height_and_the_stance_target_are_the_same_number(cfg):
-    # THE invariant between the two halves of the plate geometry. The spawn puts
-    # the trunk at z0 + plate_half_thickness + stand_z; backflip_ready_stance
-    # scores it against z0 + its own stand_z. Edit either constant alone and the
-    # robot spawns at a height its own stance reward calls wrong — with every
-    # other test in this file still green.
+def test_the_spawn_pose_and_the_stance_target_are_the_same_numbers(cfg):
+    # THE invariant between the spawn and the reward that scores it. The spawn
+    # folds the robot to tuck_overrides x tuck_factor and puts the trunk at
+    # z0 + plate_half_thickness + tuck_z; backflip_ready_stance scores the same
+    # joint target and the same height. Edit either alone and the robot spawns
+    # in a pose its own hold reward calls wrong — with every other test in this
+    # file still green.
     spawn = cfg.events["backflip_spawn"].params
-    assert spawn["stand_z"] + spawn["plate_half_thickness"] == pytest.approx(
-        cfg.rewards["ready_stance"].params["stand_z"]
+    stance = cfg.rewards["ready_stance"].params
+
+    assert spawn["tuck_overrides"] == stance["tuck_overrides"] == TUCK_OVERRIDES
+    assert spawn["tuck_factor"] == stance["tuck_factor"] == TUCK_FACTOR
+    assert spawn["tuck_z"] + spawn["plate_half_thickness"] == pytest.approx(
+        stance["tuck_z"]
     )
-    # and both halves are the constants this module exports, not stray numbers
-    assert spawn["stand_z"] == pytest.approx(STAND_Z)
+    # and each half is the constant this module exports, not a stray number
+    assert spawn["tuck_z"] == pytest.approx(TUCK_Z)
     assert spawn["plate_half_thickness"] == pytest.approx(PLATE_HALF_THICKNESS)
+
+
+def test_the_hold_posture_is_tucked_not_standing(cfg):
+    # The defect this whole branch turned on: the spawn, the reward that pays
+    # for the hold, and the posture the envelope was measured from must be ONE
+    # posture. STAND_Z belongs to the LANDING only.
+    spawn = cfg.events["backflip_spawn"].params
+    stance = cfg.rewards["ready_stance"].params
+    assert "stand_z" not in spawn and "stand_z" not in stance
+    assert cfg.rewards["ready_stance"].func is microduck_mdp.backflip_ready_stance
+    # A tucked trunk sits far below a standing one — if these ever converge,
+    # someone has carried STAND_Z into the tuck.
+    assert TUCK_Z < STAND_Z - 0.05
+    assert cfg.rewards["landing"].params["stand_z"] == pytest.approx(STAND_Z)
+
+
+def test_the_tuck_map_matches_roulades(cfg):
+    # TUCK_OVERRIDES is duplicated from the roulade env rather than imported,
+    # so that each task can retune its own tuck. Pin them equal anyway: a
+    # silent divergence would make the roulade lesson stop applying here.
+    from mjlab_microduck.tasks.microduck_roulade_env_cfg import (
+        TUCK_OVERRIDES as ROULADE_TUCK,
+    )
+
+    assert TUCK_OVERRIDES == ROULADE_TUCK
 
 
 def test_the_robot_spawns_over_the_plate_not_half_a_metre_away(cfg):
@@ -221,12 +273,13 @@ def test_progress_is_the_dominant_positive_term(cfg):
 
 
 def test_ready_stance_target_height_accounts_for_the_plate_thickness(cfg):
-    # backflip_ready_stance measures trunk z against (origin + z0 + stand_z),
-    # but the robot stands on the plate TOP, one half-thickness above z0.
-    assert cfg.rewards["ready_stance"].params["stand_z"] == pytest.approx(
-        STAND_Z + PLATE_HALF_THICKNESS
+    # backflip_ready_stance measures trunk z against (origin + z0 + tuck_z),
+    # but the robot rests on the plate TOP, one half-thickness above z0.
+    assert cfg.rewards["ready_stance"].params["tuck_z"] == pytest.approx(
+        TUCK_Z + PLATE_HALF_THICKNESS
     )
-    # The landing is measured against the ground, with no plate under it.
+    # The landing is measured against the ground, with no plate under it, and
+    # against the STANDING height: the duck lands on its feet.
     assert cfg.rewards["landing"].params["stand_z"] == pytest.approx(STAND_Z)
 
 
@@ -408,12 +461,14 @@ def test_critic_plate_terms_are_the_gone_masked_ones(cfg):
     assert not any("plate" in name for name in cfg.observations["actor"].terms)
 
 
-def test_z0_dr_tail_does_not_extrapolate_far_past_the_probe(cfg):
-    # The probe measured z0 in [0.10, 0.20]; landing speed rises monotonically
-    # with z0, so the tail extrapolates toward the hardware damage threshold.
+def test_z0_dr_tail_stops_where_the_landing_speed_measurement_stops_it(cfg):
+    # MEASURED at the box's worst-landing corner (docs "Tucked hold"): landing
+    # speed rises monotonically with z0 and crosses the ~2.6 m/s hardware
+    # threshold between 0.225 (2.56 m/s) and 0.250 (2.61 m/s). The spec's
+    # 0.30 m operator tail lands at 2.80 m/s and is not available.
     z0 = cfg.curriculum["backflip_z0_range"].params["param_stages"]
     assert z0[0]["params"]["z0_range"] == Z0_RANGE
-    assert z0[-1]["params"]["z0_range"][1] <= 0.25
+    assert z0[-1]["params"]["z0_range"][1] <= 0.225
     assert [s["params"]["z0_range"][1] for s in z0] == sorted(
         s["params"]["z0_range"][1] for s in z0
     )

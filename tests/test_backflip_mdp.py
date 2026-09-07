@@ -36,6 +36,16 @@ class _FakeTerrain:
         self.env_origins = env_origins
 
 
+# HOME joint pose in the canonical 14-servo order (microduck_constants'
+# HOME_FRAME). The tucked-spawn and tucked-hold tests need a default pose to
+# measure the tuck offset against.
+_HOME = torch.tensor([
+    0.0, -0.0873, -0.4579, -0.0049, 0.4530,          # left leg
+    0.3491, 0.3491, 0.0, 0.0,                        # neck / head
+    0.0, 0.0873, 0.4579, 0.0049, -0.4530,            # right leg
+])
+
+
 class _FakeAssetData:
     """Minimal root-state view: only the fields the backflip mdp functions read.
 
@@ -43,18 +53,45 @@ class _FakeAssetData:
     default, so a test only has to set the one or two fields it cares about.
     """
 
-    def __init__(self, num_envs):
+    def __init__(self, num_envs, n_joints=14):
         self.root_link_ang_vel_b = torch.zeros(num_envs, 3)
         self.root_link_lin_vel_w = torch.zeros(num_envs, 3)
         self.root_link_quat_w = torch.tensor([[1.0, 0.0, 0.0, 0.0]] * num_envs)
         self.root_link_pos_w = torch.zeros(num_envs, 3)
+        self.default_joint_pos = _HOME.repeat(num_envs, 1)[:, :n_joints].clone()
+        self.joint_pos = self.default_joint_pos.clone()
+        self.joint_vel = torch.zeros(num_envs, n_joints)
 
 
 class _FakeAsset:
-    """Stand-in for `env.scene["robot"]`: just carries `.data`."""
+    """Stand-in for `env.scene["robot"]`: `.data` plus joint-name lookup.
 
-    def __init__(self, num_envs):
-        self.data = _FakeAssetData(num_envs)
+    ``find_joints`` returns the identity servo ordering, which is what
+    ``_servo_joint_ids`` resolves on a plain (non-backlash) model.
+    """
+
+    def __init__(self, num_envs, n_joints=14):
+        self.data = _FakeAssetData(num_envs, n_joints=n_joints)
+        self._n_joints = n_joints
+
+    def find_joints(self, pattern):
+        ids = list(range(self._n_joints))
+        return ids, [f"joint_{i}" for i in ids]
+
+
+class _FakeSimData:
+    """qpos wide enough for a free joint plus the servo columns."""
+
+    def __init__(self, num_envs, n_joints=14):
+        self.qpos = torch.zeros(num_envs, 7 + n_joints)
+        self.qpos[:, 3] = 1.0
+        self.qpos[:, 7 : 7 + n_joints] = _HOME[:n_joints]
+        self.qvel = torch.zeros(num_envs, 6 + n_joints)
+
+
+class _FakeSim:
+    def __init__(self, num_envs, n_joints=14):
+        self.data = _FakeSimData(num_envs, n_joints=n_joints)
 
 
 class _FakeSensorData:
@@ -90,6 +127,7 @@ class _FakeEnvWithScene(_FakeEnv):
             env_origins = torch.zeros(num_envs, 3)
         self.plate = _FakeEntity()
         self.robot = _FakeAsset(num_envs)
+        self.sim = _FakeSim(num_envs)
         self.scene = _FakeScene(
             {"plate": self.plate, "robot": self.robot}, env_origins, sensors=sensors
         )
@@ -149,11 +187,15 @@ def test_sampled_params_stay_inside_the_requested_ranges():
 
 
 def test_sampled_params_use_measured_envelope_defaults():
-    # Defaults must be the measured launch box, not the brief's stale placeholders.
+    # Defaults must be the WHOLE-BOX-verified tucked-spawn launch box, not the
+    # stale placeholders and not the superseded standing-probe box.
     env = _FakeEnv(num_envs=256)
     microduck_mdp.reset_backflip_launch_params(env, torch.arange(256))
-    assert torch.all((env._backflip_vz >= 2.00) & (env._backflip_vz <= 2.25))
-    assert torch.all((env._backflip_w0 >= 24.0) & (env._backflip_w0 <= 30.0))
+    assert torch.all((env._backflip_vz >= 2.00) & (env._backflip_vz <= 2.10))
+    assert torch.all((env._backflip_w0 >= 21.0) & (env._backflip_w0 <= 23.0))
+    # A short flick is the violent one: t_launch=0.08 lands at up to 3.97 m/s.
+    assert torch.all(env._backflip_t_launch >= 0.12)
+    assert torch.all(env._backflip_t_launch <= 0.14)
 
 
 def test_phase_of_env_follows_episode_time():
@@ -763,3 +805,143 @@ def test_masked_plate_obs_keep_the_unmasked_shape_and_values_while_present():
     raw = microduck_mdp.ball_pos_in_base(env, asset_name="plate")
     assert masked.shape == raw.shape == (1, 3)
     assert torch.allclose(masked, raw)
+
+
+# --- The TUCKED hold: spawn pose, hold reward, and their shared numbers. -----
+
+_TUCK = {2: -1.15, 3: 1.25, 4: 1.05, 5: -1.0, 6: 1.0, 11: 1.15, 12: -1.25, 13: -1.05}
+_TUCK_FACTOR = 0.75
+_TUCK_Z = 0.029
+_PHT = 0.01
+
+
+def _spawned_env(num_envs=2, z0=0.15, joint_noise=0.0):
+    env = _FakeEnvWithScene(num_envs=num_envs)
+    ids = torch.arange(num_envs)
+    microduck_mdp.reset_backflip_launch_params(
+        env, ids, hold_range=(0.3, 0.3), launch_range=(0.13, 0.13),
+        z0_range=(z0, z0), vz_range=(2.05, 2.05), w0_range=(22.0, 22.0),
+    )
+    if joint_noise:
+        # What reset_robot_joints leaves behind: HOME + scatter.
+        env.sim.data.qpos[:, 7:21] += joint_noise
+    microduck_mdp.reset_backflip_robot_on_plate(
+        env, ids, tuck_overrides=_TUCK, tuck_factor=_TUCK_FACTOR,
+        tuck_z=_TUCK_Z, plate_half_thickness=_PHT,
+    )
+    return env
+
+
+def test_spawn_puts_the_trunk_at_the_measured_tucked_height_not_stand_z():
+    # The height must be the MEASURED tucked resting height above the plate
+    # top, never STAND_Z: the two poses differ by ~8.6 cm, and AGENTS.md
+    # records a 5 mm height carried across poses costing days.
+    env = _spawned_env(z0=0.15)
+    assert float(env.sim.data.qpos[0, 2]) == pytest.approx(0.15 + _PHT + _TUCK_Z)
+    assert float(env.sim.data.qpos[0, 2]) < 0.15 + _PHT + 0.115 - 0.05
+    # root velocity is zeroed, as before
+    assert float(env.sim.data.qvel[0, :6].abs().sum()) == 0.0
+
+
+def test_spawn_height_follows_the_sampled_z0():
+    for z0 in (0.10, 0.20):
+        env = _spawned_env(z0=z0)
+        assert float(env.sim.data.qpos[0, 2]) == pytest.approx(z0 + _PHT + _TUCK_Z)
+
+
+def test_spawn_folds_exactly_the_tuck_joints_to_the_tuck_target():
+    env = _spawned_env()
+    qpos = env.sim.data.qpos[0, 7:21]
+    default = env.robot.data.default_joint_pos[0]
+    for idx in range(14):
+        if idx in _TUCK:
+            assert float(qpos[idx]) == pytest.approx(_TUCK[idx] * _TUCK_FACTOR)
+        else:
+            assert float(qpos[idx]) == pytest.approx(float(default[idx]))
+
+
+def test_spawn_preserves_the_joint_scatter_reset_robot_joints_applied():
+    # Overwriting the joints outright would silently delete DR on exactly the
+    # eight joints that define the hold posture. The spawn SHIFTS instead.
+    noise = 0.04
+    env = _spawned_env(joint_noise=noise)
+    qpos = env.sim.data.qpos[0, 7:21]
+    for idx in _TUCK:
+        assert float(qpos[idx]) == pytest.approx(_TUCK[idx] * _TUCK_FACTOR + noise)
+
+
+def _stance_env(z0=0.15, hold=0.3):
+    env = _FakeEnvWithScene(num_envs=1)
+    microduck_mdp.reset_backflip_launch_params(
+        env, torch.arange(1), hold_range=(hold, hold), launch_range=(0.13, 0.13),
+        z0_range=(z0, z0), vz_range=(2.05, 2.05), w0_range=(22.0, 22.0),
+    )
+    return env
+
+
+def _stance(env, joints, trunk_z):
+    env.robot.data.joint_pos = joints.clone()
+    env.robot.data.root_link_pos_w[:, 2] = trunk_z
+    return float(
+        microduck_mdp.backflip_ready_stance(
+            env, tuck_overrides=_TUCK, tuck_factor=_TUCK_FACTOR,
+            tuck_z=_TUCK_Z + _PHT, joint_std=0.35, height_std=0.03,
+        )[0]
+    )
+
+
+def _tuck_joints(env, factor=_TUCK_FACTOR):
+    j = env.robot.data.default_joint_pos.clone()
+    for idx, angle in _TUCK.items():
+        j[:, idx] = angle * factor
+    return j
+
+
+def test_ready_stance_pays_for_the_tuck_and_not_for_standing():
+    env = _stance_env(z0=0.15)
+    tucked = _stance(env, _tuck_joints(env), 0.15 + _PHT + _TUCK_Z)
+    standing = _stance(env, env.robot.data.default_joint_pos.clone(),
+                       0.15 + _PHT + 0.115)
+    assert tucked > 0.95
+    assert standing < 1e-3
+    assert tucked > 1000 * standing
+
+
+def test_ready_stance_needs_BOTH_the_pose_and_the_height():
+    # Multiplicative: tucked joints held a standing height away, or standing
+    # joints at the tucked height, must each collapse the term. Otherwise
+    # there is a compromise basin.
+    env = _stance_env(z0=0.15)
+    right = _stance(env, _tuck_joints(env), 0.15 + _PHT + _TUCK_Z)
+    wrong_height = _stance(env, _tuck_joints(env), 0.15 + _PHT + 0.115)
+    wrong_pose = _stance(env, env.robot.data.default_joint_pos.clone(),
+                         0.15 + _PHT + _TUCK_Z)
+    assert wrong_height < 0.01 * right
+    assert wrong_pose < 0.2 * right
+
+
+def test_ready_stance_is_hold_phase_only_so_it_cannot_oppose_the_flip():
+    env = _stance_env(z0=0.15, hold=0.3)
+    joints = _tuck_joints(env)
+    env.episode_length_buf[:] = 0                       # HOLD
+    assert _stance(env, joints, 0.15 + _PHT + _TUCK_Z) > 0.95
+    env.episode_length_buf[:] = 20                      # LAUNCH / GONE
+    assert _stance(env, joints, 0.15 + _PHT + _TUCK_Z) == 0.0
+
+
+def test_ready_stance_height_target_tracks_the_sampled_z0():
+    # The plate height is per-episode DR, so a fixed height target would score
+    # a correctly-held tuck as wrong at every z0 but one.
+    for z0 in (0.10, 0.20):
+        env = _stance_env(z0=z0)
+        assert _stance(env, _tuck_joints(env), z0 + _PHT + _TUCK_Z) > 0.95
+
+
+def test_ready_stance_tolerates_a_realistically_imperfect_tuck():
+    # joint_std=0.35 rad prices only the escapable part: a tuck held within
+    # ~0.1 rad must still score most of the term, or the gradient punishes the
+    # policy for physics it cannot beat.
+    env = _stance_env(z0=0.15)
+    joints = _tuck_joints(env)
+    joints += 0.1
+    assert _stance(env, joints, 0.15 + _PHT + _TUCK_Z) > 0.85
