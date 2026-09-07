@@ -7369,6 +7369,16 @@ def reset_backflip_launch_params(
     speeds of 1.46-2.59 m/s. Earlier placeholder ranges (``vz in [2, 3]``,
     ``w0 in [8, 14]``) do not close a flip at all — don't copy them into a new
     env without re-checking the probe.
+
+    !! POSTURE CAVEAT: that envelope was measured with the robot pre-TUCKED on
+    the plate (CoM ~3 cm up), not STANDING as
+    ``reset_backflip_robot_on_plate`` actually spawns it (CoM ~11 cm up). From
+    the standing spawn these very ranges rotate the robot FORWARD
+    (orientation-verified, up to -275 deg), and no setting anywhere in
+    vz in [2, 4] x w0 in [3, 36] closes 360 deg below the ~2.6 m/s hardware
+    landing limit. The ranges are kept as-is deliberately — the fix is a design
+    decision about ``backflip_ready_stance``, not a range edit. See
+    ``docs/backflip_envelope_results.md`` "Standing-spawn re-measurement".
     """
     if env_ids is None or len(env_ids) == 0:
         return

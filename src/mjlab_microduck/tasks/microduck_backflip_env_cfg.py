@@ -19,11 +19,37 @@ rest of the family (61D: 48 proprioception + [twist(3), head_pose(4),
 body_pose(6)], head/body slots zero-padded): the runtime hot-swaps ONNX files
 walk/stand/trick through one buffer.
 
+!! THE LAUNCH ENVELOPE BELOW IS MEASURED FROM A TUCKED SPAWN, WHICH THIS ENV
+!! DOES NOT PRODUCE. READ THIS BEFORE TRAINING.
+  ``reset_backflip_robot_on_plate`` spawns the robot STANDING (HOME pose, trunk
+  at z0 + PLATE_HALF_THICKNESS + STAND_Z, CoM ~11 cm up) and ``ready_stance``
+  pays it to still be standing when the flick arrives. Every number in the
+  block below was measured with the robot pre-SQUATTED in the tuck pose (CoM
+  ~3 cm up). Re-measured from the standing spawn — with BAM actuators, over
+  vz in [2.0, 4.0], w0 in [3, 36], t_launch in [0.08, 0.15], with and without
+  the policy tucking at the flick, ~700 cells — NO setting closes 360 deg below
+  the ~2.6 m/s hardware landing limit, and the box configured below rotates the
+  standing robot FORWARD (up to -275 deg, face-down, orientation-verified).
+  Best direction-verified standing cell: 382.9 deg at 3.43 m/s (vz=2.5, w0=21,
+  tuck-at-flick, t_launch=0.15, z0=0.10) — ~32% over the hardware limit. Best
+  cell landing under 2.6 m/s: 201.8 deg, barely half a flip.
+  The ranges are LEFT AS MEASURED-FOR-TUCKED on purpose: the fix is a design
+  decision (let the policy crouch during HOLD, which means rethinking
+  ``ready_stance``), not a range edit, and it is the user's call. Full tables:
+  docs/backflip_envelope_results.md, "Standing-spawn re-measurement". Rerun with
+    uv run python scripts/backflip_envelope.py --bam --posture standing [--tuck-at-flick]
+  Also measured there (AGENTS.md's mandatory settle test): open-loop HOME on the
+  plate under BAM drifts to 23 deg of tilt by 1.0 s, the hold curriculum's
+  ceiling, and topples by 3 s — identically on the bare floor, so it is the
+  pose, not the perch. The HOLD phase requires ACTIVE balancing throughout.
+
 MEASURED LAUNCH ENVELOPE (docs/backflip_envelope_results.md, Task 3 CPU probe;
-these numbers are measured, not guessed — do not "tidy" them):
+these numbers are measured, not guessed — do not "tidy" them; but see the
+posture warning above: they describe a TUCKED launch posture):
   z0 in [0.10, 0.20] m, vz in [2.00, 2.25] m/s, w0 in [24, 30] rad/s,
   tuck in [0.5, 1.0] closes a full 360 deg backward flip at all three probed
-  launch heights, landing at 1.46-2.59 m/s.
+  launch heights, landing at 1.46-2.59 m/s (1.41-2.44 m/s re-confirmed under
+  BAM).
   * vz has a CLIFF at the bottom of the box: 1.80 does not close the flip
     (347 deg), 1.85 barely does (361 deg, 0.8 deg of margin), 2.00 closes with
     39.5 deg of margin. NEVER widen vz downward.
@@ -153,6 +179,10 @@ STAND_Z = 0.115
 PLATE_HALF_THICKNESS = 0.01
 
 # ── Launch envelope (MEASURED — see the module docstring) ─────────────────────
+# WARNING: measured from a TUCKED spawn; this env spawns STANDING, and from the
+# standing spawn this box rotates the robot FORWARD. See the module docstring's
+# posture warning and docs/backflip_envelope_results.md "Standing-spawn
+# re-measurement" before trusting or widening any of these.
 HOLD_RANGE    = (0.1, 0.4)     # widened to (0.1, 1.0) by curriculum
 LAUNCH_RANGE  = (0.08, 0.15)
 Z0_RANGE      = (0.10, 0.20)   # DR tail extended to 0.30 by curriculum

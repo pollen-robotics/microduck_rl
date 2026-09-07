@@ -2,10 +2,35 @@
 """Measure the Microduck backflip envelope on CPU MuJoCo, before any training.
 
 Sweeps launch speed x flick rate x tuck depth with the robot held at a FIXED
-tuck pose (no policy), and records, per cell:
+open-loop pose (no policy), and records, per cell:
   • total backward pitch accumulated while airborne (deg)
   • peak downward speed at first ground contact (m/s) — the hardware risk
   • apex height (m)
+  • trunk tilt at the instant the flick starts (deg) — how much of the
+    commanded posture actually survived the hold
+
+POSTURE MODES (--posture), and why this flag exists
+---------------------------------------------------
+``--posture tucked`` (the original mode) spawns the robot ALREADY squatting in
+the tuck pose with its trunk ~2 cm above the plate top, holding that ctrl from
+t=0. Every table in docs/backflip_envelope_results.md above the
+"Standing-spawn re-measurement" section was measured this way.
+
+``--posture standing`` (now the DEFAULT) reproduces what the ENV actually
+does: ``reset_backflip_robot_on_plate`` puts the trunk at
+``z0 + PLATE_HALF_THICKNESS + STAND_Z`` in the HOME pose, and the
+``ready_stance`` reward pays the policy to still be standing there when the
+flick arrives. That is a ~11 cm CoM, not the tuck's ~3 cm, and CoM height is
+exactly what decides whether the flick tips the robot backward over its heels
+or overdrives the sole contact and throws it FORWARD. The reversal boundary
+sits near w0 ~ 36-39 rad/s tucked but near w0 ~ 24-27 rad/s standing, so the
+posture is not a detail: it moves the usable box. Keep both modes so the two
+are directly diffable.
+
+``--tuck-at-flick`` additionally commands the tuck pose (HOME with the TUCK
+overrides applied, scaled by the tuck factor) from t >= t_hold, i.e. the
+instant the plate starts moving. That models what the policy CAN do — it acts
+during HOLD and LAUNCH — without pretending it was pre-tucked on the hands.
 
 The point is to find where 360 deg closes at the LOWEST landing speed, and to
 find out whether it closes at all inside the launch heights the operator can
@@ -57,9 +82,124 @@ SCENE = "src/mjlab_microduck/robot/microduck/scene_backflip.xml"
 # impulse into a fast enough spin.
 TUCK = {2: -1.15, 3: 1.25, 4: 1.05, 5: -1.0, 6: 1.0, 11: 1.15, 12: -1.25, 13: -1.05}
 
+# HOME pose, servo index order (= actuator index order on this model). Same
+# numbers as HOME_FRAME in robot/microduck_constants.py and DEFAULT_POSE in
+# scripts/infer_policy.py — this is the pose the env's reset_robot_joints
+# event puts the robot in (+/- 0.05 rad of joint noise) and the pose the
+# policy's zero action commands.
+HOME = np.array([
+    0.0,      # left_hip_yaw
+    -0.0873,  # left_hip_roll
+    -0.4579,  # left_hip_pitch
+    -0.0049,  # left_knee
+    0.4530,   # left_ankle
+    0.3491,   # neck_pitch
+    0.3491,   # head_pitch
+    0.0,      # head_yaw
+    0.0,      # head_roll
+    0.0,      # right_hip_yaw
+    0.0873,   # right_hip_roll
+    0.4579,   # right_hip_pitch
+    0.0049,   # right_knee
+    -0.4530,  # right_ankle
+])
+
+# Trunk height above the sole contact plane when standing in HOME, and the
+# launcher plate's box half-thickness. MUST match STAND_Z and
+# PLATE_HALF_THICKNESS in tasks/microduck_backflip_env_cfg.py — the standing
+# spawn below is the same arithmetic reset_backflip_robot_on_plate does.
+STAND_Z = 0.115
+PLATE_HALF_THICKNESS = 0.01
+
+# Physics timestep used in training (mjlab velocity template: sim dt 0.005 with
+# decimation 4 = 50 Hz control). The XML's own default is 0.002, which every
+# pre-existing table in the results doc was measured at; --bam switches the
+# default to this so the BAM runs match the trained dynamics.
+TRAINING_TIMESTEP = 0.005
+
+
+def _tuck_ctrl(nu, tuck_factor):
+    """Deep-tuck ctrl: the original probe's pose (zeros outside TUCK)."""
+    ctrl = np.zeros(nu)
+    for idx, angle in TUCK.items():
+        ctrl[idx] = angle * tuck_factor
+    return ctrl
+
+
+def _home_tuck_ctrl(nu, tuck_factor):
+    """HOME with the TUCK overrides applied — what a policy would command.
+
+    Used by --tuck-at-flick: joints the tuck does not touch stay where the
+    standing policy had them (HOME), instead of snapping to zero.
+    """
+    ctrl = np.zeros(nu)
+    ctrl[: len(HOME)] = HOME
+    for idx, angle in TUCK.items():
+        ctrl[idx] = angle * tuck_factor
+    return ctrl
+
+
+def build_scene(bam=False, vin=7.4, vin_drop_gain=0.0, timestep=None):
+    """Load scene_backflip.xml, optionally with BAM actuators.
+
+    ``bam=False`` keeps the XML's own position actuators (MuJoCo built-in PD),
+    which is what every table in docs/backflip_envelope_results.md before the
+    "Standing-spawn re-measurement" section used.
+
+    ``bam=True`` hands the 14 servos to the BAM M6 voltage-controlled XL330
+    model — the actuator TRAINING actually uses (AGENTS.md: "Actuators are
+    BAM"). Reuses scripts/infer_policy.py's loader rather than re-deriving it,
+    so the CPU probe and the CPU deployment rehearsal cannot drift apart. The
+    default timestep also switches to the training sim dt (0.005) in this mode.
+
+    Returns ``(model, data, bam_ctrl)``; ``bam_ctrl`` is None without --bam.
+    """
+    if not bam:
+        model = mujoco.MjModel.from_xml_path(SCENE)
+        if timestep is not None:
+            model.opt.timestep = timestep
+        return model, mujoco.MjData(model), None
+
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import infer_policy  # noqa: E402  (script-local import; cheap, no viewer/GL)
+
+    bam_model = infer_policy.load_bam_model(
+        infer_policy.BAM_KP_FW, vin, infer_policy.BAM_MAX_CURRENT
+    )
+    model, data, bam_ctrl, _names = infer_policy.load_mujoco_with_bam(
+        SCENE, bam_model,
+        TRAINING_TIMESTEP if timestep is None else timestep,
+        vin_drop_gain, infer_policy.BAM_VIN_MIN,
+    )
+    return model, data, bam_ctrl
+
+
+def _apply_ctrl(data, bam_ctrl, ctrl):
+    """Command a joint-position target, through BAM if it is in play.
+
+    Without BAM the XML's position actuators take the target in data.ctrl
+    directly. With BAM, data.ctrl holds TORQUE (the actuators were rewritten
+    to motors), so the target goes to the controller's q_target and BAM's
+    update() writes the torque each physics step.
+    """
+    if bam_ctrl is None:
+        data.ctrl[:] = ctrl
+    else:
+        bam_ctrl.q_target[:] = ctrl[: len(bam_ctrl.q_target)]
+
+
+def trunk_tilt_deg(data):
+    """Angle between the robot's own local +z axis and world +z, in degrees."""
+    zw = local_z_axis_world(data)
+    return math.degrees(math.acos(max(-1.0, min(1.0, float(zw[2])))))
+
 
 def run_cell(model, data, vz, w0, tuck_factor, z0, t_hold=0.3, t_launch=0.12,
-             duration=2.0, on_step=None):
+             duration=2.0, on_step=None, posture="standing", tuck_at_flick=False,
+             bam_ctrl=None):
     mujoco.mj_resetData(model, data)
     dt = model.opt.timestep
 
@@ -70,10 +210,15 @@ def run_cell(model, data, vz, w0, tuck_factor, z0, t_hold=0.3, t_launch=0.12,
     floor_gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
 
     # Robot: free joint at qpos[0:7], 14 servos after it.
-    ctrl = np.zeros(model.nu)
-    for idx, angle in TUCK.items():
-        ctrl[idx] = angle * tuck_factor
-    data.ctrl[:] = ctrl
+    if posture not in ("tucked", "standing"):
+        raise ValueError(f"posture must be 'tucked' or 'standing', got {posture!r}")
+    # ctrl held during HOLD (and, unless --tuck-at-flick, for the whole cell).
+    hold_ctrl = (
+        _tuck_ctrl(model.nu, tuck_factor) if posture == "tucked"
+        else np.concatenate([HOME, np.zeros(model.nu - len(HOME))])
+    )
+    flick_ctrl = _home_tuck_ctrl(model.nu, tuck_factor) if tuck_at_flick else hold_ctrl
+    ctrl = hold_ctrl
     # SPAWN_OFFSET: measured, not the brief's guessed 0.10. At 0.10 the tucked
     # robot spawns floating well above the plate: it is still falling at
     # -0.18..-0.22 m/s when t_hold ends, and over a longer hold the deep-tuck
@@ -84,20 +229,44 @@ def run_cell(model, data, vz, w0, tuck_factor, z0, t_hold=0.3, t_launch=0.12,
     # (|vz|<0.002 m/s, <1cm horizontal drift, upright cos~0.97) resting ~2.7cm
     # above the plate top, reproducibly.
     SPAWN_OFFSET = 0.02
-    data.qpos[0:3] = [0.0, 0.0, z0 + 0.01 + SPAWN_OFFSET]  # feet on the plate top
+    if posture == "tucked":
+        spawn_z = z0 + PLATE_HALF_THICKNESS + SPAWN_OFFSET  # feet on the plate top
+    else:
+        # EXACTLY what reset_backflip_robot_on_plate does: trunk at plate
+        # centre + half-thickness + the measured standing trunk height. No
+        # settle offset — the env spawns the robot at rest at this height and
+        # the flick arrives t_hold later, whatever the pose has drifted to by
+        # then (which is why tilt_at_flick is reported).
+        spawn_z = z0 + PLATE_HALF_THICKNESS + STAND_Z
+    data.qpos[0:3] = [0.0, 0.0, spawn_z]
     data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
     data.qpos[7 : 7 + model.nu] = ctrl
+    if bam_ctrl is not None:
+        # Clears voltage-drop state after mj_resetData; must precede the
+        # q_target write (reset() sets q_target from qpos).
+        bam_ctrl.reset(data.qpos)
+    _apply_ctrl(data, bam_ctrl, ctrl)
 
     accum_pitch = 0.0
     apex = 0.0
     landing_speed = 0.0
     airborne_seen = False
     landed = False
+    tilt_at_flick = None
     t = 0.0
     while t < duration:
         z, pitch, vz_t, w_t, phase = microduck_mdp.backflip_plate_kinematics(
             *[torch.tensor([v]) for v in (t, t_hold, t_launch, z0, vz, w0)]
         )
+        # The flick has started (phase left HOLD). Snapshot how much of the
+        # commanded posture survived the hold — for the standing spawn this is
+        # THE diagnostic: the env pays ready_stance to still be upright here,
+        # and an already-toppling robot gets flicked from the wrong CoM. Also
+        # the instant a policy would react, so --tuck-at-flick switches ctrl.
+        if tilt_at_flick is None and int(phase) != microduck_mdp.BACKFLIP_PHASE_HOLD:
+            tilt_at_flick = trunk_tilt_deg(data)
+            _apply_ctrl(data, bam_ctrl, flick_ctrl)
+
         half = float(pitch) * 0.5
         data.qpos[plate_qadr + 0 : plate_qadr + 3] = [0.0, 0.0, float(z)]
         data.qpos[plate_qadr + 3 : plate_qadr + 7] = [
@@ -114,6 +283,11 @@ def run_cell(model, data, vz, w0, tuck_factor, z0, t_hold=0.3, t_launch=0.12,
         # this turns out to be the first-contact step.
         pre_step_vz = float(data.qvel[2])
 
+        if bam_ctrl is not None:
+            # BAM owns control/torque/friction: update() runs the firmware
+            # P-loop + DC-motor equation, writes torque into data.ctrl and
+            # pushes the friction budget onto the dofs for this step.
+            bam_ctrl.update()
         mujoco.mj_step(model, data)
         t += dt
 
@@ -168,7 +342,12 @@ def run_cell(model, data, vz, w0, tuck_factor, z0, t_hold=0.3, t_launch=0.12,
         if on_step is not None:
             on_step(t, math.degrees(accum_pitch), data, phase=int(phase), touching=touching)
 
-    return math.degrees(accum_pitch), landing_speed, apex
+    return (
+        math.degrees(accum_pitch),
+        landing_speed,
+        apex,
+        float("nan") if tilt_at_flick is None else tilt_at_flick,
+    )
 
 
 def local_z_axis_world(data):
@@ -182,7 +361,9 @@ def local_z_axis_world(data):
     return R.reshape(3, 3)[:, 2]
 
 
-def check_direction(model, data, vz=3.0, w0=15.0, tuck_factor=1.0, z0=0.15):
+def check_direction(model, data, vz=3.0, w0=15.0, tuck_factor=1.0, z0=0.15,
+                    posture="standing", tuck_at_flick=False,
+                    t_hold=0.3, t_launch=0.12, bam_ctrl=None):
     """Verify BY MEASUREMENT that w0 > 0 rotates the robot BACKWARD, not
     forward — convention is exactly what got this probe's direction wrong
     once already (see docs/backflip_envelope_results.md).
@@ -211,13 +392,154 @@ def check_direction(model, data, vz=3.0, w0=15.0, tuck_factor=1.0, z0=0.15):
                 print("  -> +x component: robot is FACE-DOWN (forward roll). WRONG direction.")
             state["reported"] = True
 
-    rot, land, apex = run_cell(model, data, vz, w0, tuck_factor, z0, on_step=on_step)
-    print(f"  cell result: vz={vz} w0={w0} tuck={tuck_factor} z0={z0} "
-          f"-> rot_deg={rot:.1f} land_m/s={land:.2f} apex_m={apex:.3f}")
+    rot, land, apex, tilt = run_cell(
+        model, data, vz, w0, tuck_factor, z0, t_hold=t_hold, t_launch=t_launch,
+        on_step=on_step, posture=posture, tuck_at_flick=tuck_at_flick,
+        bam_ctrl=bam_ctrl,
+    )
+    print(f"  cell result: posture={posture} tuck_at_flick={tuck_at_flick} "
+          f"vz={vz} w0={w0} tuck={tuck_factor} z0={z0} "
+          f"-> rot_deg={rot:.1f} land_m/s={land:.2f} apex_m={apex:.3f} "
+          f"tilt_at_flick={tilt:.1f}deg")
     if not state["reported"]:
         print("  WARNING: never reached 90deg of accumulated rotation — cannot verify direction "
-              "with this cell.")
-    return rot, land, apex
+              "with this cell. NOTE a NEGATIVE rot_deg means the robot rotated FORWARD: "
+              "this check can only confirm a backward arc, so read the sign first.")
+    return rot, land, apex, tilt
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HOLD-EQUILIBRIUM SETTLE TEST (--settle)
+#
+# AGENTS.md, "Building a new env": a target/rest pose MUST be verified to be a
+# stable equilibrium before training — hold its ctrl for ~3 s from NOISY inits
+# and check TILT, not just height, because a settle test that only records z
+# reports fallen states as "resting fine". Nobody had done it for the backflip
+# env's HOLD phase, whose whole premise is that the robot stands still on the
+# plate for up to 1.0 s (the hold curriculum's final stage) while ready_stance
+# pays it to.
+#
+# This mode reproduces the env's reset EXACTLY: trunk at
+# z0 + PLATE_HALF_THICKNESS + STAND_Z, HOME joints + U(-0.05, 0.05) rad
+# (reset_robot_joints' position_range), x/y jitter +-SPAWN_XY_NOISE, roll/pitch
+# +-SPAWN_TILT_NOISE, yaw +-SPAWN_YAW_NOISE (the cfg's narrowed reset_base
+# pose_range), zero root velocity, plate parked at z0 and rewritten every step
+# exactly as backflip_plate_step does during HOLD.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Spawn noise, mirroring microduck_backflip_env_cfg.py's reset_base override
+# and reset_robot_joints position_range.
+SPAWN_XY_NOISE = 0.01
+SPAWN_YAW_NOISE = 0.05
+SPAWN_TILT_NOISE = 0.02
+SPAWN_JOINT_NOISE = 0.05
+
+SETTLE_SAMPLE_TIMES = (0.1, 0.3, 0.5, 0.7, 1.0)
+
+
+def _quat_from_rpy(roll, pitch, yaw):
+    q = np.zeros(4)
+    mujoco.mju_euler2Quat(q, np.array([roll, pitch, yaw]), "xyz")
+    return q
+
+
+def run_settle(model, data, z0, rng, bam_ctrl=None, duration=3.0,
+               sample_times=SETTLE_SAMPLE_TIMES, noisy=True, on_floor=False):
+    """Hold HOME on the parked plate from a noisy init; return per-time metrics.
+
+    Returns ``(samples, final)`` where ``samples`` maps each requested time to
+    ``(tilt_deg, xy_drift_m, trunk_z)`` and ``final`` is the same triple at
+    ``duration``. Tilt is the angle between the robot's own +z and world +z —
+    the quantity AGENTS.md insists on, since a toppled robot can sit at a
+    perfectly reasonable height.
+    """
+    mujoco.mj_resetData(model, data)
+    dt = model.opt.timestep
+
+    plate_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "plate_free")
+    plate_qadr = model.jnt_qposadr[plate_jid]
+    plate_vadr = model.jnt_dofadr[plate_jid]
+
+    # on_floor: the CONTROL experiment. Open-loop HOME is not a passive
+    # equilibrium anywhere — including on the ground — so a plate-only number
+    # cannot tell you whether the drift is about the plate or about the pose.
+    # Running the identical test on the terrain (plate parked out of the way,
+    # exactly where backflip_plate_step puts it once GONE) separates the two.
+    ctrl = np.concatenate([HOME, np.zeros(model.nu - len(HOME))])
+    if noisy:
+        ctrl_noise = rng.uniform(-SPAWN_JOINT_NOISE, SPAWN_JOINT_NOISE, size=len(HOME))
+        x0 = rng.uniform(-SPAWN_XY_NOISE, SPAWN_XY_NOISE)
+        y0 = rng.uniform(-SPAWN_XY_NOISE, SPAWN_XY_NOISE)
+        roll = rng.uniform(-SPAWN_TILT_NOISE, SPAWN_TILT_NOISE)
+        pitch = rng.uniform(-SPAWN_TILT_NOISE, SPAWN_TILT_NOISE)
+        yaw = rng.uniform(-SPAWN_YAW_NOISE, SPAWN_YAW_NOISE)
+    else:
+        ctrl_noise = np.zeros(len(HOME))
+        x0 = y0 = roll = pitch = yaw = 0.0
+
+    # reset_robot_joints perturbs the JOINT STATE, not the command: the policy's
+    # zero action still asks for HOME, so ctrl stays HOME and qpos gets the
+    # offset. Getting this backwards would test a different (easier) thing.
+    plate_pos = (
+        list(microduck_mdp.BACKFLIP_GONE_POS) if on_floor else [0.0, 0.0, z0]
+    )
+    base_z = STAND_Z if on_floor else z0 + PLATE_HALF_THICKNESS + STAND_Z
+    data.qpos[0:3] = [x0, y0, base_z]
+    data.qpos[3:7] = _quat_from_rpy(roll, pitch, yaw)
+    data.qpos[7 : 7 + len(HOME)] = HOME + ctrl_noise
+    if bam_ctrl is not None:
+        bam_ctrl.reset(data.qpos)
+    _apply_ctrl(data, bam_ctrl, ctrl)
+
+    samples = {}
+    pending = sorted(sample_times)
+    t = 0.0
+    while t < duration - 1e-9:
+        # HOLD-phase plate: parked at z0, motionless, rewritten every step
+        # (a free body would otherwise fall).
+        data.qpos[plate_qadr + 0 : plate_qadr + 3] = plate_pos
+        data.qpos[plate_qadr + 3 : plate_qadr + 7] = [1.0, 0.0, 0.0, 0.0]
+        data.qvel[plate_vadr : plate_vadr + 6] = 0.0
+        if bam_ctrl is not None:
+            bam_ctrl.update()
+        mujoco.mj_step(model, data)
+        t += dt
+        while pending and t >= pending[0] - 1e-9:
+            key = pending.pop(0)
+            samples[key] = (
+                trunk_tilt_deg(data),
+                math.hypot(float(data.qpos[0]) - x0, float(data.qpos[1]) - y0),
+                float(data.qpos[2]),
+            )
+    final = (
+        trunk_tilt_deg(data),
+        math.hypot(float(data.qpos[0]) - x0, float(data.qpos[1]) - y0),
+        float(data.qpos[2]),
+    )
+    return samples, final
+
+
+def settle_report(model, data, z0, trials, seed, bam_ctrl=None, duration=3.0,
+                  noisy=True, on_floor=False):
+    rng = np.random.default_rng(seed)
+    rows = []
+    for _ in range(trials):
+        rows.append(run_settle(model, data, z0, rng, bam_ctrl=bam_ctrl,
+                               duration=duration, noisy=noisy, on_floor=on_floor))
+    print(f"# settle: {'ON FLOOR (control)' if on_floor else f'on plate z0={z0}'} "
+          f"trials={trials} noisy={noisy} duration={duration}s "
+          f"dt={model.opt.timestep} bam={bam_ctrl is not None}")
+    print(f"{'t[s]':>6} {'tilt_mean':>10} {'tilt_max':>9} {'xy_mean':>8} "
+          f"{'xy_max':>7} {'z_mean':>7} {'n_fallen':>9}")
+    for key in list(SETTLE_SAMPLE_TIMES) + [duration]:
+        vals = [(r[0][key] if key in r[0] else r[1]) for r in rows]
+        tilts = [v[0] for v in vals]
+        xys = [v[1] for v in vals]
+        zs = [v[2] for v in vals]
+        fallen = sum(1 for x in tilts if x > 45.0)
+        print(f"{key:6.2f} {np.mean(tilts):10.1f} {max(tilts):9.1f} "
+              f"{np.mean(xys):8.3f} {max(xys):7.3f} {np.mean(zs):7.3f} {fallen:9d}")
+    return rows
 
 
 # Extended default grid (Task 3 addendum). vz now starts at 1.0 (was 1.5) at
@@ -258,6 +580,59 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--z0", type=float, default=0.15)
     ap.add_argument(
+        "--posture", choices=("standing", "tucked"), default="standing",
+        help="Initial posture on the plate. 'standing' (default) reproduces the "
+             "ENV's spawn (reset_backflip_robot_on_plate: HOME pose, trunk at "
+             "z0 + plate half-thickness + STAND_Z). 'tucked' reproduces the "
+             "ORIGINAL probe (pre-squatted 2 cm above the plate top) and the "
+             "docs' pre-'Standing-spawn re-measurement' tables. The two give "
+             "materially different envelopes — see the module docstring.",
+    )
+    ap.add_argument(
+        "--tuck-at-flick", action="store_true",
+        help="Command the tuck pose (HOME + TUCK overrides x tuck factor) from "
+             "t >= t_hold instead of holding the spawn pose. Models the policy "
+             "acting on the flick it feels.",
+    )
+    ap.add_argument("--hold", type=float, default=0.3,
+                    help="t_hold in seconds (env samples 0.1-0.4, curriculum to 1.0).")
+    ap.add_argument("--launch", type=float, default=0.12,
+                    help="t_launch in seconds (env samples 0.08-0.15).")
+    ap.add_argument(
+        "--bam", action="store_true",
+        help="Run the 14 servos through the BAM M6 XL330 model (what training "
+             "uses) instead of the XML's position actuators, at the training "
+             "sim timestep. Slower per cell, but the only mode whose HOLD-phase "
+             "posture drift means anything for the env.",
+    )
+    ap.add_argument("--vin", type=float, default=7.4,
+                    help="BAM supply voltage (training samples 6.5-8.2; 7.4 = nominal 2S).")
+    ap.add_argument("--vin-drop-gain", type=float, default=0.0,
+                    help="BAM load-dependent voltage sag gain (training samples 0.0-0.2).")
+    ap.add_argument(
+        "--settle", action="store_true",
+        help="HOLD-equilibrium settle test instead of a launch sweep: hold HOME "
+             "on the parked plate from noisy inits and report TILT and x/y "
+             "drift at 0.1/0.3/0.5/0.7/1.0 s. Combine with --bam (the actuator "
+             "training uses) — that is the only version whose numbers bear on "
+             "HOLD_RANGE.",
+    )
+    ap.add_argument("--settle-trials", type=int, default=16)
+    ap.add_argument("--settle-duration", type=float, default=3.0,
+                    help="AGENTS.md asks for a 3 s hold; the curriculum's own "
+                         "ceiling is 1.0 s.")
+    ap.add_argument("--settle-on-floor", action="store_true",
+                    help="Control experiment: same settle test with the robot on "
+                         "the TERRAIN and the plate parked away, to separate "
+                         "'the plate is a bad perch' from 'open-loop HOME is not "
+                         "a passive equilibrium anywhere'.")
+    ap.add_argument("--settle-noiseless", action="store_true",
+                    help="Single trial with zero spawn noise (drift baseline).")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--timestep", type=float, default=None,
+                    help="Physics timestep override. Default: the XML's 0.002, "
+                         "or 0.005 (training sim dt) under --bam.")
+    ap.add_argument(
         "--check-direction", action="store_true",
         help="Trace the local +z axis in world coords at ~90deg of accumulated "
              "rotation for one cell, to verify a backward flip and not a "
@@ -281,15 +656,29 @@ def main():
     )
     args = ap.parse_args()
 
-    model = mujoco.MjModel.from_xml_path(SCENE)
-    data = mujoco.MjData(model)
+    model, data, bam_ctrl = build_scene(
+        bam=args.bam, vin=args.vin, vin_drop_gain=args.vin_drop_gain,
+        timestep=args.timestep,
+    )
+
+    if args.settle:
+        settle_report(
+            model, data, args.z0,
+            1 if args.settle_noiseless else args.settle_trials,
+            args.seed, bam_ctrl=bam_ctrl, duration=args.settle_duration,
+            noisy=not args.settle_noiseless, on_floor=args.settle_on_floor,
+        )
+        return
 
     if args.check_direction:
-        print(f"Direction check (z0={args.z0}):")
+        print(f"Direction check (z0={args.z0}, posture={args.posture}, "
+              f"tuck_at_flick={args.tuck_at_flick}, hold={args.hold}, "
+              f"launch={args.launch}, bam={args.bam}, dt={model.opt.timestep}):")
         check_direction(
             model, data,
             vz=args.check_vz, w0=args.check_w0, tuck_factor=args.check_tuck,
-            z0=args.z0,
+            z0=args.z0, posture=args.posture, tuck_at_flick=args.tuck_at_flick,
+            t_hold=args.hold, t_launch=args.launch, bam_ctrl=bam_ctrl,
         )
         return
 
@@ -302,11 +691,21 @@ def main():
             "docs/backflip_envelope_results.md \"The reversal\" before trusting any "
             "of them, especially the best-looking (lowest land_m/s) ones."
         )
-    print(f"{'vz':>5} {'w0':>6} {'tuck':>5} {'rot_deg':>8} {'land_m/s':>9} {'apex_m':>7}")
+    print(f"# posture={args.posture} tuck_at_flick={args.tuck_at_flick} "
+          f"z0={args.z0} hold={args.hold} launch={args.launch} "
+          f"bam={args.bam} dt={model.opt.timestep}")
+    print(f"{'vz':>5} {'w0':>6} {'tuck':>5} {'rot_deg':>8} {'land_m/s':>9} "
+          f"{'apex_m':>7} {'tilt0':>6}")
     for vz, w0, tuck in itertools.product(args.vz, args.w0, args.tuck):
-        rot, land, apex = run_cell(model, data, vz, w0, tuck, args.z0)
+        rot, land, apex, tilt = run_cell(
+            model, data, vz, w0, tuck, args.z0,
+            t_hold=args.hold, t_launch=args.launch,
+            posture=args.posture, tuck_at_flick=args.tuck_at_flick,
+            bam_ctrl=bam_ctrl,
+        )
         flag = "*" if w0 > SAFE_W0_CEILING else " "
-        print(f"{vz:5.2f} {w0:6.1f} {tuck:5.2f} {rot:8.1f} {land:9.2f} {apex:7.3f} {flag}")
+        print(f"{vz:5.2f} {w0:6.1f} {tuck:5.2f} {rot:8.1f} {land:9.2f} "
+              f"{apex:7.3f} {tilt:6.1f} {flag}")
 
 
 if __name__ == "__main__":

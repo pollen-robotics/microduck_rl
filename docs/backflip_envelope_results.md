@@ -17,6 +17,23 @@ survive?
 > and every number in this document is from the corrected code. The old
 > numbers are superseded and should not be used for anything.
 
+> **SUPERSEDED FOR ENV PURPOSES (posture notice, added by the final-review fix
+> wave).** Every table in this document above the section
+> "**Standing-spawn re-measurement (final-review fix wave)**" was measured
+> from a **TUCKED** spawn: the robot pre-squatted in the tuck pose with its
+> trunk ~2 cm above the plate top (CoM ~3 cm up), holding that ctrl from t=0.
+> **The env never produces that posture.**
+> `reset_backflip_robot_on_plate` spawns the robot **STANDING** at
+> `z0 + PLATE_HALF_THICKNESS + STAND_Z` in the HOME pose (CoM ~11 cm up), and
+> the `ready_stance` reward pays it to still be standing when the flick
+> arrives. Re-measured from the standing spawn, **no launch setting closes
+> 360° below the ~2.6 m/s hardware landing limit**, and the DR box this
+> document recommended (`vz ∈ [2.00, 2.25]`, `w0 ∈ [24, 30]`) rotates the
+> standing robot **FORWARD** (face-down, orientation-verified). The recommended
+> box below is therefore valid *only as a statement about a tucked launch
+> posture*; do not read it as the env's envelope. See the new section for the
+> full re-measurement.
+
 ## Commands run
 
 ```
@@ -2285,3 +2302,749 @@ threshold; a DR range that also covers the box's `w0=24, tuck=0.5` and
 was unambiguously over threshold at every corner -- that part of the
 question is answered cleanly: this extension does buy real margin, just not
 a margin-free landing.
+
+
+# Standing-spawn re-measurement (final-review fix wave)
+
+**Why this section exists.** A final whole-branch review found that the whole
+document above measures a posture the env never produces. The probe spawned
+the robot pre-**TUCKED**, squatting with its trunk ~2 cm above the plate top
+and holding the tuck ctrl from t=0. The env spawns it **STANDING**:
+`reset_backflip_robot_on_plate` puts the trunk at
+`z0 + PLATE_HALF_THICKNESS + STAND_Z` (plate top + 0.115 m) in the HOME pose,
+and the `ready_stance` reward pays the policy to still be there when the flick
+arrives. CoM height is ~3 cm tucked vs ~11 cm standing, and CoM height is
+exactly what decides whether the flick tips the robot backward over its heels
+or overdrives the sole contact.
+
+**What changed in the probe** (`scripts/backflip_envelope.py`, same script — new
+flags, no second script):
+
+- `--posture standing|tucked`. `standing` is now the DEFAULT and reproduces the
+  env's spawn arithmetic exactly (no settle offset: the env spawns at rest at
+  that height and the flick arrives `t_hold` later, whatever the pose has
+  drifted to). `tucked` reproduces the original mode, so every table above is
+  still reproducible verbatim and the two are directly diffable.
+- `--tuck-at-flick`: command the tuck pose (HOME with the TUCK overrides, times
+  the tuck factor) from `t >= t_hold`. The policy can act during HOLD and
+  LAUNCH, so this is the fair "what the policy could do" variant; without it a
+  standing cell's `tuck` column is inert.
+- `--bam`: run the 14 servos through the **BAM M6 XL330** model — the actuator
+  training actually uses (AGENTS.md: "Actuators are BAM") — at the training sim
+  timestep (0.005). Reuses `scripts/infer_policy.py`'s loader rather than
+  re-deriving it. **All tables in this section are BAM unless stated
+  otherwise**; the tables above are XML-PD at dt 0.002. BAM turned out to
+  matter a lot for the HOLD drift (see the settle test), which is why it was
+  added rather than assumed away.
+- `--hold` / `--launch` / `--timestep`, and a `tilt0` column: trunk tilt (deg,
+  angle between the robot's own +z and world +z) at the instant the flick
+  starts. For the standing spawn that column is the diagnostic — it says how
+  much of the commanded stance actually survived the hold.
+- `--settle` / `--settle-on-floor` / `--settle-trials` / `--settle-noiseless`:
+  the AGENTS.md-mandated HOLD-equilibrium settle test (below).
+
+Every correctness mechanism the probe already had is untouched: the pre-step
+landing-speed snapshot, the first-contact accumulator latch, the
+plate-excluded floor-contact filter, and `--check-direction`. **Sign
+convention unchanged**: `rot_deg > 0` = backward (a real backflip),
+`rot_deg < 0` = FORWARD (face-down). Every cell quoted as a recommendation or
+as a headline failure below was orientation-verified directly, not inferred
+from the accumulator's sign.
+
+## Head-to-head: only the posture changed
+
+BAM, `t_hold=0.3`, `t_launch=0.12`, `tuck=1.0`, at the DR box the cfg
+currently samples (`vz` in {2.00, 2.25}, `w0` in {24, 30}), all three `z0`:
+
+```
+# posture=standing tuck_at_flick=False z0=0.1 hold=0.3 launch=0.12 bam=True dt=0.005
+   vz     w0  tuck  rot_deg  land_m/s  apex_m  tilt0
+ 2.00   24.0  1.00    -83.5      2.72   0.488    4.9  
+ 2.00   30.0  1.00   -250.8      3.03   0.477    4.9  
+ 2.25   24.0  1.00    -85.9      2.88   0.533    4.9  
+ 2.25   30.0  1.00   -260.9      3.11   0.505    4.9  
+# posture=tucked tuck_at_flick=False z0=0.1 hold=0.3 launch=0.12 bam=True dt=0.005
+   vz     w0  tuck  rot_deg  land_m/s  apex_m  tilt0
+ 2.00   24.0  1.00    447.5      1.73   0.421   15.1  
+ 2.00   30.0  1.00    409.9      1.37   0.332   15.1  
+ 2.25   24.0  1.00    478.9      1.84   0.482   15.1  
+ 2.25   30.0  1.00    445.2      1.27   0.380   15.1  
+# posture=standing tuck_at_flick=False z0=0.15 hold=0.3 launch=0.12 bam=True dt=0.005
+   vz     w0  tuck  rot_deg  land_m/s  apex_m  tilt0
+ 2.00   24.0  1.00    -86.2      2.86   0.538    4.9  
+ 2.00   30.0  1.00   -259.4      3.16   0.527    4.9  
+ 2.25   24.0  1.00    -88.6      3.02   0.583    4.9  
+ 2.25   30.0  1.00   -269.4      3.24   0.555    4.9  
+# posture=tucked tuck_at_flick=False z0=0.15 hold=0.3 launch=0.12 bam=True dt=0.005
+   vz     w0  tuck  rot_deg  land_m/s  apex_m  tilt0
+ 2.00   24.0  1.00    464.1      1.86   0.471   15.1  
+ 2.00   30.0  1.00    429.9      1.41   0.382   15.1  
+ 2.25   24.0  1.00    494.6      2.11   0.532   15.1  
+ 2.25   30.0  1.00    464.3      1.52   0.430   15.1  
+# posture=standing tuck_at_flick=False z0=0.2 hold=0.3 launch=0.12 bam=True dt=0.005
+   vz     w0  tuck  rot_deg  land_m/s  apex_m  tilt0
+ 2.00   24.0  1.00    -89.0      3.01   0.588    4.9  
+ 2.00   30.0  1.00   -268.0      3.29   0.577    4.9  
+ 2.25   24.0  1.00    -91.2      3.17   0.633    4.9  
+ 2.25   30.0  1.00   -275.1      3.33   0.605    4.9  
+# posture=tucked tuck_at_flick=False z0=0.2 hold=0.3 launch=0.12 bam=True dt=0.005
+   vz     w0  tuck  rot_deg  land_m/s  apex_m  tilt0
+ 2.00   24.0  1.00    475.1      1.98   0.521   15.1  
+ 2.00   30.0  1.00    449.8      1.56   0.432   15.1  
+ 2.25   24.0  1.00    515.3      2.52   0.582   15.1  
+ 2.25   30.0  1.00    489.5      1.99   0.480   15.1  
+```
+
+Read the `rot_deg` column: **standing is NEGATIVE in every one of those 12
+cells** — the currently-configured DR box rotates the env's actual spawn
+FORWARD, up to -275 deg, while the same box from a tucked spawn closes
+410-515 deg backward at 1.27-2.52 m/s. `tilt0` also differs (4.9 deg standing
+vs 15.1 deg tucked), but see "the drift is not the cause" below: it isn't the
+mechanism.
+
+**Direction verified, not inferred.** The forward result is what a mislabeled
+sign would look like, so the four worst standing cells were traced directly
+(local +z axis in world coords at 90 deg of accumulated rotation):
+
+```
+standing vz=2.00 w0=30 tuck=1.0 z0=0.15 -> rot=-259.4 land=3.16 apex=0.527
+  t=0.580 accum=-90.7 local+z=(0.917,0.004,-0.398) tilt=113.5  -> +x = FACE-DOWN = FORWARD
+standing vz=2.25 w0=30 tuck=1.0 z0=0.10 -> rot=-260.9 land=3.11 apex=0.505
+  t=0.580 accum=-90.2 local+z=(0.924,0.001,-0.383) tilt=112.5  -> +x = FACE-DOWN = FORWARD
+standing vz=2.25 w0=24 tuck=1.0 z0=0.20 -> rot=-91.2  land=3.17 apex=0.633
+  t=0.940 accum=-90.3 local+z=(0.964,0.019,-0.267) tilt=105.5  -> +x = FACE-DOWN = FORWARD
+standing vz=2.00 w0=24 tuck=1.0 z0=0.15 -> rot=-86.2  land=2.86 apex=0.538
+  (never reaches 90 deg in EITHER direction: it barely rotates at all)
+```
+
+## The drift is not the cause
+
+The standing robot drifts forward during HOLD (4.9 deg of tilt by t=0.3 s under
+BAM), and an upward-accelerating plate amplifies whatever lean is already
+there. That is real but it is NOT the mechanism, because shortening the hold to
+near zero does not rescue the flip. BAM, `z0=0.15`, `vz=2.00`, `tuck=1.0`:
+
+```
+        hold=0.02          hold=0.10          hold=0.30
+        (tilt0=0.1 deg)    (tilt0=1.2 deg)    (tilt0=4.9 deg)
+  w0     rot_deg            rot_deg            rot_deg
+   6.0     +9.9               +0.3              -19.9
+  12.0    +27.6              +13.8              -12.3
+  18.0     +7.4              -10.6              -45.2
+  24.0    -33.3              -52.7              -86.2
+  30.0   -145.5             -172.7             -259.4
+```
+
+Even with essentially zero drift the best standing cell banks **+27.6 deg** —
+7.7% of a flip — and the rotation reverses to forward by `w0` ~ 24. The
+reversal boundary is at `w0` ~ 18-24 standing versus `w0` ~ 36-39 tucked, i.e.
+**inside the box the env samples**. The posture, not the drift, moves it.
+
+## Standing sweep, no policy action (BAM)
+
+`vz` in {2.0 ... 4.0} step 0.5, `w0` in {3 ... 36} step 3, `tuck=1.0`
+(inert here), `t_hold=0.3`, `t_launch=0.12`. 180 cells across three `z0`.
+**Not one cell in any of them is positive.** Best (least-forward) cells per
+`z0`:
+
+```
+z0=0.10:  4.00  18.0   -7.9   4.11  0.981     z0=0.15:  4.00  18.0   -8.0   4.21  1.031
+          4.00  21.0  -10.5   4.01  0.948               4.00  21.0  -10.7   4.15  0.998
+          2.00   9.0  -12.3   2.76  0.506               2.00   9.0  -12.7   2.91  0.556
+z0=0.20:  4.00  18.0   -8.1   4.36  1.081
+          4.00  21.0  -10.8   4.25  1.048
+          2.00  12.0  -12.7   3.04  0.598
+```
+
+Full raw output, all three `z0`:
+
+```
+NOTE: rows with w0 > 30.0 rad/s are marked '*' below. Those cells are NOT direction-verified -- multiple cells in this exact range have been directly checked (--check-direction) and came back FORWARD rolls despite reporting a large 'backward' rot_deg. See docs/backflip_envelope_results.md "The reversal" before trusting any of them, especially the best-looking (lowest land_m/s) ones.
+# posture=standing tuck_at_flick=False z0=0.15 hold=0.3 launch=0.12 bam=True dt=0.005
+   vz     w0  tuck  rot_deg  land_m/s  apex_m  tilt0
+ 2.00    3.0  1.00    -39.7      3.06   0.586    4.9  
+ 2.00    6.0  1.00    -19.9      2.94   0.562    4.9  
+ 2.00    9.0  1.00    -12.7      2.91   0.556    4.9  
+ 2.00   12.0  1.00    -12.3      2.89   0.548    4.9  
+ 2.00   15.0  1.00    -26.2      2.94   0.549    4.9  
+ 2.00   18.0  1.00    -45.2      2.98   0.550    4.9  
+ 2.00   21.0  1.00    -66.6      3.10   0.547    4.9  
+ 2.00   24.0  1.00    -86.2      2.86   0.538    4.9  
+ 2.00   27.0  1.00   -176.3      2.90   0.536    4.9  
+ 2.00   30.0  1.00   -259.4      3.16   0.527    4.9  
+ 2.00   33.0  1.00   -288.4      2.97   0.538    4.9 *
+ 2.00   36.0  1.00   -295.7      2.83   0.523    4.9 *
+ 2.50    3.0  1.00    -66.4      3.63   0.729    4.9  
+ 2.50    6.0  1.00    -39.1      3.43   0.694    4.9  
+ 2.50    9.0  1.00    -23.8      3.31   0.673    4.9  
+ 2.50   12.0  1.00    -16.9      3.29   0.666    4.9  
+ 2.50   15.0  1.00    -15.1      3.21   0.648    4.9  
+ 2.50   18.0  1.00    -34.7      3.27   0.646    4.9  
+ 2.50   21.0  1.00    -60.3      3.33   0.641    4.9  
+ 2.50   24.0  1.00    -88.8      3.19   0.630    4.9  
+ 2.50   27.0  1.00   -107.3      3.01   0.611    4.9  
+ 2.50   30.0  1.00   -262.2      3.35   0.597    4.9  
+ 2.50   33.0  1.00   -289.5      2.98   0.546    4.9 *
+ 2.50   36.0  1.00   -304.3      2.86   0.554    4.9 *
+ 3.00    3.0  1.00    -94.4      3.88   0.894    4.9  
+ 3.00    6.0  1.00    -69.0      3.93   0.862    4.9  
+ 3.00    9.0  1.00    -41.9      3.76   0.825    4.9  
+ 3.00   12.0  1.00    -22.2      3.63   0.790    4.9  
+ 3.00   15.0  1.00    -16.6      3.58   0.774    4.9  
+ 3.00   18.0  1.00    -16.6      3.51   0.753    4.9  
+ 3.00   21.0  1.00    -44.2      3.54   0.742    4.9  
+ 3.00   24.0  1.00    -81.7      3.54   0.731    4.9  
+ 3.00   27.0  1.00   -111.5      3.31   0.707    4.9  
+ 3.00   30.0  1.00   -212.5      3.52   0.694    4.9  
+ 3.00   33.0  1.00   -279.2      3.37   0.627    4.9 *
+ 3.00   36.0  1.00   -290.0      2.96   0.546    4.9 *
+ 3.50    3.0  1.00   -133.3      4.25   1.088    4.9  
+ 3.50    6.0  1.00   -103.4      4.21   1.054    4.9  
+ 3.50    9.0  1.00    -68.1      4.31   0.999    4.9  
+ 3.50   12.0  1.00    -33.6      4.07   0.947    4.9  
+ 3.50   15.0  1.00    -14.4      3.93   0.909    4.9  
+ 3.50   18.0  1.00    -17.0      3.89   0.890    4.9  
+ 3.50   21.0  1.00    -18.4      3.80   0.856    4.9  
+ 3.50   24.0  1.00    -64.3      3.86   0.836    4.9  
+ 3.50   27.0  1.00   -106.1      3.61   0.814    4.9  
+ 3.50   30.0  1.00   -121.6      3.49   0.772    4.9  
+ 3.50   33.0  1.00   -263.3      3.78   0.744    4.9 *
+ 3.50   36.0  1.00   -288.0      3.31   0.652    4.9 *
+ 4.00    3.0  1.00   -182.7      4.82   1.304    4.9  
+ 4.00    6.0  1.00   -145.7      4.69   1.270    4.9  
+ 4.00    9.0  1.00    -99.2      4.57   1.196    4.9  
+ 4.00   12.0  1.00    -61.5      4.59   1.144    4.9  
+ 4.00   15.0  1.00    -26.3      4.37   1.083    4.9  
+ 4.00   18.0  1.00     -8.0      4.21   1.031    4.9  
+ 4.00   21.0  1.00    -10.7      4.15   0.998    4.9  
+ 4.00   24.0  1.00    -33.8      4.09   0.951    4.9  
+ 4.00   27.0  1.00    -89.3      3.98   0.922    4.9  
+ 4.00   30.0  1.00   -116.4      3.76   0.876    4.9  
+ 4.00   33.0  1.00   -128.0      3.64   0.830    4.9 *
+ 4.00   36.0  1.00   -258.7      3.85   0.781    4.9 *
+```
+
+```
+NOTE: rows with w0 > 30.0 rad/s are marked '*' below. Those cells are NOT direction-verified -- multiple cells in this exact range have been directly checked (--check-direction) and came back FORWARD rolls despite reporting a large 'backward' rot_deg. See docs/backflip_envelope_results.md "The reversal" before trusting any of them, especially the best-looking (lowest land_m/s) ones.
+# posture=standing tuck_at_flick=False z0=0.1 hold=0.3 launch=0.12 bam=True dt=0.005
+   vz     w0  tuck  rot_deg  land_m/s  apex_m  tilt0
+ 2.00    3.0  1.00    -38.5      2.92   0.536    4.9  
+ 2.00    6.0  1.00    -19.2      2.79   0.512    4.9  
+ 2.00    9.0  1.00    -12.3      2.76   0.506    4.9  
+ 2.00   12.0  1.00    -12.0      2.75   0.498    4.9  
+ 2.00   15.0  1.00    -25.2      2.74   0.499    4.9  
+ 2.00   18.0  1.00    -43.3      2.79   0.500    4.9  
+ 2.00   21.0  1.00    -64.0      2.90   0.497    4.9  
+ 2.00   24.0  1.00    -83.5      2.72   0.488    4.9  
+ 2.00   27.0  1.00   -168.4      2.68   0.486    4.9  
+ 2.00   30.0  1.00   -250.8      3.03   0.477    4.9  
+ 2.00   33.0  1.00   -278.6      2.85   0.488    4.9 *
+ 2.00   36.0  1.00   -285.2      2.73   0.473    4.9 *
+ 2.50    3.0  1.00    -64.8      3.49   0.679    4.9  
+ 2.50    6.0  1.00    -38.1      3.28   0.644    4.9  
+ 2.50    9.0  1.00    -23.2      3.16   0.623    4.9  
+ 2.50   12.0  1.00    -16.4      3.14   0.616    4.9  
+ 2.50   15.0  1.00    -14.7      3.07   0.598    4.9  
+ 2.50   18.0  1.00    -33.5      3.07   0.596    4.9  
+ 2.50   21.0  1.00    -58.7      3.18   0.591    4.9  
+ 2.50   24.0  1.00    -86.3      3.05   0.580    4.9  
+ 2.50   27.0  1.00   -104.2      2.86   0.561    4.9  
+ 2.50   30.0  1.00   -254.6      3.21   0.547    4.9  
+ 2.50   33.0  1.00   -279.6      2.87   0.496    4.9 *
+ 2.50   36.0  1.00   -293.9      2.76   0.504    4.9 *
+ 3.00    3.0  1.00    -93.0      3.79   0.844    4.9  
+ 3.00    6.0  1.00    -68.0      3.83   0.812    4.9  
+ 3.00    9.0  1.00    -41.2      3.66   0.775    4.9  
+ 3.00   12.0  1.00    -21.7      3.48   0.740    4.9  
+ 3.00   15.0  1.00    -16.2      3.44   0.724    4.9  
+ 3.00   18.0  1.00    -16.2      3.36   0.703    4.9  
+ 3.00   21.0  1.00    -43.2      3.39   0.692    4.9  
+ 3.00   24.0  1.00    -79.7      3.39   0.681    4.9  
+ 3.00   27.0  1.00   -108.6      3.16   0.657    4.9  
+ 3.00   30.0  1.00   -205.1      3.31   0.644    4.9  
+ 3.00   33.0  1.00   -271.1      3.24   0.577    4.9 *
+ 3.00   36.0  1.00   -279.8      2.85   0.496    4.9 *
+ 3.50    3.0  1.00   -131.6      4.15   1.038    4.9  
+ 3.50    6.0  1.00   -102.1      4.11   1.004    4.9  
+ 3.50    9.0  1.00    -66.8      4.16   0.949    4.9  
+ 3.50   12.0  1.00    -32.9      3.92   0.897    4.9  
+ 3.50   15.0  1.00    -14.3      3.83   0.859    4.9  
+ 3.50   18.0  1.00    -16.7      3.75   0.840    4.9  
+ 3.50   21.0  1.00    -18.0      3.66   0.806    4.9  
+ 3.50   24.0  1.00    -63.4      3.76   0.786    4.9  
+ 3.50   27.0  1.00   -104.5      3.51   0.764    4.9  
+ 3.50   30.0  1.00   -118.7      3.34   0.722    4.9  
+ 3.50   33.0  1.00   -256.7      3.64   0.694    4.9 *
+ 3.50   36.0  1.00   -282.4      3.23   0.602    4.9 *
+ 4.00    3.0  1.00   -180.7      4.71   1.254    4.9  
+ 4.00    6.0  1.00   -144.0      4.59   1.220    4.9  
+ 4.00    9.0  1.00    -98.0      4.47   1.146    4.9  
+ 4.00   12.0  1.00    -60.7      4.50   1.094    4.9  
+ 4.00   15.0  1.00    -25.9      4.22   1.033    4.9  
+ 4.00   18.0  1.00     -7.9      4.11   0.981    4.9  
+ 4.00   21.0  1.00    -10.5      4.01   0.948    4.9  
+ 4.00   24.0  1.00    -33.2      3.94   0.901    4.9  
+ 4.00   27.0  1.00    -88.1      3.88   0.872    4.9  
+ 4.00   30.0  1.00   -114.7      3.66   0.826    4.9  
+ 4.00   33.0  1.00   -125.0      3.49   0.780    4.9 *
+ 4.00   36.0  1.00   -254.6      3.75   0.731    4.9 *
+```
+
+```
+NOTE: rows with w0 > 30.0 rad/s are marked '*' below. Those cells are NOT direction-verified -- multiple cells in this exact range have been directly checked (--check-direction) and came back FORWARD rolls despite reporting a large 'backward' rot_deg. See docs/backflip_envelope_results.md "The reversal" before trusting any of them, especially the best-looking (lowest land_m/s) ones.
+# posture=standing tuck_at_flick=False z0=0.2 hold=0.3 launch=0.12 bam=True dt=0.005
+   vz     w0  tuck  rot_deg  land_m/s  apex_m  tilt0
+ 2.00    3.0  1.00    -41.3      3.26   0.636    4.9  
+ 2.00    6.0  1.00    -20.7      3.13   0.612    4.9  
+ 2.00    9.0  1.00    -13.3      3.10   0.606    4.9  
+ 2.00   12.0  1.00    -12.7      3.04   0.598    4.9  
+ 2.00   15.0  1.00    -27.0      3.09   0.599    4.9  
+ 2.00   18.0  1.00    -46.5      3.13   0.600    4.9  
+ 2.00   21.0  1.00    -68.6      3.25   0.597    4.9  
+ 2.00   24.0  1.00    -89.0      3.01   0.588    4.9  
+ 2.00   27.0  1.00   -182.3      3.06   0.586    4.9  
+ 2.00   30.0  1.00   -268.0      3.29   0.577    4.9  
+ 2.00   33.0  1.00   -298.1      3.08   0.588    4.9 *
+ 2.00   36.0  1.00   -306.2      2.93   0.573    4.9 *
+ 2.50    3.0  1.00    -68.0      3.78   0.779    4.9  
+ 2.50    6.0  1.00    -40.1      3.57   0.744    4.9  
+ 2.50    9.0  1.00    -24.4      3.46   0.723    4.9  
+ 2.50   12.0  1.00    -17.3      3.43   0.716    4.9  
+ 2.50   15.0  1.00    -15.5      3.36   0.698    4.9  
+ 2.50   18.0  1.00    -35.7      3.41   0.696    4.9  
+ 2.50   21.0  1.00    -61.9      3.48   0.691    4.9  
+ 2.50   24.0  1.00    -90.4      3.29   0.680    4.9  
+ 2.50   27.0  1.00   -110.5      3.16   0.661    4.9  
+ 2.50   30.0  1.00   -267.3      3.44   0.647    4.9  
+ 2.50   33.0  1.00   -299.3      3.09   0.596    4.9 *
+ 2.50   36.0  1.00   -314.7      2.96   0.604    4.9 *
+ 3.00    3.0  1.00    -95.7      3.98   0.944    4.9  
+ 3.00    6.0  1.00    -70.5      4.08   0.912    4.9  
+ 3.00    9.0  1.00    -42.8      3.90   0.875    4.9  
+ 3.00   12.0  1.00    -22.7      3.77   0.840    4.9  
+ 3.00   15.0  1.00    -16.9      3.73   0.824    4.9  
+ 3.00   18.0  1.00    -17.0      3.65   0.803    4.9  
+ 3.00   21.0  1.00    -45.3      3.69   0.792    4.9  
+ 3.00   24.0  1.00    -83.0      3.63   0.781    4.9  
+ 3.00   27.0  1.00   -114.3      3.46   0.757    4.9  
+ 3.00   30.0  1.00   -217.9      3.67   0.744    4.9  
+ 3.00   33.0  1.00   -284.6      3.45   0.677    4.9 *
+ 3.00   36.0  1.00   -300.3      3.06   0.596    4.9 *
+ 3.50    3.0  1.00   -135.9      4.40   1.138    4.9  
+ 3.50    6.0  1.00   -105.4      4.36   1.104    4.9  
+ 3.50    9.0  1.00    -69.0      4.40   1.049    4.9  
+ 3.50   12.0  1.00    -34.0      4.17   0.997    4.9  
+ 3.50   15.0  1.00    -14.7      4.08   0.959    4.9  
+ 3.50   18.0  1.00    -17.3      3.99   0.940    4.9  
+ 3.50   21.0  1.00    -18.7      3.95   0.906    4.9  
+ 3.50   24.0  1.00    -65.7      4.00   0.886    4.9  
+ 3.50   27.0  1.00   -108.6      3.75   0.864    4.9  
+ 3.50   30.0  1.00   -123.6      3.59   0.822    4.9  
+ 3.50   33.0  1.00   -267.6      3.88   0.794    4.9 *
+ 3.50   36.0  1.00   -296.4      3.43   0.702    4.9 *
+ 4.00    3.0  1.00   -184.8      4.92   1.354    4.9  
+ 4.00    6.0  1.00   -147.4      4.79   1.320    4.9  
+ 4.00    9.0  1.00   -100.3      4.67   1.246    4.9  
+ 4.00   12.0  1.00    -62.2      4.69   1.194    4.9  
+ 4.00   15.0  1.00    -26.6      4.46   1.133    4.9  
+ 4.00   18.0  1.00     -8.1      4.36   1.081    4.9  
+ 4.00   21.0  1.00    -10.8      4.25   1.048    4.9  
+ 4.00   24.0  1.00    -34.2      4.19   1.001    4.9  
+ 4.00   27.0  1.00    -91.1      4.13   0.972    4.9  
+ 4.00   30.0  1.00   -118.9      3.91   0.926    4.9  
+ 4.00   33.0  1.00   -130.0      3.74   0.880    4.9 *
+ 4.00   36.0  1.00   -265.0      3.99   0.831    4.9 *
+```
+
+## Standing sweep WITH the policy tucking at the flick (BAM)
+
+This is the fair version — the policy feels the flick and can tuck.
+`--tuck-at-flick`, `vz` in {2.0 ... 4.0} step 0.5, `w0` in {3 ... 36} step 3,
+`tuck` in {0.5, 1.0}, `t_launch=0.12`. **360 deg now closes — but only at
+`vz >= 3.0`, i.e. only at landing speeds far over the hardware limit.**
+
+Lowest-landing cells that close 360 deg (all `z0`):
+
+```
+ vz     w0  tuck  rot_deg  land_m/s  apex_m
+ 3.50  21.0  1.00    524.6      3.69   0.986   (z0=0.10)  <- lowest landing of any 360-closing cell at t_launch=0.12
+ 3.50  24.0  1.00    495.6      3.65   0.912   (z0=0.10)
+ 3.50  21.0  1.00    531.4      3.78   1.036   (z0=0.15)
+ 4.00  18.0  1.00    563.3      4.24   1.249   (z0=0.15)
+ 3.00  18.0  1.00    362.6      4.18   0.812   (z0=0.10)
+```
+
+Cells matching `rot_deg >= 360` **and** `land_m/s <= 2.6`: **none.**
+Cells matching `rot_deg >= 300` **and** `land_m/s <= 2.9`: **none.**
+
+Direction traces on the three best 360-closing cells (all PASS, backward):
+
+```
+vz=3.5 w0=21 tuck=1.0 z0=0.15: accum=90.7 @0.555s local+z=(-0.995,0.020,0.101)  -> BACKWARD. rot=531.4 land=3.78
+vz=3.5 w0=24 tuck=1.0 z0=0.15: accum=90.1 @0.555s local+z=(-0.999,-0.020,0.031) -> BACKWARD. rot=502.4 land=3.72
+vz=4.0 w0=18 tuck=1.0 z0=0.15: accum=91.3 @0.560s local+z=(-0.988,-0.044,0.150) -> BACKWARD. rot=563.3 land=4.24
+```
+
+Full raw output (`z0=0.15`; `z0=0.10` / `0.20` follow the same surface,
+shifted by the extra/reduced drop):
+
+```
+NOTE: rows with w0 > 30.0 rad/s are marked '*' below. Those cells are NOT direction-verified -- multiple cells in this exact range have been directly checked (--check-direction) and came back FORWARD rolls despite reporting a large 'backward' rot_deg. See docs/backflip_envelope_results.md "The reversal" before trusting any of them, especially the best-looking (lowest land_m/s) ones.
+# posture=standing tuck_at_flick=True z0=0.15 hold=0.3 launch=0.12 bam=True dt=0.005
+   vz     w0  tuck  rot_deg  land_m/s  apex_m  tilt0
+ 2.00    3.0  0.50   -172.1      3.03   0.559    4.9  
+ 2.00    3.0  1.00   -271.1      2.49   0.477    4.9  
+ 2.00    6.0  0.50   -144.9      2.83   0.534    4.9  
+ 2.00    6.0  1.00   -261.0      2.56   0.463    4.9  
+ 2.00    9.0  0.50   -120.6      2.75   0.510    4.9  
+ 2.00    9.0  1.00   -224.7      2.74   0.445    4.9  
+ 2.00   12.0  0.50    -99.1      2.62   0.488    4.9  
+ 2.00   12.0  1.00   -190.3      2.88   0.423    4.9  
+ 2.00   15.0  0.50    -86.7      2.56   0.473    4.9  
+ 2.00   15.0  1.00     15.3      2.78   0.462    4.9  
+ 2.00   18.0  0.50    -85.1      2.51   0.463    4.9  
+ 2.00   18.0  1.00    127.5      2.80   0.477    4.9  
+ 2.00   21.0  0.50    -89.7      2.48   0.454    4.9  
+ 2.00   21.0  1.00    147.5      2.61   0.464    4.9  
+ 2.00   24.0  0.50   -102.7      2.47   0.449    4.9  
+ 2.00   24.0  1.00    112.1      2.63   0.441    4.9  
+ 2.00   27.0  0.50   -117.0      2.49   0.445    4.9  
+ 2.00   27.0  1.00   -105.1      2.31   0.396    4.9  
+ 2.00   30.0  0.50   -122.3      2.46   0.435    4.9  
+ 2.00   30.0  1.00   -150.1      2.51   0.365    4.9  
+ 2.00   33.0  0.50   -154.1      2.47   0.413    4.9 *
+ 2.00   33.0  1.00   -157.0      2.57   0.362    4.9 *
+ 2.00   36.0  0.50   -152.5      2.44   0.378    4.9 *
+ 2.00   36.0  1.00   -167.1      2.65   0.360    4.9 *
+ 2.50    3.0  0.50   -236.7      3.54   0.679    4.9  
+ 2.50    3.0  1.00   -371.0      2.58   0.564    4.9  
+ 2.50    6.0  0.50   -209.3      3.51   0.658    4.9  
+ 2.50    6.0  1.00   -365.7      2.53   0.550    4.9  
+ 2.50    9.0  0.50   -165.3      3.20   0.626    4.9  
+ 2.50    9.0  1.00   -309.7      2.48   0.530    4.9  
+ 2.50   12.0  0.50   -135.4      3.02   0.598    4.9  
+ 2.50   12.0  1.00     -8.9      3.05   0.559    4.9  
+ 2.50   15.0  0.50   -109.9      2.90   0.570    4.9  
+ 2.50   15.0  1.00    187.6      3.09   0.607    4.9  
+ 2.50   18.0  0.50   -101.8      2.85   0.551    4.9  
+ 2.50   18.0  1.00    162.2      2.98   0.576    4.9  
+ 2.50   21.0  0.50   -100.7      2.78   0.534    4.9  
+ 2.50   21.0  1.00    331.6      3.69   0.639    4.9  
+ 2.50   24.0  0.50   -105.8      2.74   0.517    4.9  
+ 2.50   24.0  1.00      2.7      2.93   0.519    4.9  
+ 2.50   27.0  0.50   -123.0      2.73   0.508    4.9  
+ 2.50   27.0  1.00    123.5      2.84   0.499    4.9  
+ 2.50   30.0  0.50   -131.2      2.66   0.495    4.9  
+ 2.50   30.0  1.00   -162.8      2.68   0.401    4.9  
+ 2.50   33.0  0.50   -136.6      2.65   0.482    4.9 *
+ 2.50   33.0  1.00   -172.6      2.73   0.396    4.9 *
+ 2.50   36.0  0.50   -178.5      2.73   0.438    4.9 *
+ 2.50   36.0  1.00   -188.5      2.83   0.393    4.9 *
+ 3.00    3.0  0.50   -299.6      3.57   0.812    4.9  
+ 3.00    3.0  1.00   -456.4      3.39   0.651    4.9  
+ 3.00    6.0  0.50   -269.6      3.68   0.792    4.9  
+ 3.00    6.0  1.00   -452.1      3.31   0.639    4.9  
+ 3.00    9.0  0.50   -228.7      3.77   0.761    4.9  
+ 3.00    9.0  1.00   -398.3      2.84   0.621    4.9  
+ 3.00   12.0  0.50   -183.8      3.54   0.727    4.9  
+ 3.00   12.0  1.00    -82.2      3.47   0.747    4.9  
+ 3.00   15.0  0.50   -140.9      3.29   0.685    4.9  
+ 3.00   15.0  1.00    226.1      3.41   0.754    4.9  
+ 3.00   18.0  0.50   -118.4      3.20   0.652    4.9  
+ 3.00   18.0  1.00    362.6      4.18   0.812    4.9  
+ 3.00   21.0  0.50   -116.3      3.14   0.629    4.9  
+ 3.00   21.0  1.00    247.6      3.88   0.783    4.9  
+ 3.00   24.0  0.50   -116.0      3.05   0.604    4.9  
+ 3.00   24.0  1.00    265.1      3.49   0.686    4.9  
+ 3.00   27.0  0.50   -123.1      2.95   0.579    4.9  
+ 3.00   27.0  1.00     34.3      3.20   0.583    4.9  
+ 3.00   30.0  0.50   -135.6      2.91   0.559    4.9  
+ 3.00   30.0  1.00    131.0      2.88   0.535    4.9  
+ 3.00   33.0  0.50   -144.0      2.86   0.543    4.9 *
+ 3.00   33.0  1.00   -187.8      2.93   0.435    4.9 *
+ 3.00   36.0  0.50   -150.9      2.84   0.530    4.9 *
+ 3.00   36.0  1.00   -192.8      2.87   0.428    4.9 *
+ 3.50    3.0  0.50   -381.5      3.82   0.956    4.9  
+ 3.50    3.0  1.00   -584.6      3.95   0.747    4.9  
+ 3.50    6.0  0.50   -343.3      3.71   0.939    4.9  
+ 3.50    6.0  1.00   -581.8      3.95   0.734    4.9  
+ 3.50    9.0  0.50   -286.4      3.88   0.901    4.9  
+ 3.50    9.0  1.00    -70.5      3.47   0.832    4.9  
+ 3.50   12.0  0.50   -239.6      4.00   0.867    4.9  
+ 3.50   12.0  1.00    108.6      4.19   0.962    4.9  
+ 3.50   15.0  0.50   -179.3      3.77   0.821    4.9  
+ 3.50   15.0  1.00    384.4      4.58   1.009    4.9  
+ 3.50   18.0  0.50   -145.7      3.54   0.777    4.9  
+ 3.50   18.0  1.00    403.9      4.48   1.002    4.9  
+ 3.50   21.0  0.50   -126.5      3.42   0.738    4.9  
+ 3.50   21.0  1.00    531.4      3.78   1.036    4.9  
+ 3.50   24.0  0.50   -131.8      3.36   0.707    4.9  
+ 3.50   24.0  1.00    502.4      3.72   0.962    4.9  
+ 3.50   27.0  0.50   -127.8      3.21   0.666    4.9  
+ 3.50   27.0  1.00    382.2      4.10   0.798    4.9  
+ 3.50   30.0  0.50   -130.6      3.10   0.629    4.9  
+ 3.50   30.0  1.00    -21.6      3.34   0.661    4.9  
+ 3.50   33.0  0.50   -145.2      3.07   0.608    4.9 *
+ 3.50   33.0  1.00    174.4      3.02   0.601    4.9 *
+ 3.50   36.0  0.50   -156.4      3.06   0.592    4.9 *
+ 3.50   36.0  1.00     42.2      3.06   0.558    4.9 *
+ 4.00    3.0  0.50   -461.0      4.44   1.105    4.9  
+ 4.00    3.0  1.00   -713.8      3.48   0.926    4.9  
+ 4.00    6.0  0.50   -421.1      4.20   1.089    4.9  
+ 4.00    6.0  1.00   -721.6      3.46   0.912    4.9  
+ 4.00    9.0  0.50   -364.4      4.02   1.059    4.9  
+ 4.00    9.0  1.00   -315.8      4.26   1.120    4.9  
+ 4.00   12.0  0.50   -300.4      4.14   1.020    4.9  
+ 4.00   12.0  1.00    112.5      4.66   1.186    4.9  
+ 4.00   15.0  0.50   -237.6      4.28   0.977    4.9  
+ 4.00   15.0  1.00    289.8      4.95   1.211    4.9  
+ 4.00   18.0  0.50   -183.5      4.03   0.916    4.9  
+ 4.00   18.0  1.00    563.3      4.24   1.249    4.9  
+ 4.00   21.0  0.50   -158.8      3.82   0.872    4.9  
+ 4.00   21.0  1.00    236.7      3.99   1.100    4.9  
+ 4.00   24.0  0.50   -141.6      3.66   0.816    4.9  
+ 4.00   24.0  1.00    315.3      3.98   1.062    4.9  
+ 4.00   27.0  0.50   -148.1      3.55   0.773    4.9  
+ 4.00   27.0  1.00    388.0      4.40   0.953    4.9  
+ 4.00   30.0  0.50   -140.4      3.39   0.719    4.9  
+ 4.00   30.0  1.00    279.4      4.23   0.843    4.9  
+ 4.00   33.0  0.50   -138.1      3.27   0.677    4.9 *
+ 4.00   33.0  1.00     20.2      3.55   0.711    4.9 *
+ 4.00   36.0  0.50   -153.9      3.23   0.656    4.9 *
+ 4.00   36.0  1.00    -77.7      3.09   0.616    4.9 *
+```
+
+## Does the longest launch ramp rescue it? (BAM, `t_launch=0.15`)
+
+`t_launch` is sampled in `[0.08, 0.15]`, and a longer ramp transfers more
+angular impulse. It helps materially — and still does not reach the hardware
+limit. `--tuck-at-flick`, `vz` in {2.0 ... 3.0} step 0.25, `w0` in
+{9 ... 24} step 3, `tuck` in {0.75, 1.0}, all three `z0` (180 cells):
+
+```
+Cells with rot_deg >= 360 AND land_m/s <= 2.6:  NONE
+Best rot_deg among cells landing <= 2.6 m/s:
+ 2.00  21.0  1.00    208.8      2.45   0.464   (z0=0.15)
+ 2.00  21.0  1.00    201.8      2.28   0.414   (z0=0.10)   <- direction-verified BACKWARD
+ 2.25  21.0  1.00    160.5      2.53   0.445
+Lowest landing among cells that close 360:
+ 2.50  18.0  1.00    370.8      3.61   0.600   (z0=0.10)
+ 2.50  21.0  1.00    382.9      3.43   0.574   (z0=0.10)   <- direction-verified BACKWARD; BEST STANDING CELL FOUND
+ 2.50  21.0  1.00    393.7      3.51   0.624   (z0=0.15)
+```
+
+Direction traces:
+
+```
+vz=2.5 w0=21 tuck=1.0 z0=0.10 launch=0.15: accum=92.1 @0.575s local+z=(-0.986,-0.089,-0.144) -> BACKWARD. rot=382.9 land=3.43
+vz=2.0 w0=21 tuck=1.0 z0=0.10 launch=0.15: accum=90.9 @0.640s local+z=(-0.990, 0.137, 0.041) -> BACKWARD. rot=201.8 land=2.28
+```
+
+The `t_launch=0.08` end of the range is strictly worse: every cell in
+`vz` in {2.0, 2.25, 2.5} x `w0` in {15 ... 27} comes out forward
+(-141 to -226 deg).
+
+## The tucked box still holds under BAM (so the gap really is the posture)
+
+To rule out "BAM breaks the flip" as the explanation, the published box was
+re-run from the TUCKED spawn under BAM, `z0=0.15`:
+
+```
+NOTE: rows with w0 > 30.0 rad/s are marked '*' below. Those cells are NOT direction-verified -- multiple cells in this exact range have been directly checked (--check-direction) and came back FORWARD rolls despite reporting a large 'backward' rot_deg. See docs/backflip_envelope_results.md "The reversal" before trusting any of them, especially the best-looking (lowest land_m/s) ones.
+# posture=tucked tuck_at_flick=False z0=0.15 hold=0.3 launch=0.12 bam=True dt=0.005
+   vz     w0  tuck  rot_deg  land_m/s  apex_m  tilt0
+ 2.00   12.0  0.50    285.2      3.36   0.559   13.2  
+ 2.00   12.0  1.00    331.3      3.50   0.570   15.1  
+ 2.00   18.0  0.50    406.7      2.73   0.553   13.2  
+ 2.00   18.0  1.00    427.4      2.52   0.555   15.1  
+ 2.00   24.0  0.50    454.5      2.00   0.476   13.2  
+ 2.00   24.0  1.00    464.1      1.86   0.471   15.1  
+ 2.00   30.0  0.50    430.5      1.51   0.384   13.2  
+ 2.00   30.0  1.00    429.9      1.41   0.382   15.1  
+ 2.00   36.0  0.50    381.6      1.43   0.315   13.2 *
+ 2.00   36.0  1.00    352.6      1.71   0.318   15.1 *
+ 2.25   12.0  0.50    304.7      3.53   0.640   13.2  
+ 2.25   12.0  1.00    359.6      3.67   0.652   15.1  
+ 2.25   18.0  0.50    447.5      2.78   0.626   13.2  
+ 2.25   18.0  1.00    474.9      2.59   0.632   15.1  
+ 2.25   24.0  0.50    503.8      2.44   0.537   13.2  
+ 2.25   24.0  1.00    494.6      2.11   0.532   15.1  
+ 2.25   30.0  0.50    479.1      1.90   0.428   13.2  
+ 2.25   30.0  1.00    464.3      1.52   0.430   15.1  
+ 2.25   36.0  0.50    411.3      1.28   0.352   13.2 *
+ 2.25   36.0  1.00    411.5      1.26   0.350   15.1 *
+ 2.50   12.0  0.50    331.7      3.74   0.730   13.2  
+ 2.50   12.0  1.00    382.1      3.78   0.749   15.1  
+ 2.50   18.0  0.50    467.6      2.95   0.703   13.2  
+ 2.50   18.0  1.00    504.1      2.77   0.711   15.1  
+ 2.50   24.0  0.50    531.7      2.93   0.603   13.2  
+ 2.50   24.0  1.00    556.3      3.04   0.594   15.1  
+ 2.50   30.0  0.50    523.6      2.59   0.487   13.2  
+ 2.50   30.0  1.00    532.1      2.50   0.473   15.1  
+ 2.50   36.0  0.50    459.4      1.69   0.390   13.2 *
+ 2.50   36.0  1.00    440.2      1.23   0.382   15.1 *
+ 3.00   12.0  0.50    358.2      4.11   0.915   13.2  
+ 3.00   12.0  1.00    410.1      4.05   0.934   15.1  
+ 3.00   18.0  0.50    528.9      3.52   0.878   13.2  
+ 3.00   18.0  1.00    499.7      3.73   0.877   15.1  
+ 3.00   24.0  0.50    644.1      4.00   0.747   13.2  
+ 3.00   24.0  1.00    654.3      4.24   0.744   15.1  
+ 3.00   30.0  0.50    658.2      3.38   0.597   13.2  
+ 3.00   30.0  1.00    626.6      3.68   0.587   15.1  
+ 3.00   36.0  0.50    610.9      3.19   0.475   13.2 *
+ 3.00   36.0  1.00    597.7      3.60   0.472   15.1 *
+```
+
+`vz` in [2.00, 2.25] x `w0` in [24, 30] x `tuck` in [0.5, 1.0] closes
+410-504 deg backward at **1.41-2.44 m/s** — the published box reproduces under
+the training actuator. The tucked/standing gap is the posture, full stop.
+
+## Verdict on the DR box: LEFT UNTOUCHED
+
+No launch setting closes 360 deg from the env's standing spawn below the
+~2.6 m/s hardware limit. The best direction-verified 360-closing standing cell
+is `vz=2.5, w0=21, tuck-at-flick 1.0, t_launch=0.15, z0=0.10` -> **382.9 deg at
+3.43 m/s** (~60 cm free-fall equivalent, ~32% over the limit). The best cell
+that lands under 2.6 m/s reaches **201.8 deg** — a bit over half a flip.
+
+Per the fix-wave brief, `Z0_RANGE` / `VZ_RANGE` / `W0_RANGE` / `MAX_PAID_RATE`
+are therefore **left exactly as they were**, and no redesign was invented. The
+cfg and `reset_backflip_launch_params` docstrings now carry the posture warning
+instead. `MAX_PAID_RATE = 25.0` rad/s remains adequate on the measurement it
+was set from (13-16 rad/s average over a closing flip) and is not the binding
+constraint here.
+
+**The option, for the user to decide.** The one launch posture that IS measured
+to close 360 deg at a survivable landing speed is the tucked one, and the env
+could produce it — the policy has `t_hold` (0.1-1.0 s) to crouch before the
+flick. That means rethinking `ready_stance`, which currently pays the policy
+`up * exp(-(z - (z0 + STAND_Z + PLATE_HALF_THICKNESS))^2 / 0.03^2)` for the
+whole HOLD window, i.e. pays it specifically NOT to crouch. That is a design
+change to the reward stack, so it is reported as an option with the evidence
+above, not made here.
+
+## HOLD-equilibrium settle test (AGENTS.md requirement)
+
+`--settle`: hold HOME on the parked plate from noisy inits matching the env's
+resets exactly (HOME joints + U(-0.05, 0.05) rad per `reset_robot_joints`,
+x/y +-0.01 m, roll/pitch +-0.02 rad, yaw +-0.05 rad per the cfg's narrowed
+`reset_base`, zero root velocity), plate rewritten at `z0` every step as
+`backflip_plate_step` does during HOLD. **TILT, not just height** — a settle
+test that only records z reports a toppled robot as resting fine.
+`n_fallen` counts trials past 45 deg of tilt.
+
+```
+# settle: on plate z0=0.1 trials=32 noisy=True duration=3.0s dt=0.005 bam=True
+  t[s]  tilt_mean  tilt_max  xy_mean  xy_max  z_mean  n_fallen
+  0.10        0.9       2.0    0.003   0.007   0.222         0
+  0.30        3.5       6.5    0.005   0.010   0.221         0
+  0.50        7.3      11.7    0.008   0.016   0.220         0
+  0.70       11.6      17.7    0.012   0.022   0.219         0
+  1.00       23.2      42.4    0.028   0.064   0.217         0
+  3.00      113.3     113.4    0.128   0.133   0.078        32
+# settle: on plate z0=0.15 trials=32 noisy=True duration=3.0s dt=0.005 bam=True
+  t[s]  tilt_mean  tilt_max  xy_mean  xy_max  z_mean  n_fallen
+  0.10        0.9       2.0    0.003   0.007   0.272         0
+  0.30        3.5       6.5    0.005   0.010   0.271         0
+  0.50        7.3      11.7    0.008   0.016   0.270         0
+  0.70       11.6      17.7    0.012   0.022   0.269         0
+  1.00       23.2      42.4    0.028   0.064   0.267         0
+  3.00      123.4     124.4    0.140   0.146   0.116        32
+# settle: on plate z0=0.2 trials=32 noisy=True duration=3.0s dt=0.005 bam=True
+  t[s]  tilt_mean  tilt_max  xy_mean  xy_max  z_mean  n_fallen
+  0.10        0.9       2.0    0.003   0.007   0.322         0
+  0.30        3.5       6.5    0.005   0.010   0.321         0
+  0.50        7.3      11.7    0.008   0.016   0.320         0
+  0.70       11.6      17.7    0.012   0.022   0.319         0
+  1.00       23.2      42.4    0.028   0.064   0.317         0
+  3.00      118.4     133.7    0.196   0.421   0.117        32
+# settle: ON FLOOR (control) trials=32 noisy=True duration=3.0s dt=0.005 bam=True
+  t[s]  tilt_mean  tilt_max  xy_mean  xy_max  z_mean  n_fallen
+  0.10        0.9       2.0    0.003   0.007   0.116         0
+  0.30        3.3       6.7    0.004   0.010   0.115         0
+  0.50        6.9      12.7    0.007   0.016   0.115         0
+  0.70       11.2      19.7    0.012   0.022   0.114         0
+  1.00       23.6      54.1    0.030   0.082   0.111         2
+  3.00       80.6      80.8    0.130   0.134   0.044        32
+# settle: on plate z0=0.15 trials=32 noisy=True duration=3.0s dt=0.002 bam=False
+  t[s]  tilt_mean  tilt_max  xy_mean  xy_max  z_mean  n_fallen
+  0.10        0.9       2.0    0.003   0.007   0.272         0
+  0.30        4.9       8.5    0.005   0.011   0.271         0
+  0.50       12.7      19.0    0.013   0.022   0.269         0
+  0.70       27.2      40.5    0.029   0.049   0.264         0
+  1.00       98.5     124.5    0.139   0.174   0.180        31
+  3.00      129.3     137.6    0.143   0.152   0.080        32
+# settle: on plate z0=0.15 trials=1 noisy=False duration=3.0s dt=0.005 bam=True
+  t[s]  tilt_mean  tilt_max  xy_mean  xy_max  z_mean  n_fallen
+  0.10        1.2       1.2    0.001   0.001   0.272         0
+  0.30        4.9       4.9    0.005   0.005   0.271         0
+  0.50        8.9       8.9    0.009   0.009   0.270         0
+  0.70       13.8      13.8    0.014   0.014   0.269         0
+  1.00       26.8      26.8    0.033   0.033   0.266         0
+  3.00      123.5     123.5    0.140   0.140   0.116         1
+```
+
+**Reading it:**
+
+- **Under BAM the robot does NOT hold the pose for the hold curriculum's 1.0 s
+  ceiling**: tilt is 0.9 deg at 0.1 s, 3.5 deg at 0.3 s, 7.3 deg at 0.5 s,
+  11.6 deg at 0.7 s, and **23.2 deg mean / 42.4 deg worst at 1.0 s**, with x/y
+  drift growing to 2.8 cm mean / 6.4 cm worst on an 18 cm plate. By AGENTS.md's
+  3 s criterion it fails outright: 32/32 trials toppled (113-123 deg of tilt).
+  The drift is monotonic, not oscillatory — this is a slow topple, not a wobble.
+  Identical at all three `z0` (the plate height does not enter the pose's
+  stability).
+- **BAM matters, exactly as the fix-wave brief guessed**: the XML-PD row
+  (dt 0.002, the mode every earlier table used) is ~4x worse at 1.0 s — 98.5
+  deg mean, 31/32 already fallen — against BAM's 23.2 deg. The reviewer's
+  open-loop XML-PD numbers were pessimistic, but not pessimistic enough to
+  change the conclusion.
+- **It is NOT the plate.** The `--settle-on-floor` control (robot on the
+  terrain, plate parked at `BACKFLIP_GONE_POS`) drifts identically: 0.9 / 3.3 /
+  6.9 / 11.2 / 23.6 deg. Open-loop HOME is simply not a passive equilibrium for
+  this robot, on the plate or off it. Every other microduck env shares that
+  property; their policies actively balance, which is what `ready_stance` is
+  paying for here, and a closed-loop policy is not measured by this test.
+- **The honest conclusion about `HOLD_RANGE`**: nothing here says the plate
+  perch is unusually bad, but nothing here supports the premise that "standing
+  still on the hands" is a free, passive state the policy merely has to avoid
+  disturbing. At the curriculum's 1.0 s ceiling the pose has decayed by ~23 deg
+  open-loop, so the policy must be actively balancing through most of every
+  long hold, and the launch condition at `t_hold = 1.0 s` is whatever that
+  active balancing leaves — not the spawn pose. If the flip turns out to be
+  sensitive to `tilt0` (and the drift sweep above says it is: 4.9 deg of tilt
+  costs 30-115 deg of rotation), the cheap mitigation is to keep `HOLD_RANGE`
+  short rather than to widen it to 1.0 s.
+
+## Reproducing everything in this section
+
+```bash
+# head-to-head at the current DR box (per z0 in 0.10 0.15 0.20)
+uv run python scripts/backflip_envelope.py --bam --posture standing --z0 0.15 --vz 2.00,2.25 --w0 24,30 --tuck 1.0
+uv run python scripts/backflip_envelope.py --bam --posture tucked   --z0 0.15 --vz 2.00,2.25 --w0 24,30 --tuck 1.0
+
+# standing sweep, no policy action
+uv run python scripts/backflip_envelope.py --bam --posture standing --z0 0.15 --hold 0.3 \
+    --vz 2.0,2.5,3.0,3.5,4.0 --w0 3,6,9,12,15,18,21,24,27,30,33,36 --tuck 1.0
+
+# standing sweep with the policy tucking at the flick
+uv run python scripts/backflip_envelope.py --bam --posture standing --tuck-at-flick --z0 0.15 --hold 0.3 \
+    --vz 2.0,2.5,3.0,3.5,4.0 --w0 3,6,9,12,15,18,21,24,27,30,33,36 --tuck 0.5,1.0
+
+# longest launch ramp
+uv run python scripts/backflip_envelope.py --bam --posture standing --tuck-at-flick --z0 0.15 --hold 0.3 --launch 0.15 \
+    --vz 2.0,2.25,2.5,2.75,3.0 --w0 9,12,15,18,21,24 --tuck 0.75,1.0
+
+# drift-is-not-the-cause scan (repeat with --hold 0.02 / 0.10 / 0.30)
+uv run python scripts/backflip_envelope.py --bam --posture standing --z0 0.15 --hold 0.02 --vz 2.0 --w0 6,12,18,24,30 --tuck 1.0
+
+# direction checks (one cell each)
+uv run python scripts/backflip_envelope.py --bam --posture standing --tuck-at-flick --z0 0.10 --hold 0.3 --launch 0.15 \
+    --check-direction --check-vz 2.5 --check-w0 21.0 --check-tuck 1.0
+
+# settle test
+uv run python scripts/backflip_envelope.py --settle --bam --z0 0.15 --settle-trials 32
+uv run python scripts/backflip_envelope.py --settle --bam --settle-on-floor --settle-trials 32
+uv run python scripts/backflip_envelope.py --settle --z0 0.15 --settle-trials 32          # XML-PD comparison
+uv run python scripts/backflip_envelope.py --settle --bam --z0 0.15 --settle-noiseless
+```
