@@ -16,16 +16,32 @@ the tuck pose with its trunk ~2 cm above the plate top, holding that ctrl from
 t=0. Every table in docs/backflip_envelope_results.md above the
 "Standing-spawn re-measurement" section was measured this way.
 
-``--posture standing`` (now the DEFAULT) reproduces what the ENV actually
-does: ``reset_backflip_robot_on_plate`` puts the trunk at
-``z0 + PLATE_HALF_THICKNESS + STAND_Z`` in the HOME pose, and the
-``ready_stance`` reward pays the policy to still be standing there when the
-flick arrives. That is a ~11 cm CoM, not the tuck's ~3 cm, and CoM height is
+``--posture tucked_env`` (now the DEFAULT) reproduces what the ENV actually
+does: ``reset_backflip_robot_on_plate`` folds the robot to
+``TUCK_OVERRIDES x TUCK_FACTOR`` and puts the trunk at
+``z0 + PLATE_HALF_THICKNESS + TUCK_Z`` (all four constants IMPORTED from the
+cfg, so this mode cannot silently stop being what the env does), and
+``ready_stance`` pays the policy to still be holding that tuck when the flick
+arrives.
+
+``--posture standing`` reproduces the SUPERSEDED standing hold (HOME pose at
+STAND_Z). It is kept because it is the measurement that killed itself: a
+standing robot has a ~11 cm CoM, not the tuck's ~3 cm, and CoM height is
 exactly what decides whether the flick tips the robot backward over its heels
 or overdrives the sole contact and throws it FORWARD. The reversal boundary
-sits near w0 ~ 36-39 rad/s tucked but near w0 ~ 24-27 rad/s standing, so the
-posture is not a detail: it moves the usable box. Keep both modes so the two
-are directly diffable.
+sits near w0 ~ 36-39 rad/s tucked but near w0 ~ 18-24 rad/s standing — inside
+the box that was configured at the time. Keep all three modes so they stay
+directly diffable.
+
+Two acceptance modes worth knowing about:
+  --box-check     WHOLE-BOX verification of the cfg's DR ranges from the env's
+                  actual spawn. Reports the WORST cell, not the best: every
+                  corner AND midpoint of z0 / vz / w0 / t_launch, crossed with
+                  the hold extremes and tuck depths, must close 360 deg under
+                  2.6 m/s. A box whose interior contains one dead cell is not
+                  a box — that is how the previous box got shipped.
+  --measure-tuck-z  Re-measure TUCK_Z (the tucked resting trunk height on the
+                  plate top) by dropping the robot from several offsets.
 
 ``--tuck-at-flick`` additionally commands the tuck pose (HOME with the TUCK
 overrides applied, scaled by the tuck factor) from t >= t_hold, i.e. the
@@ -279,10 +295,12 @@ def run_cell(model, data, vz, w0, tuck_factor, z0, t_hold=0.3, t_launch=0.12,
             *[torch.tensor([v]) for v in (t, t_hold, t_launch, z0, vz, w0)]
         )
         # The flick has started (phase left HOLD). Snapshot how much of the
-        # commanded posture survived the hold — for the standing spawn this is
-        # THE diagnostic: the env pays ready_stance to still be upright here,
-        # and an already-toppling robot gets flicked from the wrong CoM. Also
-        # the instant a policy would react, so --tuck-at-flick switches ctrl.
+        # commanded posture survived the hold — THE diagnostic for any spawn:
+        # the env pays ready_stance to still be holding the pose here, and a
+        # robot that has drifted gets flicked from the wrong CoM. Read it
+        # against the pose's own equilibrium (~14 deg for the tuck, ~0 for
+        # standing). Also the instant a policy would react, so --tuck-at-flick
+        # switches ctrl here.
         if tilt_at_flick is None and int(phase) != microduck_mdp.BACKFLIP_PHASE_HOLD:
             tilt_at_flick = trunk_tilt_deg(data)
             _apply_ctrl(data, bam_ctrl, flick_ctrl)

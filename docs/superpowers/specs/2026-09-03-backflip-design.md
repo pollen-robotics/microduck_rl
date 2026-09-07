@@ -4,6 +4,28 @@ Date: 2026-09-03
 Branch: `feat/backflip`
 Status: approved design, ready for implementation planning
 
+> **AMENDMENT 2026-09-07 — the hold posture is TUCKED, not standing.**
+> This design specified that the robot *stands* on the plate through HOLD, and
+> the env was built that way. It is wrong, and the measurement is what says so:
+> re-measured from a standing spawn under BAM actuators (~700
+> direction-checked cells over `vz` ∈ [2, 4] × `ω0` ∈ [3, 36] × `t_launch` ∈
+> [0.08, 0.15], with and without tucking at the flick), **no launch setting
+> closes 360° below the ~2.6 m/s hardware landing limit**, and the DR box that
+> had been configured rotated a standing robot **forward** (to −275°,
+> face-down, orientation-verified). A standing robot has a ~11 cm CoM and a
+> large pitch inertia, so the flick overdrives the sole contact instead of
+> tipping it over its heels; tucked (~3 cm CoM) the same class of box closes
+> 393–484° at 1.68–2.51 m/s. The launch envelope in the original document had
+> been measured from a *tucked* probe spawn all along, so the spec, the spawn
+> and the reward had simply never agreed on one posture.
+>
+> Everything else in this document stands. The concrete deltas are marked
+> **[AMENDED]** below: the robot spawns folded, `ready_stance` pays for holding
+> the tuck rather than for standing, the launch box is narrower and whole-box
+> verified, and the `z0` DR tail stops at 0.225 m. The landing target is
+> unchanged — the duck still lands on its feet, standing.
+> Evidence: `docs/backflip_envelope_results.md`, section "Tucked hold".
+
 ## Problem
 
 Microduck (~800 g, ~25 cm, 14 XL330 servos) cannot generate the vertical
@@ -13,8 +35,9 @@ job is the airborne half — tuck to speed the rotation up, extend to slow it,
 and land on its feet without breaking itself.
 
 The environment models the hands as a **launcher plate**: a prop the robot
-stands on, which lifts and flicks it and then leaves the scene, so the robot
-lands on bare floor.
+waits on, which lifts and flicks it and then leaves the scene, so the robot
+lands on bare floor. **[AMENDED]** the robot waits on it *tucked* (folded, chin
+in), not standing — see the amendment at the top.
 
 ## Success criterion
 
@@ -38,6 +61,9 @@ hardware.
 | Launch timing | Variable hold (0.1–1.0 s), no trigger bit — reactive | Firing at t=0 requires the operator to press and throw in the same instant; a trigger bit adds runtime plumbing and a real-time sync the hands must honor |
 | Spin source | Plate supplies lift *and* backward flick | Pure vertical ejection makes the robot generate all angular momentum in a very short push window — the part most likely never to converge |
 | Launch height | 0.10–0.20 m, 0.30 m as a DR tail | Higher launches buy airtime, but the landing impact is the hardware risk |
+| **[AMENDED]** Hold posture | **Tucked** (folded, chin in), at the measured 0.029 m resting trunk height on the plate top | Standing was the original choice; measured, it cannot close a safe flip at any launch setting, and it rotates the robot forward inside the configured box |
+| **[AMENDED]** Launch height, revised | 0.10–0.20 m, **0.225 m** as the DR tail | Measured landing speed at the box's worst corner: 2.51 m/s at `z0`=0.20, 2.56 at 0.225, 2.61 at 0.250, **2.80 at 0.300** — the original 0.30 m tail is over the damage threshold |
+| **[AMENDED]** Flick duration | 0.12–0.14 s, not 0.08–0.15 | A *short* flick is the violent one: `t_launch`=0.08 lands at up to 3.97 m/s. The operator's flick duration is not free DR |
 
 ## 1. Launcher
 
@@ -66,7 +92,7 @@ consequences are all wanted:
 
 | Phase | Plate | Robot |
 |---|---|---|
-| HOLD, duration `t_hold` | parked at `z0`, zero velocity | stands on it; no cue that launch is coming |
+| HOLD, duration `t_hold` | parked at `z0`, zero velocity | **[AMENDED]** waits on it *tucked*; no cue that launch is coming |
 | LAUNCH, `t_launch` ≈ 0.08–0.15 s | prescribed constant *acceleration* — linear velocity ramps 0 → `vz`, pitch rate 0 → `ω0` | rides it; may add energy by extending legs |
 | GONE | teleported to z = −3, velocities zeroed | ballistic; lands on bare floor |
 
@@ -91,7 +117,8 @@ across resets, the same rule DR follows.
 
 ### Randomized per episode
 
-`z0` ∈ [0.10, 0.20] m (DR tail to 0.30), `t_hold`, `t_launch`, `vz`, `ω0`, plus
+`z0` ∈ [0.10, 0.20] m (**[AMENDED]** DR tail to 0.225, not 0.30), `t_hold`,
+`t_launch`, `vz`, `ω0`, plus
 small lateral and yaw asymmetry so the policy cannot assume a perfectly clean
 toss.
 
@@ -102,6 +129,10 @@ impact. Illustrative free-flight numbers from a 0.15 m launch: `vz` = 3 m/s
 gives ~0.65 s of air, a ~0.6 m apex and a ~3.4 m/s landing; `vz` = 2 m/s gives
 ~0.43 s of air and requires ~14 rad/s of sustained spin. Neither is a number to
 build on, so implementation step 1 is a headless sweep of `vz` × `ω0` × tuck
+(**[AMENDED]** and the sweep must run from the env's ACTUAL spawn posture, and
+be accepted WHOLE-BOX — every corner and midpoint closing, not the best cell.
+The measured box is `vz` ∈ [2.00, 2.10], `ω0` ∈ [21, 23], `t_launch` ∈
+[0.12, 0.14], worst cell 393.6° at 2.51 m/s.)
 depth on the actual model, recording rotation achieved and landing speed. The
 measured envelope sets the DR ranges. Guessing heights across model revisions
 is exactly the failure the standup env logged.
@@ -113,7 +144,8 @@ length 4.0 s: hold + ~0.6 s flight + ≥ 1.5 s landing settle.
 
 Two spawn buckets (roulade's reverse curriculum, inverted for a flip):
 
-- **On-plate standing** — the whole task, start to finish.
+- **On-plate** (**[AMENDED]**: tucked, not standing) — the whole task, start
+  to finish.
 - **Mid-flight** — spawned already airborne at 90°–330° through the flip with
   matching backward ω and downward velocity, plate already gone, rotation
   accumulator pre-set to the spawn angle. Without this, the frontier of the
@@ -145,9 +177,15 @@ learned:
 - **`impact`** — |a_z| penalty, weighted harder than roulade: the landing is
   the hardware risk. This is what buys knee/ankle absorption; a bespoke "bend
   your knees" term would be gamed.
-- **`ready_stance`** — small upright + height term active only during HOLD, so
-  the robot stands still on the hands instead of squirming off before the
-  flick.
+- **`ready_stance`** — **[AMENDED]** small `pose × height` term active only
+  during HOLD, paying the robot to hold the TUCK on the hands instead of
+  squirming off before the flick (originally: upright + standing height). No
+  upright factor: the tuck's own equilibrium is a trunk pitched 12–15°
+  (measured), so an upright term would fight the pose the term exists to hold.
+  It pays a crouched robot per step, which is the shape AGENTS.md warns about;
+  it is legitimate here because the tuck is the *good* state and the paying
+  window is closed by the plate's prescribed schedule rather than by anything
+  the policy does, so it cannot be camped.
 - **Regularizers** — `action_rate` / `joint_torque_rate` from ≈ 0, ramped in
   after the flip exists; motion-blockers (body angular velocity, angular
   momentum) near zero throughout, since a backflip *is* a large

@@ -33,6 +33,14 @@ survive?
 > box below is therefore valid *only as a statement about a tucked launch
 > posture*; do not read it as the env's envelope. See the new section for the
 > full re-measurement.
+>
+> **RESOLVED 2026-09-07:** the user's decision was to switch the env's HOLD
+> posture to TUCKED, so the spawn, the hold reward and the envelope now all
+> describe one posture. The env's CURRENT, whole-box-verified box is in the
+> last section, "**Tucked hold**": `z0 in [0.10, 0.20]`, `vz in [2.00, 2.10]`,
+> `w0 in [21, 23]`, `t_launch in [0.12, 0.14]`. Neither the tucked-probe box
+> at the top of this document nor the standing re-measurement is the env's
+> box; both are history.
 
 ## Commands run
 
@@ -3047,4 +3055,377 @@ uv run python scripts/backflip_envelope.py --settle --bam --z0 0.15 --settle-tri
 uv run python scripts/backflip_envelope.py --settle --bam --settle-on-floor --settle-trials 32
 uv run python scripts/backflip_envelope.py --settle --z0 0.15 --settle-trials 32          # XML-PD comparison
 uv run python scripts/backflip_envelope.py --settle --bam --z0 0.15 --settle-noiseless
+```
+
+
+# Tucked hold — the posture switch, and the box measured from it
+
+**Decision, and who made it.** The standing-spawn re-measurement above put the
+question to the user: the env spawned the robot STANDING, the envelope had been
+measured TUCKED, and from the standing spawn nothing closed a safe flip. The
+user chose to switch the HOLD posture to TUCKED. This section is the
+measurement that follows from that decision — the tucked resting height, the
+whole-box re-verification from the ACTUAL new spawn, and the tucked settle
+test. Everything here is CPU MuJoCo with **BAM actuators** at the training sim
+timestep (0.005).
+
+The probe now IMPORTS `TUCK_OVERRIDES`, `TUCK_FACTOR`, `TUCK_Z`, `STAND_Z`,
+`PLATE_HALF_THICKNESS` and the four DR ranges from
+`microduck_backflip_env_cfg.py` instead of copying them, so
+`--posture tucked_env` cannot silently drift away from what the env does —
+which is exactly how the previous envelope came to describe a posture the env
+never produced.
+
+## 1. TUCK_Z: the measured tucked resting height
+
+`uv run python scripts/backflip_envelope.py --measure-tuck-z --bam --z0 0.15
+--tuck 0.5,0.75,1.0`
+
+Drop the tucked robot from four different offsets above the plate top, hold the
+tuck ctrl, settle 3 s, read `trunk_z - plate_top`:
+
+```
+# measure-tuck-z: z0=0.15 duration=3.0s dt=0.005 bam=True   (TUCK_Z in the script = 0.029)
+ tuck  offset   h@0.1   h@1.0   h@end  tilt@0.1  tilt@1.0  tilt@end  xy@end
+ 0.50   0.020  0.0280  0.0287  0.0285      11.1      11.8      12.5  0.0060
+ 0.50   0.026  0.0283  0.0286  0.0286      11.1      12.0      12.4  0.0064
+ 0.50   0.029  0.0283  0.0285  0.0285      11.4      12.5      12.5  0.0064
+ 0.50   0.032  0.0283  0.0286  0.0286      11.8      12.3      12.4  0.0066
+ 0.75   0.020  0.0282  0.0287  0.0287      15.7      13.8      14.0  0.0073
+ 0.75   0.026  0.0283  0.0286  0.0286      14.1      13.8      14.1  0.0081
+ 0.75   0.029  0.0284  0.0286  0.0286      13.7      13.8      13.9  0.0085
+ 0.75   0.032  0.0286  0.0287  0.0286      13.8      13.9      14.0  0.0091
+ 1.00   0.020  0.0259  0.0258  0.0259      13.4      15.0      14.9  0.0113
+ 1.00   0.026  0.0265  0.0262  0.0256      14.0      14.7      15.1  0.0115
+ 1.00   0.029  0.0264  0.0256  0.0259      13.9      15.9      15.4  0.0118
+ 1.00   0.032  0.0261  0.0256  0.0256      14.2      15.0      15.3  0.0118
+```
+
+**TUCK_Z = 0.029 m.** The pose rests at **0.0286 m** above the plate top for
+tuck factors 0.5-0.75 and **0.0257 m** at full tuck, converging from every
+spawn offset tried, within 0.1-0.3 s. Two things this measurement is for:
+
+- It is **not** `STAND_Z`. The standing trunk sits at 0.115 m; the tucked one
+  at 0.029 m. Carrying a height across poses is precisely the failure
+  AGENTS.md records as having cost days, so the constant is measured and
+  carries the date.
+- It is a **floor** as much as a target: spawning much below ~0.010 m jams the
+  folded legs into the plate and the contact solver ejects the robot clean off
+  it (measured: `h` goes negative and tilt jumps to 80-155 deg).
+
+## 2. Settle test on the TUCKED pose (AGENTS.md requirement, re-run)
+
+Same protocol as the standing settle test above — noisy inits matching the
+env's resets exactly (target pose + U(-0.05, 0.05) rad per joint, x/y ±0.01 m,
+roll/pitch ±0.02 rad, yaw ±0.05 rad, zero root velocity), plate rewritten at
+`z0` every step, TILT and x/y drift reported, `n_fallen` counting trials past
+45 deg.
+
+**Read the tilt against the pose's own equilibrium.** A folded robot rests with
+its trunk pitched 12-15 deg *by geometry*. "Tilt 14.0 deg, unchanged from 0.1 s
+to 3 s" is a settled tuck, not a falling one; what matters is whether it MOVES.
+
+```
+# settle: posture=tucked_env tuck=0.75 on plate z0=0.1 trials=32 noisy=True duration=3.0s dt=0.005 bam=True
+  t[s]  tilt_mean  tilt_max  xy_mean  xy_max  z_mean  n_fallen
+  0.10       13.7      14.4    0.008   0.009   0.138         0
+  0.30       14.3      14.6    0.008   0.009   0.139         0
+  0.50       14.1      14.5    0.008   0.009   0.139         0
+  0.70       14.0      14.5    0.008   0.009   0.139         0
+  1.00       13.9      14.4    0.008   0.010   0.139         0
+  3.00       14.0      14.5    0.008   0.011   0.139         0
+# settle: posture=tucked_env tuck=0.75 on plate z0=0.15 trials=32 noisy=True duration=3.0s dt=0.005 bam=True
+  t[s]  tilt_mean  tilt_max  xy_mean  xy_max  z_mean  n_fallen
+  0.10       13.7      14.4    0.008   0.009   0.188         0
+  0.30       14.3      14.6    0.008   0.009   0.189         0
+  0.50       14.1      14.5    0.008   0.009   0.189         0
+  0.70       14.0      14.5    0.008   0.009   0.189         0
+  1.00       13.9      14.4    0.008   0.010   0.189         0
+  3.00       14.0      14.5    0.008   0.011   0.189         0
+# settle: posture=tucked_env tuck=0.75 on plate z0=0.2 trials=32 noisy=True duration=3.0s dt=0.005 bam=True
+  t[s]  tilt_mean  tilt_max  xy_mean  xy_max  z_mean  n_fallen
+  0.10       13.7      14.4    0.008   0.009   0.238         0
+  0.30       14.3      14.6    0.008   0.009   0.239         0
+  0.50       14.1      14.5    0.008   0.009   0.239         0
+  0.70       14.0      14.5    0.008   0.009   0.239         0
+  1.00       13.9      14.4    0.008   0.010   0.239         0
+  3.00       14.0      14.5    0.008   0.011   0.239         0
+# settle: posture=tucked_env tuck=0.5 on plate z0=0.15 trials=32 noisy=True duration=3.0s dt=0.005 bam=True
+  t[s]  tilt_mean  tilt_max  xy_mean  xy_max  z_mean  n_fallen
+  0.10       11.0      11.5    0.006   0.007   0.188         0
+  0.30       12.4      12.6    0.006   0.007   0.188         0
+  0.50       12.2      12.5    0.006   0.007   0.189         0
+  0.70       12.2      12.5    0.006   0.007   0.189         0
+  1.00       12.3      12.5    0.006   0.007   0.189         0
+  3.00       12.3      12.5    0.006   0.007   0.189         0
+# settle: posture=tucked_env tuck=1.0 on plate z0=0.15 trials=32 noisy=True duration=3.0s dt=0.005 bam=True
+  t[s]  tilt_mean  tilt_max  xy_mean  xy_max  z_mean  n_fallen
+  0.10       13.2      14.2    0.007   0.008   0.186         0
+  0.30       15.0      15.9    0.008   0.009   0.186         0
+  0.50       15.3      16.2    0.008   0.009   0.186         0
+  0.70       15.2      16.1    0.008   0.010   0.186         0
+  1.00       15.1      17.4    0.009   0.011   0.186         0
+  3.00       15.2      16.4    0.011   0.015   0.186         0
+# settle: posture=tucked_env tuck=0.75 on plate z0=0.15 trials=32 noisy=True duration=3.0s dt=0.002 bam=False
+  t[s]  tilt_mean  tilt_max  xy_mean  xy_max  z_mean  n_fallen
+  0.10       13.6      14.3    0.008   0.009   0.189         0
+  0.30       14.6      16.2    0.009   0.010   0.188         0
+  0.50       14.1      14.5    0.008   0.009   0.188         0
+  0.70       14.0      14.5    0.008   0.009   0.188         0
+  1.00       14.0      14.5    0.008   0.009   0.188         0
+  3.00       14.0      14.4    0.009   0.010   0.188         0
+```
+
+**Verdict: the tucked hold is a genuine stable equilibrium.**
+
+| | standing (superseded) | tucked (`TUCK_FACTOR` 0.75) |
+|---|---|---|
+| tilt @ 0.1 s | 0.9 deg | 13.7 deg |
+| tilt @ 0.3 s | 3.5 deg | 14.3 deg |
+| **tilt @ 0.5 s** | **7.3 deg** | **14.1 deg** |
+| tilt @ 0.7 s | 11.6 deg | 14.0 deg |
+| **tilt @ 1.0 s** | **23.2 deg (max 42.4)** | **13.9 deg (max 14.4)** |
+| tilt @ 3.0 s | 123.4 deg | 14.0 deg (max 14.5) |
+| fallen by 3 s | **32/32** | **0/32** |
+| x/y drift @ 3 s | 0.140 m | 0.008 m |
+
+The tucked number is flat, not merely smaller: it reaches its equilibrium by
+0.1 s and stays there for 3 s. Identical at `z0` = 0.10 / 0.15 / 0.20 (plate
+height does not enter the pose's stability), and the XML-PD run agrees within
+0.5 deg — unlike the standing pose, this one does not depend on the actuator
+model at all, which is what a passively stable configuration looks like.
+
+Tuck depth barely matters for stability: 0.5 / 0.75 / 1.0 rest at 12.3 / 14.0 /
+15.3 deg with 3 s drifts of 7 / 11 / 15 mm and 0/32 falls each. 0.75 was chosen
+as the spawn depth for being interior on both the stability and the closure
+axes.
+
+**Consequence for `HOLD_RANGE`: the curriculum's 1.0 s ceiling stands**, with
+3x margin — the pose holds 3 s, and the box closes at `t_hold` = 1.0 s as well
+as 0.1 s (below). No cap was needed.
+
+## 3. Whole-box verification from the ACTUAL new spawn
+
+`uv run python scripts/backflip_envelope.py --box-check --bam`
+
+The acceptance rule is the one the previous box failed. Not "the best corner
+closes" — **every** sampled combination of the CORNERS AND MIDPOINTS of `z0`,
+`vz`, `w0` and `t_launch`, crossed with the hold extremes (0.1 s and the
+curriculum's 1.0 s) and tuck depths 0.5 / 0.75 / 1.0, must close >= 360 deg
+BACKWARD at <= 2.6 m/s. Tuck depth is swept even though the spawn is fixed at
+0.75, because the policy can deepen or open the tuck during HOLD and LAUNCH.
+
+```
+# box-check posture=tucked_env bam=True dt=0.005
+#   z0 (0.1, 0.2) vz (2.0, 2.1) w0 (21.0, 23.0) launch (0.12, 0.14)
+#   hold (0.1, 1.0) tuck (0.5, 0.75, 1.0)
+  486 cells | min rot = 393.6 deg | max landing = 2.51 m/s | short of 360: 0 | over 2.6 m/s: 0
+  worst by rotation:
+    rot=  393.6 land= 1.79 apex=0.381 tilt0= 13.9  z0=0.100 vz=2.000 w0=23.00 launch=0.140 hold=0.10 tuck=1.00
+    rot=  398.8 land= 2.07 apex=0.424 tilt0= 15.9  z0=0.100 vz=2.000 w0=23.00 launch=0.140 hold=1.00 tuck=1.00
+    rot=  400.9 land= 2.32 apex=0.458 tilt0= 15.9  z0=0.100 vz=2.000 w0=21.00 launch=0.140 hold=1.00 tuck=1.00
+    rot=  403.6 land= 1.87 apex=0.395 tilt0= 13.9  z0=0.100 vz=2.000 w0=22.00 launch=0.140 hold=0.10 tuck=1.00
+    rot=  404.6 land= 1.94 apex=0.404 tilt0= 13.9  z0=0.100 vz=2.000 w0=21.00 launch=0.140 hold=0.10 tuck=1.00
+  worst by landing speed:
+    rot=  475.7 land= 2.51 apex=0.621 tilt0= 15.9  z0=0.200 vz=2.100 w0=21.00 launch=0.120 hold=1.00 tuck=1.00
+    rot=  473.9 land= 2.50 apex=0.598 tilt0= 12.5  z0=0.200 vz=2.100 w0=21.00 launch=0.120 hold=1.00 tuck=0.50
+    rot=  465.0 land= 2.49 apex=0.585 tilt0= 12.5  z0=0.200 vz=2.050 w0=21.00 launch=0.120 hold=1.00 tuck=0.50
+    rot=  464.2 land= 2.49 apex=0.585 tilt0= 11.4  z0=0.200 vz=2.050 w0=21.00 launch=0.120 hold=0.10 tuck=0.50
+    rot=  466.9 land= 2.48 apex=0.594 tilt0= 15.9  z0=0.200 vz=2.000 w0=21.00 launch=0.120 hold=1.00 tuck=1.00
+  RESULT: PASS — whole box closes 360 deg under 2.6 m/s
+```
+
+**486 cells, 0 short of 360 deg, 0 over 2.6 m/s. Worst cell 393.6 deg
+(33.6 deg of margin) at 1.79 m/s; worst landing 2.51 m/s (0.09 m/s of margin)
+at 475.7 deg.**
+
+### The old box does NOT pass this rule from the real spawn
+
+For comparison, the previously configured box
+(`vz` [2.00, 2.25], `w0` [24, 30], `t_launch` [0.08, 0.15]) run from the same
+tucked_env spawn over its corners x hold x launch, 324 cells:
+
+```
+min rot = 278.8 deg   max land = 3.97 m/s
+closed >= 360: 308/324    land <= 2.6: 234/324    BOTH: 218/324
+worst by rotation:
+  rot=278.8 land=1.93 z0=0.10 vz=2.00 w0=30 tuck=0.5 hold=0.4 launch=0.15
+  rot=278.9 land=1.94 z0=0.10 vz=2.00 w0=30 tuck=0.5 hold=0.1 launch=0.15
+  rot=283.1 land=2.19 z0=0.10 vz=2.00 w0=30 tuck=1.0 hold=0.1 launch=0.15
+worst by landing speed:
+  rot=627.9 land=3.97 z0=0.20 vz=2.25 w0=30 tuck=1.0 hold=0.4 launch=0.08
+  rot=655.1 land=3.92 z0=0.20 vz=2.25 w0=30 tuck=1.0 hold=0.1 launch=0.08
+  rot=627.8 land=3.84 z0=0.20 vz=2.25 w0=24 tuck=0.75 hold=0.4 launch=0.08
+```
+
+Two independent failures, and both are instructive:
+
+- **A SHORT flick is the violent one.** `t_launch` = 0.08 lands at up to
+  3.97 m/s. The operator's flick duration was being treated as free DR; it is
+  not. The low end moved to 0.12.
+- **`w0` = 30 runs out of AIRTIME, not spin.** A harder flick trades apex for
+  rotation rate: at `z0` = 0.10, `vz` = 2.00, `t_launch` = 0.15 it reaches only
+  278.8 deg with an apex of 0.285 m. That is why the ceiling came DOWN to 23,
+  not up.
+
+### The axis scans behind the chosen ranges
+
+Per `(t_launch, vz, w0)`, worst rotation and worst landing over
+`z0` ∈ {0.10, 0.15, 0.20} × tuck ∈ {0.5, 1.0} × hold ∈ {0.1, 1.0}:
+
+```
+  lau    vz    w0   minrot  maxland  OK  worstrot  worstland
+0.120  2.00  21.0    431.8     2.48  YES  (0.1, 0.5, 1.0)  (0.2, 1.0, 1.0)
+0.120  2.00  22.5    435.6     2.31  YES  (0.1, 1.0, 1.0)  (0.2, 0.5, 1.0)
+0.120  2.00  24.0    437.3     2.21  YES  (0.1, 0.5, 0.1)  (0.2, 0.5, 0.1)
+0.120  2.00  25.5    431.4     2.10  YES  (0.1, 1.0, 0.1)  (0.2, 0.5, 1.0)
+0.120  2.10  21.0    443.0     2.51  YES  (0.1, 0.5, 0.1)  (0.2, 1.0, 1.0)
+0.120  2.10  22.5    447.7     2.39  YES  (0.1, 1.0, 1.0)  (0.2, 0.5, 1.0)
+0.120  2.10  24.0    445.1     2.34  YES  (0.1, 1.0, 1.0)  (0.2, 0.5, 1.0)
+0.120  2.10  25.5    447.3     2.34  YES  (0.1, 1.0, 0.1)  (0.2, 0.5, 1.0)
+0.120  2.20  21.0    437.8     2.59  YES  (0.1, 1.0, 1.0)  (0.2, 0.5, 0.1)
+0.120  2.20  22.5    459.8     2.58  YES  (0.1, 1.0, 1.0)  (0.2, 0.5, 0.1)
+0.120  2.20  24.0    453.9     2.65  no   (0.1, 1.0, 1.0)  (0.2, 0.5, 0.1)
+0.120  2.20  25.5    460.4     2.61  no   (0.1, 1.0, 0.1)  (0.2, 0.5, 1.0)
+0.135  2.00  21.0    412.1     2.43  YES  (0.1, 1.0, 1.0)  (0.2, 1.0, 1.0)
+0.135  2.00  22.5    401.5     2.25  YES  (0.1, 1.0, 1.0)  (0.2, 1.0, 1.0)
+0.135  2.00  24.0    398.8     2.12  YES  (0.1, 1.0, 0.1)  (0.2, 1.0, 1.0)
+0.135  2.00  25.5    386.2     1.96  YES  (0.1, 1.0, 0.1)  (0.2, 1.0, 1.0)
+0.135  2.10  21.0    429.7     2.43  YES  (0.1, 1.0, 0.1)  (0.2, 1.0, 1.0)
+0.135  2.10  22.5    432.7     2.27  YES  (0.1, 1.0, 0.1)  (0.2, 0.5, 0.1)
+0.135  2.10  24.0    426.9     2.13  YES  (0.1, 1.0, 0.1)  (0.2, 0.5, 0.1)
+0.135  2.10  25.5    415.9     2.07  YES  (0.1, 1.0, 0.1)  (0.2, 0.5, 1.0)
+0.135  2.20  21.0    441.8     2.47  YES  (0.1, 0.5, 0.1)  (0.2, 1.0, 1.0)
+0.135  2.20  22.5    444.1     2.43  YES  (0.1, 1.0, 0.1)  (0.2, 0.5, 0.1)
+0.135  2.20  24.0    435.1     2.34  YES  (0.1, 1.0, 0.1)  (0.2, 0.5, 0.1)
+0.135  2.20  25.5    426.4     2.25  YES  (0.1, 1.0, 0.1)  (0.2, 0.5, 1.0)
+0.150  2.00  21.0    380.8     2.35  YES  (0.1, 1.0, 1.0)  (0.2, 1.0, 1.0)
+0.150  2.00  22.5    372.1     2.22  YES  (0.1, 1.0, 0.1)  (0.2, 1.0, 1.0)
+0.150  2.00  24.0    362.2     2.08  YES  (0.1, 1.0, 0.1)  (0.2, 1.0, 1.0)
+0.150  2.00  25.5    345.6     2.04  no   (0.1, 1.0, 0.1)  (0.1, 1.0, 1.0)
+0.150  2.10  21.0    407.9     2.35  YES  (0.1, 1.0, 1.0)  (0.2, 1.0, 1.0)
+0.150  2.10  22.5    394.7     2.21  YES  (0.1, 1.0, 0.1)  (0.2, 1.0, 1.0)
+0.150  2.10  24.0    392.0     2.06  YES  (0.1, 1.0, 0.1)  (0.2, 1.0, 1.0)
+0.150  2.10  25.5    367.6     1.96  YES  (0.1, 1.0, 0.1)  (0.2, 1.0, 1.0)
+0.150  2.20  21.0    426.7     2.36  YES  (0.1, 1.0, 1.0)  (0.2, 1.0, 1.0)
+0.150  2.20  22.5    425.3     2.27  YES  (0.1, 1.0, 0.1)  (0.2, 0.5, 1.0)
+0.150  2.20  24.0    413.9     2.15  YES  (0.1, 1.0, 1.0)  (0.2, 0.5, 1.0)
+0.150  2.20  25.5    396.4     1.96  YES  (0.1, 1.0, 0.1)  (0.2, 0.5, 1.0)
+```
+
+The chosen rectangle is the largest one in that surface with margin on both
+constraints. The failures just outside it, each measured:
+
+| widening | what breaks |
+|---|---|
+| `vz` > 2.10 | `z0`=0.20 corner lands at 2.65-2.70 m/s (over the limit) |
+| `w0` > 23 | `t_launch`=0.14 drops to 372 deg; `w0`=25 at `t_launch`=0.15 to 345.6 deg |
+| `t_launch` < 0.12 | landings to 3.97 m/s |
+| `t_launch` > 0.14 | rotation margin thins: 362 deg at `t_launch`=0.15, `vz`=2.00, `w0`=24 |
+| `vz` < 2.00 | the flip stops closing (the vz cliff measured in the earlier sections) |
+
+## 4. Direction checks — 20/20 backward
+
+Every corner of the recommended box plus its two worst cells and both tuck
+extremes, traced by the robot's own local +z axis in world coordinates at
+90 deg of accumulated rotation (`-x` = leaning backward-and-up = a real
+backflip; `+x` = face-down = a forward roll):
+
+```
+   z0    vz    w0   lau  hold  tuck     rot  land  verdict
+ 0.10  2.00  21.0 0.120  0.40  0.75   451.0  2.12  BACKWARD ok  (+z=(-0.675,0.004,-0.738))
+ 0.10  2.00  21.0 0.140  0.40  0.75   428.6  2.01  BACKWARD ok  (+z=(-0.490,-0.023,-0.871))
+ 0.10  2.00  23.0 0.120  0.40  0.75   453.8  1.88  BACKWARD ok  (+z=(-0.530,-0.015,-0.848))
+ 0.10  2.00  23.0 0.140  0.40  0.75   425.4  1.81  BACKWARD ok  (+z=(-0.334,0.001,-0.943))
+ 0.10  2.10  21.0 0.120  0.40  0.75   466.0  2.14  BACKWARD ok  (+z=(-0.678,0.004,-0.735))
+ 0.10  2.10  21.0 0.140  0.40  0.75   444.2  2.00  BACKWARD ok  (+z=(-0.413,-0.018,-0.910))
+ 0.10  2.10  23.0 0.120  0.40  0.75   468.7  1.91  BACKWARD ok  (+z=(-0.548,0.007,-0.837))
+ 0.10  2.10  23.0 0.140  0.40  0.75   438.8  1.77  BACKWARD ok  (+z=(-0.332,-0.013,-0.943))
+ 0.20  2.00  21.0 0.120  0.40  0.75   475.4  2.34  BACKWARD ok  (+z=(-0.675,0.004,-0.738))
+ 0.20  2.00  21.0 0.140  0.40  0.75   454.4  2.19  BACKWARD ok  (+z=(-0.490,-0.023,-0.871))
+ 0.20  2.00  23.0 0.120  0.40  0.75   480.4  2.16  BACKWARD ok  (+z=(-0.530,-0.015,-0.848))
+ 0.20  2.00  23.0 0.140  0.40  0.75   453.3  2.02  BACKWARD ok  (+z=(-0.334,0.001,-0.943))
+ 0.20  2.10  21.0 0.120  0.40  0.75   490.5  2.42  BACKWARD ok  (+z=(-0.678,0.004,-0.735))
+ 0.20  2.10  21.0 0.140  0.40  0.75   470.0  2.26  BACKWARD ok  (+z=(-0.413,-0.018,-0.910))
+ 0.20  2.10  23.0 0.120  0.40  0.75   500.5  2.34  BACKWARD ok  (+z=(-0.548,0.007,-0.837))
+ 0.20  2.10  23.0 0.140  0.40  0.75   466.9  2.06  BACKWARD ok  (+z=(-0.332,-0.013,-0.943))
+ 0.10  2.00  23.0 0.140  0.10  1.00   393.6  1.79  BACKWARD ok  (+z=(-0.141,0.076,-0.987))
+ 0.20  2.10  21.0 0.120  1.00  1.00   475.7  2.51  BACKWARD ok  (+z=(-0.684,0.043,-0.728))
+ 0.15  2.05  22.0 0.130  0.55  0.50   449.6  2.20  BACKWARD ok  (+z=(-0.480,0.005,-0.877))
+ 0.15  2.05  22.0 0.130  0.55  1.00   460.1  2.08  BACKWARD ok  (+z=(-0.534,-0.023,-0.845))
+
+20 cells checked, 0 not confirmed backward
+```
+
+## 5. The `z0` DR tail: 0.225, and why not 0.25 or 0.30
+
+The spec asked for an operator tail to 0.30 m. Measured at the box's
+worst-landing corner (`vz`=2.10, `w0`=21, `t_launch`=0.12, hold=1.0, tuck=1.0),
+landing speed rises monotonically with launch height:
+
+```
+worst-landing corner of the box (vz=2.10 w0=21 launch=0.12 hold=1.0 tuck=1.0)
+    z0     rot   land   apex
+ 0.100   453.6   2.32  0.521
+ 0.150   466.9   2.42  0.571
+ 0.200   475.7   2.51  0.621
+ 0.225   480.1   2.56  0.646
+ 0.250   484.5   2.61  0.671
+ 0.275   488.9   2.67  0.696
+ 0.300   497.7   2.80  0.721
+```
+
+0.250 m lands at **2.61 m/s** — already past the ~2.6 m/s damage threshold —
+and 0.300 m at **2.80 m/s**. **0.225 m is the last height that stays under it**
+(2.56 m/s, 0.04 m/s of margin), so that is where the curriculum's tail stops.
+This supersedes the previous round's 0.25 m, which was a conservative reading
+of a rationale rather than a measurement; the measurement now exists.
+
+## 6. `MAX_PAID_RATE` re-checked against the new box
+
+Peak and mean BACKWARD rotation rate while airborne, over 64 corner cells of
+the new box:
+
+```
+   peak    mean     rot   land  z0    vz    w0   tuck hold  lau
+  23.03   19.60   449.1   1.92  0.2 2.1 23.0 1.0 0.1 0.14
+  23.03   20.13   415.2   1.71  0.1 2.1 23.0 1.0 0.1 0.14
+  23.03   19.90   456.2   1.69  0.1 2.1 23.0 1.0 0.1 0.12
+  23.03   15.64   483.8   2.01  0.2 2.1 23.0 1.0 0.1 0.12
+  22.98   18.43   470.0   1.91  0.2 2.0 23.0 1.0 0.1 0.12
+  22.98   20.03   441.8   1.68  0.1 2.0 23.0 1.0 0.1 0.12
+  22.86   18.56   451.9   2.16  0.2 2.1 23.0 0.5 0.1 0.14
+  22.86   19.01   424.7   1.87  0.1 2.1 23.0 0.5 0.1 0.14
+...
+  17.79   16.14   434.7   2.31  0.1 2.0 21.0 1.0 1.0 0.12
+  17.79   16.14   466.9   2.48  0.2 2.0 21.0 1.0 1.0 0.12
+  17.78   15.97   475.7   2.51  0.2 2.1 21.0 1.0 1.0 0.12
+  17.78   15.99   453.6   2.32  0.1 2.1 21.0 1.0 1.0 0.12
+
+max peak = 23.03 rad/s   max mean = 20.13 rad/s   over 64 cells
+```
+
+Peak **23.03 rad/s**, mean over a closing flip **15.6-20.1 rad/s**.
+`MAX_PAID_RATE = 25.0` rad/s therefore forfeits nothing a real flip in this box
+needs, while still pricing spin above the measured envelope. Unchanged.
+
+## 7. Reproducing this section
+
+```bash
+# the measured tucked resting height
+uv run python scripts/backflip_envelope.py --measure-tuck-z --bam --z0 0.15 --tuck 0.5,0.75,1.0
+
+# settle test on the tucked pose (repeat with --z0 0.10 / 0.20, --tuck 0.5 / 1.0,
+# and without --bam for the XML-PD comparison)
+uv run python scripts/backflip_envelope.py --settle --bam --z0 0.15 --settle-trials 32 --tuck 0.75
+
+# whole-box verification of the cfg's ranges from the env's actual spawn
+uv run python scripts/backflip_envelope.py --box-check --bam
+
+# a single direction check inside the box
+uv run python scripts/backflip_envelope.py --bam --posture tucked_env --z0 0.10 \
+    --hold 0.4 --launch 0.12 --check-direction --check-vz 2.00 --check-w0 21.0 --check-tuck 0.75
+
+# the z0 tail scan and the peak-rate scan are two-line drivers over run_cell();
+# the tables above carry their exact parameters.
 ```

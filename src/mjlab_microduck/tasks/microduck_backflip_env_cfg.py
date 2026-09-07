@@ -114,9 +114,10 @@ DESIGN CHOICES AND WHERE THEY CAME FROM
     deg): "stand still and never flip" satisfies feet/upright/height/calm
     trivially, and without the gate it is the argmax. Reward MASS (episode
     sums, dt-scaled): flip 8.0, landing up to 4.0 x ~2 s of post-landing
-    annuity = ~8.0, ready_stance ~0.4. So a flip-and-crash earns ~8 and a
-    flip-and-land earns ~16 — the landing is worth a second flip, and the
-    stance is worth 5% of one.
+    annuity = ~8.0, ready_stance 0.4-1.0 (weight x the hold, which the
+    curriculum widens from 0.4 s to 1.0 s). So a flip-and-crash earns ~8 and a
+    flip-and-land earns ~16 — the landing is worth a second flip, and the hold
+    is worth 5-12% of one.
   * ``ready_stance`` (weight 1.0) pays only during HOLD and dies at launch, so
     it can never oppose the flip. It pays ``pose x height`` for HOLDING THE
     TUCK: the joint Gaussian says "be folded", the height Gaussian says "be
