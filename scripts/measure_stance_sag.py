@@ -18,12 +18,19 @@ Model predictions, for comparison (boots on, 893 g):
 
     hip_roll   4.4 deg     ankle      0.9 deg
     knee       3.2 deg     hip_pitch  0.05 deg
-    tilt after 1.2 s: 5.85 deg      spring compression: 0.42 mm/foot
+    pitch +4.4 deg forward, steady    roll EXACTLY 0.00 deg
+    spring compression: 0.42 mm/foot
 
-THE ROBOT MAY WELL NOT STAND. That is a result, not a failed run: it is what
-the model does. Everything is logged from before `init`, so a topple is
-captured rather than lost -- and `--seconds` defaults to a short window for
-exactly that reason.
+The axis matters as much as the magnitude. The hip_roll give-way is SYMMETRIC,
+so it widens and lowers the stance without leaning the robot: sim roll stays at
+exactly zero and the whole tilt is a 4.4 deg forward pitch from the knee and
+ankle errors. A real robot that ROLLS instead is telling us the two legs are
+not yielding equally -- a different fault with a different fix.
+
+STANDING IS MARGINAL IN SIM, not impossible: the median instance holds a steady
+4.4 deg lean over 6 s, but 3 of 16 topple. So a real topple is consistent with
+the model rather than a refutation of it, and everything is logged from before
+`init` so a topple is captured rather than lost.
 
     # on the robot, or over ssh:
     python3 scripts/measure_stance_sag.py --seconds 6 --out sag.csv
@@ -53,6 +60,8 @@ JOINT_NAMES = [
 # What the sim predicts for |target - measured|, degrees. Sign is not compared:
 # the two legs mirror, so the interesting quantity is magnitude.
 MODEL = {"hip_roll": 4.4, "knee": 3.2, "ankle": 0.9, "hip_pitch": 0.05, "hip_yaw": 0.3}
+# Symmetric splay: both hip_rolls yield toward zero by the same amount, which is
+# why sim roll is zero. Check the SIGNS match between left and right.
 
 
 def main():
@@ -99,8 +108,22 @@ def main():
         if len(j) < 15 or len(tg) < 15:
             continue
         g = (st.get("safety") or {}).get("gravity") or [0, 0, -1]
+        # ROLL AND PITCH SEPARATELY, not just the total tilt. acos(-g_z) is
+        # rotation-axis blind, and the axis is diagnostic: the sim tips in
+        # PITCH (+4.4 deg, steady) with roll at EXACTLY zero, because the
+        # hip_roll give-way is symmetric on both legs -- it widens and lowers
+        # the stance without leaning the robot. A real robot that rolls instead
+        # is telling us the two legs are NOT yielding equally, which is a
+        # different fault with a different fix.
+        #
+        # Trunk frame is X forward, Y left, Z up (robotctl robot look), and
+        # upright gravity is about [0, 0, -1].
         tilt = math.degrees(math.acos(max(-1.0, min(1.0, -g[2]))))
+        roll = math.degrees(math.atan2(g[1], -g[2]))
+        pitch = math.degrees(math.atan2(g[0], -g[2]))
         row = {"t": st.get("t", time.time() - t0), "tilt_deg": tilt,
+               "roll_deg": roll, "pitch_deg": pitch,
+               "grav_x": g[0], "grav_y": g[1], "grav_z": g[2],
                "fallen": (st.get("safety") or {}).get("fallen"),
                "limp": (st.get("safety") or {}).get("limp"),
                "policy": st.get("policy")}
@@ -122,8 +145,14 @@ def main():
     print(f"\n[sag] {len(rows)} frames over "
           f"{rows[-1]['t'] - t_start:.2f} s; averaging the last "
           f"{len(late)} (after {args.settle:.1f} s)")
-    print(f"[sag] tilt: first {rows[0]['tilt_deg']:.2f} deg -> "
-          f"last {rows[-1]['tilt_deg']:.2f} deg   (sim: 0.8 -> 5.85 in 1.2 s)")
+    print(f"[sag] tilt : first {rows[0]['tilt_deg']:+7.2f} -> last {rows[-1]['tilt_deg']:+7.2f} deg"
+          "   (sim median: 0.7 -> 4.4, steady)")
+    print(f"[sag] pitch: first {rows[0]['pitch_deg']:+7.2f} -> last {rows[-1]['pitch_deg']:+7.2f} deg"
+          "   (sim: +4.4 forward -- THIS is the axis the sim tips on)")
+    print(f"[sag] ROLL : first {rows[0]['roll_deg']:+7.2f} -> last {rows[-1]['roll_deg']:+7.2f} deg"
+          "   (sim: EXACTLY 0.00 -- any real roll means the legs yield unequally)")
+    print(f"[sag] gravity last = [{rows[-1]['grav_x']:+.3f} {rows[-1]['grav_y']:+.3f} "
+          f"{rows[-1]['grav_z']:+.3f}]  (upright is about [0, 0, -1])")
     if any(r["fallen"] for r in rows):
         print("[sag] NOTE: `fallen` went true during the run -- the robot went down. "
               "That is the sim's behaviour too; the numbers below are still the "
