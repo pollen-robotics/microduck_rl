@@ -7643,6 +7643,25 @@ def _backflip_tuck_target(
     return target
 
 
+def _trunk_tilt_smoothstep(
+    quat: torch.Tensor, tilt_full_deg: float, tilt_zero_deg: float
+) -> torch.Tensor:
+    """1 below ``tilt_full_deg`` of trunk tilt, 0 above ``tilt_zero_deg``.
+
+    Tilt is the angle between the body's own +z and world +z, from
+    ``cos(tilt) = R[2,2] = 1 - 2 (qx^2 + qy^2)`` — the same quantity
+    ``body_upright_linear`` and ``body_ang_vel_at_height`` use.
+    """
+    cos_tilt = 1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2)
+    tilt_deg = torch.rad2deg(torch.acos(cos_tilt.clamp(-1.0, 1.0)))
+    u = torch.clamp(
+        (tilt_zero_deg - tilt_deg) / max(tilt_zero_deg - tilt_full_deg, 1e-6),
+        0.0,
+        1.0,
+    )
+    return u * u * (3.0 - 2.0 * u)
+
+
 def backflip_ready_stance(
     env: ManagerBasedRlEnv,
     tuck_overrides: dict,
@@ -7650,11 +7669,13 @@ def backflip_ready_stance(
     tuck_z: float = 0.029,
     joint_std: float = 0.35,
     height_std: float = 0.03,
+    tilt_full_deg: float = 40.0,
+    tilt_zero_deg: float = 70.0,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Pay for HOLDING THE TUCK on the operator's hands. HOLD phase only.
 
-    ``pose x height``, both Gaussians, gated by the HOLD window:
+    ``pose x height x upright``, gated by the HOLD window:
       * ``pose``  — exp on the MEAN SQUARED servo-joint error against the tuck
         target (mean, not sum, so the number does not depend on how many joints
         the model has). ``joint_std=0.35`` rad is set from the escapable part:
@@ -7666,16 +7687,50 @@ def backflip_ready_stance(
         up worthless: a standing trunk is ~8.6 cm high here, i.e. ~2.9 sigma
         out, scoring ~3e-4.
 
-    NO upright factor, deliberately. The tuck's own equilibrium is a trunk
-    pitched 12-15 deg (measured), so an upright term would fight the very pose
-    this reward exists to hold.
+      * ``upright`` — smoothstep on trunk TILT: 1 below ``tilt_full_deg`` (40
+        deg), 0 above ``tilt_zero_deg`` (70 deg). This factor is load-bearing
+        and it was missing once; the reason is worth the paragraph.
+
+    THE SIDE-LYING BASIN (why ``upright`` is not optional). An earlier version
+    of this term deliberately dropped the upright factor, reasoning that the
+    tuck's own equilibrium is a trunk pitched 12-15 deg and an upright term
+    would fight the pose it exists to hold. The reasoning was right about a
+    TIGHT Gaussian and wrong about the term as a whole, because ``pose`` and
+    ``height`` cannot tell an upright tuck from an INVERTED one. Measured on
+    the plate at z0=0.15 (probe mode ``--flop-audit``):
+
+        upright tuck (the spawn):  tilt  14.1 deg  pose 0.950  height 1.000
+        tucked, ON ITS SIDE:       tilt 102.8 deg  pose 0.997  height 0.994
+        tucked, on its back:       tilt  91.1 deg  pose 0.983  height 0.827
+        tucked, face down:         tilt 101.6 deg  pose 0.781  height 0.975
+        tucked, inverted:          tilt 141.4 deg  pose 0.985  height 0.527
+
+    Without ``upright`` the side-lying tuck scores 0.991 against the upright
+    tuck's 0.950 — a 4% PREMIUM for flopping. It is worse than a tie: the side
+    basin is PASSIVELY STABLE on the plate (held 3 s it stays at 102.8 deg with
+    15 mm of drift and does not fall off), it needs no balancing at all, its
+    joints are less load-sagged than the upright tuck's so its ``pose`` factor
+    is actually HIGHER, and it costs less ``action_rate``. And it bites hardest
+    during discovery, when ``flip_progress`` pays ~0 because the flip does not
+    exist yet and this is the only paying term — after which the launch is a
+    SIDE flip, the exact failure the cfg narrows yaw scatter to +-0.05 to
+    prevent. This is the audit AGENTS.md mandates ("audit each positive term
+    against every stable flop") and it is now a probe mode and a test.
+
+    The gate is deliberately WIDE, not a Gaussian: at the tuck's 14 deg
+    equilibrium it costs exactly ZERO (14 < 40), so it does not fight the pose,
+    while 102.8 deg is hard-zeroed. cos(tilt) would also work but charges 3%
+    for holding the correct pose. Do not tighten ``tilt_full_deg`` below the
+    tuck's measured resting tilt plus a margin.
 
     WHY THIS IS NOT THE "positive reward for being in a bad state" TRAP that
     AGENTS.md warns about, even though it pays a crouched robot per step:
       1. The tuck is the GOOD state here, not a cheap degenerate one. It is the
          launch posture the whole maneuver is measured from — from a STANDING
          hold no launch setting closes a safe 360 deg at all
-         (docs/backflip_envelope_results.md).
+         (docs/backflip_envelope_results.md). The cheap degenerate versions of
+         it (on the side / back / face) are what the ``upright`` factor is
+         there to refuse; see THE SIDE-LYING BASIN above.
       2. It cannot be camped. The payout is multiplied by
          ``backflip_hold_window``, which the plate's PRESCRIBED schedule closes
          at ``t_hold`` regardless of what the policy does. There is no action
@@ -7695,7 +7750,12 @@ def backflip_ready_stance(
         - (env.scene.terrain.env_origins[:, 2] + env._backflip_z0 + tuck_z)
     )
     height = torch.exp(-(z_err**2) / (height_std**2))
-    return backflip_hold_window(env) * pose * height
+    upright = _trunk_tilt_smoothstep(
+        torch.nan_to_num(asset.data.root_link_quat_w, nan=0.0),
+        tilt_full_deg,
+        tilt_zero_deg,
+    )
+    return backflip_hold_window(env) * pose * height * upright
 
 
 def backflip_landing(

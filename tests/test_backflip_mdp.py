@@ -687,7 +687,7 @@ class _FakePlateData:
         self.root_link_lin_vel_w = torch.tensor([vel])
 
 
-def _arrival_gate_at(z):
+def _arrival_gate_at(z, height_full_max=0.121, height_zero_max=0.132):
     """body_ang_vel_at_height at the backflip cfg's own numbers, unit omega_x."""
     env = _FakeEnvWithScene(num_envs=1)
     env.robot.data.root_link_pos_w[:, 2] = z
@@ -701,8 +701,8 @@ def _arrival_gate_at(z):
             asset_cfg=_StubAssetCfg(),
             tilt_full_deg=20.0,
             tilt_zero_deg=45.0,
-            height_full_max=0.16,
-            height_zero_max=0.22,
+            height_full_max=height_full_max,
+            height_zero_max=height_zero_max,
         )[0]
     )
 
@@ -715,8 +715,16 @@ def test_arrival_damper_is_free_in_flight_and_active_at_standing_height():
     assert _arrival_gate_at(0.115) > 0.9   # settled at standing height: damped
     assert _arrival_gate_at(0.50) == 0.0   # mid-flight: free
     assert _arrival_gate_at(1.00) == 0.0   # high apex: free
-    assert _arrival_gate_at(0.275) == 0.0  # standing on the plate in HOLD: free
     assert _arrival_gate_at(0.05) == 0.0   # down on the ground: free
+    # the TUCKED hold, at every z0 the env samples (trunk = z0 + 0.039):
+    # 0.139 at z0=0.10 through 0.249 at the curriculum ceiling. The previous
+    # 0.16/0.22 ceiling was derived against the STANDING hold and taxed the
+    # tucked one at every z0 <= 0.181 -- full cost at z0=0.10.
+    for hold_trunk_z in (0.1381, 0.139, 0.189, 0.249):
+        assert _arrival_gate_at(hold_trunk_z) == 0.0
+    # and the pair that was wrong really did fire there, so this cannot regress
+    # unnoticed
+    assert _arrival_gate_at(0.139, height_full_max=0.16, height_zero_max=0.22) == 1.0
 
 
 def test_arrival_damper_without_a_ceiling_is_still_a_floor():
@@ -945,3 +953,95 @@ def test_ready_stance_tolerates_a_realistically_imperfect_tuck():
     joints = _tuck_joints(env)
     joints += 0.1
     assert _stance(env, joints, 0.15 + _PHT + _TUCK_Z) > 0.85
+
+
+# --- The flop audit AGENTS.md mandates, run through the real reward. ---------
+
+
+def _quat_rpy(roll, pitch, yaw):
+    """[w, x, y, z] for intrinsic ZYX (yaw * pitch * roll), as elsewhere here."""
+    cy, sy = math.cos(yaw * 0.5), math.sin(yaw * 0.5)
+    cp, sp = math.cos(pitch * 0.5), math.sin(pitch * 0.5)
+    cr, sr = math.cos(roll * 0.5), math.sin(roll * 0.5)
+    return torch.tensor([[
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+    ]])
+
+
+def _stance_with_quat(env, joints, trunk_z, quat):
+    env.robot.data.root_link_quat_w = quat
+    return _stance(env, joints, trunk_z)
+
+
+def test_ready_stance_collapses_for_a_tucked_but_inverted_trunk():
+    # THE CRITICAL this test exists for. pose and height CANNOT tell an upright
+    # tuck from an inverted one: measured on the plate, a side-lying tuck holds
+    # pose 0.997 and height 0.994 (its joints are LESS load-sagged than the
+    # upright tuck's), so without an upright factor it scored 0.991 against
+    # upright's 0.950 -- a premium for flopping, in a passively stable basin
+    # that needs no balancing. Every flop must collapse the term while sitting
+    # at exactly the right height with exactly the right joints.
+    env = _stance_env(z0=0.15)
+    joints = _tuck_joints(env)
+    z = 0.15 + _PHT + _TUCK_Z
+
+    upright = _stance_with_quat(env, joints, z, _quat_rpy(0.0, 0.0, 0.0))
+    # the tuck's own measured resting tilt must stay free of charge
+    rest_tilt = _stance_with_quat(env, joints, z, _quat_rpy(0.0, math.radians(14.1), 0.0))
+    assert upright > 0.9
+    assert rest_tilt == pytest.approx(upright, rel=1e-6)
+
+    for name, rpy in {
+        "side_left":  (math.radians(102.8), 0.0, 0.0),
+        "side_right": (math.radians(-102.8), 0.0, 0.0),
+        "on_back":    (0.0, math.radians(-91.1), 0.0),
+        "face_down":  (0.0, math.radians(101.6), 0.0),
+        "inverted":   (math.radians(141.4), 0.0, 0.0),
+    }.items():
+        flopped = _stance_with_quat(env, joints, z, _quat_rpy(*rpy))
+        assert flopped == 0.0, f"{name} still pays {flopped}"
+
+
+def test_ready_stance_upright_gate_is_wide_enough_not_to_tax_the_tuck():
+    # The mistake that opened the hole was assuming any upright factor must
+    # fight a 12-15 deg equilibrium. A WIDE gate does not: it must be exactly
+    # 1.0 out to 40 deg, and only then start falling.
+    env = _stance_env(z0=0.15)
+    joints = _tuck_joints(env)
+    z = 0.15 + _PHT + _TUCK_Z
+    flat = _stance_with_quat(env, joints, z, _quat_rpy(0.0, 0.0, 0.0))
+    for tilt in (5.0, 12.0, 15.0, 20.0, 39.0):
+        assert _stance_with_quat(
+            env, joints, z, _quat_rpy(0.0, math.radians(tilt), 0.0)
+        ) == pytest.approx(flat, rel=1e-6)
+    # ... and monotonically decreasing through the transition band
+    band = [
+        _stance_with_quat(env, joints, z, _quat_rpy(0.0, math.radians(t), 0.0))
+        for t in (45.0, 55.0, 65.0, 70.0)
+    ]
+    assert band == sorted(band, reverse=True)
+    assert band[-1] == 0.0
+
+
+def test_ready_stance_side_basin_no_longer_outscores_upright():
+    # The audit's bottom line, with the MEASURED settled states of each basin
+    # (probe --flop-audit, z0=0.15, tuck 0.75): pose and height as measured,
+    # so this test fails if the upright factor is ever weakened enough to let
+    # the side basin back over the upright pose.
+    env = _stance_env(z0=0.15)
+    z = 0.15 + _PHT + _TUCK_Z
+
+    def basin(tilt_deg, joint_err):
+        joints = _tuck_joints(env) + joint_err
+        return _stance_with_quat(
+            env, joints, z, _quat_rpy(0.0, math.radians(tilt_deg), 0.0)
+        )
+
+    upright = basin(14.1, 0.08)      # measured pose 0.950 at rest
+    side = basin(102.8, 0.02)        # measured pose 0.997 -- LESS sagged
+    assert upright > 0.0
+    assert side == 0.0
+    assert upright > side

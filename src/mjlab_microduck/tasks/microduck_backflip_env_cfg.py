@@ -121,16 +121,20 @@ DESIGN CHOICES AND WHERE THEY CAME FROM
   * ``ready_stance`` (weight 1.0) pays only during HOLD and dies at launch, so
     it can never oppose the flip. It pays ``pose x height`` for HOLDING THE
     TUCK: the joint Gaussian says "be folded", the height Gaussian says "be
-    folded ON THE PLATE" (a standing trunk is ~2.9 sigma out, scoring ~3e-4).
-    Its ``tuck_z`` is TUCK_Z + PLATE_HALF_THICKNESS because the robot rests on
-    the plate's TOP surface while the term measures against the plate's centre
-    height ``z0``. It has no upright factor on purpose — the tuck's own
-    equilibrium is a trunk pitched 12-15 deg (measured), so an upright term
-    would fight the pose the term exists to hold. It pays a crouched robot per
-    step, which is the shape AGENTS.md warns about; the function's docstring
-    argues why that is legitimate here (the tuck is the GOOD state, and the
-    paying window is closed by the plate's PRESCRIBED schedule rather than by
-    anything the policy does, so it cannot be camped).
+    folded ON THE PLATE" (a standing trunk is ~2.9 sigma out, scoring ~3e-4),
+    and a WIDE tilt smoothstep (full below 40 deg, zero above 70) says "be
+    folded UPRIGHT". Its ``tuck_z`` is TUCK_Z + PLATE_HALF_THICKNESS because
+    the robot rests on the plate's TOP surface while the term measures against
+    the plate's centre height ``z0``. The upright factor is load-bearing: pose
+    and height cannot tell an upright tuck from an inverted one, and the
+    SIDE-LYING tuck is a passively stable on-plate basin that measured 0.991
+    against upright's 0.950 without it — a premium for flopping, which would
+    have produced a SIDE flip. It costs zero at the tuck's own 14 deg resting
+    tilt, so it does not fight the pose. It pays a crouched robot per step,
+    which is the shape AGENTS.md warns about; the function's docstring argues
+    why that is legitimate here (the tuck is the GOOD state, and the paying
+    window is closed by the plate's PRESCRIBED schedule rather than by anything
+    the policy does, so it cannot be camped).
   * Motion-blockers (body_ang_vel, angular_momentum) stay at roulade's
     near-zero weights. Arithmetic, since this is the term most likely to eat
     the task: at a typical 14 rad/s flip, body_ang_vel costs
@@ -268,12 +272,19 @@ PLATE_HALF_THICKNESS = 0.01
 HOLD_RANGE    = (0.1, 0.4)     # widened to (0.1, 1.0) by curriculum; the tuck
                                # holds 3 s without falling, so 1.0 is safe
 LAUNCH_RANGE  = (0.12, 0.14)   # a shorter flick is the violent one
-Z0_RANGE      = (0.10, 0.20)   # DR tail extended to 0.25 by curriculum
+Z0_RANGE      = (0.10, 0.20)   # DR tail extended to Z0_CURRICULUM_MAX below
 VZ_RANGE      = (2.00, 2.10)
 W0_RANGE      = (21.0, 23.0)
 MAX_PAID_RATE = 25.0           # rad/s; measured peak in the box is 23.0,
                                # mean over a flip 15.6-20.1 — 25 forfeits
                                # nothing a real flip needs
+
+# Ceiling the z0 curriculum widens the launch-height tail to. It is part of the
+# BOX, not a footnote: after the tail opens, this is the state the env actually
+# trains into, so --box-check sweeps it and the whole-box rule has to hold
+# there too. See the curriculum term below for the landing-speed measurement
+# that sets it.
+Z0_CURRICULUM_MAX = 0.21
 
 # Spawn scatter on the plate. x/y: the plate is 18 cm across and the robot's
 # feet span ~8 cm, so 1 cm of jitter is what fits. yaw: the flick axis is world
@@ -432,9 +443,21 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
 
     # Hold the TUCK on the operator's hands. HOLD-phase only — it dies at
-    # launch, so it can never oppose the flip. pose x height: the joint-space
-    # Gaussian says "be folded", the height Gaussian says "be folded ON THE
-    # PLATE" (a standing trunk is ~2.9 sigma out and scores ~3e-4).
+    # launch, so it can never oppose the flip. pose x height x upright: the
+    # joint-space Gaussian says "be folded", the height Gaussian says "be
+    # folded ON THE PLATE" (a standing trunk is ~2.9 sigma out and scores
+    # ~3e-4), and the tilt smoothstep says "be folded UPRIGHT".
+    #
+    # The upright factor is NOT optional and was missing once. pose x height
+    # alone cannot distinguish an upright tuck from an inverted one, and the
+    # SIDE-LYING tuck is a passively stable on-plate basin whose joints are
+    # less load-sagged than the upright tuck's: measured, it scored 0.991
+    # against upright's 0.950, i.e. a 4% premium for flopping, for less effort
+    # and less action_rate. The gate is WIDE on purpose (full below 40 deg,
+    # zero above 70) so that it costs exactly zero at the tuck's own 14 deg
+    # resting tilt while hard-zeroing the 102.8 deg side basin. Re-run the
+    # audit with `--flop-audit` after touching any factor here; the table lives
+    # in the function docstring and in docs/backflip_envelope_results.md.
     #
     # Yes, this pays a crouched robot per step, which is the shape AGENTS.md
     # warns about. It is legitimate here and the function's docstring spells
@@ -456,6 +479,8 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "tuck_z":         TUCK_Z + PLATE_HALF_THICKNESS,
             "joint_std":      0.35,
             "height_std":     0.03,
+            "tilt_full_deg":  40.0,   # > the tuck's measured 14 deg rest tilt
+            "tilt_zero_deg":  70.0,   # < the 91-103 deg flop basins
         },
     )
 
@@ -480,22 +505,35 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # The height band needs BOTH edges here, and the reason is a correction:
     # body_ang_vel_at_height's height_low/height_high pair is a FLOOR, not a
     # window — everything above height_high pays FULL cost. The whole flight of
-    # a backflip is above 0.11 m (apex 0.4-1.2 m measured), and so is standing
-    # on the plate during HOLD (z0 + 0.125 = 0.23-0.43 m). So the original
+    # a backflip is above 0.11 m (apex 0.4-1.2 m measured), so the original
     # "gated on standing height AND low tilt, so the flip itself is never
     # taxed" was wrong twice over: only the tilt gate was protecting the flip,
-    # and a rotating robot passes tilt < 20 deg twice per revolution. The
-    # height_full_max/height_zero_max ceiling (full cost to 0.16 m, zero at and
-    # above 0.22 m) closes the band, so this term now fires only where its name
-    # says: on a robot that is back down at standing height and nearly upright.
+    # and a rotating robot passes tilt < 20 deg twice per revolution.
+    #
+    # The ceiling is DERIVED, and it was re-derived when the hold posture went
+    # tucked. It has to sit strictly between two measured heights:
+    #   * the landed STANDING trunk, ~STAND_Z = 0.115 m, which MUST be inside
+    #     the full-cost band — damping the arrival is the whole point;
+    #   * the lowest TUCKED HOLD trunk, at z0=0.10 that is
+    #     Z0_RANGE[0] + PLATE_HALF_THICKNESS + TUCK_Z = 0.139 m (measured
+    #     minimum over 32 noisy trials: 0.1381 m), which must be OUTSIDE it, or
+    #     the damper fires during HOLD.
+    # 0.121 / 0.132 gives 6 mm of clearance under the hold and 6 mm over the
+    # landing. The earlier 0.16 / 0.22 pair was derived against the STANDING
+    # hold (trunk >= 0.225 m) and taxed the tucked hold at every z0 <= 0.181.
+    # Practical magnitude was small (omega ~ 0 in a held tuck, and the weight
+    # only ramps from iteration 2000) but the number was simply wrong, and its
+    # test passed on 0.22 < 0.225 while the quantity it meant to bound was
+    # 0.139 — so it asserted nothing. A cfg test now bounds it against the
+    # tucked constants directly.
     cfg.rewards["arrival_damping"] = RewardTermCfg(
         func=microduck_mdp.body_ang_vel_at_height,
         weight=0.0,
         params={
             "height_low":      0.09,
             "height_high":     0.11,
-            "height_full_max": 0.16,
-            "height_zero_max": 0.22,
+            "height_full_max": 0.121,   # > STAND_Z: the landing IS damped
+            "height_zero_max": 0.132,   # < the tucked HOLD trunk (0.1381 min)
             "tilt_full_deg":   20.0,
             "tilt_zero_deg":   45.0,
             "asset_cfg":       SceneEntityCfg("robot", body_names=("trunk_base",)),
@@ -832,23 +870,33 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
 
-    # Launch-height DR tail, MEASURED rather than extrapolated. The spec asked
-    # for an operator tail to 0.30 m; the ceiling is 0.225, and it is the
-    # HARDWARE limit that sets it, not caution. At the box's worst-landing
-    # corner (vz=2.10, w0=21, t_launch=0.12, hold=1.0, tuck=1.0) landing speed
-    # rises monotonically with z0 — 2.32 / 2.42 / 2.51 / 2.56 / 2.61 / 2.67 /
-    # 2.80 m/s at z0 = 0.100 / 0.150 / 0.200 / 0.225 / 0.250 / 0.275 / 0.300 —
-    # so 0.25 is already 0.01 m/s OVER the ~2.6 m/s damage threshold and 0.30
-    # is 0.20 over. 0.225 is the last height that stays under it, with 0.04 m/s
-    # of margin. (Table: docs/backflip_envelope_results.md, "Tucked hold".)
+    # Launch-height DR tail, MEASURED rather than extrapolated, and measured
+    # WHOLE-BOX rather than along one corner. The spec asked for an operator
+    # tail to 0.30 m; the honest ceiling is Z0_CURRICULUM_MAX = 0.21, and it is
+    # the HARDWARE landing limit that sets it, not caution.
+    #
+    # Whole-box worst landing speed (162 cells of vz x w0 x t_launch x hold x
+    # tuck at each height): 2.51 m/s at z0=0.200, 2.53 at 0.210, 2.57 at 0.215,
+    # 2.57 at 0.220, 2.59 at 0.225. Against the ~2.6 m/s threshold that is
+    # 0.09 / 0.07 / 0.03 / 0.03 / 0.01 m/s of margin, so 0.21 is the last
+    # height with margin worth the name and 0.225 has essentially none.
+    # A previous revision claimed 0.04 m/s at 0.225 from a single-corner 1-D
+    # scan — the exact method the whole-box rule above exists to reject. The
+    # 1-D scan reads 2.56 there; the whole box reads 2.59.
+    # NOTE the tail is therefore only 1 cm wide. The spec's operator tail is
+    # not available at this landing limit; if the user would rather not carry a
+    # curriculum stage for 1 cm, deleting this term and living with
+    # Z0_RANGE is the honest alternative (max landing 2.51 m/s).
+    # (Tables: docs/backflip_envelope_results.md, "Tucked hold".)
     # Introduced late, and only as a tail: a higher launch is a higher apex.
     cfg.curriculum["backflip_z0_range"] = CurriculumTermCfg(
         func=microduck_mdp.event_param_curriculum,
         params={
             "event_name": "backflip_launch_params",
             "param_stages": [
-                {"step": 0,         "params": {"z0_range": (0.10, 0.20)}},
-                {"step": 3000 * 24, "params": {"z0_range": (0.10, 0.225)}},
+                {"step": 0,         "params": {"z0_range": Z0_RANGE}},
+                {"step": 3000 * 24,
+                 "params": {"z0_range": (Z0_RANGE[0], Z0_CURRICULUM_MAX)}},
             ],
         },
     )

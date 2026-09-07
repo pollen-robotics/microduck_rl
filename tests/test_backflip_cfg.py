@@ -16,6 +16,7 @@ import torch
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.microduck_backflip_env_cfg import (
     LAUNCH_RANGE,
+    Z0_CURRICULUM_MAX,
     MicroduckBackflipRlCfg,
     PLATE_HALF_THICKNESS,
     STAND_Z,
@@ -183,6 +184,10 @@ def test_robot_is_placed_on_the_plate_after_z0_is_sampled(cfg):
     order = list(cfg.events.keys())
     assert order.index("reset_base") < order.index("backflip_launch_params")
     assert order.index("backflip_launch_params") < order.index("backflip_spawn")
+    # The spawn SHIFTS the joints reset_robot_joints scattered (rather than
+    # overwriting them), so it must run after that event too. This held only by
+    # luck of insertion order until it was pinned here.
+    assert order.index("reset_robot_joints") < order.index("backflip_spawn")
     spawn = cfg.events["backflip_spawn"]
     assert spawn.mode == "reset"
     assert spawn.func is microduck_mdp.reset_backflip_robot_on_plate
@@ -432,13 +437,26 @@ def test_arrival_damping_curriculum_keeps_the_cost_sign_at_every_stage(cfg):
 def test_arrival_damping_is_a_height_window_not_a_floor(cfg):
     # body_ang_vel_at_height's height_low/height_high pair is a FLOOR: without
     # an upper edge every airborne step of the flip pays full cost, and the
-    # tilt gate alone lets a rotating robot through twice per revolution. The
-    # window must also exclude standing on the plate during HOLD (trunk at
-    # z0 + PLATE_HALF_THICKNESS + STAND_Z, i.e. >= 0.225 m).
+    # tilt gate alone lets a rotating robot through twice per revolution.
+    #
+    # The ceiling must sit strictly between the two heights it separates, and
+    # it must be bounded against the TUCKED hold, not the standing one. The
+    # earlier version of this test bounded it against
+    # Z0_RANGE[0] + PLATE_HALF_THICKNESS + STAND_Z = 0.225 and so passed on a
+    # 0.22 ceiling while the quantity it meant to bound was 0.139 — it
+    # asserted nothing at all.
     params = cfg.rewards["arrival_damping"].params
     assert params["height_high"] < params["height_full_max"] < params["height_zero_max"]
-    lowest_hold_trunk_z = Z0_RANGE[0] + PLATE_HALF_THICKNESS + STAND_Z
+
+    # the landed STANDING trunk must be inside the full-cost band
+    assert params["height_full_max"] > STAND_Z
+
+    # the lowest TUCKED HOLD trunk must be outside the band entirely
+    lowest_hold_trunk_z = Z0_RANGE[0] + PLATE_HALF_THICKNESS + TUCK_Z
     assert params["height_zero_max"] < lowest_hold_trunk_z
+    # measured minimum over 32 noisy trials at z0=0.10 is 0.1381 m; keep a few
+    # mm of clearance under it rather than sitting on the nominal value
+    assert params["height_zero_max"] < 0.1381 - 0.003
 
 
 def test_plate_reset_event_passes_t_zero_explicitly(cfg):
@@ -462,13 +480,17 @@ def test_critic_plate_terms_are_the_gone_masked_ones(cfg):
 
 
 def test_z0_dr_tail_stops_where_the_landing_speed_measurement_stops_it(cfg):
-    # MEASURED at the box's worst-landing corner (docs "Tucked hold"): landing
-    # speed rises monotonically with z0 and crosses the ~2.6 m/s hardware
-    # threshold between 0.225 (2.56 m/s) and 0.250 (2.61 m/s). The spec's
-    # 0.30 m operator tail lands at 2.80 m/s and is not available.
+    # MEASURED WHOLE-BOX, not along one corner (docs "Tucked hold"): the worst
+    # landing speed over 162 cells of vz x w0 x t_launch x hold x tuck at each
+    # height is 2.51 m/s at z0=0.200, 2.53 at 0.210, 2.57 at 0.215, 2.59 at
+    # 0.225 -- i.e. 0.09 / 0.07 / 0.03 / 0.01 m/s of margin under the ~2.6 m/s
+    # hardware threshold. A single-corner 1-D scan reads 2.56 at 0.225 and once
+    # got quoted as "0.04 m/s of margin"; the whole box is the acceptance rule.
     z0 = cfg.curriculum["backflip_z0_range"].params["param_stages"]
     assert z0[0]["params"]["z0_range"] == Z0_RANGE
-    assert z0[-1]["params"]["z0_range"][1] <= 0.225
+    assert z0[-1]["params"]["z0_range"][1] == Z0_CURRICULUM_MAX
+    assert Z0_CURRICULUM_MAX <= 0.21
+    assert Z0_CURRICULUM_MAX >= Z0_RANGE[1]      # a tail, never a narrowing
     assert [s["params"]["z0_range"][1] for s in z0] == sorted(
         s["params"]["z0_range"][1] for s in z0
     )

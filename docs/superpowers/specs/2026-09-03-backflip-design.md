@@ -94,7 +94,14 @@ consequences are all wanted:
 |---|---|---|
 | HOLD, duration `t_hold` | parked at `z0`, zero velocity | **[AMENDED]** waits on it *tucked*; no cue that launch is coming |
 | LAUNCH, `t_launch` ≈ 0.08–0.15 s | prescribed constant *acceleration* — linear velocity ramps 0 → `vz`, pitch rate 0 → `ω0` | rides it; may add energy by extending legs |
-| GONE | teleported to z = −3, velocities zeroed | ballistic; lands on bare floor |
+| GONE | teleported to `BACKFLIP_GONE_POS`, velocities zeroed | ballistic; lands on bare floor |
+
+**[AMENDED]** the GONE row originally said "teleported to z = −3". That parks
+the plate *inside* MuJoCo's infinite floor half-space, i.e. at maximal
+penetration, which measurably burned 4 contacts per env for most of every
+episode and had the solver ejecting the 50 kg plate at 59 m/s within a control
+step. It is now parked **above and beside** the floor at `BACKFLIP_GONE_POS`
+= (5, 5, 5) m; see that constant's comment in `mdp.py` for the measurement.
 
 The launch prescribes an acceleration ramp, not a step change in velocity. A
 plate that jumped straight to `vz` would drive the contact solver to accelerate

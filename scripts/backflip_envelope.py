@@ -105,6 +105,7 @@ from mjlab_microduck.tasks.microduck_backflip_env_cfg import (  # noqa: E402
     TUCK_Z,
     VZ_RANGE,
     W0_RANGE,
+    Z0_CURRICULUM_MAX,
     Z0_RANGE,
 )
 
@@ -604,7 +605,13 @@ def box_check_report(model, data, bam_ctrl=None, posture="tucked_env"):
     the policy can deepen or open the tuck during HOLD and LAUNCH, so the box
     should hold across what it might do, not only at the spawn value.
     """
-    z0s = _edges(Z0_RANGE)
+    # z0 must include the CURRICULUM's widened ceiling, not just Z0_RANGE.
+    # Reading Z0_RANGE alone was a real hole: after the tail opens at iteration
+    # 3000 the env samples up to Z0_CURRICULUM_MAX, so a box check that stops
+    # at Z0_RANGE[1] never sees the state the policy actually trains into, and
+    # a 1-D scan at one corner (the method this very rule rejects) is what got
+    # used instead.
+    z0s = tuple(sorted(set(_edges(Z0_RANGE) + (Z0_CURRICULUM_MAX,))))
     vzs = _edges(VZ_RANGE)
     w0s = _edges(W0_RANGE)
     laus = _edges(LAUNCH_RANGE)
@@ -613,7 +620,9 @@ def box_check_report(model, data, bam_ctrl=None, posture="tucked_env"):
 
     print(f"# box-check posture={posture} bam={bam_ctrl is not None} "
           f"dt={model.opt.timestep}")
-    print(f"#   z0 {Z0_RANGE} vz {VZ_RANGE} w0 {W0_RANGE} launch {LAUNCH_RANGE}")
+    print(f"#   z0 {Z0_RANGE} (curriculum ceiling {Z0_CURRICULUM_MAX}) "
+          f"vz {VZ_RANGE} w0 {W0_RANGE} launch {LAUNCH_RANGE}")
+    print(f"#   z0 grid {z0s}")
     print(f"#   hold {holds} tuck {tucks}")
     rows = []
     for z0, vz, w0, lau, hold, tk in itertools.product(
@@ -646,6 +655,133 @@ def box_check_report(model, data, bam_ctrl=None, posture="tucked_env"):
           f"{'closes' if ok else 'does NOT close'} 360 deg under "
           f"{BOX_MAX_LAND} m/s")
     return rows, ok
+
+
+# Flop basins audited by --flop-audit. AGENTS.md: "audit each positive term
+# against every stable flop (on back / face / side): if flopping keeps most of
+# the stack, the policy will flop." Named (roll, pitch, yaw) in radians.
+FLOP_ORIENTATIONS = {
+    "upright":    (0.0, 0.0, 0.0),
+    "side_left":  (math.pi / 2, 0.0, 0.0),
+    "side_right": (-math.pi / 2, 0.0, 0.0),
+    "face_down":  (0.0, math.pi / 2, 0.0),
+    "on_back":    (0.0, -math.pi / 2, 0.0),
+    "inverted":   (math.pi, 0.0, 0.0),
+}
+
+
+def _ready_stance_factors(data, z0, tuck_factor, joint_std=0.35, height_std=0.03,
+                          tilt_full_deg=40.0, tilt_zero_deg=70.0):
+    """Score backflip_ready_stance's factors from a raw MuJoCo state.
+
+    Mirrors the reward's arithmetic (pose x height x upright) so the flop audit
+    measures the TERM, not a proxy for it. Kept in sync by
+    tests/test_backflip_mdp.py, which checks the same three numbers through the
+    real function.
+    """
+    target = _home_tuck_ctrl(len(HOME), tuck_factor)[: len(HOME)]
+    err = np.asarray(data.qpos[7 : 7 + len(HOME)]) - target
+    pose = math.exp(-float((err ** 2).mean()) / joint_std ** 2)
+    z_err = float(data.qpos[2]) - (z0 + PLATE_HALF_THICKNESS + TUCK_Z)
+    height = math.exp(-(z_err ** 2) / height_std ** 2)
+    tilt = trunk_tilt_deg(data)
+    u = min(max((tilt_zero_deg - tilt) / (tilt_zero_deg - tilt_full_deg), 0.0), 1.0)
+    upright = u * u * (3.0 - 2.0 * u)
+    return pose, height, upright, tilt
+
+
+# Spawn clearances above the plate top tried per flop orientation. A flopped
+# pose settles into DIFFERENT basins depending on how it is dropped — the
+# dangerous side-lying one (tilt 102.8 deg, ON the plate, pose 0.997) is only
+# reached from ~0.045 m, while 0.025-0.035 slides off the plate entirely and
+# scores lower. An audit that tries one clearance measures whichever basin it
+# happened to hit, so the audit scans and reports the WORST (highest-scoring)
+# basin per orientation.
+FLOP_CLEARANCES = (0.005, 0.015, 0.025, 0.035, 0.045)
+
+
+def flop_audit_report(model, data, z0, tuck_factor, bam_ctrl=None, duration=3.0,
+                      clearances=FLOP_CLEARANCES):
+    """Settle the tucked robot from each flop orientation and score the hold term.
+
+    THE audit AGENTS.md mandates and that two review rounds missed: a positive
+    term that pays per step must be checked against every STABLE resting pose,
+    not only against the intended one and the obviously-bad ones. The side-lying
+    tuck is the dangerous basin here — it is passively stable on the plate, it
+    needs no balancing, its joints are less load-sagged than the upright tuck's
+    (so its `pose` factor is HIGHER), and without an upright factor it scored a
+    premium over doing the right thing.
+
+    Each row settles for `duration` from the named orientation at every
+    clearance in `clearances`, and reports the WORST basin found — the one with
+    the highest `pose x height`, i.e. the most attractive flop that exists,
+    whether or not the upright factor currently zeroes it. `pre` is what the
+    term paid before the upright factor was reinstated; `TOTAL` is what it pays
+    now. `on?` says whether that basin is still ON the plate (|x|,|y| < 0.09):
+    a flop that slides off is not a basin the policy can farm.
+    """
+    print(f"# flop-audit: z0={z0} tuck={tuck_factor} duration={duration}s "
+          f"dt={model.opt.timestep} bam={bam_ctrl is not None}")
+    print(f"{'orientation':>12} {'clr':>5} {'tilt':>7} {'drift':>7} {'trunk_z':>8} "
+          f"{'pose':>7} {'height':>7} {'pre':>6} {'upright':>8} {'TOTAL':>7} {'on?':>4}")
+    rows = {}
+    dt = model.opt.timestep
+    plate_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "plate_free")
+    qa = model.jnt_qposadr[plate_jid]
+    va = model.jnt_dofadr[plate_jid]
+    ctrl = _home_tuck_ctrl(model.nu, tuck_factor)
+    for name, (roll, pitch, yaw) in FLOP_ORIENTATIONS.items():
+        worst = None
+        for clearance in clearances:
+            mujoco.mj_resetData(model, data)
+            data.qpos[0:3] = [
+                0.0, 0.0, z0 + PLATE_HALF_THICKNESS + TUCK_Z + clearance
+            ]
+            data.qpos[3:7] = _quat_from_rpy(roll, pitch, yaw)
+            data.qpos[7 : 7 + model.nu] = ctrl
+            if bam_ctrl is not None:
+                bam_ctrl.reset(data.qpos)
+            _apply_ctrl(data, bam_ctrl, ctrl)
+            t = 0.0
+            while t < duration - 1e-9:
+                data.qpos[qa : qa + 3] = [0.0, 0.0, z0]
+                data.qpos[qa + 3 : qa + 7] = [1.0, 0.0, 0.0, 0.0]
+                data.qvel[va : va + 6] = 0.0
+                if bam_ctrl is not None:
+                    bam_ctrl.update()
+                mujoco.mj_step(model, data)
+                t += dt
+            pose, height, upright, tilt = _ready_stance_factors(
+                data, z0, tuck_factor
+            )
+            drift = math.hypot(float(data.qpos[0]), float(data.qpos[1]))
+            on_plate = (
+                abs(float(data.qpos[0])) < 0.09 and abs(float(data.qpos[1])) < 0.09
+            )
+            cand = (
+                pose * height, clearance, tilt, drift, float(data.qpos[2]),
+                pose, height, upright, on_plate,
+            )
+            if worst is None or cand[0] > worst[0]:
+                worst = cand
+        pre, clearance, tilt, drift, z, pose, height, upright, on_plate = worst
+        total = pre * upright
+        rows[name] = (tilt, drift, z, pose, height, pre, upright, total, on_plate)
+        print(f"{name:>12} {clearance:5.3f} {tilt:7.1f} {drift:7.3f} {z:8.3f} "
+              f"{pose:7.3f} {height:7.3f} {pre:6.3f} {upright:8.3f} {total:7.3f} "
+              f"{'yes' if on_plate else 'OFF':>4}")
+    flops = {k: v for k, v in rows.items() if k != "upright"}
+    up = rows["upright"]
+    best_pre = max((v[5] for v in flops.values()), default=0.0)
+    best_total = max((v[7] for v in flops.values()), default=0.0)
+    print(f"  upright: pre={up[5]:.3f} TOTAL={up[7]:.3f}   "
+          f"best flop: pre={best_pre:.3f} TOTAL={best_total:.3f}")
+    print(f"  WITHOUT the upright factor: "
+          f"{'a flop would pay MORE' if best_pre > up[5] else 'upright would win'} "
+          f"({best_pre:.3f} vs {up[5]:.3f})")
+    print(f"  RESULT: {'PASS - upright wins' if up[7] > best_total else 'FAIL - a flop pays more'} "
+          f"({up[7]:.3f} vs {best_total:.3f})")
+    return rows
 
 
 def measure_tuck_z_report(model, data, z0, tuck_factors, offsets, bam_ctrl=None,
@@ -789,6 +925,13 @@ def main():
                          "w0 / t_launch, crossed with the hold extremes and "
                          "tuck depths, must close 360 deg under 2.6 m/s. "
                          "Reports the worst cell, not the best.")
+    ap.add_argument("--flop-audit", action="store_true",
+                    help="Settle the tucked robot from every flop orientation "
+                         "(side / back / face / inverted) and score "
+                         "backflip_ready_stance's factors on each. The audit "
+                         "AGENTS.md mandates for any positive per-step term: if "
+                         "a stable flop keeps most of the stack, the policy "
+                         "will flop.")
     ap.add_argument("--measure-tuck-z", action="store_true",
                     help="Re-measure TUCK_Z: drop the tucked robot from several "
                          "offsets above the plate top, hold the tuck ctrl, and "
@@ -835,7 +978,15 @@ def main():
         timestep=args.timestep,
     )
 
-    if args.box_check:
+    if args.flop_audit:
+        flop_audit_report(
+            model, data, args.z0,
+            args.tuck[0] if len(args.tuck) == 1 else TUCK_FACTOR,
+            bam_ctrl=bam_ctrl, duration=args.settle_duration,
+        )
+        return
+
+    if args.box_check:  # noqa: E501
         box_check_report(model, data, bam_ctrl=bam_ctrl, posture=args.posture)
         return
 

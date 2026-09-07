@@ -40,7 +40,11 @@ survive?
 > last section, "**Tucked hold**": `z0 in [0.10, 0.20]`, `vz in [2.00, 2.10]`,
 > `w0 in [21, 23]`, `t_launch in [0.12, 0.14]`. Neither the tucked-probe box
 > at the top of this document nor the standing re-measurement is the env's
-> box; both are history.
+> box; both are history. The tucked box was corrected once more after a
+> re-review: the `z0` curriculum tail is **0.21**, not 0.225 (whole-box margin
+> 0.07 m/s vs 0.01), and `backflip_ready_stance` regained an upright factor
+> after the flop audit found the side-lying tuck outscoring the upright one.
+> See the final section, "**Flop audit, and two corrections**".
 
 ## Commands run
 
@@ -3428,4 +3432,218 @@ uv run python scripts/backflip_envelope.py --bam --posture tucked_env --z0 0.10 
 
 # the z0 tail scan and the peak-rate scan are two-line drivers over run_cell();
 # the tables above carry their exact parameters.
+```
+
+
+# Flop audit, and two corrections to the tucked-hold numbers
+
+Posture-switch re-review follow-ups. Same setup throughout: CPU MuJoCo, BAM
+actuators, training sim timestep 0.005.
+
+## 1. The flop audit (new probe mode `--flop-audit`) — and the hole it found
+
+AGENTS.md: *"audit each positive term against every stable flop (on back /
+face / side): if flopping keeps most of the stack, the policy will flop."*
+Nobody had run it for `backflip_ready_stance`. Run now, it fails: the
+side-lying tuck **outscored the upright one**.
+
+The mode settles the tucked robot from six orientations, at five spawn
+clearances each, and reports the WORST (highest-scoring) basin per
+orientation — a flopped pose settles into different basins depending on how it
+is dropped, and an audit that tries one clearance measures whichever one it
+happens to hit. `pre` is `pose x height`, what the term paid before the fix;
+`TOTAL` includes the reinstated upright factor.
+
+`z0 = 0.15`:
+
+```
+# flop-audit: z0=0.15 tuck=0.75 duration=3.0s dt=0.005 bam=True
+ orientation   clr    tilt   drift  trunk_z    pose  height    pre  upright   TOTAL  on?
+     upright 0.005    14.1   0.009    0.189   0.948   1.000  0.948    1.000   0.948  yes
+   side_left 0.015   102.8   0.016    0.191   0.997   0.994  0.991    0.000   0.000  yes
+  side_right 0.015   102.8   0.016    0.191   0.997   0.994  0.991    0.000   0.000  yes
+   face_down 0.015   101.4   0.019    0.184   0.783   0.972  0.762    0.000   0.000  yes
+     on_back 0.015    91.0   0.002    0.202   0.982   0.829  0.814    0.000   0.000  yes
+    inverted 0.015   141.7   0.025    0.165   0.986   0.531  0.524    0.000   0.000  yes
+  upright: pre=0.948 TOTAL=0.948   best flop: pre=0.991 TOTAL=0.000
+  WITHOUT the upright factor: a flop would pay MORE (0.991 vs 0.948)
+  RESULT: PASS - upright wins (0.948 vs 0.000)
+```
+
+`z0 = 0.10` (the lowest launch height) and `z0 = 0.21` (the curriculum
+ceiling), for completeness — the basins are the same, the trunk heights shift
+with `z0`:
+
+```
+# flop-audit: z0=0.1 tuck=0.75 duration=3.0s dt=0.005 bam=True
+ orientation   clr    tilt   drift  trunk_z    pose  height    pre  upright   TOTAL  on?
+     upright 0.005    14.1   0.009    0.139   0.948   1.000  0.948    1.000   0.948  yes
+   side_left 0.015   102.8   0.016    0.141   0.997   0.994  0.991    0.000   0.000  yes
+  side_right 0.015   102.8   0.016    0.141   0.997   0.994  0.991    0.000   0.000  yes
+   face_down 0.045   115.7   0.043    0.150   0.954   0.883  0.843    0.000   0.000  yes
+     on_back 0.015    91.0   0.002    0.152   0.982   0.829  0.814    0.000   0.000  yes
+    inverted 0.005   172.7   0.015    0.134   0.991   0.972  0.964    0.000   0.000  yes
+  upright: pre=0.948 TOTAL=0.948   best flop: pre=0.991 TOTAL=0.000
+  WITHOUT the upright factor: a flop would pay MORE (0.991 vs 0.948)
+  RESULT: PASS - upright wins (0.948 vs 0.000)
+```
+
+```
+# flop-audit: z0=0.21 tuck=0.75 duration=3.0s dt=0.005 bam=True
+ orientation   clr    tilt   drift  trunk_z    pose  height    pre  upright   TOTAL  on?
+     upright 0.005    14.1   0.009    0.249   0.948   1.000  0.948    1.000   0.948  yes
+   side_left 0.015   102.8   0.016    0.251   0.997   0.994  0.991    0.000   0.000  yes
+  side_right 0.015   102.8   0.016    0.251   0.997   0.994  0.991    0.000   0.000  yes
+   face_down 0.015   101.4   0.019    0.244   0.783   0.972  0.762    0.000   0.000  yes
+     on_back 0.015    91.0   0.002    0.262   0.982   0.829  0.814    0.000   0.000  yes
+    inverted 0.015   141.7   0.025    0.225   0.985   0.531  0.523    0.000   0.000  yes
+  upright: pre=0.948 TOTAL=0.948   best flop: pre=0.991 TOTAL=0.000
+  WITHOUT the upright factor: a flop would pay MORE (0.991 vs 0.948)
+  RESULT: PASS - upright wins (0.948 vs 0.000)
+```
+
+**What was wrong.** `pose` and `height` cannot tell an upright tuck from an
+inverted one. Measured at `z0=0.15`:
+
+| basin | settled tilt | drift @3 s | on plate? | pose | height | `pre` (old term) | TOTAL (fixed) |
+|---|---|---|---|---|---|---|---|
+| **upright tuck** (the spawn) | 14.1 deg | 0.009 m | yes | 0.948 | 1.000 | **0.948** | **0.948** |
+| **side-lying** | 102.8 deg | 0.016 m | **yes** | **0.997** | 0.994 | **0.991** | **0.000** |
+| on its back | 91.0 deg | 0.002 m | yes | 0.982 | 0.829 | 0.814 | 0.000 |
+| face down | 101.4 deg | 0.019 m | yes | 0.783 | 0.972 | 0.762 | 0.000 |
+| inverted | 141.7 deg | 0.025 m | yes | 0.986 | 0.531 | 0.524 | 0.000 |
+| inverted (at `z0`=0.10) | 172.7 deg | 0.015 m | yes | 0.991 | 0.972 | 0.964 | 0.000 |
+
+The side-lying tuck paid **0.991 against the upright tuck's 0.948** — a 4%
+premium for flopping. And it is worse than a tie:
+
+- it is a **passively stable on-plate basin**: 3 s at 102.8 deg with 16 mm of
+  drift, and it does not fall off the plate;
+- it needs **no active balancing** at all, unlike the upright tuck;
+- its `pose` factor is actually **higher** (0.997 vs 0.948) because its joints
+  are not load-sagged;
+- it costs less `action_rate`.
+
+And it bit hardest exactly where it matters: during discovery `flip_progress`
+pays ~0 because the flip does not exist yet, so `ready_stance` is the only
+paying term — and the launch that follows a side-lying hold is a SIDE flip,
+the failure the cfg narrows yaw scatter to +-0.05 specifically to prevent.
+
+**The fix.** Reinstate an upright factor as a WIDE smoothstep on trunk tilt:
+1 below 40 deg, 0 above 70 deg. The original reason for dropping it (the
+tuck's own equilibrium is a trunk pitched 12-15 deg, so an upright term would
+fight the pose) is valid for a tight Gaussian and not for this: at 14 deg the
+gate is exactly 1.000, so holding the correct pose costs **zero**, while
+102.8 deg is hard-zeroed. `clamp(cos(tilt), 0)` would also close the hole but
+charges 3% for doing the right thing. `tilt_full_deg` must stay above the
+tuck's measured resting tilt plus a margin.
+
+Every flop basin now scores exactly 0.000 at every `z0`, and the upright tuck
+is unchanged at 0.948.
+
+## 2. Correction: the `z0` tail's margin was 0.01 m/s, not 0.04
+
+The previous section quoted 2.56 m/s at `z0=0.225` and called it 0.04 m/s of
+margin. That number came from a **single-corner 1-D scan** — the exact method
+the whole-box rule in this document rejects. Measured whole-box instead (162
+cells of `vz` x `w0` x `t_launch` x hold x tuck at each height):
+
+```
+    z0  cells  min_rot  max_land  worst-landing cell
+ 0.200    162    430.8      2.51  vz=2.1 w0=21.0 launch=0.12 hold=1.0 tuck=1.0 (rot=475.7)
+ 0.205    162    430.8      2.53  vz=2.1 w0=21.0 launch=0.12 hold=0.1 tuck=0.5 (rot=471.2)
+ 0.210    162    436.1      2.53  vz=2.1 w0=21.0 launch=0.12 hold=0.1 tuck=0.5 (rot=471.2)
+ 0.215    162    436.1      2.57  vz=2.1 w0=21.0 launch=0.12 hold=1.0 tuck=0.5 (rot=478.7)
+ 0.220    162    436.1      2.57  vz=2.1 w0=21.0 launch=0.12 hold=1.0 tuck=0.5 (rot=478.7)
+ 0.225    162    436.1      2.59  vz=2.1 w0=21.0 launch=0.12 hold=0.1 tuck=0.5 (rot=476.0)
+```
+
+| z0 ceiling | whole-box worst landing | margin under 2.6 m/s |
+|---|---|---|
+| 0.200 | 2.51 m/s | 0.09 |
+| 0.205 | 2.53 | 0.07 |
+| **0.210** | **2.53** | **0.07** |
+| 0.215 | 2.57 | 0.03 |
+| 0.220 | 2.57 | 0.03 |
+| 0.225 | **2.59** | **0.01** |
+
+So `z0 = 0.225` has essentially no margin, and the tail is cut to
+**`Z0_CURRICULUM_MAX = 0.21`** (0.07 m/s). Note what that means: the tail is
+now **1 cm wide**. The spec's operator tail to 0.30 m is simply not available
+at this landing limit; if the user would rather not carry a curriculum stage
+for 1 cm, deleting the stage and living with `Z0_RANGE` (worst landing
+2.51 m/s) is the honest alternative.
+
+**Structural fix so this cannot recur:** `--box-check` read `Z0_RANGE` from the
+cfg and therefore never saw the curriculum's widened ceiling — the state the
+env actually trains into after iteration 3000. It now sweeps
+`Z0_CURRICULUM_MAX` as well (648 cells instead of 486):
+
+```
+# box-check posture=tucked_env bam=True dt=0.005
+#   z0 (0.1, 0.2) (curriculum ceiling 0.21) vz (2.0, 2.1) w0 (21.0, 23.0) launch (0.12, 0.14)
+#   z0 grid (0.1, 0.15000000000000002, 0.2, 0.21)
+#   hold (0.1, 1.0) tuck (0.5, 0.75, 1.0)
+  648 cells | min rot = 393.6 deg | max landing = 2.53 m/s | short of 360: 0 | over 2.6 m/s: 0
+  worst by rotation:
+    rot=  393.6 land= 1.79 apex=0.381 tilt0= 13.9  z0=0.100 vz=2.000 w0=23.00 launch=0.140 hold=0.10 tuck=1.00
+    rot=  398.8 land= 2.07 apex=0.424 tilt0= 15.9  z0=0.100 vz=2.000 w0=23.00 launch=0.140 hold=1.00 tuck=1.00
+    rot=  400.9 land= 2.32 apex=0.458 tilt0= 15.9  z0=0.100 vz=2.000 w0=21.00 launch=0.140 hold=1.00 tuck=1.00
+    rot=  403.6 land= 1.87 apex=0.395 tilt0= 13.9  z0=0.100 vz=2.000 w0=22.00 launch=0.140 hold=0.10 tuck=1.00
+    rot=  404.6 land= 1.94 apex=0.404 tilt0= 13.9  z0=0.100 vz=2.000 w0=21.00 launch=0.140 hold=0.10 tuck=1.00
+  worst by landing speed:
+    rot=  471.2 land= 2.53 apex=0.603 tilt0= 11.4  z0=0.210 vz=2.100 w0=21.00 launch=0.120 hold=0.10 tuck=0.50
+    rot=  471.5 land= 2.52 apex=0.604 tilt0= 15.9  z0=0.210 vz=2.000 w0=21.00 launch=0.120 hold=1.00 tuck=1.00
+    rot=  471.9 land= 2.51 apex=0.618 tilt0= 15.9  z0=0.210 vz=2.050 w0=21.00 launch=0.120 hold=1.00 tuck=1.00
+    rot=  475.7 land= 2.51 apex=0.621 tilt0= 15.9  z0=0.200 vz=2.100 w0=21.00 launch=0.120 hold=1.00 tuck=1.00
+    rot=  475.7 land= 2.51 apex=0.631 tilt0= 15.9  z0=0.210 vz=2.100 w0=21.00 launch=0.120 hold=1.00 tuck=1.00
+  RESULT: PASS — whole box closes 360 deg under 2.6 m/s
+```
+
+Still PASS: min rotation 393.6 deg, worst landing 2.53 m/s, both at the
+extremes of the widened box.
+
+## 3. Correction: `arrival_damping`'s ceiling encoded the STANDING hold
+
+`height_full_max = 0.16` / `height_zero_max = 0.22` were derived when the hold
+trunk sat at `z0 + PLATE_HALF_THICKNESS + STAND_Z >= 0.225` m. The TUCKED hold
+trunk is `z0 + PLATE_HALF_THICKNESS + TUCK_Z`, i.e. 0.139-0.249 m, so the
+damper fired **during HOLD** for every `z0 <= 0.181` — at full cost at
+`z0=0.10`. The practical magnitude was small (omega ~ 0 in a held tuck, and the
+weight only ramps from iteration 2000), but the number was wrong and its test
+passed on `0.22 < 0.225` while the quantity it meant to bound was 0.139 — so
+it asserted nothing.
+
+Re-derived against two measured heights. Measured HOLD trunk height, 32 noisy
+trials per `z0`, sampled at 0.1/0.3/0.5/0.7/1.0/1.2 s:
+
+```
+z0=0.100  nominal=0.1390  min=0.1381  mean=0.1385  max=0.1388
+z0=0.150  nominal=0.1890  min=0.1881  mean=0.1885  max=0.1890
+z0=0.210  nominal=0.2490  min=0.2481  mean=0.2485  max=0.2489
+```
+
+- the landed STANDING trunk (~`STAND_Z` = 0.115 m) must be INSIDE the
+  full-cost band — damping the arrival is the point;
+- the lowest TUCKED HOLD trunk (0.1381 m measured, 0.139 nominal) must be
+  OUTSIDE it.
+
+`height_full_max = 0.121` / `height_zero_max = 0.132` gives 6 mm of clearance
+on each side. The cfg test now bounds the ceiling against
+`Z0_RANGE[0] + PLATE_HALF_THICKNESS + TUCK_Z` and against the measured 0.1381,
+and an mdp test asserts the gate reads 0.0 at every HOLD trunk height the env
+samples while the old 0.16/0.22 pair reads 1.0 there.
+
+## 4. Reproducing this section
+
+```bash
+# the flop audit (repeat with --z0 0.10 / 0.21)
+uv run python scripts/backflip_envelope.py --flop-audit --bam --z0 0.15 --tuck 0.75
+
+# whole box including the curriculum's z0 ceiling
+uv run python scripts/backflip_envelope.py --box-check --bam
+
+# the HOLD trunk heights the damper ceiling is derived from: run_settle() with
+# posture="tucked_env" at z0 = 0.10 / 0.15 / 0.21, 32 noisy trials each, and
+# take the min over the sampled times (table above).
 ```
