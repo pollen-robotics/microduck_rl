@@ -411,6 +411,6 @@ MicroduckVelStandRlCfg = RslRlOnPolicyRunnerCfg(
     experiment_name="velstand",
     run_name="velstand",
     save_interval=250,
-    num_steps_per_env=24,
+    num_steps_per_env=NUM_STEPS_PER_ENV,
     max_iterations=20_000,
 )
