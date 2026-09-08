@@ -89,7 +89,7 @@ from .hop import (
     make_robust_stand_variant,
     make_symmetric_variant,
 )
-from mjlab_microduck.robot.sprung_foot import H_ADD, K_MEASURED, PAD_MASS, SOLE_LENGTH_V2, TRAVEL
+from mjlab_microduck.robot.sprung_foot import H_ADD, K_MEASURED, PAD_MASS, PAD_MASS_V2, SOLE_LENGTH_V2, TRAVEL
 
 # Standard velocity task
 register_mjlab_task(
@@ -284,12 +284,18 @@ for _label, _hp, _hr, _robust, _sole, _act in (
         # suspect for the stand not transferring -- see apply_hop_corrections.
         ("HopPause-StdAct", 0.5, (1.0, 8.0), False, None, "standard"),
         ("HopPauseR-StdAct", 0.5, (1.0, 8.0), True, None, "standard"),
-        ("HopPauseR-S50-StdAct", 0.5, (1.0, 8.0), True, SOLE_LENGTH_V2, "standard")):
+        ("HopPauseR-S50-StdAct", 0.5, (1.0, 8.0), True, SOLE_LENGTH_V2, "standard"),
+        # R2: robustness backed off so it HOPS as well as stands -- kp x0.8-1.8,
+        # hold penalty -1.0 -- on the V2 boot's measured 56 g (38 g delta).
+        ("HopPauseR2-S50", 0.5, (1.0, 8.0), "r2", SOLE_LENGTH_V2, "bench")):
     def _build_pause(play: bool, _hp=_hp, _hr=_hr, _robust=_robust, _sole=_sole, _act=_act):
         cfg = make_in_place_variant(make_symmetric_variant(make_hop_variant(
             make_microduck_velocity_env_cfg(play=play), stiffness=K_MEASURED,
             hold_prob=_hp, hold_range=_hr)))
-        if _robust:
+        if _robust == "r2":
+            cfg = make_robust_stand_variant(cfg, kp_range=(0.8, 1.8), kd_range=(0.8, 1.3),
+                                            hold_action_rate_weight=-1.0)
+        elif _robust:
             # HopPauseR: kp randomisation (0.7-2.5x) + hold-gated action-rate
             # penalty -- the two things the first hardware stand showed missing.
             cfg = make_robust_stand_variant(cfg)
@@ -302,6 +308,8 @@ for _label, _hp, _hr, _robust, _sole, _act in (
         sprung_kw = dict(stiffness=K_MEASURED, travel=TRAVEL, pad_mass=PAD_MASS, h_add=H_ADD)
         if _sole is not None:
             sprung_kw["sole_length"] = _sole
+        if _robust == "r2":
+            sprung_kw["pad_mass"] = PAD_MASS_V2      # the boot that is on the robot
         return apply_hop_corrections(make_sprung_variant(cfg, **sprung_kw), actuator=_act)
     _tid = f"Mjlab-{_label}-Sym-K3344-MicroDuck"
     register_mjlab_task(task_id=_tid, env_cfg=_build_pause(False), play_env_cfg=_build_pause(True),

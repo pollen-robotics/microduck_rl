@@ -724,11 +724,25 @@ HOLD_KD_SCALE_RANGE = (0.7, 1.5)
 HOLD_ACTION_RATE_WEIGHT = -3.0
 
 
-def make_robust_stand_variant(cfg):
+def make_robust_stand_variant(
+    cfg,
+    kp_range=HOLD_KP_SCALE_RANGE,
+    kd_range=HOLD_KD_SCALE_RANGE,
+    hold_action_rate_weight=HOLD_ACTION_RATE_WEIGHT,
+):
     """Robustness for the pause tasks: gain randomisation + a quiet hold.
 
-    Applied on top of make_hop_variant(hold_prob > 0). See the two constants
-    above for the hardware evidence behind each.
+    Applied on top of make_hop_variant(hold_prob > 0). See the constants above
+    for the hardware evidence behind each.
+
+    THE DEFAULTS OVER-CORRECTED. HopPauseR-S50 (kp x0.7-2.5, hold penalty -3.0)
+    stood superbly -- 984/1000, 0.16 falls per episode, 0.24 deg/step of
+    trimming on the real robot -- and never hopped: 3.2 mm, airborne reward
+    0.0025, mean reward HIGHER than the hopping policy's. Standing perfectly
+    paid more than hopping and occasionally falling: the Phase 4 standing basin
+    again. Three pressures combined: unreliable launch timing across a 3.6x kp
+    spread, a heavy hold penalty taxing the transition, and a 50 mm sole that
+    makes standing easy. The R2 arms pass narrower values here.
     """
     cfg.events["randomize_motor_gains"] = EventTermCfg(
         func=microduck_mdp.randomize_delayed_actuator_gains,
@@ -736,13 +750,13 @@ def make_robust_stand_variant(cfg):
         params={
             "asset_cfg": SceneEntityCfg("robot"),
             "operation": "scale",
-            "kp_range": HOLD_KP_SCALE_RANGE,
-            "kd_range": HOLD_KD_SCALE_RANGE,
+            "kp_range": kp_range,
+            "kd_range": kd_range,
         },
     )
     cfg.rewards["hold_action_rate_l2"] = RewardTermCfg(
         func=microduck_mdp.hold_action_rate_l2,
-        weight=HOLD_ACTION_RATE_WEIGHT,
+        weight=hold_action_rate_weight,
         params={"command_name": "twist"},
     )
     return cfg

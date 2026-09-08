@@ -68,6 +68,9 @@ def main():
     ap.add_argument("--hold", type=float, default=0.65)
     ap.add_argument("--hops", type=int, default=1, help="cycles per A press")
     ap.add_argument("--hz", type=float, default=50.0)
+    ap.add_argument("--hop-slot", action="store_true",
+                    help="A triggers the ground-pick slot (a separate hop network) instead of "
+                         "advancing this driver's phase. Use when the walk slot holds a stand-only policy.")
     args = ap.parse_args()
 
     robot = Robot(args.socket)
@@ -78,7 +81,24 @@ def main():
                          "it does not block us, but its robot.move will fight this script -- stop it)")
 
     dt = 1.0 / args.hz
-    phi = args.hold; hop_t0 = None; enabled = False
+    phi = args.hold; hop_t0 = None
+    # Sync "enabled" from robotd rather than assuming off: this driver restarts
+    # more often than robotd does, and a stale False would turn a standing
+    # robot OFF on the first Start press and refuse A until then.
+    enabled = False
+    try:
+        sub = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); sub.connect(args.socket)
+        sub.sendall(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "robot.subscribe",
+                                "params": {"hz": None}}).encode() + b"\n")
+        sf = sub.makefile("r", encoding="utf-8")
+        for _ in range(20):
+            m = json.loads(sf.readline() or "{}")
+            if m.get("method") == "robot.state":
+                enabled = m["params"].get("policy", "held") != "held"; break
+        sub.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"[pad] could not read robot state ({e}); assuming policy OFF", flush=True)
+    print(f"[pad] policy currently {'ON' if enabled else 'OFF'}", flush=True)
     print(f"[pad] hold={args.hold}  Start=stand on/off  A=hop x{args.hops}  B=RELAX", flush=True)
     t_prev = time.time()
     while True:
@@ -96,7 +116,21 @@ def main():
                 if code == BTN_START:
                     enabled = not enabled; robot.enable(enabled)
                 elif code == BTN_SOUTH and enabled and hop_t0 is None:
-                    hop_t0 = time.time(); print("[pad] HOP", flush=True)
+                    if args.hop_slot:
+                        # TWO-NETWORK MODE: the hop lives in the ground-pick slot
+                        # (a network that actually hops), the walk slot holds the
+                        # stand. The daemon drives the hop's phase itself for
+                        # `ground_pick_period` and hands back to the walk slot,
+                        # which is still receiving our frozen phase. Advancing
+                        # OUR phase instead would run the STAND network's phase
+                        # -- and if that network does not hop (HopPauseR-S50:
+                        # 3.2 mm), A produces a head twitch and nothing else.
+                        import subprocess
+                        subprocess.Popen(["robotctl", "robot", "do", "ground-pick"],
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        print("[pad] HOP via ground-pick slot", flush=True)
+                    else:
+                        hop_t0 = time.time(); print("[pad] HOP (phase advance)", flush=True)
                 elif code == BTN_EAST:
                     enabled = False; hop_t0 = None; robot.relax()
         # --- phase ---

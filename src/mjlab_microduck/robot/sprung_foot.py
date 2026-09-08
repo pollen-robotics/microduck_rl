@@ -206,6 +206,10 @@ _PAD_HALF_EXTENTS = (0.0125, 0.004, 0.020)
 SOLE_LENGTH_V1 = 0.025
 SOLE_LENGTH_V2 = 0.050
 
+# The V2 boot weighs 56 g (measured 2026-09-08) against V1's 69 g, so its delta
+# over the 18 g standard pad is 38 g, not 51. Robot total with V2 boots: ~866 g.
+PAD_MASS_V2 = 0.038
+
 
 def make_sprung_foot_spec_fn(
     stiffness: float,
