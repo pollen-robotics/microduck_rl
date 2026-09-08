@@ -762,6 +762,39 @@ def make_robust_stand_variant(
     return cfg
 
 
+# The posture terms that a motionless robot farms during the hop window. Order
+# is the measured cost of standing through that window, largest first (R2 run
+# paq347v4): 1.95 + 1.97 + 0.95 + 0.98 = 5.85/step against a hop's ~4.8.
+# com_height_target is NOT here -- it already has its own launch-half gate
+# (com_height_target_recovery_only) and scored equal for stander and hopper.
+_HOLD_GATED_POSTURE_TERMS = (
+    "upright",
+    "head_pose_tracking",
+    "pose",
+    "stillness_at_zero_command",
+)
+
+
+def make_hop_window_focus_variant(cfg):
+    """Pay the posture stack only while the phase is HELD.
+
+    Two 3000-iteration arms (R2 paq347v4, SymHard evnsrh1q) stood perfectly and
+    never hopped, while the same reward function pays a hopping policy 3.5/step
+    MORE than a standing one. The failure is the local gradient, not the
+    optimum: standing through the hop window earns 5.85/step for free, and the
+    first partial hop spends that before flight pays anything. The full
+    measurement is in `microduck_mdp` Patch 6, which also explains why the gate
+    is applied after the RewardManager resolves its terms rather than here.
+
+    This transform only NAMES the terms; weights and params are untouched, so
+    the stand still trains during holds (~50% of experience at hold_prob 0.5)
+    and the hop window's only income is the hop.
+    """
+    names = tuple(n for n in _HOLD_GATED_POSTURE_TERMS if n in cfg.rewards)
+    object.__setattr__(cfg, "hold_gated_rewards", names)
+    return cfg
+
+
 def make_structural_symmetry_variant(cfg):
     """Symmetry by CONSTRUCTION: actions projected onto the mirror subspace.
 

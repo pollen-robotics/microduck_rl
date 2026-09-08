@@ -135,6 +135,91 @@ def _process_action_symmetric(self, action):
 _ActionManager.process_action = _process_action_symmetric
 print("[mdp] Patch 5 active: structural action symmetry (cfg.symmetric_actions)")
 
+# ---------------------------------------------------------------------------
+# Patch 6: hold-gated posture rewards. When an env cfg carries
+# `hold_gated_rewards = (name, ...)` (set by hop.make_hop_window_focus_variant),
+# each named reward is wrapped so it pays only while the phase command is
+# FROZEN -- i.e. while the robot is being asked to stand, not to hop.
+#
+# WHY THIS EXISTS -- measured twice. HopPauseR2 (paq347v4) and
+# HopPauseR2-S50-SymHard (evnsrh1q) each ran 3000 iterations and neither ever
+# left the ground: airborne reward 0.002, CoM rise 0.000 m over 256 envs with
+# the phase advancing continuously. The incentive was NOT the problem. Scored
+# in R2's own reward function, the llu5t00x hopper earns 9.84/step against the
+# stander's 6.30, so hopping is the global optimum by 3.5/step and PPO still
+# never found it.
+#
+# The reason is the LOCAL gradient at the standing solution. While the phase
+# advances, a motionless robot collects upright (1.95), head_pose_tracking
+# (1.97), pose (0.95) and stillness (0.98): 5.85/step for doing nothing. Every
+# first step towards a hop spends some of that immediately, while
+# hop_both_feet_airborne and hop_body_height pay exactly zero until real flight
+# occurs -- so the approach runs uphill and standing is a local maximum.
+# Dropping hop_symmetric_push (SymHard) removed 3.67/step of that wall and was
+# still not enough, which falsified barrier HEIGHT and left the gradient's SIGN.
+# Gating these terms to holds makes standing through the hop window worth ~0
+# against a hop's ~4.8/step. The stand is unaffected: it trains during holds,
+# ~50% of experience at hold_prob 0.5.
+#
+# WHY A WRAPPER OBJECT, AND WHY AFTER MANAGER INIT: `upright` and
+# `head_pose_tracking` are CLASS-based terms. mjlab's `_prepare_terms` replaces
+# `term_cfg.func` with the instantiated object, so wrapping the cfg BEFORE that
+# hid the class and mjlab called it as a plain function (TypeError:
+# upright.__init__() got an unexpected keyword argument 'std'). Wrapping the
+# RESOLVED func instead works for function- and class-based terms alike, keeps
+# `term_cfg.params` untouched, and forwards `reset` for the class terms mjlab
+# tracks in `_class_term_cfgs`.
+
+
+class HoldGatedReward:
+    """Callable that zeroes a wrapped reward whenever the phase is advancing."""
+
+    def __init__(self, inner, command_name: str = "twist"):
+        self._inner = inner
+        self._command_name = command_name
+
+    def __call__(self, env, **params):
+        value = self._inner(env, **params)
+        term = env.command_manager.get_term(self._command_name)
+        held = getattr(term, "_hold_left", None)
+        if held is None:
+            # No pausable phase (an always-advancing arm): gating would zero the
+            # term for the whole episode, which is never the intent.
+            return value
+        return torch.where(held > 0.0, value, torch.zeros_like(value))
+
+    def reset(self, env_ids=None):
+        inner_reset = getattr(self._inner, "reset", None)
+        if inner_reset is not None:
+            return inner_reset(env_ids)
+        return {}
+
+
+_orig_reward_manager_init = _RewardManager.__init__
+
+
+def _reward_manager_init_hold_gated(self, *args, **kwargs):
+    # *args/**kwargs, not (cfg, env): mjlab 1.3.0's RewardManager also takes
+    # `scale_by_dt`, and a fixed signature here breaks on any future argument.
+    _orig_reward_manager_init(self, *args, **kwargs)
+    names = getattr(self._env.cfg, "hold_gated_rewards", ())
+    for name in names:
+        if name not in self._term_names:
+            # A term the variant expected is absent -- say so rather than
+            # silently training without the gate that makes the arm what it is.
+            raise ValueError(
+                f"hold_gated_rewards names '{name}', which is not an active reward term. "
+                f"Active: {sorted(self._term_names)}"
+            )
+        term_cfg = self.get_term_cfg(name)          # live reference
+        if isinstance(term_cfg.func, HoldGatedReward):
+            continue
+        term_cfg.func = HoldGatedReward(term_cfg.func)
+
+
+_RewardManager.__init__ = _reward_manager_init_hold_gated
+print("[mdp] Patch 6 active: hold-gated posture rewards (cfg.hold_gated_rewards)")
+
 if TYPE_CHECKING:
     from mjlab.viewer.debug_visualizer import DebugVisualizer
 

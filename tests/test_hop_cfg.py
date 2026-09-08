@@ -1027,3 +1027,69 @@ def test_nopush_arm_drops_only_the_symmetric_push_term():
     assert getattr(nopush, "symmetric_actions", False) is False
     assert set(r2.rewards.keys()) - set(nopush.rewards.keys()) == {"hop_symmetric_push"}
     assert nopush.commands["head_pose"].ranges == r2.commands["head_pose"].ranges
+
+
+# ── hold-gated posture (SymFocus) ────────────────────────────────────────────
+
+
+def test_symfocus_names_the_posture_terms_and_keeps_the_hop_terms():
+    """SymFocus is SymHard plus the posture stack gated to the hold window.
+    The transform must NAME existing terms (Patch 6 wraps the resolved funcs at
+    RewardManager init) without changing weights, params or the hop terms."""
+    from mjlab.tasks.registry import load_env_cfg
+
+    focus = load_env_cfg("Mjlab-HopPauseR2-S50-SymFocus-Sym-K3344-MicroDuck")
+    hard = load_env_cfg("Mjlab-HopPauseR2-S50-SymHard-Sym-K3344-MicroDuck")
+    assert getattr(focus, "hold_gated_rewards", ()) == (
+        "upright", "head_pose_tracking", "pose", "stillness_at_zero_command")
+    assert getattr(hard, "hold_gated_rewards", ()) == ()
+    assert getattr(focus, "symmetric_actions", False) is True
+    # Same terms, same weights: only WHEN they pay changes.
+    assert set(focus.rewards.keys()) == set(hard.rewards.keys())
+    for name in focus.rewards:
+        assert focus.rewards[name].weight == hard.rewards[name].weight, name
+    # Every gated term must actually exist, or the gate silently does nothing.
+    for name in focus.hold_gated_rewards:
+        assert name in focus.rewards
+
+
+def test_hold_gated_reward_zeroes_while_advancing_and_forwards_reset():
+    """HoldGatedReward passes the wrapped value through while `_hold_left > 0`
+    and zeroes it otherwise, per environment, and forwards `reset` so mjlab's
+    class-based terms (upright, head_pose_tracking) keep working."""
+    import torch
+    from mjlab_microduck.tasks.mdp import HoldGatedReward
+
+    class _Term:
+        _hold_left = None
+
+    class _CmdMgr:
+        def get_term(self, name):
+            return _Term()
+
+    class _Env:
+        command_manager = _CmdMgr()
+
+    env = _Env()
+    reset_calls = []
+
+    class _Inner:
+        def __call__(self, e, **kw):
+            return torch.tensor([1.0, 2.0, 3.0, 4.0])
+
+        def reset(self, env_ids=None):
+            reset_calls.append(env_ids)
+            return {"inner": 1.0}
+
+    gated = HoldGatedReward(_Inner())
+
+    # Two envs holding, two advancing.
+    _Term._hold_left = torch.tensor([1.0, 0.0, 0.5, 0.0])
+    assert torch.equal(gated(env), torch.tensor([1.0, 0.0, 3.0, 0.0]))
+
+    # No pausable phase at all: pass through untouched rather than zero forever.
+    _Term._hold_left = None
+    assert torch.equal(gated(env), torch.tensor([1.0, 2.0, 3.0, 4.0]))
+
+    assert gated.reset([0, 1]) == {"inner": 1.0}
+    assert reset_calls == [[0, 1]]

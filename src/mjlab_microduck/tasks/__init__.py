@@ -85,6 +85,7 @@ from .hop import (
     apply_hop_corrections,
     hop_rl_cfg,
     make_hop_variant,
+    make_hop_window_focus_variant,
     make_in_place_variant,
     make_robust_stand_variant,
     make_structural_symmetry_variant,
@@ -300,7 +301,13 @@ for _label, _hp, _hr, _robust, _sole, _act in (
         # perfect force ratio. It is why R and R2 both parked in the standing
         # basin. This arm tests whether removing the barrier alone is enough to
         # get a hop back; SymHard removes it AND forces symmetry.
-        ("HopPauseR2-S50-NoPush", 0.5, (1.0, 8.0), "r2", SOLE_LENGTH_V2, "bench")):
+        ("HopPauseR2-S50-NoPush", 0.5, (1.0, 8.0), "r2", SOLE_LENGTH_V2, "bench"),
+        # SymFocus: structural symmetry PLUS the posture stack gated to the hold
+        # window. SymHard (evnsrh1q) proved symmetry works -- action asymmetry
+        # exactly 0, force ratio 0.986 -- and that it does not make the robot
+        # hop: standing through the hop window pays 5.85/step for free, so the
+        # first partial attempt runs downhill. This arm removes that income.
+        ("HopPauseR2-S50-SymFocus", 0.5, (1.0, 8.0), "r2", SOLE_LENGTH_V2, "bench")):
     def _build_pause(play: bool, _hp=_hp, _hr=_hr, _robust=_robust, _sole=_sole, _act=_act, _label=_label):
         cfg = make_in_place_variant(make_symmetric_variant(make_hop_variant(
             make_microduck_velocity_env_cfg(play=play), stiffness=K_MEASURED,
@@ -327,6 +334,8 @@ for _label, _hp, _hr, _robust, _sole, _act in (
             cfg = make_structural_symmetry_variant(cfg)
         if _label.endswith("NoPush"):
             cfg.rewards.pop("hop_symmetric_push", None)
+        if _label.endswith("SymFocus"):
+            cfg = make_hop_window_focus_variant(make_structural_symmetry_variant(cfg))
         return apply_hop_corrections(make_sprung_variant(cfg, **sprung_kw), actuator=_act)
     _tid = f"Mjlab-{_label}-Sym-K3344-MicroDuck"
     register_mjlab_task(task_id=_tid, env_cfg=_build_pause(False), play_env_cfg=_build_pause(True),
