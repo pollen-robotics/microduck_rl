@@ -1,0 +1,39 @@
+<mujoco model="microduck_basketball">
+    <compiler angle="radian" meshdir="assets" texturedir="assets" autolimits="true"/>
+
+    <asset>
+        <!-- Equirectangular 8-panel seam texture (from Vottivott/microduck-playground,
+             scripts/make_basketball_assets.py). Visual only. -->
+        <texture type="2d" name="basketball_tex" file="basketball.png"/>
+        <material name="basketball_mat" texture="basketball_tex" specular="0.15" shininess="0.15" reflectance="0"/>
+        <!-- Visual-only UV sphere (scripts/make_basketball_mesh.py): MuJoCo's
+             built-in sphere geom does not use an equirect UV mapping, so the
+             seam texture only lands correctly on this mesh. -->
+        <mesh name="basketball_mesh" file="basketball.obj"/>
+    </asset>
+
+    <worldbody>
+        <!-- Size-7 basketball for the BallWalk task. FIBA size 7: circumference
+             749-780 mm -> radius 0.119-0.124 m (0.12 here), mass 567-650 g
+             (0.62 kg here). Explicit inertial: a basketball is a thin hollow
+             shell, I = (2/3) m r^2 = 0.00595 kg m^2. Do NOT let MuJoCo infer it
+             from the geom mass -- that gives a SOLID sphere (2/5 m r^2), 40%
+             too low, and the ball spins up too easily under the feet.
+             friction = (sliding, torsional, rolling): high sliding so the
+             feet grip and the ball rolls on the floor instead of skating;
+             condim=6 activates the torsional + rolling terms so the ball has
+             a little rolling resistance and doesn't coast forever.
+             NOTE: foot-ball contacts use the FOOT geom's params (feet have
+             priority=1 in FULL_COLLISION), so these values govern the
+             ball-floor contact. -->
+        <body name="ball" pos="0 0 0.12">
+            <freejoint name="ball_free"/>
+            <inertial pos="0 0 0" mass="0.62" diaginertia="0.00595 0.00595 0.00595"/>
+            <!-- Collision sphere (invisible; the mesh below carries the look). -->
+            <geom type="sphere" name="ball_geom" size="0.12" rgba="1 1 1 0" group="3"
+                  condim="6" friction="1.0 0.01 0.001"/>
+            <geom type="mesh" name="ball_visual" mesh="basketball_mesh" material="basketball_mat"
+                  contype="0" conaffinity="0" mass="0" group="0"/>
+        </body>
+    </worldbody>
+</mujoco>

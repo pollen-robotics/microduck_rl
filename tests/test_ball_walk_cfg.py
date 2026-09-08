@@ -129,3 +129,26 @@ def test_ball_walk_dr_stack_present():
 def test_ball_walk_play_variant_builds():
     cfg = make_microduck_ball_walk_env_cfg(play=True)
     assert "ball_balance" in cfg.rewards
+
+
+def test_basketball_xml_is_a_realistic_size_7():
+    """FIBA size 7: circumference 749-780 mm, mass 567-650 g. A basketball is a
+    thin hollow shell → I = (2/3) m r². Guards against MuJoCo inferring a SOLID
+    sphere inertia (2/5 m r², 40% too low) from a geom mass."""
+    import math
+
+    import mujoco
+
+    from mjlab_microduck.robot.microduck_constants import MICRODUCK_BASKETBALL_XML
+
+    m = mujoco.MjModel.from_xml_path(str(MICRODUCK_BASKETBALL_XML))
+    b = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "ball")
+    g = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "ball_geom")
+    r = float(m.geom_size[g, 0])
+    assert r == BALL_RADIUS
+    assert 0.749 <= 2 * math.pi * r <= 0.780
+    mass = float(m.body_mass[b])
+    assert 0.567 <= mass <= 0.650
+    shell = (2.0 / 3.0) * mass * r * r
+    for i in range(3):
+        assert abs(m.body_inertia[b, i] - shell) / shell < 0.02

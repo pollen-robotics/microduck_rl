@@ -1,10 +1,10 @@
-<mujoco model="scene_big_ball">
-    <!-- scene.xml + the 60cm/1kg circus ball (used by infer_policy.py with
+<mujoco model="scene_basketball">
+    <!-- scene.xml + the size-7 basketball (basketball.xml) (used by infer_policy.py with
          the ball-walk policy). No keyframes: the ball freejoint changes nq,
          which would break scene.xml's keyframe qpos sizes; infer_policy sets
          qpos programmatically anyway (robot on top of the ball). -->
     <include file="robot_allcollisions.xml" />
-    <include file="big_ball.xml" />
+    <include file="basketball.xml" />
 
     <visual>
         <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0" />

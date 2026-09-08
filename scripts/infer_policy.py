@@ -24,7 +24,7 @@ MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene.xml"
 # MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene_robot_walk.xml"
 MICRODUCK_ROLLERS_XML = "src/mjlab_microduck/robot/microduck/scene_rollers.xml"
 MICRODUCK_BALL_XML = "src/mjlab_microduck/robot/microduck/scene_ball.xml"
-MICRODUCK_BIG_BALL_XML = "src/mjlab_microduck/robot/microduck/scene_big_ball.xml"
+MICRODUCK_BASKETBALL_XML = "src/mjlab_microduck/robot/microduck/scene_basketball.xml"
 
 # BAM M6 defaults — MUST mirror `_BAM_ACTUATOR_KWARGS` in
 # src/mjlab_microduck/robot/microduck_constants.py (the actuator every policy is
@@ -116,10 +116,10 @@ BALL_OFFSET_X = 0.09
 BALL_OFFSET_ABS_Y = 0.042
 BALL_RADIUS = 0.035
 
-# Ball-walk mode constants (must match microduck_ball_walk_env_cfg): 60cm ball,
-# robot spawned on the apex just above the measured riding height (0.713).
-BALLWALK_BALL_RADIUS = 0.30
-BALLWALK_SPAWN_Z = 0.725
+# Ball-walk mode constants (must match microduck_ball_walk_env_cfg): size-7 basketball,
+# robot spawned on the apex just above the measured riding height (0.35).
+BALLWALK_BALL_RADIUS = 0.12
+BALLWALK_SPAWN_Z = 0.36
 BALLWALK_PUSH_MAX = 0.1        # final push-curriculum range in training
 # Final command-curriculum ranges in training.
 BALLWALK_VEL_MAX_XY = 0.15
@@ -929,7 +929,7 @@ def main():
     parser.add_argument("--kick-left", type=str, default=None, help="Path to LEFT-foot ball kick policy ONNX (press K to trigger). Requires --new-cmd-obs. Loads a scene with a ball.")
     parser.add_argument("--kick-right", type=str, default=None, help="Path to RIGHT-foot ball kick policy ONNX (press L to trigger). Requires --new-cmd-obs. Loads a scene with a ball.")
     parser.add_argument("--roulade", type=str, default=None, help="Path to roulade (forward roll) policy ONNX (press R to trigger). Requires --new-cmd-obs.")
-    parser.add_argument("--ball-walk", type=str, default=None, help="Path to ball-walk policy ONNX (circus-style walking on a 60cm ball). Requires --new-cmd-obs. Exclusive mode: loads the big-ball scene, spawns the robot on top; zero command = balance in place; press O to re-seat the robot on the ball.")
+    parser.add_argument("--ball-walk", type=str, default=None, help="Path to ball-walk policy ONNX (circus-style walking on a size-7 basketball). Requires --new-cmd-obs. Exclusive mode: loads the basketball scene, spawns the robot on top; zero command = balance in place; press O to re-seat the robot on the ball.")
     parser.add_argument("--kick-duration", type=float, default=3.0, help="Seconds a kick policy stays active before handing back to standing/walking (default: 3.0)")
     parser.add_argument("--roulade-duration", type=float, default=2.0, help="Seconds the roulade policy stays active before handing back to standing/walking (default: 2.0, ~the roll itself; the standing/walking policy takes over for the settle)")
     parser.add_argument("--lin-vel-x", type=float, default=0.0, help="Initial linear velocity X command (m/s)")
@@ -1008,7 +1008,7 @@ def main():
             return
 
     # Load MuJoCo model. Kick policies get a scene with a ball to kick;
-    # ball-walk gets the big-ball scene (robot spawned on top below).
+    # ball-walk gets the basketball scene (robot spawned on top below).
     # --scene overrides everything (any scene whose robot has the standard
     # 14-servo layout works, e.g. scene_allcollisions.xml).
     if args.scene:
@@ -1018,7 +1018,7 @@ def main():
     elif args.kick_left or args.kick_right:
         xml_path = MICRODUCK_BALL_XML
     elif args.ball_walk:
-        xml_path = MICRODUCK_BIG_BALL_XML
+        xml_path = MICRODUCK_BASKETBALL_XML
     else:
         xml_path = MICRODUCK_XML
     print(f"Loading MuJoCo model from: {xml_path}")
@@ -1139,7 +1139,7 @@ def main():
     data.qpos[qpos_adr + 0] = 0.0
     data.qpos[qpos_adr + 1] = 0.0
     if args.ball_walk:
-        # On the ball apex (the ball sits at the origin from big_ball.xml).
+        # On the ball apex (the ball sits at the origin from basketball.xml).
         data.qpos[qpos_adr + 2] = BALLWALK_SPAWN_Z
     else:
         data.qpos[qpos_adr + 2] = 0.1385 if args.roller else 0.125  # rollers add 13.5mm height
@@ -1174,7 +1174,7 @@ def main():
     print(f"Simulation timestep: {model.opt.timestep}s")
     print(f"Observation size: {test_obs.size} (expected: {expected_obs_size})")
     if args.ball_walk:
-        print(f"Ball-walk policy: loaded (60cm ball scene; zero command = balance in place; "
+        print(f"Ball-walk policy: loaded (basketball scene; zero command = balance in place; "
               f"cmd limits ±{BALLWALK_VEL_MAX_XY} m/s, ±{BALLWALK_VEL_MAX_ANG} rad/s; press O to re-seat)")
     elif policy.walking_session:
         print(f"Walking policy: loaded")

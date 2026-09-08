@@ -1,7 +1,7 @@
-"""Microduck BallWalk task — circus-style walking on top of a 60cm ball.
+"""Microduck BallWalk task — circus-style walking on top of a size-7 basketball.
 
-The robot spawns standing on top of a free-rolling 60cm-diameter / 1kg ball
-(big_ball.xml) and must keep its balance while tracking twist commands: the
+The robot spawns standing on top of a free-rolling size-7 basketball (24cm /
+0.62kg, basketball.xml) and must keep its balance while tracking twist commands: the
 only way the base translates sustainably is by walking the ball into rolling,
 treadmill-style. Zero-command envs train balance-in-place — the base skill.
 
@@ -11,14 +11,15 @@ Key design decisions:
     proprioception, like the rest of the policy family. The CRITIC sees ball
     pos/vel (asymmetric actor-critic) to predict falls.
   - "Stay on the ball" is enforced by hard state, not reward nudges: falling
-    off drops the root below MIN_ROOT_Z (ball top is at 0.60 m; standing on
+    off drops the root below MIN_ROOT_Z (ball top is at 0.24 m; standing on
     the FLOOR is 0.115 m) → termination. No on-ball gate on the positive
     stack is needed beyond that — every positive term is only collectable
     while riding.
   - ball_balance (Gaussian on the horizontal root ↔ ball-center offset) is
     the core balance shaping: on a ball, being off-center IS falling.
-    Verified in sim (2026-09-01 pre-check): from HOME on the ball the robot
-    settles at root_z ≈ 0.713 and passively tips over ~1 s — a healthy slow
+    Verified in sim (2026-09-08 pre-check): from HOME on the basketball the
+    robot sits at root_z ≈ 0.35 and passively tips in ~0.5 s (21° by 0.5 s;
+    the 60 cm ball it replaced took ~1 s) — a fast but still recoverable
     instability the policy must learn to stabilize.
   - Commands start near-zero (balance first) and widen via curriculum; pushes
     ramp in late and stay small (±0.1 — a shove on a ball is worth ~3× one on
@@ -71,21 +72,23 @@ BALL_FRICTION_RANGE      = (0.6, 1.2)   # sliding friction (abs) on the ball geo
 BALL_MASS_SCALE_RANGE    = (0.8, 1.2)   # ±20% mass+inertia together (pseudo_inertia)
 
 # ── Task constants ────────────────────────────────────────────────────────────
-BALL_RADIUS = 0.30
+BALL_RADIUS = 0.12  # size-7 basketball (basketball.xml: r=0.12 m, 0.62 kg, hollow-shell inertia)
 BALL_TOP_Z = 2 * BALL_RADIUS
-# Trunk height when standing on the ball, MEASURED in the 2026-09-01 physics
-# pre-check (settled root_z from HOME on a static dome): flat-ground STAND_Z
-# 0.115 minus ~2mm of sphere-curvature drop under the feet.
-TRUNK_ON_BALL_Z = 0.713
+# Trunk height when standing on the ball, MEASURED in the 2026-09-08 physics
+# pre-check (root_z from HOME held on the free basketball, tilt < 4°): flat-ground
+# STAND_Z 0.115 minus ~5mm of sphere-curvature drop under the feet (a 12 cm
+# sphere drops ~7mm under feet spread ±4 cm). Geometric estimate 0.348, measured 0.350.
+TRUNK_ON_BALL_Z = 0.35
 # Spawn root z (feet just kissing the ball top; same +5..15mm drop margin as
 # velocity's flat-ground (0.12, 0.13) spawn).
-SPAWN_Z_RANGE = (0.72, 0.73)
+SPAWN_Z_RANGE = (0.355, 0.365)
 # Spawn XY noise around the ball apex — forces an immediate balance correction.
 SPAWN_XY_NOISE = 0.02
 # Fell-off-the-ball termination: root below this = not riding anymore. Standing
-# on the ball is ~0.71, the deepest imaginable crouch ON the ball is > 0.62;
-# standing on the floor is 0.115.
-MIN_ROOT_Z = 0.45
+# on the ball is ~0.35, the deepest imaginable crouch ON the ball is ~0.29
+# (SIT-pose knees on the apex); root just below the ball TOP (0.24) is
+# unambiguous. Standing on the floor is 0.115.
+MIN_ROOT_Z = 0.23
 
 EPISODE_LENGTH_S = 20.0
 
@@ -113,7 +116,7 @@ from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from mjlab_microduck.robot.microduck_constants import (
-    MICRODUCK_BIG_BALL_CFG,
+    MICRODUCK_BASKETBALL_CFG,
     MICRODUCK_STANDUP_ROBOT_CFG,
 )
 from mjlab_microduck.tasks import mdp as microduck_mdp
@@ -176,7 +179,7 @@ def make_microduck_ball_walk_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg
     # state at qpos[:, 0:7]).
     cfg.scene.entities = {
         "robot": MICRODUCK_STANDUP_ROBOT_CFG,
-        "ball":  MICRODUCK_BIG_BALL_CFG,
+        "ball":  MICRODUCK_BASKETBALL_CFG,
     }
     cfg.scene.sensors = (feet_ball_cfg, self_collision_cfg)
     cfg.viewer.body_name = "trunk_base"

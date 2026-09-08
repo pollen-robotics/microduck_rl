@@ -25,8 +25,8 @@ MICRODUCK_GROUNDCONTACT_XML: Path = _ROBOT_DIR / "robot_groundcontact.xml"
 MICRODUCK_ALLCOLLISIONS_XML: Path = _ROBOT_DIR / "robot_allcollisions.xml"
 # 70mm / 15g ball prop for the BallKick task.
 MICRODUCK_BALL_XML: Path = _ROBOT_DIR / "ball.xml"
-# 60cm / 1kg circus ball for the BallWalk task.
-MICRODUCK_BIG_BALL_XML: Path = _ROBOT_DIR / "big_ball.xml"
+# Size-7 basketball (r=0.12 m, 0.62 kg, hollow-shell inertia) for the BallWalk task.
+MICRODUCK_BASKETBALL_XML: Path = _ROBOT_DIR / "basketball.xml"
 # Roller-skate model: 14 actuated joints + passive wheel hinges (passive_*wheel).
 MICRODUCK_GROUNDCONTACT_ROLLERS_XML: Path = _ROBOT_DIR / "robot_groundcontact_rollers.xml"
 # Backlash models: every servo joint gets an unactuated passive_<joint>_backlash
@@ -40,7 +40,7 @@ assert MICRODUCK_WALK_XML.exists(), f"XML not found: {MICRODUCK_WALK_XML}"
 assert MICRODUCK_GROUNDCONTACT_XML.exists(), f"XML not found: {MICRODUCK_GROUNDCONTACT_XML}"
 assert MICRODUCK_ALLCOLLISIONS_XML.exists(), f"XML not found: {MICRODUCK_ALLCOLLISIONS_XML}"
 assert MICRODUCK_BALL_XML.exists(), f"XML not found: {MICRODUCK_BALL_XML}"
-assert MICRODUCK_BIG_BALL_XML.exists(), f"XML not found: {MICRODUCK_BIG_BALL_XML}"
+assert MICRODUCK_BASKETBALL_XML.exists(), f"XML not found: {MICRODUCK_BASKETBALL_XML}"
 assert MICRODUCK_GROUNDCONTACT_ROLLERS_XML.exists(), f"XML not found: {MICRODUCK_GROUNDCONTACT_ROLLERS_XML}"
 assert MICRODUCK_GROUNDCONTACT_BACKLASH_XML.exists(), f"XML not found: {MICRODUCK_GROUNDCONTACT_BACKLASH_XML}"
 assert MICRODUCK_WALK_BACKLASH_XML.exists(), f"XML not found: {MICRODUCK_WALK_BACKLASH_XML}"
@@ -73,8 +73,8 @@ def get_ball_spec() -> mujoco.MjSpec:
     return mujoco.MjSpec.from_file(str(MICRODUCK_BALL_XML))
 
 
-def get_big_ball_spec() -> mujoco.MjSpec:
-    return mujoco.MjSpec.from_file(str(MICRODUCK_BIG_BALL_XML))
+def get_basketball_spec() -> mujoco.MjSpec:
+    return mujoco.MjSpec.from_file(str(MICRODUCK_BASKETBALL_XML))
 
 
 def get_backlash_spec() -> mujoco.MjSpec:
@@ -253,12 +253,12 @@ MICRODUCK_BALL_CFG = EntityCfg(
     init_state=EntityCfg.InitialStateCfg(pos=(0.3, 0.0, 0.035)),
 )
 
-# 60cm circus ball for the BallWalk task. default_root_state z = ball radius,
+# Size-7 basketball (r=0.12 m, 0.62 kg) for the BallWalk task. default_root_state z = ball radius,
 # so a reset_root_state_uniform event with an empty pose_range re-seats it
 # resting on the floor at the env origin with zero velocity.
-MICRODUCK_BIG_BALL_CFG = EntityCfg(
-    spec_fn=get_big_ball_spec,
-    init_state=EntityCfg.InitialStateCfg(pos=(0.0, 0.0, 0.3)),
+MICRODUCK_BASKETBALL_CFG = EntityCfg(
+    spec_fn=get_basketball_spec,
+    init_state=EntityCfg.InitialStateCfg(pos=(0.0, 0.0, 0.12)),
 )
 
 # Roller skate robot: the 4 passive wheel joints (passive_*wheel) have no XML
