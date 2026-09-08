@@ -46,7 +46,13 @@ survive?
 > after the flop audit found the side-lying tuck outscoring the upright one.
 > See "**Flop audit, and two corrections**".
 
-> **CURRENT BOX — the final section, "v0 — a plausible human throw":**
+> **CURRENT BOX — the final section, "After the first training run":**
+> STANDING hold on a plate RESTING ON THE GROUND, `z0` in [0.01, 0.03],
+> `vz` in [3.00, 4.00], `w0` in [15, 24], `t_launch` in [0.12, 0.16], hold
+> 1-5 s (curriculum-ramped), episode 7.5 s. Direction-verified backward in
+> every cell; 62% close 360 deg open-loop; landing 2.4-4.9 m/s.
+
+> **Superseded box — "v0 — a plausible human throw":**
 > STANDING hold, `z0` in [0.07, 0.09], `vz` in [2.50, 3.50], `w0` in
 > [15, 24], `t_launch` in [0.12, 0.16]. Direction-verified backward in every
 > cell; 37% close 360 deg open-loop, which is information about starting
@@ -4774,3 +4780,175 @@ hold extremes and midpoint (243 cells):
 
 `--box-check` now prints DIRECTION as the only PASS/FAIL and reports closure as
 a percentage, so the tool cannot re-impose the bar that was just removed.
+
+
+# After the first training run — long hold, plate on the ground
+
+First real run: 4096 envs, 279 iterations, `flip_progress +1.97`,
+`landing +1.72`, every penalty negative, the 300 deg landing gate opening. The
+env produces real backflips. The user then watched the video and found three
+things, all correct.
+
+## 1. It collapsed before the impulse
+
+`ready_stance` logged **+0.036** against a weight of 1.0. The constraint the
+user asked about does exist — `ready_stance` is a height Gaussian times a wide
+upright gate — it was simply too weak to matter: the hold lasted 0.1-0.3 s, so
+the term's entire episode-sum mass was 0.1-0.3 against 8.0 for the flip and up
+to 8.0 for the landing. Collapsing was almost free.
+
+## 2. Hold 1-5 s, episode 7.5 s
+
+`HOLD_RANGE` is now **1.0-5.0 s**. Episode length is derived, not guessed:
+5.0 s hold + 0.16 s launch + the MEASURED worst-case flight leaves the settle
+window. Airborne duration across the box, GONE to first terrain contact:
+
+```
+### flight duration at the CURRENT box's most energetic corner
+  z0=0.09 vz=2.5 w0=15 lau=0.16: rot= 285.1 land=3.48 apex=0.598 flight=0.565 s
+  z0=0.09 vz=3.0 w0=15 lau=0.16: rot= 325.5 land=4.04 apex=0.771 flight=0.665 s
+  z0=0.09 vz=3.5 w0=15 lau=0.16: rot= 445.1 land=4.17 apex=0.976 flight=0.750 s
+
+### the same launch from a plate resting on the FLOOR (z0 = 0.01)
+     vz    w0   lau     rot   land   apex  flight
+   2.50  15.0  0.12    29.3   2.59  0.413   0.455
+   2.50  15.0  0.16   273.6   3.13  0.517   0.535
+   2.50  19.5  0.12   321.9   3.19  0.483   0.525
+   2.50  19.5  0.16   333.8   3.16  0.458   0.475
+   2.50  24.0  0.12   179.7   2.30  0.393   0.460
+   2.50  24.0  0.16   264.0   2.58  0.379   0.415
+   3.00  15.0  0.12   213.0   2.91  0.585   0.585
+   3.00  15.0  0.16   289.7   3.64  0.665   0.625
+   3.00  19.5  0.12   309.8   3.50  0.598   0.590
+   3.00  19.5  0.16   404.3   3.35  0.619   0.565  <== closes
+   3.00  24.0  0.12   430.3   3.32  0.656   0.605  <== closes
+   3.00  24.0  0.16   363.3   3.16  0.493   0.475  <== closes
+   3.50  15.0  0.12   257.1   3.56  0.775   0.695
+   3.50  15.0  0.16   429.4   4.04  0.901   0.730  <== closes
+   3.50  19.5  0.12   265.7   3.85  0.726   0.675
+   3.50  19.5  0.16   476.7   3.12  0.776   0.650  <== closes
+   3.50  24.0  0.12   300.3   3.42  0.730   0.645
+   3.50  24.0  0.16   489.0   2.39  0.575   0.510  <== closes
+   4.00  15.0  0.12   140.7   4.24  0.926   0.765
+   4.00  15.0  0.16   361.1   4.93  1.172   0.875  <== closes
+   4.00  19.5  0.12   551.7   3.66  1.008   0.780  <== closes
+   4.00  19.5  0.16   652.7   4.49  0.947   0.740  <== closes
+   4.00  24.0  0.12   547.3   3.51  0.930   0.740  <== closes
+   4.00  24.0  0.16   527.5   3.05  0.789   0.635  <== closes
+```
+
+0.42-0.88 s, worst case at `vz` = 4.0. So 7.5 s leaves
+7.5 - 5.0 - 0.16 - 0.88 = **1.46 s** to settle in the worst case and over 6 s
+at a short hold. `EPISODE_LENGTH_S = 7.5`.
+
+The hold is reached by curriculum, not immediately: at a 5 s hold in a 7.5 s
+episode roughly 70% of collected experience is standing still, which would slow
+the flip's discovery badly. Stages (steps = iteration x 24):
+
+| step | hold_range |
+|---|---|
+| 0 | 0.1-0.3 s |
+| 1000 | 0.3-1.0 |
+| 2000 | 0.5-2.0 |
+| 3000 | 1.0-3.5 |
+| 4000 | **1.0-5.0** |
+
+The END state is the requirement; the ramp only keeps early discovery cheap.
+
+## 3. The plate rests on the ground
+
+`Z0_RANGE` is now **0.01-0.03 m** (plate CENTRE; 0.01 = `PLATE_HALF_THICKNESS`,
+so the slab sits exactly on the floor). The old 0.07 floor came from the
+KNEELING tuck, whose feet hung ~8 cm below the slab — that posture is gone, and
+standing's lowest geoms ARE its feet, so nothing can tunnel. The four
+spawn-penetration tests pass unchanged at the new height.
+
+**The honest cost is altitude.** A floor-level launch has less airtime: at
+`vz` = 2.5 nothing closes any more (best 334 deg), so `VZ_RANGE` came up from
+2.50-3.50 to **3.00-4.00**, and the landing got worse — 2.4-4.9 m/s where it
+was 2.4-4.4.
+
+## Launch box re-check
+
+`--box-check`, corners and midpoints of all four ranges (243 cells):
+
+```
+# box-check posture=standing bam=True dt=0.005
+#   z0 (0.01, 0.03) vz (3.0, 4.0) w0 (15.0, 24.0) launch (0.12, 0.16)
+#   z0 grid (0.01, 0.02, 0.03)
+#   hold (0.1, 0.2, 0.3) (NOT the env's (1.0, 5.0) — see BOX_CHECK_HOLDS) tuck (1.0,)
+  243 cells | rot 48.4-652.7 deg | max landing = 4.93 m/s | short of 360: 93 | over 2.6 m/s: 238 | never landed: 0
+  worst by rotation:
+    rot=   48.4 land= 2.98 apex=0.521 tilt0=  1.2  z0=0.010 vz=3.000 w0=15.00 launch=0.120 hold=0.10 tuck=1.00
+    rot=   70.0 land= 3.01 apex=0.532 tilt0=  1.2  z0=0.020 vz=3.000 w0=15.00 launch=0.120 hold=0.10 tuck=1.00
+    rot=   70.6 land= 3.06 apex=0.542 tilt0=  1.2  z0=0.030 vz=3.000 w0=15.00 launch=0.120 hold=0.10 tuck=1.00
+    rot=   99.7 land= 3.11 apex=0.554 tilt0=  3.0  z0=0.020 vz=3.000 w0=15.00 launch=0.120 hold=0.20 tuck=1.00
+    rot=   99.7 land= 3.11 apex=0.564 tilt0=  3.0  z0=0.030 vz=3.000 w0=15.00 launch=0.120 hold=0.20 tuck=1.00
+  worst by landing speed:
+    rot=  361.1 land= 4.93 apex=1.172 tilt0=  3.0  z0=0.010 vz=4.000 w0=15.00 launch=0.160 hold=0.20 tuck=1.00
+    rot=  176.5 land= 4.77 apex=1.101 tilt0=  3.0  z0=0.030 vz=4.000 w0=15.00 launch=0.140 hold=0.20 tuck=1.00
+    rot=  286.6 land= 4.73 apex=1.091 tilt0=  4.9  z0=0.030 vz=4.000 w0=15.00 launch=0.120 hold=0.30 tuck=1.00
+    rot=  176.9 land= 4.73 apex=1.091 tilt0=  3.0  z0=0.020 vz=4.000 w0=15.00 launch=0.140 hold=0.20 tuck=1.00
+    rot=  285.9 land= 4.68 apex=1.081 tilt0=  4.9  z0=0.020 vz=4.000 w0=15.00 launch=0.120 hold=0.30 tuck=1.00
+  DIRECTION: PASS — 0 cells rotate FORWARD (min rot 48.4 deg)
+  OPEN-LOOP CLOSURE (information, not a gate): 150/243 cells reach 360 deg = 62%; 0 never land
+  LANDING: 2.39-4.93 m/s (operator comfort threshold 2.6 m/s; 238/243 cells over)
+```
+
+- **DIRECTION: PASS — 0 of 243 cells rotate forward** (minimum +48.4 deg). That
+  stays the one hard gate.
+- **Open-loop closure 150/243 = 62%**, up from 37% because `vz` rose. Still
+  information, not a gate.
+- Landing 2.39-4.93 m/s.
+
+**A note on the hold used for this check.** `--box-check` sweeps
+`BOX_CHECK_HOLDS = (0.1, 0.2, 0.3)`, deliberately NOT the env's 1-5 s. The
+probe has no balance controller — it freezes the HOME command, and open-loop
+standing drifts 23 deg by 1.0 s — so sweeping the env's real hold measures a
+TOPPLING robot being flicked: 27 deg of tilt at the flick, rotations of
++-1000 deg, 42 forward cells and 177 that never land. That says nothing about
+the launch. The env's long hold exists so the POLICY learns to stand, and a
+policy that has learned it presents an upright robot at the flick whatever the
+hold lasted. This is the sharpest form of the standing caveat: **the probe
+measures the launch, not the skill.**
+
+## Reward mass, re-derived
+
+Episode sums, dt-scaled. With hold H, launch ~0.14 s and a 0.65 s typical
+flight, the post-landing settle is S ~ 6.7 - H seconds:
+
+| term | weight | value/step | mass H=1 | H=3 | H=5 |
+|---|---|---|---|---|---|
+| `flip_progress` | 8.0 | potential | 8.0 | 8.0 | 8.0 |
+| `landing` | 4.0 | ~1.0 x S | 22.8 | 14.8 | 5.8 |
+| `ready_stance` | **1.0** | ~0.975 x H | **1.0** | **3.0** | **5.0** |
+
+The stance weight STAYS 1.0 and the hold does the work: its mass rises 5-25x
+from the hold change alone (0.1-0.3 -> 1.0-5.0), which is the fix for the
+observed collapse. Raising the weight on top would have pushed the stance PAST
+the landing annuity at the long end — at H=5 the annuity is only 5.8 — and
+`landing` has to stay the dominant attractor. Never flipping caps the episode
+at 5.0; flipping and landing adds 13.8-30.8 on top.
+
+**Known consequence:** the landing mass swings 3.9x across the hold DR (5.8 at
+H=5, 22.8 at H=1), which is noisy credit assignment. If that shows up as
+instability, cap the annuity's paying window rather than reaching for weights.
+
+## Flop audit at the new plate height
+
+```
+# flop-audit: z0=0.02 tuck=0.75 duration=0.5s dt=0.005 bam=True
+ orientation   clr    tilt   drift  trunk_z    pose  height    pre  upright   TOTAL  on?
+     upright 0.045     8.4   0.009    0.140   1.000   0.975  0.975    1.000   0.975  yes
+   side_left 0.015   100.0   0.012    0.062   1.000   0.000  0.000    0.000   0.000  yes
+  side_right 0.015   100.0   0.012    0.062   1.000   0.000  0.000    0.000   0.000  yes
+   face_down 0.045    80.9   0.006    0.058   1.000   0.000  0.000    0.000   0.000  yes
+     on_back 0.045   102.4   0.011    0.077   1.000   0.006  0.006    0.000   0.000  yes
+    inverted 0.005    69.1   0.171    0.056   1.000   0.000  0.000    0.003   0.000  OFF
+  upright: pre=0.975 TOTAL=0.975   best flop: pre=0.006 TOTAL=0.000
+  WITHOUT the upright factor: upright would win (0.006 vs 0.975)
+  RESULT: PASS - upright wins (0.975 vs 0.000)
+```
+
+Upright 0.975, every flop 0.000. Unchanged in substance; the trunk heights move
+with the plate.

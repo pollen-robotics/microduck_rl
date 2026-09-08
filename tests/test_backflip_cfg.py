@@ -149,9 +149,9 @@ def test_launch_params_are_sampled_on_reset_within_the_operator_range(cfg):
     assert term.mode == "reset"
     assert term.func is microduck_mdp.reset_backflip_launch_params
     lo, hi = term.params["z0_range"]
-    # 0.07 is the geometric floor for the kneeling hold (its feet hang ~8 cm
-    # below the surface it rests on); the retune pushed the top down from 0.20.
-    assert lo >= 0.07 and hi <= 0.09
+    # The slab rests ON the floor at the low end (z0 = PLATE_HALF_THICKNESS);
+    # the spread above it is operator variation.
+    assert lo >= PLATE_HALF_THICKNESS and hi <= 0.05
 
 
 def test_launch_envelope_is_the_measured_box_not_the_placeholders(cfg):
@@ -378,11 +378,15 @@ def test_impact_penalty_ramps_up_and_keeps_the_self_negating_sign(cfg):
 
 
 def test_launch_dr_widens_over_training(cfg):
-    # Only the HOLD window widens now; the z0 tail was removed (see
-    # test_there_is_no_z0_dr_tail).
+    # Only the HOLD window widens; the z0 tail was removed. The curriculum now
+    # RAMPS INTO HOLD_RANGE rather than out of it: 1-5 s is the requirement and
+    # the early stages exist only to keep the flip's discovery cheap.
     hold = cfg.curriculum["backflip_hold_range"].params["param_stages"]
-    assert hold[0]["params"]["hold_range"] == HOLD_RANGE
-    assert hold[-1]["params"]["hold_range"][1] > HOLD_RANGE[1]
+    assert hold[0]["params"]["hold_range"] == (0.1, 0.3)
+    assert hold[-1]["params"]["hold_range"] == HOLD_RANGE
+    widths = [s["params"]["hold_range"][1] for s in hold]
+    assert widths == sorted(widths)          # monotonically longer
+    assert hold[-1]["step"] > hold[0]["step"]
 
 
 # ── Runner cfg / registration ────────────────────────────────────────────────
@@ -443,15 +447,17 @@ def test_arrival_damping_is_a_height_window_not_a_floor(cfg):
     # is 0.29-0.40 m, so anything at or above 0.2 m is comfortably clear.
     assert params["height_zero_max"] < 0.2
 
-    # The HOLD is NOT separable by height any more, and that is deliberate:
-    # with the plate at z0 = 0.07-0.09 the tucked hold trunk is 0.109-0.129 m,
-    # straddling STAND_Z (0.115). This assertion documents the overlap so the
-    # next reader does not "fix" the ceiling into a number that cannot exist.
-    hold_lo = Z0_RANGE[0] + PLATE_HALF_THICKNESS + TUCK_Z
-    hold_hi = Z0_RANGE[1] + PLATE_HALF_THICKNESS + TUCK_Z
-    assert hold_lo < STAND_Z < hold_hi, (
-        "the tucked hold no longer straddles standing height - re-derive the "
-        "arrival_damping ceiling instead of accepting HOLD-phase damping"
+    # The HOLD is separable by height again, and the ceiling must exclude it:
+    # standing on a floor-resting plate puts the trunk at
+    # z0 + PLATE_HALF_THICKNESS + STAND_Z = 0.135-0.155 m, above STAND_Z, so
+    # the damper must switch off before it. (It could NOT be separated when the
+    # hold was a tuck at z0 0.07-0.09 -- that trunk straddled STAND_Z -- which
+    # is why this assertion is worth keeping explicit.)
+    hold_lo = Z0_RANGE[0] + PLATE_HALF_THICKNESS + STAND_Z
+    assert hold_lo > STAND_Z
+    assert params["height_zero_max"] < hold_lo, (
+        "arrival_damping fires during the HOLD; re-derive its ceiling against "
+        f"the standing hold trunk height ({hold_lo:.3f} m)"
     )
 
 
@@ -484,7 +490,9 @@ def test_there_is_no_z0_dr_tail(cfg):
     # curriculum stage. If the hold posture changes, re-measure first.
     assert "backflip_z0_range" not in cfg.curriculum
     assert cfg.events["backflip_launch_params"].params["z0_range"] == Z0_RANGE
-    assert Z0_RANGE == (0.07, 0.09)
+    # the slab rests ON the floor at the low end (z0 = PLATE_HALF_THICKNESS)
+    assert Z0_RANGE == (0.01, 0.03)
+    assert Z0_RANGE[0] == pytest.approx(PLATE_HALF_THICKNESS)
 
 
 def test_the_standing_box_is_a_plausible_human_throw(cfg):
@@ -492,13 +500,14 @@ def test_the_standing_box_is_a_plausible_human_throw(cfg):
     # tuned so an unskilled robot completes every throw. Requiring whole-box
     # open-loop closure once squeezed w0 to the single value 18.5 rad/s, which
     # no hand reproduces, and it is the wrong bar -- compensating for an
-    # imperfect throw is the policy's job. Measured over 243 cells: 0 rotate
-    # forward, 37% close 360 deg open-loop, landing 2.4-4.4 m/s.
+    # imperfect throw is the policy's job. Measured over 243 cells from the
+    # floor-resting plate: 0 rotate forward, 62% close 360 deg open-loop,
+    # landing 2.4-4.9 m/s.
     p = cfg.events["backflip_launch_params"].params
-    assert p["vz_range"] == VZ_RANGE == (2.50, 3.50)
+    assert p["vz_range"] == VZ_RANGE == (3.00, 4.00)
     assert p["w0_range"] == W0_RANGE == (15.0, 24.0)
     assert p["launch_range"] == LAUNCH_RANGE == (0.12, 0.16)
-    assert p["z0_range"] == Z0_RANGE == (0.07, 0.09)
+    assert p["z0_range"] == Z0_RANGE == (0.01, 0.03)
 
 
 def test_the_flick_stays_inside_the_direction_reversal_boundary(cfg):
@@ -510,14 +519,38 @@ def test_the_flick_stays_inside_the_direction_reversal_boundary(cfg):
     assert cfg.events["backflip_launch_params"].params["w0_range"][1] <= 24.0
 
 
-def test_the_hold_window_is_capped_where_standing_holds_itself(cfg):
-    # MEASURED open-loop standing drift on the plate under BAM: 3.5 deg of
-    # tilt at 0.3 s, 7.3 at 0.5 s, 11.6 at 0.7, 23.2 (max 42) at 1.0. The
-    # curriculum must not widen past the point the pose holds unaided.
-    assert HOLD_RANGE == (0.1, 0.3)
-    stages = cfg.curriculum["backflip_hold_range"].params["param_stages"]
-    assert stages[0]["params"]["hold_range"] == HOLD_RANGE
-    assert stages[-1]["params"]["hold_range"][1] <= 0.5
+def test_the_hold_is_long_and_random_and_the_episode_fits_it(cfg):
+    # The user's requirement after watching the first run collapse into the
+    # plate: a long, random wait so the policy has to learn to STAND. The
+    # episode must fit the worst case -- 5 s hold + 0.16 s launch + the
+    # measured 0.88 s worst-case flight leaves ~1.46 s to settle at 7.5 s.
+    assert HOLD_RANGE == (1.0, 5.0)
+    assert cfg.episode_length_s >= HOLD_RANGE[1] + 0.16 + 0.88 + 1.4
+    assert cfg.episode_length_s == pytest.approx(7.5)
+
+
+def test_the_stance_weight_is_set_by_mass_not_by_weight(cfg):
+    # AGENTS.md: compare reward MASS. At the old 0.1-0.3 s hold this term could
+    # only earn 0.1-0.3 in episode-sum, which is why the first run ignored it
+    # (+0.036). With a 1-5 s hold and weight 1.5 it earns 1.5-7.5, while the
+    # landing annuity still dominates at 6.8-22.8 -- so never flipping caps the
+    # episode well below flipping and landing.
+    stance_w = cfg.rewards["ready_stance"].weight
+    landing_w = cfg.rewards["landing"].weight
+    flip_w = cfg.rewards["flip_progress"].weight
+    settle_min = cfg.episode_length_s - HOLD_RANGE[1] - 0.16 - 0.88
+
+    stance_mass_max = stance_w * HOLD_RANGE[1]
+    landing_mass_min = landing_w * settle_min
+    # 5x the most it could ever earn at the old 0.1-0.3 s hold
+    assert stance_mass_max >= 5.0 * 0.3 * 3, (
+        "holding the pose must be clearly worth doing"
+    )
+    assert landing_mass_min >= stance_mass_max, (
+        "the landing annuity must stay the dominant attractor at every hold"
+    )
+    # and never flipping must never beat flipping
+    assert stance_mass_max < flip_w + landing_mass_min
 
 
 # The sign convention that has bitten four envs. It CANNOT be checked from the
@@ -527,194 +560,6 @@ def test_the_hold_window_is_capped_where_standing_holds_itself(cfg):
 # every term's function is stated here explicitly, and the test also fails when
 # a new reward term is added without classifying it. A wrong weight sign turns a
 # penalty into a bounty for the violation, which the policy WILL farm.
-_TERM_SIGNS = {
-    # task terms: the function returns >= 0 and we want it → positive weight
-    "flip_progress":        "bonus",
-    "landing":              "bonus",
-    "ready_stance":         "bonus",
-    # costs: the function returns >= 0 → NEGATIVE weight (may be 0 pre-curriculum)
-    "body_ang_vel":         "cost",
-    "angular_momentum":     "cost",
-    "dof_pos_limits":       "cost",
-    "action_rate_l2":       "cost",
-    "joint_torque_rate_l2": "cost",
-    "arrival_damping":      "cost",
-    "self_collisions":      "cost",
-    # self-negating: the function returns <= 0 → POSITIVE weight
-    "gentle_landing":       "self_negating",
-}
-
-
-def test_every_reward_term_is_classified(cfg):
-    assert set(cfg.rewards.keys()) == set(_TERM_SIGNS)
-
-
-def test_every_penalty_term_carries_the_sign_that_makes_it_a_cost(cfg):
-    for name, term in cfg.rewards.items():
-        kind = _TERM_SIGNS[name]
-        if kind == "cost":
-            assert term.weight <= 0.0, f"{name}: a >=0 cost needs a negative weight"
-        else:
-            assert term.weight > 0.0, f"{name}: {kind} term needs a positive weight"
-
-
-def test_the_self_negating_term_really_is_self_negating():
-    # Pins the classification above to the actual function, so the table can't
-    # drift away from the code it is asserting about.
-    import inspect
-
-    src = inspect.getsource(microduck_mdp.trunk_vertical_accel_penalty)
-    assert "-torch.abs" in src or "return -" in src
-
-
-def test_motion_blockers_stay_low_for_this_dynamic_task(cfg):
-    # A backflip IS a large angular-velocity event: taxing it blocks discovery.
-    for name in ("body_ang_vel", "angular_momentum"):
-        if name in cfg.rewards:
-            assert abs(cfg.rewards[name].weight) <= 0.05, name
-
-
-def test_no_always_on_upright_term_opposes_the_flip(cfg):
-    assert "upright" not in cfg.rewards
-
-
-def test_walking_terms_are_gone(cfg):
-    for name in (
-        "track_linear_velocity",
-        "track_angular_velocity",
-        "air_time",
-        "foot_slip",
-    ):
-        assert name not in cfg.rewards
-
-
-# ── Curriculum ───────────────────────────────────────────────────────────────
-
-
-def test_smoothness_is_introduced_by_curriculum_not_at_full_strength(cfg):
-    stages = cfg.curriculum["torque_rate_weight"].params["weight_stages"]
-    assert stages[0]["step"] == 0 and stages[0]["weight"] == 0.0
-    assert stages[-1]["step"] > 0
-    # every stage of a mjlab-base cost stays <= 0
-    assert all(s["weight"] <= 0.0 for s in stages)
-
-
-def test_impact_penalty_ramps_up_and_keeps_the_self_negating_sign(cfg):
-    stages = cfg.curriculum["gentle_landing_weight"].params["weight_stages"]
-    assert all(s["weight"] > 0.0 for s in stages)  # self-negating func
-    assert stages[-1]["weight"] > stages[0]["weight"]  # ramps UP
-
-
-def test_launch_dr_widens_over_training(cfg):
-    # Only the HOLD window widens now; the z0 tail was removed (see
-    # test_there_is_no_z0_dr_tail).
-    hold = cfg.curriculum["backflip_hold_range"].params["param_stages"]
-    assert hold[0]["params"]["hold_range"] == HOLD_RANGE
-    assert hold[-1]["params"]["hold_range"][1] > HOLD_RANGE[1]
-
-
-# ── Runner cfg / registration ────────────────────────────────────────────────
-
-
-def test_symmetry_mirror_loss_is_enabled():
-    assert MicroduckBackflipRlCfg.algorithm.symmetry_cfg is not None
-
-
-def test_task_is_registered():
-    from mjlab.tasks.registry import list_tasks
-
-    import mjlab_microduck.tasks  # noqa: F401
-
-    tasks = list_tasks()
-    assert "Mjlab-Backflip-Flat-MicroDuck" in tasks
-    assert "Mjlab-Backflip-Flat-Backlash-MicroDuck" in tasks
-
-
-def test_backlash_variant_keeps_the_plate_and_the_entity_order():
-    from mjlab_microduck.robot.microduck_constants import MICRODUCK_BACKLASH_ROBOT_CFG
-    from mjlab_microduck.tasks.backlash import make_backlash_variant
-
-    bl = make_backlash_variant(
-        make_microduck_backflip_env_cfg(), MICRODUCK_BACKLASH_ROBOT_CFG
-    )
-    names = list(bl.scene.entities.keys())
-    assert names[0] == "robot"
-    assert "plate" in names
-    assert bl.scene.entities["robot"] is MICRODUCK_BACKLASH_ROBOT_CFG
-
-
-# --- Fix-wave additions. -----------------------------------------------------
-
-
-def test_arrival_damping_curriculum_keeps_the_cost_sign_at_every_stage(cfg):
-    # The one staged table whose signs were unchecked while the other two were.
-    # body_ang_vel_at_height is an mjlab-style POSITIVE cost, so every stage
-    # must be <= 0; a positive stage would pay for trunk thrash at the landing.
-    stages = cfg.curriculum["arrival_damping_weight"].params["weight_stages"]
-    assert stages[0]["step"] == 0 and stages[0]["weight"] == 0.0
-    assert all(s["weight"] <= 0.0 for s in stages)
-    assert stages[-1]["weight"] < stages[0]["weight"]   # ramps DOWN (stronger)
-    assert stages[-1]["step"] > 0                       # after skill discovery
-
-
-def test_arrival_damping_is_a_height_window_not_a_floor(cfg):
-    # body_ang_vel_at_height's height_low/height_high pair is a FLOOR: without
-    # an upper edge every airborne step of the flip pays full cost, and the
-    # tilt gate alone lets a rotating robot through twice per revolution.
-    params = cfg.rewards["arrival_damping"].params
-    assert params["height_high"] < params["height_full_max"] < params["height_zero_max"]
-
-    # the landed STANDING trunk must be inside the full-cost band
-    assert params["height_full_max"] > STAND_Z
-
-    # ... and the flight must be outside it. Measured apex in the retuned box
-    # is 0.29-0.40 m, so anything at or above 0.2 m is comfortably clear.
-    assert params["height_zero_max"] < 0.2
-
-    # The HOLD is NOT separable by height any more, and that is deliberate:
-    # with the plate at z0 = 0.07-0.09 the tucked hold trunk is 0.109-0.129 m,
-    # straddling STAND_Z (0.115). This assertion documents the overlap so the
-    # next reader does not "fix" the ceiling into a number that cannot exist.
-    hold_lo = Z0_RANGE[0] + PLATE_HALF_THICKNESS + TUCK_Z
-    hold_hi = Z0_RANGE[1] + PLATE_HALF_THICKNESS + TUCK_Z
-    assert hold_lo < STAND_Z < hold_hi, (
-        "the tucked hold no longer straddles standing height - re-derive the "
-        "arrival_damping ceiling instead of accepting HOLD-phase damping"
-    )
-
-
-def test_plate_reset_event_passes_t_zero_explicitly(cfg):
-    # episode_length_buf is zeroed AFTER reset events, so without an explicit
-    # t=0 this event reads the terminal episode's time, the phase comes out
-    # GONE, and it parks the plate 5 m away instead of placing it at z0.
-    # (The placement itself is measured in test_backflip_mdp.py.)
-    assert cfg.events["backflip_plate_reset"].params["t_override"] == 0.0
-
-
-def test_critic_plate_terms_are_the_gone_masked_ones(cfg):
-    # The parked plate sits ~8.7 m away for ~85% of every episode's steps; an
-    # unmasked plate_position normalizer converges to std ~3 m and squashes the
-    # informative 0-0.3 m HOLD/LAUNCH range into noise. The mask itself is
-    # measured in test_backflip_mdp.py.
-    critic = cfg.observations["critic"].terms
-    assert critic["plate_position"].func is microduck_mdp.backflip_plate_pos_obs
-    assert critic["plate_velocity"].func is microduck_mdp.backflip_plate_vel_obs
-    # The actor must still carry no plate term at all, masked or not.
-    assert not any("plate" in name for name in cfg.observations["actor"].terms)
-
-
-def test_there_is_no_z0_dr_tail(cfg):
-    # The tail was removed, and both ends of the argument are measured
-    # (docs "Lower and gentler"): upward, whole-box landing speed crosses the
-    # ~2.6 m/s hardware limit between z0=0.21 and 0.225; downward, Z0_RANGE is
-    # floored at 0.07 by the hold pose's own geometry (the kneeling tuck's feet
-    # hang ~8 cm below the surface it rests on). A 2 cm range does not need a
-    # curriculum stage. If the hold posture changes, re-measure first.
-    assert "backflip_z0_range" not in cfg.curriculum
-    assert cfg.events["backflip_launch_params"].params["z0_range"] == Z0_RANGE
-    assert Z0_RANGE == (0.07, 0.09)
-
-
 def test_the_pre_reset_state_is_coherent(cfg):
     # mjlab never calls env.reset() before the viewer's first episode
     # (ManagerBasedRlEnv.__init__ does not reset; mjlab/viewer/base.py calls

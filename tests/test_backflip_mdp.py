@@ -191,15 +191,15 @@ def test_sampled_params_use_measured_envelope_defaults():
     # boxes and not the pre-measurement placeholders.
     env = _FakeEnv(num_envs=256)
     microduck_mdp.reset_backflip_launch_params(env, torch.arange(256))
-    assert torch.all((env._backflip_vz >= 2.50) & (env._backflip_vz <= 3.50))
+    assert torch.all((env._backflip_vz >= 3.00) & (env._backflip_vz <= 4.00))
     assert torch.all((env._backflip_w0 >= 15.0) & (env._backflip_w0 <= 24.0))
     # A short flick is the violent one: t_launch=0.08 lands at up to 3.97 m/s,
     # which is why the low end sits at 0.12.
     assert torch.all(env._backflip_t_launch >= 0.12)
     assert torch.all(env._backflip_t_launch <= 0.16)
-    # z0 is floored at 0.07 by the hold pose's geometry and capped at 0.09 by
-    # the retune (the plate is now less than half as high as it was).
-    assert torch.all((env._backflip_z0 >= 0.07) & (env._backflip_z0 <= 0.09))
+    # The slab rests ON the floor at z0 = PLATE_HALF_THICKNESS = 0.01; the
+    # spread is operator variation.
+    assert torch.all((env._backflip_z0 >= 0.01) & (env._backflip_z0 <= 0.03))
 
 
 def test_phase_of_env_follows_episode_time():

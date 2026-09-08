@@ -1,23 +1,25 @@
 """Microduck backflip task — launched by the operator's hands, land on the feet.
 
-STATUS (2026-09-07). This is a v0: a platform under the robot's feet that
-lifts and flicks it, with launch parameters randomized across the spread a
-human throw plausibly delivers. The spawn is geometrically valid (the feet are
-the lowest geoms, so placing the trunk at STAND_Z above the plate top puts the
-soles on the surface by construction; four CPU tests assert it). Open-loop —
-holding a fixed pose and folding once at the flick — the robot lands at roughly
-3-4 m/s, above the ~2.6 m/s the operator would like; a trained policy that
-tucks to spin faster and extends to brake before contact may do better, and
-that, along with how much of the box it can actually complete, is answered by
-training rather than by more probing.
+STATUS. First training run (4096 envs, 279 iterations) worked: flip_progress
++1.97, landing +1.72, every penalty negative, and the 300 deg landing gate
+opening — so the env does produce real backflips. It also collapsed into the
+plate before the impulse, because the hold was 0.1-0.3 s and ready_stance
+could only ever earn 0.1-0.3 (it logged +0.036). This revision answers that:
+the plate now rests on the ground, the hold is 1-5 s (curriculum-ramped), the
+episode is 7.5 s to fit it, and the stance weight is re-derived by reward MASS.
+Open-loop the robot lands at 2.4-4.9 m/s, above the ~2.6 m/s the operator
+would like; a trained policy that tucks to spin faster and extends to brake
+before contact may do better, and that — along with how much of the launch box
+it can complete — is answered by training rather than by more probing.
 
-WHY THE PLATE IS HELD 7-9 cm UP AND NOT LYING ON THE GROUND. A user watching
-the env asked for the plate to sit ON the ground. Measured, it cannot: with the
-plate top under 0.08 m the robot's own geometry reaches the floor, and the
-launcher then transfers the flick into the floor rather than the robot. Z0_RANGE
-is pushed down to that geometric floor (0.07-0.09, plate top 0.08-0.10) instead
-— less than half the height the env started with. Rotation varies by under
-6 deg across that range, so the plate height is the one benign DR axis.
+WHY THE PLATE SITS ON THE GROUND NOW. An earlier revision floored Z0_RANGE at
+0.07 m because the then-current KNEELING tuck rested on its shins with its feet
+hanging ~8 cm below the slab, so a lower plate put them through the floor. That
+posture is gone. Standing's LOWEST GEOMS ARE THE FEET, so the plate can rest on
+the ground (z0 = PLATE_HALF_THICKNESS puts the slab exactly on the floor) and
+the spawn still puts the soles on its top surface by construction. The honest
+cost is altitude: a floor-level launch has less airtime, nothing closes at
+vz 2.5 any more, and VZ_RANGE had to come up to 3.0-4.0 — which lands harder.
 
 HAND-OFF PREMISE. On the real robot there is no launcher and no launcher
 sensing: a human picks the duck up, holds it on two flat palms, and flicks.
@@ -105,6 +107,28 @@ DESIGN CHOICES AND WHERE THEY CAME FROM
     and it is a pure motion-blocker on the one thing the maneuver is made of.
     Anti-violence pressure lives on |a_z|, action_rate and the landing's
     settle factor instead.
+  * REWARD MASS under the 7.5 s episode and the 1-5 s hold (episode sums,
+    dt-scaled — AGENTS.md: compare mass, not weight). With hold H, launch
+    ~0.14 s and a measured 0.42-0.88 s flight, the post-landing settle is
+    S = 7.5 - H - 0.14 - 0.65 ~ 6.7 - H seconds:
+
+        term            weight   value/step   mass at H=1   H=3    H=5
+        flip_progress    8.0      potential      8.0         8.0    8.0
+        landing          4.0      ~1.0 x S      22.8        14.8    5.8
+        ready_stance     1.0      ~0.975 x H     1.0         3.0    5.0
+
+    Two things this buys. Holding the pose is now clearly worth doing — 1.0-5.0
+    against the 0.1-0.3 it could earn at the old hold, a 5-25x increase from
+    the hold change alone, which is why the first run ignored it (+0.036). And
+    `landing` stays the dominant attractor at EVERY hold (5.8 >= 5.0 even at
+    H=5, where the settle window is shortest): never flipping caps the episode
+    at ready_stance's 5.0, while flipping and landing adds 13.8-30.8 on top.
+    Raising the stance weight instead of relying on the hold would have
+    inverted that at the long end — which is exactly the mass arithmetic
+    AGENTS.md asks for rather than multiplying a weight and hoping. KNOWN CONSEQUENCE: the
+    landing mass swings 3.4x across the hold DR (6.8 at H=5, 22.8 at H=1),
+    which is noisy credit assignment; if that shows up as instability, cap the
+    annuity's paying window rather than reaching for the weights.
   * The landing annuity (weight 4.0) is gated on a near-complete flip (300-345
     deg): "stand still and never flip" satisfies feet/upright/height/calm
     trivially, and without the gate it is the argmax. Reward MASS (episode
@@ -201,9 +225,12 @@ KP_RANDOMIZATION_RANGE              = (0.85, 1.15)  # unused (kp DR off)
 KD_RANDOMIZATION_RANGE              = (0.9, 1.1)    # unused (kd DR off)
 IMU_ORIENTATION_RANDOMIZATION_ANGLE = 6.0
 
-# Episode budget: hold (<= 1.0 s once the curriculum has widened it) + launch
-# ramp (<= 0.15 s) + a ~0.6 s airborne window + ~2 s to settle on the feet.
-EPISODE_LENGTH_S = 4.0
+# Episode budget, MEASURED rather than guessed: hold (up to 5.0 s once the
+# curriculum has widened it) + launch ramp (<= 0.16 s) + the airborne window
+# (0.42-0.88 s measured across the box, worst case at vz = 4.0) + settle. At
+# 7.5 s the worst case leaves 7.5 - 5.0 - 0.16 - 0.88 = 1.46 s to settle on the
+# feet, and a short hold leaves over 6 s.
+EPISODE_LENGTH_S = 7.5
 
 # Empirically-measured standing trunk height above the sole contact plane
 # (standup lesson: measure it on the actual model, never carry it across
@@ -313,19 +340,33 @@ PLATE_HALF_THICKNESS = 0.01
 # have to be re-signed to even score. The w0 ceiling stays inside that measured
 # boundary with margin. Every corner of this box is direction-checked backward;
 # re-check with `--box-check` if you move it.
-HOLD_RANGE    = (0.1, 0.3)     # widened to (0.1, 0.5) by curriculum, and no
-                               # further: MEASURED open-loop standing drift on
-                               # the plate under BAM is 3.5 deg of tilt at
-                               # 0.3 s, 7.3 at 0.5 s, then 11.6 at 0.7 and
-                               # 23.2 (max 42) at 1.0 s. 0.5 s is the last
-                               # point the pose holds itself unaided. A trained
-                               # policy balances — the walking and stand-up
-                               # policies hold far longer — so this is a floor
-                               # on what is safe, not a claim about the limit.
+HOLD_RANGE    = (1.0, 5.0)     # the END state, and the user's requirement:
+                               # a long, random wait so the policy has to learn
+                               # to STAND on the launcher rather than collapse
+                               # into it. The first training run collapsed
+                               # before the impulse (ready_stance +0.036
+                               # against a weight of 1.0) precisely because a
+                               # 0.1-0.3 s hold made collapsing almost free.
+                               # A curriculum ramps into it — see the comment
+                               # on backflip_hold_range below — because at a
+                               # 5 s hold in a 7.5 s episode ~70% of collected
+                               # experience is standing still, which slows the
+                               # flip's discovery badly. The ramp is only for
+                               # early discovery; 1-5 s is where it must end.
 LAUNCH_RANGE  = (0.12, 0.16)   # how long the hands stay with the robot
-Z0_RANGE      = (0.07, 0.09)   # plate top 0.08-0.10; rotation varies < 6 deg
-                               # across this, the one benign DR axis
-VZ_RANGE      = (2.50, 3.50)   # lift
+Z0_RANGE      = (0.01, 0.03)   # plate CENTRE. 0.01 = PLATE_HALF_THICKNESS, so
+                               # the slab rests exactly on the floor; the DR
+                               # spread is operator variation. The old 0.07-0.09
+                               # floor came from the KNEELING tuck, whose feet
+                               # hung ~8 cm below the slab; standing's lowest
+                               # geoms ARE the feet, so the plate can sit on the
+                               # ground and a test asserts nothing tunnels.
+VZ_RANGE      = (3.00, 4.00)   # lift. RAISED from 2.50-3.50 because the lower
+                               # plate costs altitude: from a floor-resting
+                               # plate nothing closes at vz 2.5 (best 334 deg),
+                               # while 3.0-4.0 closes across most of the w0
+                               # range. The honest cost is landing speed —
+                               # 2.4-4.9 m/s open-loop, worse than before.
 W0_RANGE      = (15.0, 24.0)   # backward flick; 24 keeps clear of the
                                # measured 24-27 direction reversal
 MAX_PAID_RATE = 25.0           # rad/s; measured peak in the box is 23.0,
@@ -513,6 +554,16 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # passively stable, needing no balancing, costing less action_rate --
     # outscored the intended pose by 4%. Re-run `--flop-audit` after touching
     # any factor here.
+    #
+    # WEIGHT 1.0, chosen by MASS not by weight (AGENTS.md). See the module
+    # docstring's reward-mass table. At the old 0.1-0.3 s hold this term could
+    # only ever earn 0.1-0.3 in episode-sum, which is why the first training
+    # run collapsed into the plate and logged ready_stance +0.036 — the hold
+    # was almost free to skip. The hold change alone therefore multiplies its
+    # mass by 5-25x at the SAME weight (1.0-5.0), which is the fix; raising the
+    # weight on top would push the stance PAST the landing annuity at the long
+    # end (at H=5 the annuity is only 5.8), and `landing` must stay the
+    # dominant attractor. So the weight stays 1.0 and the hold does the work.
     #
     # stand_z carries the plate half-thickness: the term measures trunk height
     # against the plate CENTRE (z0) while the robot stands on its top surface.
@@ -890,20 +941,28 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         del cfg.curriculum["terrain_levels"]
     del cfg.curriculum["command_vel"]
 
-    # Hold-window widening. A narrow hold early keeps every episode's launch at
-    # a similar time so the policy can learn what the flick FEELS like; widening
-    # it later (to a full second) stops it from learning the clock instead of
-    # the cue. Phase-aligned with the flip existing first — hardening the
-    # timing DR before the skill consolidates is the pacing failure that has
-    # bitten this repo before.
+    # Hold-window widening, to HOLD_RANGE = 1-5 s. THE END STATE IS THE
+    # REQUIREMENT: the policy must learn to STAND on the launcher for a long,
+    # random wait, because the first training run collapsed into the plate
+    # before the impulse. The ramp exists ONLY to keep early discovery cheap —
+    # at a 5 s hold in a 7.5 s episode roughly 70% of collected experience is
+    # standing still, and paying that from step 0 would slow the flip's
+    # discovery badly. A narrow hold early also keeps every episode's launch at
+    # a similar time so the policy can learn what the flick FEELS like;
+    # widening it later stops it learning the clock instead of the cue.
+    # Phase-aligned with the flip existing first — hardening the timing DR
+    # before the skill consolidates is the pacing failure that has bitten this
+    # repo before.
     cfg.curriculum["backflip_hold_range"] = CurriculumTermCfg(
         func=microduck_mdp.event_param_curriculum,
         params={
             "event_name": "backflip_launch_params",
             "param_stages": [
-                {"step": 0,         "params": {"hold_range": HOLD_RANGE}},
-                {"step": 1500 * 24, "params": {"hold_range": (0.1, 0.4)}},
-                {"step": 3000 * 24, "params": {"hold_range": (0.1, 0.5)}},
+                {"step": 0,         "params": {"hold_range": (0.1, 0.3)}},
+                {"step": 1000 * 24, "params": {"hold_range": (0.3, 1.0)}},
+                {"step": 2000 * 24, "params": {"hold_range": (0.5, 2.0)}},
+                {"step": 3000 * 24, "params": {"hold_range": (1.0, 3.5)}},
+                {"step": 4000 * 24, "params": {"hold_range": HOLD_RANGE}},
             ],
         },
     )

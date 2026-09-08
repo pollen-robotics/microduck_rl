@@ -623,10 +623,23 @@ def run_settle(model, data, z0, rng, bam_ctrl=None, duration=3.0,
     return samples, final
 
 
-# Hold ceiling the cfg's backflip_hold_range curriculum widens to. The box has
-# to close at the LONGEST hold too, since that is the state the policy trains
-# into last.
-HOLD_CURRICULUM_MAX = 0.5
+# Hold durations --box-check sweeps. These are DELIBERATELY NOT the env's
+# HOLD_RANGE, which is 1-5 s.
+#
+# The probe has no balance controller: it freezes the HOME command, and
+# open-loop standing on the plate drifts 3.5 deg of tilt by 0.3 s, 7.3 by 0.5,
+# 23.2 by 1.0. Sweeping the env's actual 1-5 s hold therefore measures a
+# TOPPLING robot being flicked — 27 deg of tilt at the flick, rotations of
+# +-1000 deg, and most cells never landing on their feet. That says nothing
+# about the launch.
+#
+# The env's long hold exists so the POLICY learns to stand, and a policy that
+# has learned it presents an upright robot at the flick whatever the hold
+# lasted. So the box is measured over the window where the open-loop pose is
+# still upright, which is the launch condition a balanced policy delivers.
+# This is the sharpest form of the standing caveat: THE PROBE MEASURES THE
+# LAUNCH, NOT THE SKILL.
+BOX_CHECK_HOLDS = (0.1, 0.2, 0.3)
 
 # Acceptance thresholds for --box-check. 360 deg is a closed flip. 2.6 m/s is
 # the OPERATOR'S COMFORT THRESHOLD (~34 cm of free fall), not a physical limit:
@@ -665,7 +678,7 @@ def box_check_report(model, data, bam_ctrl=None, posture="tucked_env"):
     w0s = _edges(W0_RANGE)
     z0s = _edges(Z0_RANGE)
     laus = _edges(LAUNCH_RANGE)
-    holds = (HOLD_RANGE[0], 0.5 * sum(HOLD_RANGE), HOLD_CURRICULUM_MAX)
+    holds = BOX_CHECK_HOLDS
     # The FOLD DEPTH the policy reaches at the flick. It is not DR -- it is
     # the policy's action -- and the standing launch only closes at a full
     # fold (measured: fold 0.75 gives 209-254 deg where 1.0 gives 357-458).
@@ -678,7 +691,8 @@ def box_check_report(model, data, bam_ctrl=None, posture="tucked_env"):
     print(f"#   z0 {Z0_RANGE} vz {VZ_RANGE} w0 {W0_RANGE} "
           f"launch {LAUNCH_RANGE}")
     print(f"#   z0 grid {z0s}")
-    print(f"#   hold {holds} tuck {tucks}")
+    print(f"#   hold {holds} (NOT the env's {HOLD_RANGE} — see "
+          f"BOX_CHECK_HOLDS) tuck {tucks}")
     rows = []
     for z0, vz, w0, lau, hold, tk in itertools.product(
         z0s, vzs, w0s, laus, holds, tucks

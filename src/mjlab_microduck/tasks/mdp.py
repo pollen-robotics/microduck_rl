@@ -7359,10 +7359,10 @@ def _backflip_state(env: ManagerBasedRlEnv) -> tuple:
         # ("the plate is stuck in the middle of the robot, not under its
         # feet"). They now describe a plausible mid-box toss instead.
         z = torch.zeros(env.num_envs, device=env.device)
-        env._backflip_t_hold = torch.full_like(z, 0.2)
+        env._backflip_t_hold = torch.full_like(z, 1.0)
         env._backflip_t_launch = torch.full_like(z, 0.14)
-        env._backflip_z0 = torch.full_like(z, 0.08)
-        env._backflip_vz = torch.full_like(z, 3.0)
+        env._backflip_z0 = torch.full_like(z, 0.02)
+        env._backflip_vz = torch.full_like(z, 3.5)
         env._backflip_w0 = torch.full_like(z, 19.5)
         env._backflip_accum = z.clone()
         env._backflip_max = z.clone()
@@ -7388,10 +7388,10 @@ def _uniform(env, env_ids, rng: tuple) -> torch.Tensor:
 def reset_backflip_launch_params(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
-    hold_range: tuple = (0.1, 0.3),
+    hold_range: tuple = (1.0, 5.0),
     launch_range: tuple = (0.12, 0.16),
-    z0_range: tuple = (0.07, 0.09),
-    vz_range: tuple = (2.50, 3.50),
+    z0_range: tuple = (0.01, 0.03),
+    vz_range: tuple = (3.00, 4.00),
     w0_range: tuple = (15.0, 24.0),
 ) -> None:
     """Sample this episode's toss and clear the rotation accounting.
@@ -7417,6 +7417,13 @@ def reset_backflip_launch_params(
         reverted.
       * ``t_launch`` down at 0.08 lands at up to 3.97 m/s: a SHORT flick is the
         violent one, which is why the low end sits at 0.12.
+      * ``z0 in [0.07, 0.09]`` was a floor imposed by a KNEELING hold whose
+        feet hung below the slab. Standing's lowest geoms are its feet, so the
+        plate now rests on the ground — at the cost of altitude, which is why
+        ``vz`` had to rise to 3.0-4.0.
+      * ``hold_range`` is 1-5 s because the first training run COLLAPSED into
+        the plate before the impulse: at the old 0.1-0.3 s the stance reward
+        could only ever earn 0.1-0.3 in episode-sum. The cfg ramps into it.
     """
     if env_ids is None or len(env_ids) == 0:
         return
