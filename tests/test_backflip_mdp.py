@@ -1066,3 +1066,41 @@ def test_landing_pays_nothing_once_the_window_has_expired():
     env.common_step_counter += int(round(1.4 / env.step_dt)) + 1
     outside = float(microduck_mdp.backflip_landing(env, window_s=1.4)[0])
     assert outside == 0.0
+
+
+# --- The critic-obs NaN path from run 2026-09-08_16-26-30_backflip. ---------
+#
+# rsl_rl found NaN in the CRITIC group while nan_state read exactly 0.0000.
+# mjlab computes obs AFTER _reset_idx, so anything robot_state_is_nan checks
+# would have reset the env and returned clean obs -- the NaN came through a
+# quantity it does not check. These pin the sanitizing.
+
+def test_the_plate_obs_sanitize_before_the_mask_multiplies():
+    # ORDER MATTERS. The phase mask is exactly 0.0 once the plate is GONE and
+    # 0 * inf is NaN, so masking an unsanitized infinity CREATES a NaN. Feed
+    # both an inf and a NaN plate state and require a finite, zeroed output.
+
+    for bad in (float("inf"), float("-inf"), float("nan")):
+        env = _FakeEnvWithScene(num_envs=1)
+        env.plate.data = type(
+            "D", (), {
+                "root_link_pos_w": torch.tensor([[bad, 1.0, 2.0]]),
+                "root_link_lin_vel_w": torch.tensor([[1.0, bad, 3.0]]),
+            },
+        )()
+        microduck_mdp.reset_backflip_launch_params(env, torch.arange(1))
+        for phase_step, expect_zero in ((0, False), (400, True)):
+            env.episode_length_buf[:] = phase_step
+            pos = microduck_mdp.backflip_plate_pos_obs(env)
+            vel = microduck_mdp.backflip_plate_vel_obs(env)
+            assert torch.isfinite(pos).all(), (bad, phase_step, pos)
+            assert torch.isfinite(vel).all(), (bad, phase_step, vel)
+            if expect_zero:
+                assert float(pos.abs().sum()) == 0.0
+                assert float(vel.abs().sum()) == 0.0
+
+def test_the_phase_obs_is_finite():
+
+    env = _FakeEnv(num_envs=4)
+    microduck_mdp.reset_backflip_launch_params(env, torch.arange(4))
+    assert torch.isfinite(microduck_mdp.backflip_phase_obs(env)).all()

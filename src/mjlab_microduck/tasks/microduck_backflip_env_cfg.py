@@ -573,9 +573,14 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     cfg.episode_length_s = EPISODE_LENGTH_S
 
-    # Extra contact headroom for the plate (two feet plus whatever else the
-    # robot puts on it, on top of the full-collision robot's budget) — the same
-    # allowance the ball-kick env makes for its ball.
+    # Contact budget, MEASURED not guessed (AGENTS.md: contact overflow presents
+    # as sudden NaN, so this was the first suspect for the 2026-09-08 crash and
+    # it was RULED OUT). Peak simultaneous contacts on CPU MuJoCo with the
+    # full-collision robot and the plate in the scene: 16 standing on the plate,
+    # 3-10 sprawled on the floor for 5 s in every orientation a flip can end
+    # in, plus 4 persistent plate-floor contacts once z0 puts the slab on the
+    # ground — so ~20 worst case. 50 leaves 2.5x headroom; roulade uses 35 with
+    # no prop and sitstand 200. A test pins the floor.
     cfg.sim.nconmax = 50
 
     # ── Actions ───────────────────────────────────────────────────────────────
@@ -825,6 +830,22 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=microduck_mdp.zero_command_padding, params={"dim": 6},
         )
 
+    # The critic's SENSOR-DERIVED terms are the one obs path `nan_state` cannot
+    # protect in time: it checks joint + root state (and now contact forces),
+    # but obs is computed in the same step, and a sensor can report non-finite
+    # while the state is still clean. A single NaN here kills the whole run via
+    # rsl_rl's check_nan — the 2026-08-21 Velocity2 crash and the 2026-09-08
+    # backflip crash are both this. Critic-only, so sanitizing costs the policy
+    # nothing. The velocity cfg does the same; this env builds on mjlab's base
+    # template and so did not inherit it.
+    for _term, _safe in (
+        ("foot_contact_forces", microduck_mdp.foot_contact_forces_safe),
+        ("foot_height",         microduck_mdp.foot_height_safe),
+        ("foot_air_time",       microduck_mdp.foot_air_time_safe),
+    ):
+        if _term in cfg.observations["critic"].terms:
+            cfg.observations["critic"].terms[_term].func = _safe
+
     # CRITIC-ONLY launcher state (asymmetric actor-critic). The actor stays
     # plate-blind — there is no launcher sensor on the real robot — while the
     # critic gets the plate's relative pose/velocity and the phase, which is
@@ -866,9 +887,29 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Being upside down is the task — keep only the NaN guard + timeout.
     if "fell_over" in cfg.terminations:
         del cfg.terminations["fell_over"]
+    # NaN guard. `sensor_names` IS LOAD-BEARING and its absence caused the
+    # 2026-09-08 crash (run 2026-09-08_16-26-30_backflip): rsl_rl's check_nan
+    # found NaN in the CRITIC group while Episode_Termination/nan_state read
+    # exactly 0.0000, i.e. this guard never fired. mjlab computes observations
+    # AFTER _reset_idx (manager_based_rl_env.step), so anything this term
+    # checks would have reset the env and returned clean obs — the NaN
+    # therefore came through a quantity it does NOT check. Contact FORCES are
+    # such a quantity: MuJoCo resolves a degenerate contact into an inf/NaN
+    # impulse a step before the integrated state goes bad, and that force
+    # feeds the critic's `foot_contact_forces` obs. The velocity cfg has
+    # passed these sensors since its own 2026-08-21 crash; this env builds on
+    # mjlab's make_velocity_env_cfg rather than the microduck one, so it
+    # inherited neither the sensor list nor the _safe swap below.
     cfg.terminations["nan_state"] = TerminationTermCfg(
         func=microduck_mdp.robot_state_is_nan,
         time_out=False,
+        params={
+            "sensor_names": (
+                feet_ground_cfg.name,
+                self_collision_cfg.name,
+                robot_ground_cfg.name,
+            )
+        },
     )
 
     # ── Events ────────────────────────────────────────────────────────────────

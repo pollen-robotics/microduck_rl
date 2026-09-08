@@ -865,3 +865,73 @@ def test_the_lean_penalty_has_the_shape_the_docstring_claims(cfg):
     assert gate(35.0) < 0.25           # a 35 deg lean costs ~80%
     assert gate(45.0) == 0.0
     assert gate(90.0) == 0.0
+
+
+# --- The NaN path that killed run 2026-09-08_16-26-30_backflip. -------------
+#
+# rsl_rl's check_nan found NaN in the CRITIC group while
+# Episode_Termination/nan_state read exactly 0.0000. mjlab computes
+# observations AFTER _reset_idx (manager_based_rl_env.step), so anything
+# `robot_state_is_nan` checks would have reset the env and returned clean obs.
+# The NaN therefore arrived through a quantity it does NOT check -- and with no
+# `sensor_names` it did not check contact FORCES, which is what the critic's
+# `foot_contact_forces` obs is built from.
+
+
+def test_nan_guard_watches_every_contact_sensor_in_the_scene(cfg):
+    # THE OMISSION. Contact forces blow up to inf/NaN a step before the
+    # integrated state does; `robot_state_is_nan` only sees them if it is told
+    # which sensors to read. Every sensor the scene defines must be listed, so
+    # adding a sensor cannot silently reopen the hole.
+    named = set(cfg.terminations["nan_state"].params.get("sensor_names", ()))
+    in_scene = {s.name for s in cfg.scene.sensors}
+    assert named == in_scene, (
+        f"nan_state watches {sorted(named)} but the scene has "
+        f"{sorted(in_scene)}; contact forces on the unwatched ones reach the "
+        "critic group unchecked"
+    )
+
+
+def test_every_sensor_derived_critic_term_is_nan_safe(cfg):
+    # The critic group is the one obs path the NaN guard cannot protect in
+    # time. mjlab's own sensor observations are NOT sanitized, so any term
+    # sourced from that module must be swapped for a `_safe` variant -- which
+    # this env failed to do, because it builds on mjlab's base velocity
+    # template rather than the microduck one that already does the swap.
+    unsafe_module = "mjlab.tasks.velocity.mdp.observations"
+    allowed_raw = {
+        # boolean/found flags: 0-1 by construction, cannot be non-finite
+        "foot_contact",
+    }
+    offenders = []
+    for name, term in cfg.observations["critic"].terms.items():
+        if term.func.__module__ == unsafe_module and name not in allowed_raw:
+            offenders.append((name, term.func.__name__))
+    assert not offenders, (
+        f"unsanitized sensor-derived critic terms: {offenders}. Swap them for "
+        "the microduck _safe variants (see the cfg's critic block)."
+    )
+
+
+def test_the_backflip_critic_terms_are_the_sanitizing_ones(cfg):
+    critic = cfg.observations["critic"].terms
+    assert critic["foot_contact_forces"].func is microduck_mdp.foot_contact_forces_safe
+    assert critic["foot_air_time"].func is microduck_mdp.foot_air_time_safe
+    assert critic["plate_position"].func is microduck_mdp.backflip_plate_pos_obs
+    assert critic["plate_velocity"].func is microduck_mdp.backflip_plate_vel_obs
+    assert critic["plate_phase"].func is microduck_mdp.backflip_phase_obs
+
+
+def test_nconmax_clears_the_measured_worst_case_contact_count(cfg):
+    # AGENTS.md: contact overflow presents as sudden NaN, so this was the first
+    # suspect for the 2026-09-08 crash. MEASURED on CPU MuJoCo with the
+    # full-collision robot and the plate in the scene: peak 16 standing on the
+    # plate, 3-10 sprawled on the floor for 5 s in every orientation a flip can
+    # end in, plus 4 persistent plate-floor contacts once the slab rests on the
+    # ground -- ~20 worst case. The hypothesis was RULED OUT; this pins the
+    # margin so a future collision or prop change cannot quietly eat it.
+    measured_worst_case = 20
+    assert cfg.sim.nconmax >= 2 * measured_worst_case, (
+        f"nconmax={cfg.sim.nconmax} leaves less than 2x the measured worst "
+        f"case ({measured_worst_case}); re-measure before lowering it"
+    )

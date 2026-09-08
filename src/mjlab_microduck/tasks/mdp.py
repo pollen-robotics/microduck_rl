@@ -7828,7 +7828,11 @@ def backflip_landing(
 
 
 def _backflip_present_mask(env: ManagerBasedRlEnv) -> torch.Tensor:
-    """1.0 while the plate is in the episode (HOLD/LAUNCH), 0.0 once GONE."""
+    """1.0 while the plate is in the episode (HOLD/LAUNCH), 0.0 once GONE.
+
+    Callers must sanitize the value they multiply by this: the mask is exactly
+    0.0 in GONE and ``0 * inf`` is NaN.
+    """
     return (backflip_phase(env) != BACKFLIP_PHASE_GONE).float().unsqueeze(-1)
 
 
@@ -7851,7 +7855,17 @@ def backflip_plate_pos_obs(
     (the real robot has no launcher sensing); a masked observation is still an
     observation.
     """
-    return ball_pos_in_base(env, asset_name=asset_name) * _backflip_present_mask(env)
+    # NaN-safe, and the ORDER matters: sanitize BEFORE the mask multiplies.
+    # `_backflip_present_mask` is 0.0 once the plate is GONE, and 0 * inf is
+    # NaN, so masking an unsanitized infinity would CREATE a NaN rather than
+    # remove one. `ball_pos_in_base` also rotates into the robot's base frame,
+    # so a degenerate robot quaternion propagates straight through — and this
+    # is a CRITIC-only term, the one obs path `robot_state_is_nan` cannot
+    # protect in time (see the note on that function and the cfg's critic
+    # block). Sanitizing costs the policy nothing.
+    return _finite(ball_pos_in_base(env, asset_name=asset_name)) * _backflip_present_mask(
+        env
+    )
 
 
 def backflip_plate_vel_obs(
@@ -7864,7 +7878,10 @@ def backflip_plate_vel_obs(
     for position — but it is applied for the same reason and so the two terms
     cannot drift apart.
     """
-    return ball_vel_in_base(env, asset_name=asset_name) * _backflip_present_mask(env)
+    # NaN-safe before the mask, for the same reason as the position term.
+    return _finite(ball_vel_in_base(env, asset_name=asset_name)) * _backflip_present_mask(
+        env
+    )
 
 
 def backflip_phase_obs(env: ManagerBasedRlEnv) -> torch.Tensor:
@@ -7878,7 +7895,7 @@ def backflip_phase_obs(env: ManagerBasedRlEnv) -> torch.Tensor:
     happened yet makes the value function's job much easier without touching
     what the deployed network sees.
     """
-    return backflip_phase(env).float().unsqueeze(-1)
+    return _finite(backflip_phase(env).float().unsqueeze(-1))
 
 
 def reset_backflip_robot_on_plate(

@@ -5210,3 +5210,107 @@ measurement.
 
 Nothing else changed: hold sampling (1-5 s uniform), the annuity window
 (1.4 s), the tilt gate (10/45 deg) and all weights stay as they were.
+
+
+# The 2026-09-08 NaN crash — diagnosis
+
+Run `2026-09-08_16-26-30_backflip` (wandb `thd7grux`) died ~2 min in with
+rsl_rl's `check_nan` reporting NaN in the **critic** group, while
+`Episode_Termination/nan_state` read exactly **0.0000** — the env's own guard
+never fired. Two hypotheses were tested.
+
+## Hypothesis A: contact overflow. REFUTED, measured.
+
+`nconmax = 50`. Peak simultaneous contacts on CPU MuJoCo, full-collision robot
+with the plate in the scene, 5 s per case:
+
+| situation | peak ncon | settled mean / max |
+|---|---|---|
+| standing on the plate (HOLD) | **16** | 11.3 / 16 |
+| fallen on its back | 5 | 5.0 / 5 |
+| fallen face down | 10 | 7.1 / 9 |
+| fallen on its side | 8 | 5.0 / 5 |
+| inverted | 6 | 3.5 / 4 |
+| dropped flat from 0.4 m | 10 | 6.5 / 9 |
+| fallen on back, tuck commanded | 8 | 5.0 / 5 |
+
+Plus 4 persistent plate-floor contacts once `z0` puts the slab on the ground,
+so **~20 worst case against a budget of 50** — 2.5x headroom. The robot has
+only 13 collision geoms, so it cannot generate 50 contacts. Not the mechanism.
+
+A test now pins `nconmax >= 2x` the measured worst case, so a future collision
+or prop change cannot quietly eat the margin.
+
+## The ordering hypothesis: REFUTED, by reading mjlab.
+
+`ManagerBasedRlEnv.step` computes observations **after** `_reset_idx`
+(`manager_based_rl_env.py`: terminations -> rewards -> `_reset_idx` ->
+`sim.forward()` -> `observation_manager.compute()`). So a firing `nan_state`
+resets the env and the obs handed to rsl_rl comes from the clean reset state.
+
+That is what makes the `nan_state = 0.0000` clue decisive rather than
+confusing: **anything `robot_state_is_nan` checks would have terminated and
+returned clean obs.** The NaN necessarily arrived through a quantity it does
+not check.
+
+## Hypothesis B: an unprotected critic obs path. CONFIRMED as the only
+## remaining mechanism, with a documented precedent.
+
+`robot_state_is_nan` checks the robot's `joint_pos`, `joint_vel`, root
+`pos`/`quat`/`lin_vel`/`ang_vel`, **and contact forces — but only for the
+sensors named in its `sensor_names` parameter.** The backflip cfg passed
+**none**:
+
+```
+nan_state params: {}          # before
+```
+
+Meanwhile its critic group contained three sensor-derived terms straight from
+mjlab's unsanitized observation module:
+
+```
+  foot_air_time          mjlab.tasks.velocity.mdp.observations.foot_air_time
+  foot_contact           mjlab.tasks.velocity.mdp.observations.foot_contact
+  foot_contact_forces    mjlab.tasks.velocity.mdp.observations.foot_contact_forces
+```
+
+`foot_contact_forces` is `sign(F) * log1p(|F|)` over a contact-sensor force.
+MuJoCo resolves a degenerate contact into an inf/NaN impulse **a step before**
+the integrated state goes bad, so the force is non-finite while
+`joint_pos`/root state are still clean: the guard reads 0, and the NaN goes
+straight into the critic group and into `check_nan`.
+
+**This is a recurrence, not a new failure mode.** The microduck velocity cfg
+has both passed `sensor_names` and swapped these three terms for `_safe`
+variants since its own crash of 2026-08-21 (Velocity2-Rough-Backlash), with
+the mechanism written in its comments. The backflip env builds on **mjlab's**
+`make_velocity_env_cfg`, not the microduck one, so it inherited neither
+protection. Every other env in the family was covered; this one was not.
+
+Two secondary paths in the backflip's own critic terms, both real and both now
+closed: `ball_pos_in_base` / `ball_vel_in_base` rotate into the robot's base
+frame, so a degenerate robot quaternion propagates through; and the phase mask
+was applied as a MULTIPLICATION, so `0 * inf` would have *created* a NaN once
+the plate went GONE.
+
+## What changed
+
+1. `nan_state` now receives **all three** contact sensors
+   (`feet_ground_contact`, `self_collision`, `robot_ground_contact`), so a
+   force blow-up terminates the env.
+2. The three sensor-derived critic terms are swapped for the microduck `_safe`
+   variants — the same loop the velocity cfg runs. This is the load-bearing
+   fix: because obs is computed after the reset, terminating is not enough on
+   its own for a value that is non-finite *in the step it is read*.
+3. `backflip_plate_pos_obs` / `_vel_obs` sanitize **before** the mask
+   multiplies (killing the `0 * inf` path), and `backflip_phase_obs`
+   sanitizes too.
+4. `nconmax` keeps 50, now with the measurement in the comment rather than an
+   analogy to the ball-kick env.
+
+Six tests, two of which were verified to fail when the fix is reverted: one
+asserts `nan_state` watches **every** sensor the scene defines, so adding a
+sensor cannot silently reopen the hole; one asserts **no** critic term comes
+from mjlab's unsanitized sensor module (with `foot_contact` whitelisted as a
+0/1 flag); one feeds `inf` and `NaN` plate states through both plate obs terms
+in both phases and requires finite, zeroed output.
