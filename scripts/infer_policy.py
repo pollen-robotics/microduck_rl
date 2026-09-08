@@ -1007,6 +1007,16 @@ def main():
             print("Error: --delay accepts 0, 1, or 2 arguments")
             return
 
+    # Ball-walk: the policy is trained with a 3-6 sim-step (15-30 ms) command
+    # delay (BAM cfg delay_min_lag/delay_max_lag) and balancing on the ball is
+    # delay-critical: measured 2026-09-08 on CPU, survival 10/10 s at a 20 ms
+    # lag vs ~1.7 s with none (and ~2 s at 40 ms). Walking policies tolerate
+    # 0 lag; this one does not, so default to one control step (20 ms).
+    if args.ball_walk and args.delay is None:
+        delay_min_lag = delay_max_lag = 1
+        print("Ball-walk: --delay not given, defaulting to 1 control step (20 ms) to match "
+              "the trained 15-30 ms actuator delay (pass --delay 0 to disable)")
+
     # Load MuJoCo model. Kick policies get a scene with a ball to kick;
     # ball-walk gets the basketball scene (robot spawned on top below).
     # --scene overrides everything (any scene whose robot has the standard

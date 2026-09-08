@@ -408,7 +408,14 @@ def make_microduck_ball_walk_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg
         mode="reset",
     )
     cfg.events["foot_friction"].params["asset_cfg"].geom_names = foot_frictions_geom_names
-    cfg.events["foot_friction"].params["ranges"] = (0.7, 1.3)  # match velocity
+    # Foot sliding friction DR. Feet have priority=1 (FULL_COLLISION), so this
+    # range governs the FOOT-BALL contact (the ball geom's friction only sets
+    # ball-floor grip). Widened above velocity's (0.7, 1.3): the real PU sole on
+    # a pebbled rubber basketball is rubber-on-rubber (~1.5-2.5), and the
+    # 2026-09-08 rollouts showed the policy barely lifting its feet — expecting
+    # slip that the real setup won't have. Low end kept so the sim default still
+    # falls in-distribution.
+    cfg.events["foot_friction"].params["ranges"] = (0.7, 2.0)
 
     # Ball reset MUST run before the robot spawn conceptually pairs with it —
     # both center on the env origin. Empty pose_range = exactly at the origin,

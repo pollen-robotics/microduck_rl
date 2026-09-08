@@ -3,7 +3,10 @@
          the ball-walk policy). No keyframes: the ball freejoint changes nq,
          which would break scene.xml's keyframe qpos sizes; infer_policy sets
          qpos programmatically anyway (robot on top of the ball). -->
-    <include file="robot_allcollisions.xml" />
+    <!-- robot_groundcontact.xml = the model the BallWalk env trains on (MICRODUCK_STANDUP_ROBOT_CFG);
+         robot_allcollisions.xml is the TRUE full-collision export, a different contact set. -->
+    <include file="robot_groundcontact.xml" /> 
+    <!-- <include file="robot_allcollisions.xml" /> -->
     <include file="basketball.xml" />
 
     <visual>
