@@ -489,12 +489,13 @@ def test_the_standing_box_is_a_plausible_human_throw(cfg):
     # open-loop closure once squeezed w0 to the single value 18.5 rad/s, which
     # no hand reproduces, and it is the wrong bar -- compensating for an
     # imperfect throw is the policy's job. Measured over 243 cells from the
-    # floor-resting plate: 0 rotate forward, 62% close 360 deg open-loop,
-    # landing 2.4-4.9 m/s.
+    # floor-resting plate: 0 rotate forward, 27% close 360 deg open-loop,
+    # rotation 98-442 deg, landing 1.78-3.65 m/s, apex 0.28-0.64 m -- the
+    # gentler retune after the user said the ejection was too strong.
     p = cfg.events["backflip_launch_params"].params
-    assert p["vz_range"] == VZ_RANGE == (3.00, 4.00)
-    assert p["w0_range"] == W0_RANGE == (15.0, 24.0)
-    assert p["launch_range"] == LAUNCH_RANGE == (0.12, 0.16)
+    assert p["vz_range"] == VZ_RANGE == (2.20, 2.80)
+    assert p["w0_range"] == W0_RANGE == (18.0, 24.0)
+    assert p["launch_range"] == LAUNCH_RANGE == (0.14, 0.16)
     assert p["z0_range"] == Z0_RANGE == (0.01, 0.03)
 
 
@@ -505,6 +506,11 @@ def test_the_flick_stays_inside_the_direction_reversal_boundary(cfg):
     # re-signed to score. Every corner of the box is direction-checked backward;
     # widening w0 past this needs a fresh --box-check.
     assert cfg.events["backflip_launch_params"].params["w0_range"][1] <= 24.0
+    # ... and the gate binds from BELOW too: a low vz with a low w0 and a short
+    # flick also comes out forward (vz 2.2, w0 15, t_launch 0.12 = -110 deg),
+    # which is what sets these two floors.
+    assert cfg.events["backflip_launch_params"].params["w0_range"][0] >= 18.0
+    assert cfg.events["backflip_launch_params"].params["launch_range"][0] >= 0.14
 
 
 def test_the_pre_reset_state_is_coherent(cfg):

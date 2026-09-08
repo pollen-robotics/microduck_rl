@@ -7360,10 +7360,10 @@ def _backflip_state(env: ManagerBasedRlEnv) -> tuple:
         # feet"). They now describe a plausible mid-box toss instead.
         z = torch.zeros(env.num_envs, device=env.device)
         env._backflip_t_hold = torch.full_like(z, 1.0)
-        env._backflip_t_launch = torch.full_like(z, 0.14)
+        env._backflip_t_launch = torch.full_like(z, 0.15)
         env._backflip_z0 = torch.full_like(z, 0.02)
-        env._backflip_vz = torch.full_like(z, 3.5)
-        env._backflip_w0 = torch.full_like(z, 19.5)
+        env._backflip_vz = torch.full_like(z, 2.5)
+        env._backflip_w0 = torch.full_like(z, 21.0)
         env._backflip_accum = z.clone()
         env._backflip_max = z.clone()
         env._backflip_paid = z.clone()
@@ -7394,10 +7394,10 @@ def reset_backflip_launch_params(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
     hold_range: tuple = (1.0, 5.0),
-    launch_range: tuple = (0.12, 0.16),
+    launch_range: tuple = (0.14, 0.16),
     z0_range: tuple = (0.01, 0.03),
-    vz_range: tuple = (3.00, 4.00),
-    w0_range: tuple = (15.0, 24.0),
+    vz_range: tuple = (2.20, 2.80),
+    w0_range: tuple = (18.0, 24.0),
 ) -> None:
     """Sample this episode's toss and clear the rotation accounting.
 
@@ -7422,6 +7422,12 @@ def reset_backflip_launch_params(
         reverted.
       * ``t_launch`` down at 0.08 lands at up to 3.97 m/s: a SHORT flick is the
         violent one, which is why the low end sits at 0.12.
+      * ``vz in [3.0, 4.0]`` was the first floor-level box. The user watched
+        it and said the ejection was too strong; the current defaults are the
+        gentler retune, which trades open-loop closure (62% -> 27%) for landing
+        speed (2.39-4.93 -> 1.78-3.65 m/s). The direction gate binds from BOTH
+        sides: a low ``vz`` with a low ``w0`` and a short flick also comes out
+        FORWARD, which is what sets the 0.14 s and 18 rad/s floors.
       * ``z0 in [0.07, 0.09]`` was a floor imposed by a KNEELING hold whose
         feet hung below the slab. Standing's lowest geoms are its feet, so the
         plate now rests on the ground — at the cost of altitude, which is why

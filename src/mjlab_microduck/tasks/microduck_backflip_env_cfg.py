@@ -239,7 +239,9 @@ IMU_ORIENTATION_RANDOMIZATION_ANGLE = 6.0
 
 # Episode budget, MEASURED rather than guessed: hold (up to 5.0 s once the
 # curriculum has widened it) + launch ramp (<= 0.16 s) + the airborne window
-# (0.42-0.88 s measured across the box, worst case at vz = 4.0) + settle. At
+# (0.42-0.88 s measured when vz reached 4.0; the gentler retune cut the apex
+# to 0.28-0.64 m so the real flight is shorter now, and 0.88 s is kept as a
+# CONSERVATIVE bound) + settle. At
 # 7.5 s the worst case leaves 7.5 - 5.0 - 0.16 - 0.88 = 1.46 s to settle on the
 # feet, and a short hold leaves over 6 s.
 EPISODE_LENGTH_S = 7.5
@@ -355,12 +357,24 @@ PLATE_HALF_THICKNESS = 0.01
 # throw is exactly the policy's job. Open-loop closure is now reported as
 # INFORMATION about starting difficulty, not a gate.
 #
-# THE ONE HARD LIMIT IS DIRECTION. Above roughly w0 = 24-27 rad/s from a
-# standing hold the flick overdrives the sole contact and the robot comes out
-# FORWARD, face-down — a different maneuver that the rotation accumulator would
-# have to be re-signed to even score. The w0 ceiling stays inside that measured
-# boundary with margin. Every corner of this box is direction-checked backward;
-# re-check with `--box-check` if you move it.
+# THE ONE HARD LIMIT IS DIRECTION, and it binds from BOTH sides now. Above
+# roughly w0 = 24-27 rad/s from a standing hold the flick overdrives the sole
+# contact and the robot comes out FORWARD, face-down — a different maneuver the
+# rotation accumulator would have to be re-signed to even score. And at the
+# gentle end, a LOW vz with a LOW w0 and a SHORT flick also comes out forward:
+# vz 2.2 with w0 15 at t_launch 0.12 measures -110 deg. Those two facts are
+# what set all four bounds. Every corner of this box is direction-checked
+# backward; re-check with `--box-check` if you move any of them.
+#
+# The gentler-retune ladder, all direction-verified, for whoever wants to move
+# further (`--box-check` after editing the ranges reproduces each row):
+#     vz        w0      t_launch     landing m/s   closure   apex m
+#     3.0-4.0   15-24   0.12-0.16    2.39-4.93     62%       0.47-1.19
+#     2.5-3.2   15-24   0.12-0.16    2.17-4.08     28%       0.34-0.83
+#     2.2-2.8   18-24   0.14-0.16    1.78-3.65     27%       0.28-0.64  <- here
+#     2.1-2.7   18-24   0.15-0.16    1.59-3.57     15%       0.24-0.60
+#     2.0-2.6   18-24   0.14-0.16    1.54-3.50     10%       0.26-0.58
+# Ranges with vz below ~2.2 at t_launch 0.12 FAIL the direction gate outright.
 HOLD_RANGE    = (1.0, 5.0)     # sampled uniformly from step 0, NO curriculum.
                                # A long, random wait so the policy has to learn
                                # to STAND on the launcher: the first training
@@ -370,21 +384,35 @@ HOLD_RANGE    = (1.0, 5.0)     # sampled uniformly from step 0, NO curriculum.
                                # 5.0 s worst case, and backflip_landing pays
                                # over a FIXED window so the hold draw does not
                                # change what a given backflip is worth.
-LAUNCH_RANGE  = (0.12, 0.16)   # how long the hands stay with the robot
+LAUNCH_RANGE  = (0.14, 0.16)   # how long the hands stay with the robot. The
+                               # low end moved 0.12 -> 0.14 as part of the
+                               # gentler retune: at 0.12 the low-vz / low-w0
+                               # corner rotates FORWARD, and trimming it is
+                               # what let vz come down at all.
 Z0_RANGE      = (0.01, 0.03)   # plate CENTRE. 0.01 = PLATE_HALF_THICKNESS, so
                                # the slab rests exactly on the floor; the DR
-                               # spread is operator variation. The old 0.07-0.09
-                               # floor came from the KNEELING tuck, whose feet
-                               # hung ~8 cm below the slab; standing's lowest
-                               # geoms ARE the feet, so the plate can sit on the
-                               # ground and a test asserts nothing tunnels.
-VZ_RANGE      = (3.00, 4.00)   # lift. RAISED from 2.50-3.50 because the lower
-                               # plate costs altitude: from a floor-resting
-                               # plate nothing closes at vz 2.5 (best 334 deg),
-                               # while 3.0-4.0 closes across most of the w0
-                               # range. The honest cost is landing speed —
-                               # 2.4-4.9 m/s open-loop, worse than before.
-W0_RANGE      = (15.0, 24.0)   # backward flick; 24 keeps clear of the
+                               # spread is operator variation. Standing's
+                               # lowest geoms ARE the feet, so the plate can
+                               # sit on the ground and a test asserts nothing
+                               # tunnels.
+VZ_RANGE      = (2.20, 2.80)   # lift. LOWERED from 3.00-4.00 because the user
+                               # watched the video and said the ejection was
+                               # too strong. Landing speed is their binding
+                               # constraint and this is the whole point of the
+                               # change: 2.39-4.93 m/s -> 1.78-3.65, with 191
+                               # of 243 sampled cells over the ~2.6 m/s comfort
+                               # threshold instead of 238, and apex halved from
+                               # 0.47-1.19 m to 0.28-0.64. The price is
+                               # open-loop closure: 62% -> 27%. That is the
+                               # right trade — a fixed-pose robot is not the
+                               # robot being trained, and the policy's whole
+                               # job is to spin faster by tucking. Gentler
+                               # still is available and measured: vz 2.0-2.6
+                               # lands at 1.54-3.50 with 10% closure.
+W0_RANGE      = (18.0, 24.0)   # backward flick. The low end moved 15 -> 18 for
+                               # the same reason as t_launch: at w0 15 the
+                               # low-vz corner rotates forward. 24 keeps clear
+                               # of the measured 24-27 direction reversal.   # backward flick; 24 keeps clear of the
                                # measured 24-27 direction reversal
 MAX_PAID_RATE = 25.0           # rad/s; measured peak in the box is 23.0,
                                # mean over a flip 15.6-20.1 — 25 forfeits

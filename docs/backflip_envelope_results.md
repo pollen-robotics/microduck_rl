@@ -46,7 +46,15 @@ survive?
 > after the flop audit found the side-lying tuck outscoring the upright one.
 > See "**Flop audit, and two corrections**".
 
-> **CURRENT BOX — the final section, "After the first training run":**
+> **CURRENT BOX — the final section, "Gentler ejection":**
+> STANDING hold on a plate RESTING ON THE GROUND, `z0` in [0.01, 0.03],
+> `vz` in [2.20, 2.80], `w0` in [18, 24], `t_launch` in [0.14, 0.16], hold
+> 1-5 s uniform (no curriculum), episode 7.5 s, landing annuity over a fixed
+> 1.4 s window. Direction-verified backward in every cell; rotation
+> 98-442 deg; landing 1.78-3.65 m/s; apex 0.28-0.64 m; 27% close 360 deg
+> open-loop.
+
+> **Superseded box — "After the first training run":**
 > STANDING hold on a plate RESTING ON THE GROUND, `z0` in [0.01, 0.03],
 > `vz` in [3.00, 4.00], `w0` in [15, 24], `t_launch` in [0.12, 0.16], hold
 > 1-5 s (curriculum-ramped), episode 7.5 s. Direction-verified backward in
@@ -5137,3 +5145,68 @@ So a genuinely upright stance still costs nothing, a lean is priced in
 proportion, and every measured flop basin (80-126 deg) is still hard-zeroed.
 **This is a shape fix, not a mass fix** — which is the only lever left, since
 the mass ceiling is set by the annuity and has no headroom.
+
+
+# Gentler ejection — the vz retune
+
+The user watched the video and said the ejection was too strong. One
+measurement pass with `--box-check` over eight candidate ranges; landing speed
+is the number they actually care about, so it is the column to read.
+
+| candidate | vz | w0 | t_launch | rotation | **landing m/s** | closure | apex m | direction |
+|---|---|---|---|---|---|---|---|---|
+| previous | 3.0-4.0 | 15-24 | 0.12-0.16 | 48-653 | **2.39-4.93** | 62% | 0.47-1.19 | PASS |
+| A | 2.5-3.2 | 15-24 | 0.12-0.16 | 4-485 | 2.17-4.08 | 28% | 0.34-0.83 | PASS |
+| B | 2.2-2.8 | 15-24 | 0.12-0.16 | -110-423 | 1.78-3.75 | 12% | 0.28-0.65 | **FAIL** (2 fwd) |
+| C | 2.2-2.8 | 18-27 | 0.12-0.16 | -83-420 | 1.40-3.65 | 12% | 0.24-0.63 | **FAIL** (5 fwd) |
+| D | 2.0-2.5 | 18-27 | 0.12-0.16 | -83-395 | 1.45-3.37 | 3% | 0.23-0.53 | **FAIL** (11 fwd) |
+| E | 2.3-2.9 | 18-24 | 0.13-0.16 | 137-466 | 1.92-3.69 | 27% | 0.31-0.66 | PASS |
+| F | 2.4-3.0 | 15-24 | 0.13-0.16 | 108-483 | 2.00-3.95 | 28% | 0.33-0.74 | PASS |
+| **G (chosen)** | **2.2-2.8** | **18-24** | **0.14-0.16** | **98-442** | **1.78-3.65** | **27%** | **0.28-0.64** | **PASS** |
+| H | 2.0-2.6 | 18-24 | 0.14-0.16 | 97-403 | 1.54-3.50 | 10% | 0.26-0.58 | PASS |
+| I | 2.1-2.7 | 18-24 | 0.15-0.16 | 120-440 | 1.59-3.57 | 15% | 0.24-0.60 | PASS |
+
+## The direction gate binds from BOTH sides
+
+This is the finding that shaped the answer. It was already known that
+`w0` above ~24-27 rad/s overdrives the sole contact and comes out FORWARD. It
+turns out a **low `vz` with a low `w0` and a SHORT flick does the same**: B, C
+and D all fail the gate, and their forward cells are all at the
+`vz` 2.0-2.2 / `w0` 15-27 / `t_launch` 0.12 corner (vz 2.2, w0 15,
+t_launch 0.12 measures **-110 deg**).
+
+So simply lowering `vz` does not work. Trimming `t_launch`'s low end from 0.12
+to 0.14 and `w0`'s from 15 to 18 is what let `vz` come down to 2.2 while
+keeping the gate — compare B (FAIL at 0.12-0.16) with G (PASS at 0.14-0.16) on
+the same `vz`.
+
+## Chosen: G
+
+`vz` 2.20-2.80, `w0` 18-24, `t_launch` 0.14-0.16, `z0` unchanged at 0.01-0.03.
+
+| | before | after |
+|---|---|---|
+| landing | 2.39-4.93 m/s | **1.78-3.65 m/s** |
+| cells over the 2.6 m/s comfort threshold | 238/243 | **191/243** |
+| apex | 0.47-1.19 m | **0.28-0.64 m** |
+| rotation | 48-653 deg | **98-442 deg** |
+| open-loop closure | 62% | **27%** |
+| direction | PASS | **PASS** (min rot +98 deg) |
+
+**How far down does this get the landing speed?** The maximum falls from 4.93
+to **3.65 m/s** and the minimum from 2.39 to **1.78** — the gentlest cells are
+now well under the ~2.6 m/s threshold, where before none were. Nearly a fifth
+of the box is now under it (52 of 243 cells) against 5 of 243. The apex halves,
+which is the part that shows up in a video as "too strong".
+
+**Why G and not H.** H is gentler still (1.54-3.50) but drops open-loop closure
+to 10%, i.e. 25 of 243 cells. That is a much bigger leap from what has already
+trained successfully than G's 27% — the same fraction that was accepted at 37%
+earlier and reached `landing +1.72` by iteration 279. G is the gentlest range
+that keeps both the direction gate and a closure fraction in the region already
+shown to train. **H and I are measured and available** if the user wants to go
+further; the ladder is in the cfg docstring so the next step needs no new
+measurement.
+
+Nothing else changed: hold sampling (1-5 s uniform), the annuity window
+(1.4 s), the tilt gate (10/45 deg) and all weights stay as they were.
