@@ -972,3 +972,42 @@ def test_fall_angle_is_below_the_exploit_posture():
         limit = _registered(label).terminations["fell_over"].params["limit_angle"]
         assert math.degrees(limit) == pytest.approx(50.0, abs=0.1), label
         assert math.degrees(limit) < 52.8, "must fire below the measured exploit posture"
+
+
+
+# ── structural (hard) action symmetry ────────────────────────────────────────
+
+
+def test_structural_symmetry_projection_is_exact_and_idempotent():
+    """P = 0.5 (I + mirror) must be a projection onto the mirror-fixed subspace:
+    P a is mirror-fixed, P P = P, and the matrix form equals the function form
+    (the ONNX export appends the matrix; training applies the function)."""
+    import torch
+    from mjlab_microduck.tasks.symmetry import (
+        _get_tensors, symmetrize_actions, symmetry_matrix)
+
+    a = torch.randn(64, 14)
+    s = symmetrize_actions(a)
+    _, _, perm, sign = _get_tensors(a.device)
+    assert torch.allclose(sign * s[:, perm], s, atol=1e-6), "not mirror-fixed"
+    assert torch.allclose(symmetrize_actions(s), s, atol=1e-6), "not idempotent"
+    assert torch.allclose(a @ symmetry_matrix().T, s, atol=1e-6), "matrix != function"
+    # head_yaw (7) and head_roll (8) mirror to their own negation -> forced to zero.
+    assert torch.all(s[:, 7:9].abs() < 1e-6)
+
+
+def test_symhard_task_carries_the_flag_and_drops_the_reward_term():
+    """The SymHard arm sets cfg.symmetric_actions (read by mdp.py Patch 5), drops
+    the now-redundant hop_symmetric_push, and shrinks the untrackable head
+    yaw/roll command ranges. Its sibling R2 arm does none of these."""
+    from mjlab.tasks.registry import load_env_cfg
+
+    hard = load_env_cfg("Mjlab-HopPauseR2-S50-SymHard-Sym-K3344-MicroDuck")
+    soft = load_env_cfg("Mjlab-HopPauseR2-S50-Sym-K3344-MicroDuck")
+    assert getattr(hard, "symmetric_actions", False) is True
+    assert getattr(soft, "symmetric_actions", False) is False
+    assert "hop_symmetric_push" not in hard.rewards
+    assert "hop_symmetric_push" in soft.rewards
+    assert "head_pose_range" not in hard.curriculum
+    assert hard.commands["head_pose"].ranges[2] == (-0.005, 0.005)
+    assert hard.commands["head_pose"].ranges[3] == (-0.005, 0.005)

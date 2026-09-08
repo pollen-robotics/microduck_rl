@@ -167,3 +167,35 @@ def microduck_vel_symmetry(
         aug_actions = torch.cat([actions, actions_sym], dim=0)
 
     return aug_obs, aug_actions
+
+
+# ── Structural (hard) action symmetry ───────────────────────────────────────
+#
+# The reward-based symmetry term moved the left/right force ratio from 0.63 to
+# 0.70 and cost 3 mm of hop -- it nudges, it cannot enforce, because the policy
+# can always opt out. Projecting the action onto the mirror-symmetric subspace
+# makes an asymmetric action UNREPRESENTABLE:
+#
+#     a_sym = 0.5 * (a + mirror(a)),   mirror(a)[i] = _JOINT_SIGN[i] * a[_JOINT_PERM[i]]
+#
+# Consequences, all intended: left and right legs mirror exactly; head_yaw and
+# head_roll -- whose mirror is their own negation -- become identically zero,
+# so the head can only pitch. The projection is linear and idempotent, so it is
+# also a 14x14 matrix that can be appended to an exported ONNX graph; training
+# applies it to the SAMPLED action in the ActionManager (mdp.py, Patch 5) and
+# export bakes the same matrix in, so what the daemon feeds back as
+# `last_action` is exactly what the policy saw in training.
+
+def symmetry_matrix() -> torch.Tensor:
+    """The 14x14 projection M with a_sym = a @ M.T (row-vector convention)."""
+    n = len(_JOINT_PERM)
+    P = torch.zeros(n, n)
+    for i, j in enumerate(_JOINT_PERM):
+        P[i, j] = _JOINT_SIGN[i]          # (P a)[i] = sign[i] * a[perm[i]]
+    return 0.5 * (torch.eye(n) + P)
+
+
+def symmetrize_actions(actions: torch.Tensor) -> torch.Tensor:
+    """Project [N, 14] actions onto the mirror-symmetric subspace."""
+    _, _, perm, sign = _get_tensors(actions.device)   # the JOINT tables, not the obs ones
+    return 0.5 * (actions + sign * actions[:, perm])

@@ -762,6 +762,33 @@ def make_robust_stand_variant(
     return cfg
 
 
+def make_structural_symmetry_variant(cfg):
+    """Symmetry by CONSTRUCTION: actions projected onto the mirror subspace.
+
+    Replaces the reward-based `hop_symmetric_push`, which nudged the force
+    ratio 0.63 -> 0.70 and cost 3 mm; a reward cannot forbid the one-footed
+    tap, a projection makes it unrepresentable. See symmetry.symmetrize_actions
+    and mdp.py Patch 5 for the mechanism, export.py for the ONNX side.
+
+    Side effects handled here:
+      * hop_symmetric_push is dropped -- always ~1 under the projection.
+      * head_yaw / head_roll are forced to zero by the projection, so their
+        pose COMMANDS become untrackable. Ranges shrink to the dead-weight
+        minimum and the head_pose_range curriculum (which widens them to
+        1.4 rad) is removed, or head_pose_tracking becomes pure noise.
+    """
+    object.__setattr__(cfg, "symmetric_actions", True)
+    cfg.rewards.pop("hop_symmetric_push", None)
+    cfg.curriculum.pop("head_pose_range", None)
+    head = cfg.commands.get("head_pose")
+    if head is not None and hasattr(head, "ranges"):
+        r = list(head.ranges)
+        r[2] = (-0.005, 0.005)   # head_yaw
+        r[3] = (-0.005, 0.005)   # head_roll
+        head.ranges = tuple(r)
+    return cfg
+
+
 def make_symmetric_variant(cfg):
     """Pay for a TWO-FOOTED launch, so the hop stops being a skip.
 

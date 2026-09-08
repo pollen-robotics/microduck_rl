@@ -112,6 +112,29 @@ except Exception:
 
 print("[mdp] Patch 4 active: ONNX export filters passive_* joints")
 
+# ---------------------------------------------------------------------------
+# Patch 5: structural action symmetry. When an env cfg carries
+# `symmetric_actions = True` (set by hop.make_structural_symmetry_variant),
+# every action is projected onto the mirror-symmetric subspace BEFORE the
+# ActionManager stores it -- so the `actions` observation, action_rate terms
+# and the joint targets all see the projected action. The exported ONNX gets
+# the same projection appended (export.py), keeping train and deploy identical.
+# See symmetry.symmetrize_actions for the projection and why.
+from mjlab.managers.action_manager import ActionManager as _ActionManager  # noqa: E402
+
+_orig_process_action = _ActionManager.process_action
+
+
+def _process_action_symmetric(self, action):
+    if getattr(self._env.cfg, "symmetric_actions", False):
+        from mjlab_microduck.tasks.symmetry import symmetrize_actions
+        action = symmetrize_actions(action)
+    return _orig_process_action(self, action)
+
+
+_ActionManager.process_action = _process_action_symmetric
+print("[mdp] Patch 5 active: structural action symmetry (cfg.symmetric_actions)")
+
 if TYPE_CHECKING:
     from mjlab.viewer.debug_visualizer import DebugVisualizer
 

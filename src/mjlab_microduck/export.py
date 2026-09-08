@@ -263,6 +263,15 @@ def run_export(task_id: str, cfg: ExportConfig) -> ExportResult:
 
     runner.export_policy_to_onnx(path, filename)
 
+    # Structural symmetry (hop.make_structural_symmetry_variant): training
+    # projected every action onto the mirror subspace inside the ActionManager
+    # (mdp.py Patch 5). The deployed graph must do the same, or the daemon feeds
+    # back an asymmetric `last_action` the policy never saw. The projection is a
+    # constant 14x14 matrix, appended here as one MatMul node.
+    if getattr(runner.env.unwrapped.cfg, "symmetric_actions", False):
+        _append_symmetry_projection(onnx_path)
+        print("Appended structural-symmetry projection to the ONNX graph")
+
     metadata = get_base_metadata(runner.env.unwrapped, run_path=cfg.checkpoint_file)
     attach_metadata_to_onnx(onnx_path, metadata)
 
@@ -309,3 +318,24 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+def _append_symmetry_projection(onnx_path: str) -> None:
+    """Rename the graph's action output to actions_raw and add actions = raw @ M.T."""
+    import numpy as np
+    import onnx
+    from onnx import helper, numpy_helper
+
+    from mjlab_microduck.tasks.symmetry import symmetry_matrix
+
+    model = onnx.load(onnx_path)
+    graph = model.graph
+    out = graph.output[0]
+    raw_name = out.name + "_raw"
+    for node in graph.node:
+        node.output[:] = [raw_name if o == out.name else o for o in node.output]
+    M_T = symmetry_matrix().T.contiguous().numpy().astype(np.float32)   # [14, 14]
+    graph.initializer.append(numpy_helper.from_array(M_T, "symmetry_projection_T"))
+    graph.node.append(helper.make_node("MatMul", [raw_name, "symmetry_projection_T"],
+                                       [out.name], name="symmetrize_actions"))
+    onnx.checker.check_model(model)
+    onnx.save(model, onnx_path)
