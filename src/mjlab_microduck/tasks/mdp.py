@@ -7367,6 +7367,11 @@ def _backflip_state(env: ManagerBasedRlEnv) -> tuple:
         env._backflip_accum = z.clone()
         env._backflip_max = z.clone()
         env._backflip_paid = z.clone()
+        # Global step at which this env FIRST touched the terrain after its
+        # launch, or -1 while it has not. Drives backflip_landing's fixed
+        # payout window; see that function. Not part of the returned tuple, so
+        # the `*_, max_accum, paid` unpacking elsewhere stays valid.
+        env._backflip_land_step = torch.full_like(z, -1.0)
         env._backflip_last_update_step = -1
     return (
         env._backflip_t_hold,
@@ -7437,6 +7442,7 @@ def reset_backflip_launch_params(
     env._backflip_accum[env_ids] = 0.0
     env._backflip_max[env_ids] = 0.0
     env._backflip_paid[env_ids] = 0.0
+    env._backflip_land_step[env_ids] = -1.0
 
 
 def _backflip_time(env: ManagerBasedRlEnv) -> torch.Tensor:
@@ -7713,12 +7719,44 @@ def backflip_ready_stance(
     return backflip_hold_window(env) * height * upright
 
 
+def _backflip_landing_window(env: ManagerBasedRlEnv, window_s: float) -> torch.Tensor:
+    """1.0 for ``window_s`` seconds after this env's FIRST terrain contact.
+
+    WHY A FIXED WINDOW. The annuity used to pay for "all the time remaining
+    after touchdown", so its episode mass ran from 21.8 at a 1 s hold down to
+    5.84 at a 5 s hold. With the hold sampled uniformly 1-5 s from step 0 that
+    is a ~4x different payout for an IDENTICAL backflip, decided by a draw the
+    policy neither controls nor observes — noise injected straight into the
+    main attractor's credit assignment, and it also made a long-hold episode
+    worth less than a short one for the same skill. A fixed window makes the
+    same landing earn the same total whenever it happens.
+
+    The latch is the whole-robot terrain sensor (the same one the airborne gate
+    reads), not the feet sensor: touchdown is the first terrain contact of any
+    kind, however the robot arrives. Anything past the window pays zero.
+    """
+    _backflip_state(env)
+    step = float(env.common_step_counter)
+    contact = _sensor_any_contact(env, _BACKFLIP_GROUND_SENSOR)
+    if contact is not None:
+        fresh = (env._backflip_land_step < 0.0) & contact
+        env._backflip_land_step = torch.where(
+            fresh,
+            torch.full_like(env._backflip_land_step, step),
+            env._backflip_land_step,
+        )
+    landed = env._backflip_land_step >= 0.0
+    elapsed = (step - env._backflip_land_step) * env.step_dt
+    return (landed & (elapsed < window_s)).float()
+
+
 def backflip_landing(
     env: ManagerBasedRlEnv,
     stand_z: float = 0.115,
     height_std: float = 0.04,
     omega_std: float = 3.0,
     lin_vel_std: float = 0.5,
+    window_s: float = 1.4,
     sensor_name: str = "feet_ground_contact",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
@@ -7735,6 +7773,12 @@ def backflip_landing(
     "stand still on the plate" (which already trivially satisfies
     feet-contact/upright/height/calm) becomes the argmax and the flip itself
     never gets learned.
+
+    FIXED PAYOUT WINDOW (``window_s``): the annuity pays for at most
+    ``window_s`` seconds after the first terrain contact, so an identical
+    backflip earns the same total whatever the hold draw was. See
+    ``_backflip_landing_window`` for why that matters now that the hold is
+    sampled uniformly 1-5 s.
 
     BOUNCE-FARMING TRAP: gate x feet x upright x height can all be satisfied
     momentarily mid-rebound off a hard landing, at near-zero ANGULAR rate
@@ -7773,7 +7817,8 @@ def backflip_landing(
         torch.nan_to_num(asset.data.root_link_lin_vel_w, nan=0.0), dim=-1
     )
     settle = torch.exp(-(lin_vel**2) / (lin_vel_std**2))
-    return gate * feet_f * up * height * calm * settle
+    window = _backflip_landing_window(env, window_s)
+    return gate * feet_f * up * height * calm * settle * window
 
 
 def _backflip_present_mask(env: ManagerBasedRlEnv) -> torch.Tensor:

@@ -107,39 +107,40 @@ DESIGN CHOICES AND WHERE THEY CAME FROM
     and it is a pure motion-blocker on the one thing the maneuver is made of.
     Anti-violence pressure lives on |a_z|, action_rate and the landing's
     settle factor instead.
-  * REWARD MASS AT EVERY CURRICULUM STAGE (episode sums, dt-scaled —
-    AGENTS.md: compare mass, not weight; and price every stage, not just the
-    last). With hold H, launch ~0.14 s and a measured 0.42-0.88 s flight, the
-    post-landing settle is S = 7.5 - H - 0.16 - 0.88 = 6.46 - H seconds
-    (the WORST-CASE flight, so the bounds below hold everywhere):
+  * REWARD MASS ACROSS THE HOLD RANGE (episode sums, dt-scaled — AGENTS.md:
+    compare mass, not weight, and price every draw the env can make). The hold
+    H is sampled uniformly 1-5 s from step 0, and the landing annuity pays over
+    a FIXED 1.4 s window after touchdown, so only the stance varies with H:
 
-      stage   hold H      ready_stance   landing        flip  never-flip cap
-      0       1.0-2.0 s   1.12 - 2.24    17.8 - 21.8    8.0   2.24
-      1       1.0-3.5 s   1.12 - 3.92    11.8 - 21.8    8.0   3.92
-      2       1.0-5.0 s   1.12 - 5.61     5.84 - 21.8   8.0   5.61
+      hold H     ready_stance   landing   flip   never-flip cap
+      1.0 s      1.07           5.6       8.0    1.07
+      3.0 s      3.21           5.6       8.0    3.21
+      5.0 s      5.36           5.6       8.0    5.36
 
-    (ready_stance = 0.975 x 1.15 x H; landing = 4.0 x S, with S from the
-    WORST-CASE 0.88 s flight so the bound holds everywhere.)
+    (ready_stance = 0.975 x 1.10 x H; landing = 4.0 x 1.4.)
 
-    THE ACCEPTANCE STATEMENT, checked at every stage:
+    THE ACCEPTANCE STATEMENT, checked at every hold draw:
       1. Collapsing during the hold costs more than the rotation it buys.
-         Collapsing forfeits the whole stance mass — at worst 1.12, at best
-         5.61 — where the previous curriculum's first stage forfeited only
-         0.1-0.3. And the rotation a pre-flick crouch buys is bounded: the
-         policy can tuck AT the flick and get the same compactness for free
-         (ready_stance dies at launch), and flip_progress is capped at one
-         turn, so extra rotation beyond 360 deg pays nothing.
-      2. Flipping and landing still beats never flipping, at every stage. The
-         never-flip cap is the stance mass alone (2.24 / 3.92 / 5.61); flipping
-         adds flip 8.0 + landing >= 5.84, i.e. at least 13.84 on top.
-      3. `landing` stays the dominant attractor at every stage: its minimum
-         (5.84, at the longest hold) still exceeds ready_stance's maximum
-         (5.61).
+         Collapsing forfeits the whole stance mass — 1.07 at the shortest hold,
+         5.36 at the longest — where the old 0.1-0.3 s first curriculum stage
+         forfeited only 0.1-0.3. And the rotation a PRE-FLICK crouch buys is
+         bounded: the policy can fold AT the flick for free (ready_stance dies
+         at launch) and flip_progress is capped at one turn, so extra rotation
+         beyond 360 deg pays nothing. A LEAN is now priced too — see the tilt
+         gate on the term.
+      2. Flipping and landing still beats never flipping, at every draw. The
+         never-flip cap is the stance mass alone (1.07-5.36); flipping adds
+         flip 8.0 + landing 5.6 = 13.6 on top, whatever the hold was.
+      3. `landing` stays the dominant attractor at every draw: 5.6 against
+         ready_stance's maximum of 5.36.
 
-    KNOWN CONSEQUENCE: the landing mass swings 3.7x across the hold DR (5.84 at
-    H=5, 21.8 at H=1), which is noisy credit assignment. If that shows up as
-    instability, cap the annuity's paying window rather than reaching for the
-    weights.
+    WHAT THE FIXED WINDOW BOUGHT: the annuity no longer swings 3.7x with the
+    hold draw, so an identical backflip is worth the same whenever it happens.
+    What it did NOT buy is stance headroom — the binding case was always the
+    longest hold, and pinning the annuity to the worst case's affordance pins
+    the ceiling with it. If more hold authority is ever needed, lengthening
+    EPISODE_LENGTH_S raises the affordable window and the ceiling with it (at
+    8.0 s the window could be 1.9 s and w could go to 1.56).
   * The landing annuity (weight 4.0) is gated on a near-complete flip (300-345
     deg): "stand still and never flip" satisfies feet/upright/height/calm
     trivially, and without the gate it is the argmax. Reward MASS (episode
@@ -242,6 +243,15 @@ IMU_ORIENTATION_RANDOMIZATION_ANGLE = 6.0
 # 7.5 s the worst case leaves 7.5 - 5.0 - 0.16 - 0.88 = 1.46 s to settle on the
 # feet, and a short hold leaves over 6 s.
 EPISODE_LENGTH_S = 7.5
+
+# How long after the first terrain contact `backflip_landing` keeps paying.
+# 1.4 s is what the WORST case can always afford (7.5 - 5.0 - 0.16 - 0.88 =
+# 1.46 s), so an identical backflip earns the same annuity whatever the hold
+# draw was. Before this the annuity paid for "all the time remaining", i.e.
+# 21.8 in episode-sum at a 1 s hold against 5.84 at a 5 s hold — a ~4x swing
+# in the MAIN attractor decided by a draw the policy cannot observe, and it
+# made a long-hold episode worth less than a short one for the same skill.
+LANDING_WINDOW_S = 1.4
 
 # Empirically-measured standing trunk height above the sole contact plane
 # (standup lesson: measure it on the actual model, never carry it across
@@ -351,19 +361,15 @@ PLATE_HALF_THICKNESS = 0.01
 # have to be re-signed to even score. The w0 ceiling stays inside that measured
 # boundary with margin. Every corner of this box is direction-checked backward;
 # re-check with `--box-check` if you move it.
-HOLD_RANGE    = (1.0, 5.0)     # the END state, and the user's requirement:
-                               # a long, random wait so the policy has to learn
-                               # to STAND on the launcher rather than collapse
-                               # into it. The first training run collapsed
-                               # before the impulse (ready_stance +0.036
-                               # against a weight of 1.0) precisely because a
-                               # 0.1-0.3 s hold made collapsing almost free.
-                               # A curriculum ramps into it — see the comment
-                               # on backflip_hold_range below — because at a
-                               # 5 s hold in a 7.5 s episode ~70% of collected
-                               # experience is standing still, which slows the
-                               # flip's discovery badly. The ramp is only for
-                               # early discovery; 1-5 s is where it must end.
+HOLD_RANGE    = (1.0, 5.0)     # sampled uniformly from step 0, NO curriculum.
+                               # A long, random wait so the policy has to learn
+                               # to STAND on the launcher: the first training
+                               # run collapsed into the plate before the
+                               # impulse, and a later one launched leaning ~35
+                               # deg back. EPISODE_LENGTH_S is derived from the
+                               # 5.0 s worst case, and backflip_landing pays
+                               # over a FIXED window so the hold draw does not
+                               # change what a given backflip is worth.
 LAUNCH_RANGE  = (0.12, 0.16)   # how long the hands stay with the robot
 Z0_RANGE      = (0.01, 0.03)   # plate CENTRE. 0.01 = PLATE_HALF_THICKNESS, so
                                # the slab rests exactly on the floor; the DR
@@ -590,14 +596,15 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "height_std":  0.04,
             "omega_std":   3.0,
             "lin_vel_std": 0.5,
+            "window_s":    LANDING_WINDOW_S,
             "sensor_name": feet_ground_cfg.name,
         },
     )
 
     # Stand still on the operator's hands. HOLD-phase only — it dies at
     # launch, so it can never oppose the flip. upright x height: the height
-    # Gaussian says "be on the plate at standing height", the WIDE tilt
-    # smoothstep says "be upright".
+    # Gaussian says "be on the plate at standing height", the tilt smoothstep
+    # says "be UPRIGHT, not leaning".
     #
     # The upright factor is NOT optional and was dropped once, during the
     # tucked-hold experiment. height alone cannot tell an upright robot from an
@@ -606,28 +613,40 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # outscored the intended pose by 4%. Re-run `--flop-audit` after touching
     # any factor here.
     #
-    # WEIGHT 1.15, chosen by MASS at EVERY CURRICULUM STAGE (AGENTS.md), not
-    # just at the end. See the module docstring's per-stage table. The ceiling
-    # is set by the long end — at H=5 the landing annuity is only 5.84 (the
-    # settle window is shortest there, and this uses the WORST-CASE 0.88 s
-    # flight, not the typical 0.65) and `landing` must stay the dominant
-    # attractor, so 0.975*w*5 <= 5.84 gives w <= 1.19. The floor is set by the
-    # SHORT end, which
-    # is why the hold curriculum now starts at 1.0 s rather than 0.1: at a
-    # 0.1-0.3 s hold no admissible weight makes this term matter (it caps at
-    # 0.3*1.4 = 0.42 against ~30 for flip+landing), which is how the policy
-    # came to crouch before the impulse.
+    # THE GATE IS 10/45 deg, NOT 40/70. The wide 40/70 pair was sized for the
+    # short-lived TUCKED hold, whose own equilibrium is pitched 14 deg, and it
+    # made a LEAN FREE: the user saw the robot launch leaning ~35 deg back and
+    # this term charged nothing for it, because 35 < 40. At 10/45 a genuinely
+    # upright stance still costs nothing (measured open-loop drift is 3.5 deg
+    # at 0.3 s, 7.3 at 0.5), a 20 deg lean loses 20% of the term, a 35 deg lean
+    # loses 80%, and every flop basin (80-126 deg) is still hard-zeroed. This
+    # is a SHAPE fix, not a mass fix -- the mass ceiling below is set by the
+    # landing annuity and there is no headroom in it.
+    #
+    # WEIGHT 1.10, chosen by MASS across the WHOLE hold range (AGENTS.md), not
+    # at one draw. See the module docstring's table. The ceiling is set by the
+    # LONGEST hold, where this term is largest while the landing annuity -- now
+    # a fixed 1.4 s window -- stays at 5.6: `landing` must remain the dominant
+    # attractor, so 0.975*w*5.0 <= 5.6 gives w <= 1.148, and 1.10 keeps a
+    # margin. The fixed window did NOT raise that ceiling: the binding case was
+    # always the longest hold, and pinning the annuity to the worst case's
+    # affordance pins the ceiling with it. The hold authority the policy needed
+    # came from the tilt gate above instead.
+    # The floor is why the hold is 1-5 s and not 0.1-0.3: at a 0.3 s hold no
+    # admissible weight makes this term matter (it caps at 0.3*1.148 = 0.34
+    # against ~14 for flip+landing), which is how the policy came to crouch
+    # before the impulse.
     #
     # stand_z carries the plate half-thickness: the term measures trunk height
     # against the plate CENTRE (z0) while the robot stands on its top surface.
     cfg.rewards["ready_stance"] = RewardTermCfg(
         func=microduck_mdp.backflip_ready_stance,
-        weight=1.15,
+        weight=1.10,
         params={
             "stand_z":       STAND_Z + PLATE_HALF_THICKNESS,
             "height_std":    0.03,
-            "tilt_full_deg": 40.0,   # standing is ~0 deg: this costs nothing
-            "tilt_zero_deg": 70.0,   # < the 91-103 deg flop basins
+            "tilt_full_deg": 10.0,   # free while genuinely upright
+            "tilt_zero_deg": 45.0,   # << the 80-126 deg flop basins
         },
     )
 
@@ -994,35 +1013,16 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         del cfg.curriculum["terrain_levels"]
     del cfg.curriculum["command_vel"]
 
-    # Hold-window widening, to HOLD_RANGE = 1-5 s.
+    # NO HOLD CURRICULUM. HOLD_RANGE is sampled uniformly 1-5 s from step 0.
     #
-    # THE FLOOR IS 1.0 s AT EVERY STAGE, and that is the whole point. An
-    # earlier revision started at 0.1-0.3 s to keep early episodes cheap, and
-    # the policy learned to CROUCH before the impulse — rationally, because a
-    # compact body rotates much further at the same flick, and at a 0.1-0.3 s
-    # hold ready_stance's episode-sum mass was 0.1-0.3 against ~30 for
-    # flip+landing. The term was sized for the END of the curriculum and the
-    # behaviour is acquired at its START. Curriculum stages must be priced at
-    # EVERY stage; the per-stage table is in the module docstring.
-    #
-    # Starting at 1-2 s is affordable now: the first real run reached
-    # landing +1.72 by iteration 279 and open-loop closure is 62%, so flip
-    # discovery is not fragile, and the cheap-hold window was buying less than
-    # it cost. What the ramp still buys is the range WIDTH — a narrower early
-    # window keeps each episode's launch at a similar time so the policy can
-    # learn what the flick FEELS like before it has to handle 5 s of timing
-    # uncertainty. Phase-aligned with the flip existing first.
-    cfg.curriculum["backflip_hold_range"] = CurriculumTermCfg(
-        func=microduck_mdp.event_param_curriculum,
-        params={
-            "event_name": "backflip_launch_params",
-            "param_stages": [
-                {"step": 0,         "params": {"hold_range": (1.0, 2.0)}},
-                {"step": 1500 * 24, "params": {"hold_range": (1.0, 3.5)}},
-                {"step": 3000 * 24, "params": {"hold_range": HOLD_RANGE}},
-            ],
-        },
-    )
+    # There used to be a ramp (0.1-0.3 -> 1-2 -> 1-3.5 -> 1-5) whose only job
+    # was to keep early episodes from spending most of their time standing
+    # still. It bought little and cost a lot: the first real run reached
+    # landing +1.72 by iteration 279, so flip discovery was never fragile, and
+    # a curriculum on the hold meant `play` — which starts
+    # common_step_counter at 0 — showed a 0.1-0.3 s hold whatever checkpoint
+    # was loaded, so the long hold could not be seen in the viewer at all.
+    # Sampling the final range from step 0 removes both problems.
 
     # NO launch-height DR tail. There used to be one, widening z0 from the
     # measured box toward the spec's 0.30 m "operator tail". It is gone, and

@@ -17,6 +17,7 @@ import torch
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.microduck_backflip_env_cfg import (
     HOLD_RANGE,
+    LANDING_WINDOW_S,
     LAUNCH_RANGE,
     VZ_RANGE,
     W0_RANGE,
@@ -275,9 +276,11 @@ def test_ready_stance_target_height_accounts_for_the_plate_thickness(cfg):
     assert cfg.rewards["ready_stance"].params["stand_z"] == pytest.approx(
         STAND_Z + PLATE_HALF_THICKNESS
     )
-    # and the wide upright gate is present with standing-safe edges
-    assert cfg.rewards["ready_stance"].params["tilt_full_deg"] >= 30.0
-    assert cfg.rewards["ready_stance"].params["tilt_zero_deg"] <= 80.0
+    # and the upright gate is present, tight enough to price a lean but wide
+    # enough not to tax the pose's own drift (see
+    # test_the_lean_penalty_has_the_shape_the_docstring_claims)
+    assert 5.0 <= cfg.rewards["ready_stance"].params["tilt_full_deg"] <= 15.0
+    assert cfg.rewards["ready_stance"].params["tilt_zero_deg"] <= 70.0
     # The landing is measured against the ground, with no plate under it, and
     # against the STANDING height: the duck lands on its feet.
     assert cfg.rewards["landing"].params["stand_z"] == pytest.approx(STAND_Z)
@@ -375,21 +378,6 @@ def test_impact_penalty_ramps_up_and_keeps_the_self_negating_sign(cfg):
     stages = cfg.curriculum["gentle_landing_weight"].params["weight_stages"]
     assert all(s["weight"] > 0.0 for s in stages)  # self-negating func
     assert stages[-1]["weight"] > stages[0]["weight"]  # ramps UP
-
-
-def test_launch_dr_widens_over_training(cfg):
-    # Only the HOLD window widens; the z0 tail was removed. The curriculum now
-    # RAMPS INTO HOLD_RANGE rather than out of it: 1-5 s is the requirement and
-    # the early stages exist only to keep the flip's discovery cheap.
-    hold = cfg.curriculum["backflip_hold_range"].params["param_stages"]
-    assert hold[0]["params"]["hold_range"] == (1.0, 2.0)
-    assert hold[-1]["params"]["hold_range"] == HOLD_RANGE
-    widths = [s["params"]["hold_range"][1] for s in hold]
-    assert widths == sorted(widths)          # monotonically longer
-    assert hold[-1]["step"] > hold[0]["step"]
-
-
-# ── Runner cfg / registration ────────────────────────────────────────────────
 
 
 def test_symmetry_mirror_loss_is_enabled():
@@ -519,47 +507,6 @@ def test_the_flick_stays_inside_the_direction_reversal_boundary(cfg):
     assert cfg.events["backflip_launch_params"].params["w0_range"][1] <= 24.0
 
 
-def test_the_hold_is_long_and_random_and_the_episode_fits_it(cfg):
-    # The user's requirement after watching the first run collapse into the
-    # plate: a long, random wait so the policy has to learn to STAND. The
-    # episode must fit the worst case -- 5 s hold + 0.16 s launch + the
-    # measured 0.88 s worst-case flight leaves ~1.46 s to settle at 7.5 s.
-    assert HOLD_RANGE == (1.0, 5.0)
-    assert cfg.episode_length_s >= HOLD_RANGE[1] + 0.16 + 0.88 + 1.4
-    assert cfg.episode_length_s == pytest.approx(7.5)
-
-
-def test_the_stance_weight_is_set_by_mass_not_by_weight(cfg):
-    # AGENTS.md: compare reward MASS. At the old 0.1-0.3 s hold this term could
-    # only earn 0.1-0.3 in episode-sum, which is why the first run ignored it
-    # (+0.036). With a 1-5 s hold and weight 1.5 it earns 1.5-7.5, while the
-    # landing annuity still dominates at 6.8-22.8 -- so never flipping caps the
-    # episode well below flipping and landing.
-    stance_w = cfg.rewards["ready_stance"].weight
-    landing_w = cfg.rewards["landing"].weight
-    flip_w = cfg.rewards["flip_progress"].weight
-    settle_min = cfg.episode_length_s - HOLD_RANGE[1] - 0.16 - 0.88
-
-    stance_mass_max = 0.975 * stance_w * HOLD_RANGE[1]
-    landing_mass_min = landing_w * settle_min
-    # 5x the most it could ever earn at the old 0.1-0.3 s hold
-    assert stance_mass_max >= 5.0 * 0.3 * 3, (
-        "holding the pose must be clearly worth doing"
-    )
-    assert landing_mass_min >= stance_mass_max, (
-        "the landing annuity must stay the dominant attractor at every hold"
-    )
-    # and never flipping must never beat flipping
-    assert stance_mass_max < flip_w + landing_mass_min
-
-
-# The sign convention that has bitten four envs. It CANNOT be checked from the
-# function name: mjlab's own body_angular_velocity_penalty returns >= 0 (a cost,
-# negative weight) while microduck's trunk_vertical_accel_penalty returns <= 0
-# (self-negating, POSITIVE weight) — same suffix, opposite sign. So the sign of
-# every term's function is stated here explicitly, and the test also fails when
-# a new reward term is added without classifying it. A wrong weight sign turns a
-# penalty into a bounty for the violation, which the policy WILL farm.
 def test_the_pre_reset_state_is_coherent(cfg):
     # mjlab never calls env.reset() before the viewer's first episode
     # (ManagerBasedRlEnv.__init__ does not reset; mjlab/viewer/base.py calls
@@ -788,22 +735,6 @@ def play_cfg():
     return make_microduck_backflip_env_cfg(play=True)
 
 
-def test_play_cfg_uses_the_FINAL_curriculum_values_not_the_first(play_cfg, cfg):
-    # THE INVARIANT THAT WAS MISSING. `play` builds a fresh env with
-    # common_step_counter == 0, so every curriculum term evaluates at stage
-    # ZERO whatever checkpoint is loaded. The viewer therefore showed a
-    # 0.1-0.3 s hold while the policy had been trained on 1-5 s, and the user
-    # could not see the behaviour they had asked for.
-    train_stages = cfg.curriculum["backflip_hold_range"].params["param_stages"]
-    first = train_stages[0]["params"]["hold_range"]
-    last = train_stages[-1]["params"]["hold_range"]
-    assert first != last, "nothing to test if the curriculum does not widen"
-
-    play_hold = play_cfg.events["backflip_launch_params"].params["hold_range"]
-    assert play_hold == last == HOLD_RANGE
-    assert play_hold != first
-
-
 def test_play_cfg_carries_every_curriculum_to_its_last_stage(play_cfg, cfg):
     # Not just the hold: every range or weight a curriculum moves over training
     # must be at its trained value in play, or the viewer is showing a
@@ -835,44 +766,96 @@ def test_play_cfg_drops_the_curriculum_terms(play_cfg):
     # would write stage 0 straight back over the final values.
     assert play_cfg.curriculum == {}
 
-
-def test_the_training_cfg_still_starts_at_stage_zero(cfg):
-    # The play change must not leak into training.
-    assert cfg.curriculum, "training must keep its curricula"
-    stages = cfg.curriculum["backflip_hold_range"].params["param_stages"]
-    assert stages[0]["params"]["hold_range"] == (1.0, 2.0)
-    assert stages[0]["step"] == 0
-
-
-def test_the_hold_floor_is_never_short_enough_to_make_crouching_free(cfg):
-    # The crouch the user saw was learned at curriculum stage 0, where the hold
-    # was 0.1-0.3 s and ready_stance's episode-sum mass was 0.1-0.3 against
-    # ~30 for flip+landing. Every stage must now price the hold: a 1.0 s floor
-    # makes the term worth at least ~1.2 whatever stage the policy is in.
-    stages = cfg.curriculum["backflip_hold_range"].params["param_stages"]
-    stance_w = cfg.rewards["ready_stance"].weight
-    for stage in stages:
-        lo, hi = stage["params"]["hold_range"]
-        assert lo >= 1.0, f"stage at step {stage['step']} has a {lo}s hold floor"
-        assert stance_w * lo >= 1.0, "the stance must be worth defending"
+def test_there_is_no_hold_curriculum(cfg):
+    # The hold is sampled uniformly 1-5 s from step 0. The ramp it replaced
+    # existed only to keep early episodes from standing still, it bought little
+    # (the first run reached landing +1.72 by iteration 279), and it made the
+    # long hold invisible in `play`, which evaluates every curriculum at stage
+    # zero.
+    assert "backflip_hold_range" not in cfg.curriculum
+    assert cfg.events["backflip_launch_params"].params["hold_range"] == HOLD_RANGE
+    assert HOLD_RANGE == (1.0, 5.0)
 
 
-def test_the_stance_never_outweighs_the_landing_at_any_stage(cfg):
-    # The ceiling on the stance weight comes from the LONGEST hold, where the
-    # settle window -- and so the landing annuity -- is shortest. Checked at
-    # both ends of the curriculum, which is what the previous revision missed.
-    stance_w = cfg.rewards["ready_stance"].weight
+def test_the_episode_fits_the_worst_case_hold(cfg):
+    # 5.0 s hold + 0.16 s flick + the MEASURED 0.88 s worst-case flight leaves
+    # 1.46 s to settle, which is what LANDING_WINDOW_S is sized against.
+    assert cfg.episode_length_s == pytest.approx(7.5)
+    settle = cfg.episode_length_s - HOLD_RANGE[1] - 0.16 - 0.88
+    assert settle >= LANDING_WINDOW_S
+    assert settle - LANDING_WINDOW_S < 0.2, (
+        "the payout window should use nearly all of the worst case's "
+        "affordance; a large gap is wasted annuity"
+    )
+
+
+def test_the_landing_annuity_is_hold_independent(cfg):
+    # THE POINT OF THE FIXED WINDOW. Paying for "all the time remaining after
+    # touchdown" gave an identical backflip 21.8 in episode-sum at a 1 s hold
+    # against 5.84 at a 5 s hold -- a ~4x swing in the MAIN attractor decided
+    # by a draw the policy neither controls nor observes.
+    assert cfg.rewards["landing"].params["window_s"] == LANDING_WINDOW_S
     landing_w = cfg.rewards["landing"].weight
+    masses = [
+        landing_w * LANDING_WINDOW_S           # same at every hold, by design
+        for _ in (HOLD_RANGE[0], HOLD_RANGE[1])
+    ]
+    assert masses[0] == masses[-1]
+    # ... and it must still fit the shortest available settle window
+    assert LANDING_WINDOW_S <= (
+        cfg.episode_length_s - HOLD_RANGE[1] - 0.16 - 0.88
+    )
+
+
+def test_the_stance_never_outweighs_the_landing_at_any_hold(cfg):
+    # The ceiling on the stance weight comes from the LONGEST hold, where the
+    # stance is largest and the (now fixed) annuity is unchanged.
+    stance_w = cfg.rewards["ready_stance"].weight
+    landing_mass = cfg.rewards["landing"].weight * LANDING_WINDOW_S
     flip_w = cfg.rewards["flip_progress"].weight
-    stages = cfg.curriculum["backflip_hold_range"].params["param_stages"]
-    for stage in stages:
-        lo, hi = stage["params"]["hold_range"]
-        settle = cfg.episode_length_s - hi - 0.16 - 0.88
-        stance_mass = 0.975 * stance_w * hi
-        landing_mass = landing_w * settle
+    for hold in (HOLD_RANGE[0], 0.5 * sum(HOLD_RANGE), HOLD_RANGE[1]):
+        stance_mass = 0.975 * stance_w * hold
         assert landing_mass >= stance_mass, (
-            f"at a {hi}s hold the stance ({stance_mass:.2f}) outweighs the "
+            f"at a {hold}s hold the stance ({stance_mass:.2f}) outweighs the "
             f"landing annuity ({landing_mass:.2f})"
         )
-        # ... and never flipping must never beat flipping and landing
+        # never flipping must never beat flipping and landing
         assert stance_mass < flip_w + landing_mass
+    # and the hold must be long enough that the term is worth defending at all
+    assert 0.975 * stance_w * HOLD_RANGE[0] >= 1.0
+
+
+def test_the_stance_prices_a_LEAN_not_just_a_topple(cfg):
+    # The user saw the robot launch leaning ~35 deg back and the term charged
+    # nothing, because the gate was full-credit below 40 deg -- a width sized
+    # for the short-lived tucked hold, whose own equilibrium is pitched 14 deg.
+    params = cfg.rewards["ready_stance"].params
+    assert params["tilt_full_deg"] <= 15.0, (
+        "a lean must cost something; standing's own drift is only 3.5-7.3 deg"
+    )
+    # ... while every measured flop basin (80-126 deg) is still hard-zeroed
+    assert params["tilt_zero_deg"] <= 70.0
+    assert params["tilt_full_deg"] < params["tilt_zero_deg"]
+
+
+def test_the_lean_penalty_has_the_shape_the_docstring_claims(cfg):
+    # Measured through the real gate, at the cfg's own numbers.
+    import torch
+
+    p = cfg.rewards["ready_stance"].params
+
+    def gate(tilt_deg):
+        half = math.radians(tilt_deg) * 0.5
+        quat = torch.tensor([[math.cos(half), 0.0, math.sin(half), 0.0]])
+        return float(
+            microduck_mdp._trunk_tilt_smoothstep(
+                quat, p["tilt_full_deg"], p["tilt_zero_deg"]
+            )[0]
+        )
+
+    assert gate(0.0) == 1.0
+    assert gate(7.3) == 1.0            # the measured open-loop drift is free
+    assert gate(20.0) < 0.85           # a 20 deg lean costs ~20%
+    assert gate(35.0) < 0.25           # a 35 deg lean costs ~80%
+    assert gate(45.0) == 0.0
+    assert gate(90.0) == 0.0

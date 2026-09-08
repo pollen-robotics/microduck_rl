@@ -5049,3 +5049,91 @@ floor comes from the SHORT end, and it is why the hold had to move: at a
 
 The plate height was NOT touched — it went to the floor in the previous commit
 and the video was an older checkpoint.
+
+
+# Third video — hold as plain DR, and a hold-independent annuity
+
+Two coupled changes, both about pricing rather than physics. No new sweeps.
+
+## 1. The hold curriculum is deleted
+
+`HOLD_RANGE = (1.0, 5.0)` sampled uniformly from step 0. The ramp
+(0.1-0.3 -> 1-2 -> 1-3.5 -> 1-5) existed only to keep early episodes from
+spending most of their time standing still. It bought little — the first real
+run reached `landing +1.72` by iteration 279, so flip discovery was never
+fragile — and it cost the ability to see the real behaviour: `play` starts
+`common_step_counter` at 0, so a curriculum on the hold meant the viewer showed
+0.1-0.3 s whatever checkpoint was loaded.
+
+`EPISODE_LENGTH_S = 7.5` and its derivation are unchanged: 5.0 s hold + 0.16 s
+flick + the measured 0.88 s worst-case flight + 1.46 s to settle. The other
+curricula (regularizer ramps, CoM DR) stay.
+
+## 2. The landing annuity now pays over a FIXED window
+
+`LANDING_WINDOW_S = 1.4` s after the first terrain contact, latched per env in
+`backflip_landing` and cleared on reset like every other buffer.
+
+**The problem it fixes.** The annuity paid per step for "all the time remaining
+after touchdown", so its episode mass was:
+
+| hold H | settle window | landing mass (old) |
+|---|---|---|
+| 1.0 s | 5.46 s | **21.8** |
+| 3.0 s | 3.46 s | 13.8 |
+| 5.0 s | 1.46 s | **5.84** |
+
+A ~4x different payout for an IDENTICAL backflip, decided by a draw the policy
+neither controls nor observes — noise injected straight into the main
+attractor's credit assignment — and it made a long-hold episode worth less than
+a short one for the same skill. With a fixed window the mass is **5.6 at every
+hold**, and 1.4 s is what the worst case can always afford (1.46 s).
+
+Anything past the window pays zero, and the latch does not move once set, so
+bouncing back into the air and touching down again cannot restart the annuity.
+
+## The re-derived mass table
+
+| hold H | `ready_stance` | `landing` | `flip` | never-flip cap |
+|---|---|---|---|---|
+| 1.0 s | 1.07 | 5.6 | 8.0 | 1.07 |
+| 3.0 s | 3.21 | 5.6 | 8.0 | 3.21 |
+| 5.0 s | 5.36 | 5.6 | 8.0 | 5.36 |
+
+(`ready_stance` = 0.975 x 1.10 x H; `landing` = 4.0 x 1.4.)
+
+**The ceiling did NOT rise.** The hope was that a hold-independent annuity
+would lift its floor and free stance headroom. It does not: the binding case
+was always the longest hold, and pinning the annuity to the worst case's
+affordance pins the ceiling with it. `0.975 * w * 5.0 <= 5.6` gives
+**w <= 1.148**, so the weight went 1.15 -> **1.10** for margin — slightly DOWN,
+not up. (Lengthening `EPISODE_LENGTH_S` is what would raise it: at 8.0 s the
+window could be 1.9 s and w could reach 1.56.)
+
+Acceptance statement, checked at every hold draw: collapsing forfeits the whole
+stance mass (1.07-5.36 against 0.1-0.3 under the old first curriculum stage);
+flipping and landing adds a hold-independent 13.6 on top, so it always beats
+never flipping; and `landing` (5.6) stays above `ready_stance`'s maximum (5.36).
+
+## 3. The lean the mass table could not fix
+
+The user also reported the robot launching **leaning ~35 deg back**. That is
+not a mass problem: `ready_stance`'s tilt gate was full-credit below 40 deg, so
+a 35 deg lean cost **nothing**. The 40/70 width had been sized for the
+short-lived TUCKED hold, whose own equilibrium is pitched 14 deg, and it
+survived the revert to standing unchanged.
+
+The gate is now **10/45 deg**, measured through the real function:
+
+| trunk tilt | gate |
+|---|---|
+| 0 deg | 1.000 |
+| 7.3 deg (the measured open-loop drift) | 1.000 |
+| 20 deg | ~0.80 |
+| 35 deg | ~0.20 |
+| 45 deg and beyond | 0.000 |
+
+So a genuinely upright stance still costs nothing, a lean is priced in
+proportion, and every measured flop basin (80-126 deg) is still hard-zeroed.
+**This is a shape fix, not a mass fix** — which is the only lever left, since
+the mass ceiling is set by the annuity and has no headroom.

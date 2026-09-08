@@ -965,3 +965,104 @@ def test_ready_stance_height_target_tracks_the_sampled_z0():
     for z0 in (0.07, 0.09):
         env = _stance_env(z0=z0)
         assert _stance(env, z0 + _PHT + _STAND_Z, _quat_rpy(0, 0, 0)) > 0.99
+
+
+# --- The landing annuity's FIXED payout window. -----------------------------
+
+
+def test_the_landing_window_latches_on_first_contact_and_then_expires():
+    # The annuity used to pay for "all the time remaining after touchdown", so
+    # an identical backflip earned 21.8 in episode-sum at a 1 s hold against
+    # 5.84 at a 5 s hold -- a ~4x swing in the MAIN attractor decided by a draw
+    # the policy neither controls nor observes. A fixed window makes the same
+    # landing worth the same whenever it happens.
+    env, found = _accum_env()
+    window = 1.4
+
+    # airborne: nothing latched, nothing pays
+    found[:] = 0.0
+    assert float(microduck_mdp._backflip_landing_window(env, window)[0]) == 0.0
+    assert float(env._backflip_land_step[0]) == -1.0
+
+    # first terrain contact latches the step and opens the window
+    found[:] = 1.0
+    env.common_step_counter += 1
+    assert float(microduck_mdp._backflip_landing_window(env, window)[0]) == 1.0
+    latched = float(env._backflip_land_step[0])
+    assert latched == float(env.common_step_counter)
+
+    # ... and it keeps paying for exactly `window` seconds of steps
+    steps = int(round(window / env.step_dt))
+    for _ in range(steps - 1):
+        env.common_step_counter += 1
+        assert float(microduck_mdp._backflip_landing_window(env, window)[0]) == 1.0
+    env.common_step_counter += 1
+    assert float(microduck_mdp._backflip_landing_window(env, window)[0]) == 0.0
+
+    # the latch does not move once set, so bouncing back into the air and
+    # touching down again cannot restart the annuity
+    found[:] = 0.0
+    env.common_step_counter += 1
+    microduck_mdp._backflip_landing_window(env, window)
+    found[:] = 1.0
+    env.common_step_counter += 1
+    microduck_mdp._backflip_landing_window(env, window)
+    assert float(env._backflip_land_step[0]) == latched
+
+
+def test_the_landing_window_is_the_same_length_whenever_touchdown_happens():
+    # The property the fix exists for: identical landings, different hold
+    # draws, identical total payout.
+    totals = []
+    for offset_steps in (0, 50, 200):
+        env, found = _accum_env()
+        found[:] = 0.0
+        for _ in range(offset_steps):          # a longer hold = a later launch
+            env.common_step_counter += 1
+            microduck_mdp._backflip_landing_window(env, 1.4)
+        found[:] = 1.0
+        paid = 0.0
+        for _ in range(400):
+            env.common_step_counter += 1
+            paid += float(microduck_mdp._backflip_landing_window(env, 1.4)[0])
+        totals.append(paid)
+    assert totals[0] == totals[1] == totals[2]
+    assert totals[0] == pytest.approx(1.4 / 0.02, abs=1.0)
+
+
+def test_the_landing_latch_is_cleared_on_reset():
+    # No buffer may survive an episode boundary; a stale latch would pay the
+    # next episode's stance phase as if it had already landed.
+    env, found = _accum_env(num_envs=3)
+    found[:] = 1.0
+    env.common_step_counter += 1
+    microduck_mdp._backflip_landing_window(env, 1.4)
+    assert float(env._backflip_land_step[0]) >= 0.0
+
+    microduck_mdp.reset_backflip_launch_params(env, torch.tensor([0, 2]))
+    assert float(env._backflip_land_step[0]) == -1.0
+    assert float(env._backflip_land_step[2]) == -1.0
+    assert float(env._backflip_land_step[1]) >= 0.0   # untouched env keeps its
+
+
+def test_landing_pays_nothing_once_the_window_has_expired():
+    # End to end through backflip_landing itself: a perfect settled pose past
+    # the window earns zero.
+    env = _FakeEnvWithScene(
+        num_envs=1,
+        sensors={
+            "feet_ground_contact": _FakeSensor(torch.ones(1, 1)),
+            "robot_ground_contact": _FakeSensor(torch.ones(1, 1)),
+        },
+    )
+    microduck_mdp._backflip_state(env)
+    env._backflip_max[:] = 2 * math.pi          # gate fully open
+    env.robot.data.root_link_pos_w[:, 2] = 0.115
+
+    env.common_step_counter += 1
+    inside = float(microduck_mdp.backflip_landing(env, window_s=1.4)[0])
+    assert inside > 0.5
+
+    env.common_step_counter += int(round(1.4 / env.step_dt)) + 1
+    outside = float(microduck_mdp.backflip_landing(env, window_s=1.4)[0])
+    assert outside == 0.0
