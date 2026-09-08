@@ -382,7 +382,7 @@ def test_launch_dr_widens_over_training(cfg):
     # RAMPS INTO HOLD_RANGE rather than out of it: 1-5 s is the requirement and
     # the early stages exist only to keep the flip's discovery cheap.
     hold = cfg.curriculum["backflip_hold_range"].params["param_stages"]
-    assert hold[0]["params"]["hold_range"] == (0.1, 0.3)
+    assert hold[0]["params"]["hold_range"] == (1.0, 2.0)
     assert hold[-1]["params"]["hold_range"] == HOLD_RANGE
     widths = [s["params"]["hold_range"][1] for s in hold]
     assert widths == sorted(widths)          # monotonically longer
@@ -540,7 +540,7 @@ def test_the_stance_weight_is_set_by_mass_not_by_weight(cfg):
     flip_w = cfg.rewards["flip_progress"].weight
     settle_min = cfg.episode_length_s - HOLD_RANGE[1] - 0.16 - 0.88
 
-    stance_mass_max = stance_w * HOLD_RANGE[1]
+    stance_mass_max = 0.975 * stance_w * HOLD_RANGE[1]
     landing_mass_min = landing_w * settle_min
     # 5x the most it could ever earn at the old 0.1-0.3 s hold
     assert stance_mass_max >= 5.0 * 0.3 * 3, (
@@ -778,3 +778,101 @@ def test_the_feet_are_the_lowest_geoms_so_the_spawn_cannot_tunnel():
         f"the lowest collision geom is {lowest[0][1]}, not a foot -- a spawn "
         "placed by trunk height can then tunnel whatever hangs below it"
     )
+
+
+# --- The play cfg must show the env the policy was TRAINED on. --------------
+
+
+@pytest.fixture(scope="module")
+def play_cfg():
+    return make_microduck_backflip_env_cfg(play=True)
+
+
+def test_play_cfg_uses_the_FINAL_curriculum_values_not_the_first(play_cfg, cfg):
+    # THE INVARIANT THAT WAS MISSING. `play` builds a fresh env with
+    # common_step_counter == 0, so every curriculum term evaluates at stage
+    # ZERO whatever checkpoint is loaded. The viewer therefore showed a
+    # 0.1-0.3 s hold while the policy had been trained on 1-5 s, and the user
+    # could not see the behaviour they had asked for.
+    train_stages = cfg.curriculum["backflip_hold_range"].params["param_stages"]
+    first = train_stages[0]["params"]["hold_range"]
+    last = train_stages[-1]["params"]["hold_range"]
+    assert first != last, "nothing to test if the curriculum does not widen"
+
+    play_hold = play_cfg.events["backflip_launch_params"].params["hold_range"]
+    assert play_hold == last == HOLD_RANGE
+    assert play_hold != first
+
+
+def test_play_cfg_carries_every_curriculum_to_its_last_stage(play_cfg, cfg):
+    # Not just the hold: every range or weight a curriculum moves over training
+    # must be at its trained value in play, or the viewer is showing a
+    # different env from the one the checkpoint knows.
+    for name, term in cfg.curriculum.items():
+        params = term.params
+        if "param_stages" in params:
+            last = params["param_stages"][-1]["params"]
+            got = play_cfg.events[params["event_name"]].params
+            for key, value in last.items():
+                assert got[key] == value, f"{name}: {key}"
+        elif "weight_stages" in params:
+            last = params["weight_stages"][-1]["weight"]
+            assert play_cfg.rewards[params["reward_name"]].weight == last, name
+        elif "range_stages" in params:
+            last = params["range_stages"][-1]["range"]
+            assert play_cfg.events[params["event_name"]].params["ranges"] == (
+                -last, last
+            ), name
+        else:
+            raise AssertionError(
+                f"{name} has an unrecognised stage list; _apply_final_curriculum "
+                "must learn it or play silently runs at stage 0"
+            )
+
+
+def test_play_cfg_drops_the_curriculum_terms(play_cfg):
+    # Pre-applying is not enough: the curriculum manager runs every step and
+    # would write stage 0 straight back over the final values.
+    assert play_cfg.curriculum == {}
+
+
+def test_the_training_cfg_still_starts_at_stage_zero(cfg):
+    # The play change must not leak into training.
+    assert cfg.curriculum, "training must keep its curricula"
+    stages = cfg.curriculum["backflip_hold_range"].params["param_stages"]
+    assert stages[0]["params"]["hold_range"] == (1.0, 2.0)
+    assert stages[0]["step"] == 0
+
+
+def test_the_hold_floor_is_never_short_enough_to_make_crouching_free(cfg):
+    # The crouch the user saw was learned at curriculum stage 0, where the hold
+    # was 0.1-0.3 s and ready_stance's episode-sum mass was 0.1-0.3 against
+    # ~30 for flip+landing. Every stage must now price the hold: a 1.0 s floor
+    # makes the term worth at least ~1.2 whatever stage the policy is in.
+    stages = cfg.curriculum["backflip_hold_range"].params["param_stages"]
+    stance_w = cfg.rewards["ready_stance"].weight
+    for stage in stages:
+        lo, hi = stage["params"]["hold_range"]
+        assert lo >= 1.0, f"stage at step {stage['step']} has a {lo}s hold floor"
+        assert stance_w * lo >= 1.0, "the stance must be worth defending"
+
+
+def test_the_stance_never_outweighs_the_landing_at_any_stage(cfg):
+    # The ceiling on the stance weight comes from the LONGEST hold, where the
+    # settle window -- and so the landing annuity -- is shortest. Checked at
+    # both ends of the curriculum, which is what the previous revision missed.
+    stance_w = cfg.rewards["ready_stance"].weight
+    landing_w = cfg.rewards["landing"].weight
+    flip_w = cfg.rewards["flip_progress"].weight
+    stages = cfg.curriculum["backflip_hold_range"].params["param_stages"]
+    for stage in stages:
+        lo, hi = stage["params"]["hold_range"]
+        settle = cfg.episode_length_s - hi - 0.16 - 0.88
+        stance_mass = 0.975 * stance_w * hi
+        landing_mass = landing_w * settle
+        assert landing_mass >= stance_mass, (
+            f"at a {hi}s hold the stance ({stance_mass:.2f}) outweighs the "
+            f"landing annuity ({landing_mass:.2f})"
+        )
+        # ... and never flipping must never beat flipping and landing
+        assert stance_mass < flip_w + landing_mass

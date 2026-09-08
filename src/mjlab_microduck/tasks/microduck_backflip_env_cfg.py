@@ -107,28 +107,39 @@ DESIGN CHOICES AND WHERE THEY CAME FROM
     and it is a pure motion-blocker on the one thing the maneuver is made of.
     Anti-violence pressure lives on |a_z|, action_rate and the landing's
     settle factor instead.
-  * REWARD MASS under the 7.5 s episode and the 1-5 s hold (episode sums,
-    dt-scaled — AGENTS.md: compare mass, not weight). With hold H, launch
-    ~0.14 s and a measured 0.42-0.88 s flight, the post-landing settle is
-    S = 7.5 - H - 0.14 - 0.65 ~ 6.7 - H seconds:
+  * REWARD MASS AT EVERY CURRICULUM STAGE (episode sums, dt-scaled —
+    AGENTS.md: compare mass, not weight; and price every stage, not just the
+    last). With hold H, launch ~0.14 s and a measured 0.42-0.88 s flight, the
+    post-landing settle is S = 7.5 - H - 0.16 - 0.88 = 6.46 - H seconds
+    (the WORST-CASE flight, so the bounds below hold everywhere):
 
-        term            weight   value/step   mass at H=1   H=3    H=5
-        flip_progress    8.0      potential      8.0         8.0    8.0
-        landing          4.0      ~1.0 x S      22.8        14.8    5.8
-        ready_stance     1.0      ~0.975 x H     1.0         3.0    5.0
+      stage   hold H      ready_stance   landing        flip  never-flip cap
+      0       1.0-2.0 s   1.12 - 2.24    17.8 - 21.8    8.0   2.24
+      1       1.0-3.5 s   1.12 - 3.92    11.8 - 21.8    8.0   3.92
+      2       1.0-5.0 s   1.12 - 5.61     5.84 - 21.8   8.0   5.61
 
-    Two things this buys. Holding the pose is now clearly worth doing — 1.0-5.0
-    against the 0.1-0.3 it could earn at the old hold, a 5-25x increase from
-    the hold change alone, which is why the first run ignored it (+0.036). And
-    `landing` stays the dominant attractor at EVERY hold (5.8 >= 5.0 even at
-    H=5, where the settle window is shortest): never flipping caps the episode
-    at ready_stance's 5.0, while flipping and landing adds 13.8-30.8 on top.
-    Raising the stance weight instead of relying on the hold would have
-    inverted that at the long end — which is exactly the mass arithmetic
-    AGENTS.md asks for rather than multiplying a weight and hoping. KNOWN CONSEQUENCE: the
-    landing mass swings 3.4x across the hold DR (6.8 at H=5, 22.8 at H=1),
-    which is noisy credit assignment; if that shows up as instability, cap the
-    annuity's paying window rather than reaching for the weights.
+    (ready_stance = 0.975 x 1.15 x H; landing = 4.0 x S, with S from the
+    WORST-CASE 0.88 s flight so the bound holds everywhere.)
+
+    THE ACCEPTANCE STATEMENT, checked at every stage:
+      1. Collapsing during the hold costs more than the rotation it buys.
+         Collapsing forfeits the whole stance mass — at worst 1.12, at best
+         5.61 — where the previous curriculum's first stage forfeited only
+         0.1-0.3. And the rotation a pre-flick crouch buys is bounded: the
+         policy can tuck AT the flick and get the same compactness for free
+         (ready_stance dies at launch), and flip_progress is capped at one
+         turn, so extra rotation beyond 360 deg pays nothing.
+      2. Flipping and landing still beats never flipping, at every stage. The
+         never-flip cap is the stance mass alone (2.24 / 3.92 / 5.61); flipping
+         adds flip 8.0 + landing >= 5.84, i.e. at least 13.84 on top.
+      3. `landing` stays the dominant attractor at every stage: its minimum
+         (5.84, at the longest hold) still exceeds ready_stance's maximum
+         (5.61).
+
+    KNOWN CONSEQUENCE: the landing mass swings 3.7x across the hold DR (5.84 at
+    H=5, 21.8 at H=1), which is noisy credit assignment. If that shows up as
+    instability, cap the annuity's paying window rather than reaching for the
+    weights.
   * The landing annuity (weight 4.0) is gated on a near-complete flip (300-345
     deg): "stand still and never flip" satisfies feet/upright/height/calm
     trivially, and without the gate it is the argmax. Reward MASS (episode
@@ -410,13 +421,53 @@ from mjlab_microduck.tasks.microduck_velocity_env_cfg import HEAD_BODY_NAMES
 from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg, SYMMETRY_CFG
 
 
+def _apply_final_curriculum(cfg) -> None:
+    """Fast-forward every curriculum term to its LAST stage, then remove it.
+
+    WHY THIS EXISTS. ``play`` builds a fresh env with
+    ``common_step_counter == 0``, so every curriculum term evaluates at stage
+    ZERO no matter which checkpoint is loaded. A viewer therefore showed a
+    0.1-0.3 s hold while the policy had been trained on 1-5 s — the user could
+    not see the behaviour they had asked for, and any hand-tuned range a
+    curriculum widens was equally invisible. Applying the final stage is what a
+    play/deploy cfg is for.
+
+    The terms must also be DELETED, not just pre-applied: the curriculum
+    manager runs every step and would immediately write stage 0 back.
+
+    Handles the three curriculum shapes this env uses — ``event_param_curriculum``
+    (``param_stages``), ``reward_weight`` (``weight_stages``) and
+    ``com_range_curriculum`` (``range_stages``). A new shape must be added here
+    or it will silently keep its stage-0 value in play.
+    """
+    for name, term in list(cfg.curriculum.items()):
+        params = term.params
+        if "param_stages" in params:
+            last = params["param_stages"][-1]["params"]
+            cfg.events[params["event_name"]].params.update(last)
+        elif "weight_stages" in params:
+            last = params["weight_stages"][-1]["weight"]
+            cfg.rewards[params["reward_name"]].weight = last
+        elif "range_stages" in params:
+            last = params["range_stages"][-1]["range"]
+            cfg.events[params["event_name"]].params["ranges"] = (-last, last)
+        else:
+            raise AssertionError(
+                f"curriculum term {name!r} has no stage list this function "
+                "understands; teach it the new shape rather than letting play "
+                "silently run at stage 0"
+            )
+        del cfg.curriculum[name]
+
+
 def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Create the Microduck backflip environment configuration.
 
-    ``play`` is accepted for registry parity with the other task factories;
-    nothing in this env branches on it (roulade is the same).
+    ``play=True`` fast-forwards every curriculum to its FINAL stage and drops
+    the curriculum terms, so the viewer shows the env the policy was actually
+    trained on (most visibly the 1-5 s hold instead of 0.1-0.3 s). The training
+    path is untouched.
     """
-    del play
 
     feet_ground_cfg = ContactSensorCfg(
         name="feet_ground_contact",
@@ -555,21 +606,23 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # outscored the intended pose by 4%. Re-run `--flop-audit` after touching
     # any factor here.
     #
-    # WEIGHT 1.0, chosen by MASS not by weight (AGENTS.md). See the module
-    # docstring's reward-mass table. At the old 0.1-0.3 s hold this term could
-    # only ever earn 0.1-0.3 in episode-sum, which is why the first training
-    # run collapsed into the plate and logged ready_stance +0.036 — the hold
-    # was almost free to skip. The hold change alone therefore multiplies its
-    # mass by 5-25x at the SAME weight (1.0-5.0), which is the fix; raising the
-    # weight on top would push the stance PAST the landing annuity at the long
-    # end (at H=5 the annuity is only 5.8), and `landing` must stay the
-    # dominant attractor. So the weight stays 1.0 and the hold does the work.
+    # WEIGHT 1.15, chosen by MASS at EVERY CURRICULUM STAGE (AGENTS.md), not
+    # just at the end. See the module docstring's per-stage table. The ceiling
+    # is set by the long end — at H=5 the landing annuity is only 5.84 (the
+    # settle window is shortest there, and this uses the WORST-CASE 0.88 s
+    # flight, not the typical 0.65) and `landing` must stay the dominant
+    # attractor, so 0.975*w*5 <= 5.84 gives w <= 1.19. The floor is set by the
+    # SHORT end, which
+    # is why the hold curriculum now starts at 1.0 s rather than 0.1: at a
+    # 0.1-0.3 s hold no admissible weight makes this term matter (it caps at
+    # 0.3*1.4 = 0.42 against ~30 for flip+landing), which is how the policy
+    # came to crouch before the impulse.
     #
     # stand_z carries the plate half-thickness: the term measures trunk height
     # against the plate CENTRE (z0) while the robot stands on its top surface.
     cfg.rewards["ready_stance"] = RewardTermCfg(
         func=microduck_mdp.backflip_ready_stance,
-        weight=1.0,
+        weight=1.15,
         params={
             "stand_z":       STAND_Z + PLATE_HALF_THICKNESS,
             "height_std":    0.03,
@@ -941,28 +994,32 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         del cfg.curriculum["terrain_levels"]
     del cfg.curriculum["command_vel"]
 
-    # Hold-window widening, to HOLD_RANGE = 1-5 s. THE END STATE IS THE
-    # REQUIREMENT: the policy must learn to STAND on the launcher for a long,
-    # random wait, because the first training run collapsed into the plate
-    # before the impulse. The ramp exists ONLY to keep early discovery cheap —
-    # at a 5 s hold in a 7.5 s episode roughly 70% of collected experience is
-    # standing still, and paying that from step 0 would slow the flip's
-    # discovery badly. A narrow hold early also keeps every episode's launch at
-    # a similar time so the policy can learn what the flick FEELS like;
-    # widening it later stops it learning the clock instead of the cue.
-    # Phase-aligned with the flip existing first — hardening the timing DR
-    # before the skill consolidates is the pacing failure that has bitten this
-    # repo before.
+    # Hold-window widening, to HOLD_RANGE = 1-5 s.
+    #
+    # THE FLOOR IS 1.0 s AT EVERY STAGE, and that is the whole point. An
+    # earlier revision started at 0.1-0.3 s to keep early episodes cheap, and
+    # the policy learned to CROUCH before the impulse — rationally, because a
+    # compact body rotates much further at the same flick, and at a 0.1-0.3 s
+    # hold ready_stance's episode-sum mass was 0.1-0.3 against ~30 for
+    # flip+landing. The term was sized for the END of the curriculum and the
+    # behaviour is acquired at its START. Curriculum stages must be priced at
+    # EVERY stage; the per-stage table is in the module docstring.
+    #
+    # Starting at 1-2 s is affordable now: the first real run reached
+    # landing +1.72 by iteration 279 and open-loop closure is 62%, so flip
+    # discovery is not fragile, and the cheap-hold window was buying less than
+    # it cost. What the ramp still buys is the range WIDTH — a narrower early
+    # window keeps each episode's launch at a similar time so the policy can
+    # learn what the flick FEELS like before it has to handle 5 s of timing
+    # uncertainty. Phase-aligned with the flip existing first.
     cfg.curriculum["backflip_hold_range"] = CurriculumTermCfg(
         func=microduck_mdp.event_param_curriculum,
         params={
             "event_name": "backflip_launch_params",
             "param_stages": [
-                {"step": 0,         "params": {"hold_range": (0.1, 0.3)}},
-                {"step": 1000 * 24, "params": {"hold_range": (0.3, 1.0)}},
-                {"step": 2000 * 24, "params": {"hold_range": (0.5, 2.0)}},
-                {"step": 3000 * 24, "params": {"hold_range": (1.0, 3.5)}},
-                {"step": 4000 * 24, "params": {"hold_range": HOLD_RANGE}},
+                {"step": 0,         "params": {"hold_range": (1.0, 2.0)}},
+                {"step": 1500 * 24, "params": {"hold_range": (1.0, 3.5)}},
+                {"step": 3000 * 24, "params": {"hold_range": HOLD_RANGE}},
             ],
         },
     )
@@ -1061,6 +1118,9 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             ],
         },
     )
+
+    if play:
+        _apply_final_curriculum(cfg)
 
     return cfg
 

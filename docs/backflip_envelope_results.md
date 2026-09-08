@@ -4952,3 +4952,100 @@ instability, cap the annuity's paying window rather than reaching for weights.
 
 Upright 0.975, every flop 0.000. Unchanged in substance; the trunk heights move
 with the plate.
+
+
+# Second video — the invisible hold and the pre-flick crouch
+
+Two findings from the current policy's video. Both are about pricing, not
+physics, so this section carries arithmetic rather than sweeps.
+
+## 1. The 1-5 s hold was invisible in `play`
+
+`play` builds a fresh env with `common_step_counter == 0`, so EVERY curriculum
+term evaluates at stage ZERO no matter which checkpoint is loaded. The viewer
+showed a 0.1-0.3 s hold while the policy had been trained on 1-5 s — and the
+same was true of every other range or weight a curriculum moves (action_rate
+-0.05 instead of -0.2, arrival_damping 0.0 instead of -0.05, gentle_landing
+0.004 instead of 0.0125, the CoM DR at a fifth of its trained range).
+
+`make_microduck_backflip_env_cfg(play=True)` now fast-forwards every curriculum
+to its LAST stage and DELETES the terms — deleting matters, because the
+curriculum manager runs every step and would write stage 0 straight back.
+Training is untouched. Verified:
+
+| | training (stage 0) | play |
+|---|---|---|
+| hold | 1.0-2.0 s | **1.0-5.0 s** |
+| `action_rate_l2` | -0.05 | **-0.2** |
+| `arrival_damping` | 0.0 | **-0.05** |
+| `gentle_landing` | 0.004 | **0.0125** |
+| CoM DR | +-0.003 | **+-0.015** |
+| curriculum terms | 7 | **0** |
+
+Six tests pin it, including one that walks EVERY curriculum term and fails on a
+stage-list shape `_apply_final_curriculum` does not understand — so a new
+curriculum cannot silently keep its stage-0 value in play.
+
+## 2. The pre-flick crouch: a pricing error at stage 0
+
+The robot crouched before the impulse. The instinct that it was chasing a lower
+CoM is right, and the mechanism is ours: a compact body rotates much further at
+the same flick — measured directly when the tucked hold "flew" at 1.5-2.2 m/s
+and standing did not. So crouching is the policy rationally buying rotation.
+
+**The error was in the mass reasoning.** The previous revision priced
+`ready_stance` at H=1, 3 and 5 s — but the crouch is LEARNED at curriculum
+stage 0, which was 0.1-0.3 s, where the term's episode-sum mass is 0.1-0.3
+against ~30 for flip+landing. The term was sized for the END of the curriculum
+and the behaviour is acquired at its START. **Curriculum stages have to be
+priced at every stage.**
+
+Both levers were used.
+
+**The hold curriculum now starts at 1.0-2.0 s**, so there is no cheap-crouch
+window at any stage:
+
+| step | hold_range |
+|---|---|
+| 0 | **1.0-2.0 s** (was 0.1-0.3) |
+| 1500 | 1.0-3.5 |
+| 3000 | **1.0-5.0** |
+
+Affordable now: the first real run reached `landing +1.72` by iteration 279 and
+open-loop closure is 62%, so flip discovery is not fragile. What the ramp still
+buys is range WIDTH — a narrower early window keeps each episode's launch at a
+similar time so the policy can learn what the flick feels like before it has to
+handle 5 s of timing uncertainty.
+
+**`ready_stance` weight 1.0 -> 1.15**, bounded at BOTH ends of the curriculum.
+Episode sums, dt-scaled, with S = 7.5 - H - 0.16 - 0.88 = 6.46 - H (the
+worst-case 0.88 s flight, so the bounds hold everywhere):
+
+| stage | hold H | `ready_stance` | `landing` | `flip` | never-flip cap |
+|---|---|---|---|---|---|
+| 0 | 1.0-2.0 s | 1.12 - 2.24 | 17.8 - 21.8 | 8.0 | 2.24 |
+| 1 | 1.0-3.5 s | 1.12 - 3.92 | 11.8 - 21.8 | 8.0 | 3.92 |
+| 2 | 1.0-5.0 s | 1.12 - 5.61 | 5.84 - 21.8 | 8.0 | 5.61 |
+
+The ceiling comes from the LONG end: at H=5 the settle window is shortest and
+the annuity is only 5.84, so `0.975 * w * 5 <= 5.84` gives `w <= 1.19`. The
+floor comes from the SHORT end, and it is why the hold had to move: at a
+0.1-0.3 s hold NO admissible weight makes the term matter (it caps at
+0.3 x 1.19 = 0.36).
+
+**The acceptance statement, checked at every stage:**
+
+1. **Collapsing costs more than the rotation it buys.** It forfeits the whole
+   stance mass — at worst 1.12, at best 5.61, against 0.1-0.3 before. And the
+   rotation a PRE-FLICK crouch buys over tucking AT the flick is bounded: the
+   policy can fold at the flick for free (`ready_stance` dies at launch), and
+   `flip_progress` is capped at one turn so rotation beyond 360 deg pays
+   nothing.
+2. **Flipping and landing still beats never flipping**, at every stage: the
+   never-flip cap is the stance mass alone (2.24 / 3.92 / 5.61) while flipping
+   adds at least 8.0 + 5.84 = 13.84 on top.
+3. **`landing` stays the dominant attractor** at every stage: its minimum
+   (5.84) exceeds `ready_stance`'s maximum (5.61).
+
+The plate height was NOT touched — it went to the floor in the previous commit
+and the video was an older checkpoint.
