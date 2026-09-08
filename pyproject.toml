@@ -51,7 +51,9 @@ mjlab_microduck = "mjlab_microduck.tasks"
 # --hf-jobs is intercepted from the `mjlab.tasks` entry point above
 # (train_hook.py), not here. Locked by tests/test_hf_jobs_flag.py.
 train = "mjlab_microduck.train_cli:main"
-
+# Serve a simulated body to the real `robotd` — see sim/body_server.py.
+duck-body = "mjlab_microduck.sim.body_server:main"
+publish = "mjlab_microduck.publish.cli:main"
 [tool.ruff]
 src = ["src"]  # Helpful for recognizing first-party imports.
 indent-width = 4

@@ -26,6 +26,85 @@ MICRODUCK_ROLLERS_XML = "src/mjlab_microduck/robot/microduck/scene_rollers.xml"
 MICRODUCK_BALL_XML = "src/mjlab_microduck/robot/microduck/scene_ball.xml"
 MICRODUCK_BIG_BALL_XML = "src/mjlab_microduck/robot/microduck/scene_big_ball.xml"
 
+# BAM M6 defaults — MUST mirror `_BAM_ACTUATOR_KWARGS` in
+# src/mjlab_microduck/robot/microduck_constants.py (the actuator every policy is
+# trained against in warp). Not imported from there: that module drags in
+# mjlab/torch/warp (~16 s import) for a CPU rehearsal script. Locked by
+# tests/test_infer_policy_bam.py.
+BAM_MOTOR_NAME = "xl330"
+BAM_MODEL = "m6"
+BAM_KP_FW = 200.0                 # microduck's preserved firmware stiffness
+BAM_VIN_RANGE = (6.5, 8.2)        # per-env battery voltage DR in training
+BAM_VIN_DROP_GAIN_RANGE = (0.0, 0.2)  # load-dependent sag V_drop = gain * sum|tau|
+BAM_VIN_MIN = 6.0                 # floor on effective voltage after sag
+BAM_MAX_CURRENT = None            # training runs WITHOUT the firmware current limiter
+# Stiff joint-friction constraint, copied from bam.mjlab.BamActuator
+# (stiff_frictionloss=True in training): warp has no noslip solver, so BAM
+# stiffens frictionloss so a statically-held joint does not creep. Mirrored
+# here so CPU and warp apply the same friction budget the same way.
+BAM_STIFF_SOLREF_FRICTION = (-5.0e4, -2.0e2)
+BAM_STIFF_SOLIMP_FRICTION = (0.99, 0.9999, 0.001, 0.5, 2.0)
+
+
+def load_bam_model(kp_fw: float, vin: float, max_current):
+    """Build the BAM M6 model + XL330 voltage-controlled actuator."""
+    from bam.model import load_model
+    bam_model = load_model(motor_name=BAM_MOTOR_NAME, model=BAM_MODEL)
+    bam_model.actuator.kp = kp_fw
+    bam_model.actuator.vin = vin
+    bam_model.actuator.max_current = max_current if (max_current and max_current > 0) else None
+    return bam_model
+
+
+def load_mujoco_with_bam(xml_path: str, bam_model, timestep: float, vin_drop_gain, vin_min):
+    """Load the scene and hand every non-passive actuator to bam.mujoco.MujocoController.
+
+    Mirrors bam.mjlab.BamActuator.edit_spec (what warp does at training time):
+    position actuators -> torque motors with the voltage-bounded forcerange,
+    joint damping/frictionloss zeroed (BAM rewrites them every step), stiff
+    friction constraint. Armature is set on the dofs by MujocoController.
+    Returns (model, data, bam_ctrl, actuator_names).
+    """
+    from bam.mujoco import MujocoController
+
+    kt = bam_model.kt.value
+    R = bam_model.R.value
+    force_limit = bam_model.actuator.vin * kt / R
+
+    spec = mujoco.MjSpec.from_file(xml_path)
+    names = []
+    for act in spec.actuators:
+        tgt = act.target
+        tgt_name = tgt.name if hasattr(tgt, "name") else str(tgt)
+        if tgt_name.startswith("passive_"):
+            continue
+        act.set_to_motor()
+        act.forcelimited = True
+        act.forcerange = (-force_limit, force_limit)
+        act.ctrllimited = False
+        act.gear = [1.0, 0, 0, 0, 0, 0]
+        names.append(act.name)
+        for joint in spec.joints:
+            if joint.name == tgt_name:
+                joint.damping = np.zeros((3, 1))  # MjsJoint expects a (3,1) array
+                joint.frictionloss = 0.0
+                joint.solref_friction = BAM_STIFF_SOLREF_FRICTION
+                joint.solimp_friction = BAM_STIFF_SOLIMP_FRICTION
+                break
+
+    model = spec.compile()
+    model.opt.timestep = timestep
+    data = mujoco.MjData(model)
+    bam_ctrl = MujocoController(bam_model, names, model, data,
+                                vin_drop_gain=vin_drop_gain, vin_min=vin_min)
+    print(f"BAM {BAM_MODEL} actuators on {len(names)} joints: kt={kt:.4f} R={R:.4f} "
+          f"vin={bam_model.actuator.vin:.2f}V kp_fw={bam_model.actuator.kp:.0f} "
+          f"vin_drop_gain={vin_drop_gain} vin_min={vin_min} "
+          f"max_current={bam_model.actuator.max_current} forcerange=+/-{force_limit:.3f}Nm "
+          f"armature={bam_model.actuator.get_extra_inertia():.2e}")
+    return model, data, bam_ctrl, names
+
+
 # Body pose command constants (must match training constants)
 BODY_CMD_MAX_Z = 0.03              # ±30 mm
 BODY_CMD_MAX_XY = 0.02             # ±20 mm
@@ -140,7 +219,7 @@ class TerminalInput:
 
 
 class PolicyInference:
-    def __init__(self, model, data, walking_onnx_path=None, action_scale=1.0,
+    def __init__(self, model, data, walking_onnx_path=None, action_scale=1.0, bam_ctrl=None,
                  delay_min_lag=0, delay_max_lag=0,
                  standing_onnx_path=None, switch_threshold=0.05,
                  use_projected_gravity=False, ground_pick_onnx_path=None, ground_pick_period=4.0,
@@ -150,6 +229,7 @@ class PolicyInference:
                  roulade_onnx_path=None,
                  kick_duration=3.0, roulade_duration=2.0,
                  ball_walk=False):
+        self.bam_ctrl = bam_ctrl  # bam.mujoco.MujocoController (None = legacy position actuators)
         self.model = model
         self.data = data
         self.action_scale = action_scale
@@ -816,17 +896,30 @@ class PolicyInference:
         else:
             target_positions = self.default_pose + action * self.action_scale
 
-        self.data.ctrl[:] = target_positions
         # Legacy mode: head_offset is an external perturbation added on top of
         # the policy output. New mode: head_offset is a COMMAND fed into the
         # policy's obs, so the policy itself produces the offset head pose.
         if not self.new_cmd_obs:
-            self.data.ctrl[5:9] += self.head_offset
+            target_positions = target_positions.copy()
+            target_positions[5:9] += self.head_offset
+        self.set_position_targets(target_positions)
+
+    def set_position_targets(self, target_positions):
+        """Send joint position targets to the actuators.
+
+        BAM: the firmware position loop lives in the controller (ctrl is the
+        motor TORQUE it writes on update()). Legacy: MuJoCo position actuators.
+        """
+        if self.bam_ctrl is not None:
+            self.bam_ctrl.q_target[:] = target_positions
+        else:
+            self.data.ctrl[:] = target_positions
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run ONNX policy in MuJoCo")
     parser.add_argument("--roller", action="store_true", help="Use roller skate robot XML (robot_walk_rollers.xml)")
+    parser.add_argument("--scene", type=str, default=None, help="Path to a scene XML, overriding the default pick (e.g. src/mjlab_microduck/robot/microduck/scene_allcollisions.xml)")
     parser.add_argument("--walking", type=str, default=None, help="Path to walking policy ONNX file")
     parser.add_argument("--standing", "-s", type=str, default=None, help="Path to standing policy ONNX file")
     parser.add_argument("--ground-pick", type=str, default=None, help="Path to ground pick policy ONNX file (press G to activate)")
@@ -854,10 +947,22 @@ def main():
                         help="Use the unified 13D command obs layout (twist+head_pose+body_pose). "
                              "Required for policies trained with the new pose-command-tracking setup. "
                              "Old policies (51D obs, head_offset added to ctrl) need this flag OFF.")
-    parser.add_argument("--current-limit", type=float, default=1.75,
-                        help="XL330 firmware current limit [A]. Actuator torque is clipped to "
-                             "+/- current_limit * kt (kt from the bam package), matching the "
-                             "current saturation modeled in training. <=0 disables.")
+    parser.add_argument("--no-bam", action="store_true",
+                        help="Use the XML MuJoCo position actuators instead of the BAM M6 "
+                             "voltage/friction model the policies are trained against.")
+    parser.add_argument("--vin", type=float, default=7.4,
+                        help="BAM battery voltage [V]. Training samples per-env in "
+                             f"{BAM_VIN_RANGE}; 7.4 = nominal 2S LiPo.")
+    parser.add_argument("--vin-drop-gain", type=float, default=0.1,
+                        help="BAM load-dependent voltage sag gain [V/Nm], V = vin - gain*sum|tau|. "
+                             f"Training samples per-env in {BAM_VIN_DROP_GAIN_RANGE}. 0 disables.")
+    parser.add_argument("--kp-fw", type=float, default=BAM_KP_FW,
+                        help="BAM firmware P-gain (training uses %(default)s).")
+    parser.add_argument("--current-limit", type=float, default=0.0,
+                        help="XL330 firmware current limit [A]. With BAM this is the duty-cycle "
+                             "limiter of the voltage model (as bam models it); with --no-bam the "
+                             "actuator force is clipped to +/- current_limit * kt. Training runs "
+                             "WITHOUT a current limit, so the default is off (<=0).")
     parser.add_argument("--foot-friction", type=float, default=None,
                         help="Override the foot sliding friction (mu) to emulate the real grippy "
                              "PU sole. Training used mu~1.0 (range 0.7-1.3); real PU is likely "
@@ -904,7 +1009,11 @@ def main():
 
     # Load MuJoCo model. Kick policies get a scene with a ball to kick;
     # ball-walk gets the big-ball scene (robot spawned on top below).
-    if args.roller:
+    # --scene overrides everything (any scene whose robot has the standard
+    # 14-servo layout works, e.g. scene_allcollisions.xml).
+    if args.scene:
+        xml_path = args.scene
+    elif args.roller:
         xml_path = MICRODUCK_ROLLERS_XML
     elif args.kick_left or args.kick_right:
         xml_path = MICRODUCK_BALL_XML
@@ -913,16 +1022,27 @@ def main():
     else:
         xml_path = MICRODUCK_XML
     print(f"Loading MuJoCo model from: {xml_path}")
-    model = mujoco.MjModel.from_xml_path(xml_path)
-    model.opt.timestep = 0.005
-    data = mujoco.MjData(model)
+    bam_ctrl = None
+    if not args.no_bam:
+        # Same actuator the policies are trained against in warp (BAM M6 XL330,
+        # voltage control + load-dependent friction budget), driven on CPU by
+        # bam.mujoco.MujocoController. Voltage DR collapses to fixed --vin /
+        # --vin-drop-gain (training samples them per env).
+        bam_model = load_bam_model(args.kp_fw, args.vin, args.current_limit)
+        vin_drop_gain = args.vin_drop_gain if args.vin_drop_gain > 0 else None
+        model, data, bam_ctrl, _bam_names = load_mujoco_with_bam(
+            xml_path, bam_model, 0.005, vin_drop_gain, BAM_VIN_MIN)
+    else:
+        model = mujoco.MjModel.from_xml_path(xml_path)
+        model.opt.timestep = 0.005
+        data = mujoco.MjData(model)
+        print("Legacy MuJoCo position actuators (--no-bam): NOT the actuator the policy was trained with")
 
-    # XL330 firmware current limit. The motors saturate current at ~1.75 A; since
-    # torque = kt * current, this caps the actuator force at +/- kt * I_max. The
-    # MuJoCo position actuators here are not the BAM voltage model, but clipping
-    # their output force reproduces the same current saturation the policy was
-    # trained against (see BamActuator.max_current). kt comes from the bam package.
-    if args.current_limit and args.current_limit > 0:
+    # (--no-bam only) XL330 firmware current limit. The motors saturate current
+    # at ~1.75 A; since torque = kt * current, this caps the actuator force at
+    # +/- kt * I_max. With BAM the limiter is modelled inside the voltage
+    # controller instead (see load_bam_model). kt comes from the bam package.
+    if args.no_bam and args.current_limit and args.current_limit > 0:
         from bam.model import load_model
         kt = load_model(motor_name="xl330", model="m6").kt.value
         torque_limit = kt * args.current_limit
@@ -956,6 +1076,7 @@ def main():
     # twist-driven interface; zero command = balance in place on the ball).
     policy = PolicyInference(
         model, data,
+        bam_ctrl=bam_ctrl,
         walking_onnx_path=args.ball_walk or args.walking,
         action_scale=args.action_scale,
         delay_min_lag=delay_min_lag,
@@ -1025,7 +1146,9 @@ def main():
     data.qpos[qpos_adr + 3:qpos_adr + 7] = [1, 0, 0, 0]
     for i, qpos_idx in enumerate(policy.joint_qpos_indices):
         data.qpos[qpos_idx] = policy.default_pose[i]
-    data.ctrl[:] = policy.default_pose
+    if bam_ctrl is not None:
+        bam_ctrl.reset(data.qpos)   # clears voltage-drop state, q_target = current qpos
+    policy.set_position_targets(policy.default_pose)
     mujoco.mj_forward(model, data)
 
     # Verify observation size
@@ -1091,6 +1214,22 @@ def main():
     original_kp = None
     if args.record:
         original_kp = model.actuator_gainprm[:, 0].copy()
+
+    # Standby (--record) gains: the legacy path sets the position-actuator kp
+    # to 2.0 (XML kp 0.55 ~ kp_fw 200). Under BAM apply the same ratio to the
+    # firmware gain so both paths hold with the same relative stiffness.
+    _XML_KP_NOMINAL = 0.55
+    _STANDBY_KP = 2.0
+
+    def set_standby_gains(on: bool):
+        if bam_ctrl is not None:
+            bam_ctrl.model.actuator.kp = args.kp_fw * (_STANDBY_KP / _XML_KP_NOMINAL if on else 1.0)
+            print(f"  BAM kp_fw set to {bam_ctrl.model.actuator.kp:.0f}")
+            return
+        for i in range(model.nu):
+            kp = _STANDBY_KP if on else original_kp[i]
+            model.actuator_gainprm[i, 0] = kp
+            model.actuator_biasprm[i, 1] = -kp
 
     # Cache the trunk freejoint qvel address so the push handler can write to
     # the trunk's world-frame linear velocity directly (qvel[0..3]).
@@ -1307,10 +1446,8 @@ def main():
         if args.record:
             policy_enable_time = start_time + 1.0
             print("Recording mode: policy will be enabled after 1 second standby")
-            for i in range(model.nu):
-                model.actuator_gainprm[i, 0] = 2.0
-                model.actuator_biasprm[i, 1] = -2.0
-            print("  Standby mode: kp set to 2.0")
+            set_standby_gains(True)
+            print("  Standby mode: kp set to 2.0 (XML units)")
 
         try:
             prev_step_time = time.time()
@@ -1325,10 +1462,7 @@ def main():
                     if step_start >= policy_enable_time:
                         policy_enabled = True
                         if original_kp is not None:
-                            for i in range(model.nu):
-                                kp = original_kp[i]
-                                model.actuator_gainprm[i, 0] = kp
-                                model.actuator_biasprm[i, 1] = -kp
+                            set_standby_gains(False)
                             print("Policy inference enabled (after 1s standby)")
                             print(f"  Restored original kp gains (range: [{original_kp.min():.2f}, {original_kp.max():.2f}])")
 
@@ -1422,10 +1556,17 @@ def main():
                         print(f"  Action min/max: [{action.min():.4f}, {action.max():.4f}]")
                         if policy.use_delay:
                             print(f"  Delay: {policy.current_lag} timesteps (buffered)")
-                        print(f"  Applied ctrl (first 5): {data.ctrl[:5]}")
-                        print(f"  Applied ctrl (last 5):  {data.ctrl[-5:]}")
+                        ctrl_kind = "torque [Nm]" if bam_ctrl is not None else "position target"
+                        print(f"  Applied ctrl ({ctrl_kind}, first 5): {data.ctrl[:5]}")
+                        print(f"  Applied ctrl ({ctrl_kind}, last 5):  {data.ctrl[-5:]}")
 
                 for _ in range(decimation):
+                    if bam_ctrl is not None:
+                        # BAM owns control/torque/friction: update() runs the
+                        # firmware P-loop + DC-motor equation, writes the torque
+                        # to data.ctrl and pushes the friction budget onto the
+                        # dofs so MuJoCo's solver applies it on this step.
+                        bam_ctrl.update()
                     mujoco.mj_step(model, data)
 
                 viewer.sync()

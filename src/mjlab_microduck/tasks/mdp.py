@@ -6161,7 +6161,7 @@ def leg_antisymmetry(
 # =============================================================================
 # Backlash model — encoder-through-backlash joint observations
 # =============================================================================
-# The backlash model (robot_allcollisions_backlash.xml) puts an unactuated
+# The backlash model (robot_groundcontact_backlash.xml) puts an unactuated
 # ``passive_<joint>_backlash`` hinge in series with each servo joint. The link
 # angle is qpos[servo] + qpos[backlash], and the real encoder sits on the
 # OUTPUT side of the play — it reads the sum. These obs replace joint_pos_rel /

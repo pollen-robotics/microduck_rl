@@ -64,7 +64,7 @@ class FrictionDRBamActuatorCfg(BamActuatorCfg):
 class BacklashEncoderBamActuator(FrictionDRBamActuator):
     """FrictionDRBamActuator whose firmware PD reads the encoder THROUGH backlash.
 
-    Backlash models (robot_allcollisions_backlash.xml) put an unactuated
+    Backlash models (robot_groundcontact_backlash.xml) put an unactuated
     ``passive_<joint>_backlash`` hinge in series with each servo joint: the
     servo joint is the motor output, the backlash joint is the play between it
     and the link, and the link angle is their sum.

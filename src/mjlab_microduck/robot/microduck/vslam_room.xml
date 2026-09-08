@@ -1,0 +1,57 @@
+<!-- Open VSLAM benchmark room — a large, empty, feature-rich space so the duck can walk a long
+     drift-heavy loop (which the cramped apartment cannot) and loop closure has distinctive
+     landmarks to fire on. ~11×11 m, duck spawns at the centre (origin).
+
+     Design for visual SLAM:
+       - Floor + walls carry DENSE, non-repeating marks (a flat/checker surface is featureless).
+       - Perimeter walls are far (±5.5 m) so a big loop never bumps them; each wall a distinct hue.
+       - Scattered PILLARS at asymmetric positions, each a distinct bright colour: these are the
+         loop-closure anchors — revisiting one from a similar view closes the loop. -->
+<mujoco model="vslam_room">
+  <asset>
+    <texture type="2d" name="vs_floor" builtin="checker" mark="random" random="0.45"
+             rgb1="0.55 0.50 0.44" rgb2="0.42 0.38 0.33" markrgb="0.20 0.16 0.12"
+             width="512" height="512"/>
+    <material name="vs_floor" texture="vs_floor" texrepeat="8 8" reflectance="0.03"/>
+
+    <texture type="2d" name="vs_wall_n" builtin="checker" mark="random" random="0.45"
+             rgb1="0.86 0.72 0.60" rgb2="0.72 0.58 0.46" markrgb="0.30 0.20 0.14" width="512" height="512"/>
+    <texture type="2d" name="vs_wall_s" builtin="checker" mark="random" random="0.45"
+             rgb1="0.62 0.74 0.86" rgb2="0.48 0.60 0.74" markrgb="0.16 0.24 0.36" width="512" height="512"/>
+    <texture type="2d" name="vs_wall_e" builtin="checker" mark="random" random="0.45"
+             rgb1="0.70 0.82 0.64" rgb2="0.56 0.70 0.50" markrgb="0.20 0.30 0.16" width="512" height="512"/>
+    <texture type="2d" name="vs_wall_w" builtin="checker" mark="random" random="0.45"
+             rgb1="0.86 0.78 0.60" rgb2="0.74 0.64 0.46" markrgb="0.32 0.26 0.14" width="512" height="512"/>
+    <material name="vs_wall_n" texture="vs_wall_n" texrepeat="10 3"/>
+    <material name="vs_wall_s" texture="vs_wall_s" texrepeat="10 3"/>
+    <material name="vs_wall_e" texture="vs_wall_e" texrepeat="10 3"/>
+    <material name="vs_wall_w" texture="vs_wall_w" texrepeat="10 3"/>
+
+    <material name="vs_pillar_r" rgba="0.90 0.20 0.15 1"/>
+    <material name="vs_pillar_g" rgba="0.15 0.75 0.25 1"/>
+    <material name="vs_pillar_b" rgba="0.20 0.35 0.90 1"/>
+    <material name="vs_pillar_y" rgba="0.92 0.82 0.10 1"/>
+    <material name="vs_pillar_c" rgba="0.10 0.80 0.82 1"/>
+    <material name="vs_pillar_m" rgba="0.85 0.20 0.75 1"/>
+  </asset>
+
+  <worldbody>
+    <geom name="vs_floor" type="box" size="5.6 5.6 0.01" pos="0 0 -0.01"
+          material="vs_floor" contype="1" conaffinity="1"/>
+
+    <!-- Perimeter walls at ±5.5 m, 2 m tall (never seen over = no skybox in frame). -->
+    <geom name="vs_wall_n" type="box" size="5.6 0.08 1.0" pos="0  5.5 1.0" material="vs_wall_n" contype="1" conaffinity="1"/>
+    <geom name="vs_wall_s" type="box" size="5.6 0.08 1.0" pos="0 -5.5 1.0" material="vs_wall_s" contype="1" conaffinity="1"/>
+    <geom name="vs_wall_e" type="box" size="0.08 5.6 1.0" pos=" 5.5 0 1.0" material="vs_wall_e" contype="1" conaffinity="1"/>
+    <geom name="vs_wall_w" type="box" size="0.08 5.6 1.0" pos="-5.5 0 1.0" material="vs_wall_w" contype="1" conaffinity="1"/>
+
+    <!-- Landmark pillars — asymmetric positions so no two places look alike; short enough that a
+         head-down camera sees them. Clear of a ~3 m loop around the centre. -->
+    <geom name="vs_pil_r" type="box" size="0.12 0.12 0.45" pos=" 2.4  1.8 0.45" material="vs_pillar_r" contype="1" conaffinity="1"/>
+    <geom name="vs_pil_g" type="box" size="0.12 0.12 0.45" pos="-2.1  2.6 0.45" material="vs_pillar_g" contype="1" conaffinity="1"/>
+    <geom name="vs_pil_b" type="box" size="0.12 0.12 0.45" pos="-2.8 -1.6 0.45" material="vs_pillar_b" contype="1" conaffinity="1"/>
+    <geom name="vs_pil_y" type="box" size="0.12 0.12 0.45" pos=" 1.9 -2.7 0.45" material="vs_pillar_y" contype="1" conaffinity="1"/>
+    <geom name="vs_pil_c" type="cylinder" size="0.14 0.5" pos=" 3.4 -0.6 0.5" material="vs_pillar_c" contype="1" conaffinity="1"/>
+    <geom name="vs_pil_m" type="cylinder" size="0.14 0.5" pos="-0.7  3.3 0.5" material="vs_pillar_m" contype="1" conaffinity="1"/>
+  </worldbody>
+</mujoco>

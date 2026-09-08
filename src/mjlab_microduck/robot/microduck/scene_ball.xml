@@ -3,7 +3,7 @@
          kick policies). No keyframes: the ball freejoint changes nq, which
          would break scene.xml's keyframe qpos sizes; infer_policy sets qpos
          programmatically anyway. -->
-    <include file="robot_allcollisions.xml" />
+    <include file="robot_groundcontact.xml" />
     <include file="ball.xml" />
 
     <visual>

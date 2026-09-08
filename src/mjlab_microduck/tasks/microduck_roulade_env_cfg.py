@@ -172,7 +172,7 @@ def make_microduck_roulade_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     # Head-ground contact — the roll's pivot signal. jaw_soft is the body that
     # carries the head collision geoms (top_head_shell = the flat top, jaw,
-    # bottom_head_shell) in robot_allcollisions.xml. NAME IS LOAD-BEARING:
+    # bottom_head_shell) in robot_groundcontact.xml. NAME IS LOAD-BEARING:
     # _update_roulade_accum reads it for the over-the-head latch.
     head_ground_cfg = ContactSensorCfg(
         name="head_ground_contact",

@@ -2,7 +2,7 @@
     "url": "https://cad.onshape.com/documents/804927696f06d877f3f1803e/w/5b75db19292e71970de02dee/e/ed34b749f5a3718f68024fd5",
     "outputFormat": "mujoco",
     "robot_name": "microduck",
-    "output_filename": "robot_allcollisions_rollers_backlash",
+    "output_filename": "robot_groundcontact_rollers_backlash",
     "simplify_stls": true,
     "max_stl_size": 1.0,
     "ignore": {
@@ -30,13 +30,13 @@
         "additional.xml"
     ],
     "post_import_commands": [
-        "sed -i 's/body name=\"trunk_base\" pos=\"[^\"]*\"/body name=\"trunk_base\" pos=\"0 0 0.12\"/' robot_allcollisions_rollers_backlash.xml",
-        "sed -i '/<!-- Part sole_left -->/{n; n; s/class=\"collision\"/name=\"left_foot_collision\" class=\"collision\"/}' robot_allcollisions_rollers_backlash.xml",
-        "sed -i '/<!-- Part sole_right -->/{n; n; s/class=\"collision\"/name=\"right_foot_collision\" class=\"collision\"/}' robot_allcollisions_rollers_backlash.xml",
-        "sed -i '/<!-- Part power_support -->/{n; n; s/class=\"collision\"/class=\"self_collision_only\"/}' robot_allcollisions_rollers_backlash.xml",
-        "sed -i 's/ inheritrange=\"1\"//g' robot_allcollisions_rollers_backlash.xml",
-        "sed -i 's|<site[^>]*name=\"head_camera\"[^>]*pos=\"\\([^\"]*\\)\"[^>]*/>|&\\n              <camera name=\"head_camera\" pos=\"\\1\" quat=\"0 0 -1 0\"/>|' robot_allcollisions_rollers_backlash.xml",
-        "python3 add_backlash.py robot_allcollisions_rollers_backlash.xml --backlash-deg 2.0"
+        "sed -i 's/body name=\"trunk_base\" pos=\"[^\"]*\"/body name=\"trunk_base\" pos=\"0 0 0.12\"/' robot_groundcontact_rollers_backlash.xml",
+        "sed -i '/<!-- Part sole_left -->/{n; n; s/class=\"collision\"/name=\"left_foot_collision\" class=\"collision\"/}' robot_groundcontact_rollers_backlash.xml",
+        "sed -i '/<!-- Part sole_right -->/{n; n; s/class=\"collision\"/name=\"right_foot_collision\" class=\"collision\"/}' robot_groundcontact_rollers_backlash.xml",
+        "sed -i '/<!-- Part power_support -->/{n; n; s/class=\"collision\"/class=\"self_collision_only\"/}' robot_groundcontact_rollers_backlash.xml",
+        "sed -i 's/ inheritrange=\"1\"//g' robot_groundcontact_rollers_backlash.xml",
+        "sed -i 's|<site[^>]*name=\"head_camera\"[^>]*pos=\"\\([^\"]*\\)\"[^>]*/>|&\\n              <camera name=\"head_camera\" pos=\"\\1\" quat=\"0 0 -1 0\"/>|' robot_groundcontact_rollers_backlash.xml",
+        "python3 add_backlash.py robot_groundcontact_rollers_backlash.xml --backlash-deg 2.0"
     ],
     "joint_properties": {
         "default": {

@@ -3,7 +3,7 @@
 MIGRATED to mjlab 1.3.0 + canonical BAM (2026-07), matching the velocity env's
 sim2real machinery, and updated for the NEW roller model:
 
-  - `get_walk_rollers_spec` now loads `robot_allcollisions_rollers.xml`
+  - `get_walk_rollers_spec` now loads `robot_groundcontact_rollers.xml`
     (it silently loaded the wheel-less standup model before): 14 actuated
     joints + 4 passive wheels (passive_{L,R}{F,R}wheel), two per blade,
     INTERSPERSED in the joint order (after each ankle) — everything resolves

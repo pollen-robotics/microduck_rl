@@ -16,7 +16,9 @@ uv run train <TASK_ID> --env.scene.num-envs 4096    # train (add --hf-jobs for H
 uv run train <TASK_ID> --env.scene.num-envs 64 --agent.max_iterations 5   # SMOKE TEST — always run first
 uv run play <TASK_ID> --wandb-run-path <entity/project/run_id>
 uv run scripts/export.py <TASK_ID> --wandb-run-path <...>   # → ONNX (bakes obs normalizer — mandatory path)
-uv run scripts/infer_policy.py --walking out.onnx   # CPU MuJoCo deployment rehearsal
+uv run publish --task <TASK_ID> --wandb-run-path <...> --checkpoint N --repo <user>/microduck-<name> --kind episodic --duration-s 4.0
+                                                    # → HF Hub repo (policy.onnx + schema-2 manifest.json + README) the daemon loads via `robotctl policy add`
+uv run scripts/infer_policy.py --walking out.onnx   # CPU MuJoCo deployment rehearsal (BAM M6 actuators as in training; --no-bam = XML PD)
 uv run --with pytest pytest tests/
 ```
 
@@ -36,7 +38,11 @@ Never launch a long run without one.
 - `src/mjlab_microduck/robot/microduck/` — MJCF exports from Onshape
   (onshape-to-robot, one `config_mjcf_*.json` per model) + scenes + `add_backlash.py`.
 - `src/mjlab_microduck/actuator/friction_dr_bam.py` — BAM actuator + friction DR + backlash encoder.
-- `scripts/` — export, infer, sim2real comparison, wandb helpers.
+- `src/mjlab_microduck/export.py` — the ONNX export (normalizer baked in); `scripts/export.py` wraps it.
+- `src/mjlab_microduck/publish/` — `uv run publish`: schema-2 manifest builder + ONNX shape/smoke
+  gate + Hub upload. Contract = `docs/policy-manifest.md` in the `microduck` repo; only
+  constant-command episodic/perpetual policies are publishable (phase/posture-flag are the set's).
+- `scripts/` — export wrapper, infer, sim2real comparison, wandb helpers.
 - `tests/` — cfg-invariant and mdp-function regression tests (CPU, no GPU needed).
 
 ## Invariants — do not break these
@@ -46,7 +52,7 @@ Never launch a long run without one.
   13D command block `[twist(3), head_pose(4), body_pose(6)]`, in that order.
   An env that doesn't use a command slot ZERO-PADS it (keep the obs term,
   sample tiny ranges) — never delete a slot.
-- **Joint layout** (14 servos, ctrl idx = joint idx on walk/allcollisions
+- **Joint layout** (14 servos, ctrl idx = joint idx on walk/groundcontact
   models): 0–4 left leg (hip_yaw, hip_roll, hip_pitch, knee, ankle), 5–8
   neck/head (neck_pitch, head_pitch, head_yaw, head_roll), 9–13 right leg.
   On roller/backlash models, passive joints INTERLEAVE — never hardcode joint
@@ -75,7 +81,7 @@ Never launch a long run without one.
   REWARD on the same quantity must measure the same view — otherwise the policy
   is punished for correcting what it sees.
 - `-Backlash-` task variants must mirror their base task's robot model
-  (walk / allcollisions / rollers) so backlash A/B comparisons are unconfounded.
+  (walk / groundcontact / rollers) so backlash A/B comparisons are unconfounded.
 
 ## Building a new env — the workflow
 
