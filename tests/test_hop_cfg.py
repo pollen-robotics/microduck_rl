@@ -1011,3 +1011,19 @@ def test_symhard_task_carries_the_flag_and_drops_the_reward_term():
     assert "head_pose_range" not in hard.curriculum
     assert hard.commands["head_pose"].ranges[2] == (-0.005, 0.005)
     assert hard.commands["head_pose"].ranges[3] == (-0.005, 0.005)
+
+
+def test_nopush_arm_drops_only_the_symmetric_push_term():
+    """The NoPush control arm is R2 with hop_symmetric_push removed and NOTHING
+    else changed -- no projection, head ranges untouched. Measured on run
+    paq347v4: that term paid a still robot 3.67/step inside the push window,
+    the largest term in the stack, because two feet resting evenly is a perfect
+    force ratio. This arm isolates removing it from forcing symmetry."""
+    from mjlab.tasks.registry import load_env_cfg
+
+    nopush = load_env_cfg("Mjlab-HopPauseR2-S50-NoPush-Sym-K3344-MicroDuck")
+    r2 = load_env_cfg("Mjlab-HopPauseR2-S50-Sym-K3344-MicroDuck")
+    assert "hop_symmetric_push" not in nopush.rewards
+    assert getattr(nopush, "symmetric_actions", False) is False
+    assert set(r2.rewards.keys()) - set(nopush.rewards.keys()) == {"hop_symmetric_push"}
+    assert nopush.commands["head_pose"].ranges == r2.commands["head_pose"].ranges

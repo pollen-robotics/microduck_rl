@@ -292,7 +292,15 @@ for _label, _hp, _hr, _robust, _sole, _act in (
         # R2 with symmetry BY CONSTRUCTION: actions projected onto the mirror
         # subspace, so the one-footed tap is unrepresentable. The reward-based
         # term only ever nudged the force ratio (0.63 -> 0.70) and cost height.
-        ("HopPauseR2-S50-SymHard", 0.5, (1.0, 8.0), "r2", SOLE_LENGTH_V2, "bench")):
+        ("HopPauseR2-S50-SymHard", 0.5, (1.0, 8.0), "r2", SOLE_LENGTH_V2, "bench"),
+        # CONTROL for SymHard: R2 with hop_symmetric_push simply REMOVED and no
+        # projection. Measured on paq347v4 (2026-09-08): that term pays a
+        # perfectly still robot 3.67/step inside the push window -- the largest
+        # single term in the stack -- because two feet resting evenly is a
+        # perfect force ratio. It is why R and R2 both parked in the standing
+        # basin. This arm tests whether removing the barrier alone is enough to
+        # get a hop back; SymHard removes it AND forces symmetry.
+        ("HopPauseR2-S50-NoPush", 0.5, (1.0, 8.0), "r2", SOLE_LENGTH_V2, "bench")):
     def _build_pause(play: bool, _hp=_hp, _hr=_hr, _robust=_robust, _sole=_sole, _act=_act, _label=_label):
         cfg = make_in_place_variant(make_symmetric_variant(make_hop_variant(
             make_microduck_velocity_env_cfg(play=play), stiffness=K_MEASURED,
@@ -317,6 +325,8 @@ for _label, _hp, _hr, _robust, _sole, _act in (
             sprung_kw["pad_mass"] = PAD_MASS_V2      # the boot that is on the robot
         if _label.endswith("SymHard"):
             cfg = make_structural_symmetry_variant(cfg)
+        if _label.endswith("NoPush"):
+            cfg.rewards.pop("hop_symmetric_push", None)
         return apply_hop_corrections(make_sprung_variant(cfg, **sprung_kw), actuator=_act)
     _tid = f"Mjlab-{_label}-Sym-K3344-MicroDuck"
     register_mjlab_task(task_id=_tid, env_cfg=_build_pause(False), play_env_cfg=_build_pause(True),
