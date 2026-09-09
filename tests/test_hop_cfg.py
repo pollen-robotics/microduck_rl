@@ -1093,3 +1093,39 @@ def test_hold_gated_reward_zeroes_while_advancing_and_forwards_reset():
 
     assert gated.reset([0, 1]) == {"inner": 1.0}
     assert reset_calls == [[0, 1]]
+
+
+# ── the stand datum and the CoM height source (SymHop) ───────────────────────
+
+
+def test_symhop_measures_the_com_above_the_stand_and_leaves_other_arms_alone():
+    """SymHop turns on all three opt-ins; every earlier arm keeps the takeoff
+    datum on the trunk root, so the campaign's numbers stay comparable."""
+    from mjlab.tasks.registry import load_env_cfg
+
+    hop = load_env_cfg("Mjlab-HopPauseR2-S50-SymHop-Sym-K3344-MicroDuck")
+    focus = load_env_cfg("Mjlab-HopPauseR2-S50-SymFocus-Sym-K3344-MicroDuck")
+
+    air, height, vel = (hop.rewards[k] for k in
+                        ("hop_both_feet_airborne", "hop_body_height", "hop_upward_velocity"))
+    assert air.params["stand_ramp"] == 0.010
+    assert air.params["height_source"] == "com"
+    assert height.params["datum"] == "stand"
+    assert height.params["height_source"] == "com"
+    assert vel.params["height_source"] == "com"
+    # The target is unchanged: with the stand datum it now MEANS hop height.
+    assert height.params.get("target_rise", 0.040) == 0.040
+
+    # SymHop is SymFocus plus those params -- same terms, same weights.
+    assert set(hop.rewards.keys()) == set(focus.rewards.keys())
+    for name in hop.rewards:
+        assert hop.rewards[name].weight == focus.rewards[name].weight, name
+    assert getattr(hop, "symmetric_actions", False) is True
+    assert getattr(hop, "hold_gated_rewards", ()) == getattr(focus, "hold_gated_rewards", ())
+
+    # Defaults elsewhere: no other arm's measurement moves.
+    f_air = focus.rewards["hop_both_feet_airborne"].params
+    assert f_air.get("stand_ramp", 0.0) == 0.0
+    assert f_air.get("height_source", "root") == "root"
+    assert focus.rewards["hop_body_height"].params.get("datum", "takeoff") == "takeoff"
+    assert focus.rewards["hop_upward_velocity"].params.get("height_source", "root") == "root"

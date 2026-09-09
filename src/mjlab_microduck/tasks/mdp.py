@@ -6700,6 +6700,50 @@ def _both_feet_airborne(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tenso
     return ((found[:, 0] <= 0) & (found[:, 1] <= 0)).float()
 
 
+def _robot_com_vz(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Mass-weighted vertical CoM velocity of the whole robot, per env.
+
+    Same reason as `_robot_com_z`: `hop_upward_velocity` is the ONLY hop term
+    that pays before flight, so it is the one the policy bootstraps on. Left on
+    the trunk root it pays for straightening the legs while the ~38%-of-mass
+    head drops, which moves the root up and the body not at all.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    ids = asset.indexing.body_ids
+    vz = asset.data.body_link_lin_vel_w[:, :, 2].float()     # [N, nbody_local]
+    m = env.sim.model.body_mass[:, ids].float()
+    if m.shape[0] == 1:
+        m = m.expand(vz.shape[0], -1)
+    return (vz * m).sum(dim=1) / m.sum(dim=1).clamp(min=1e-9)
+
+
+def _robot_com_z(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Mass-weighted CoM height of the whole robot, per env.
+
+    WHY THE HOP REWARDS NEED THIS. `root_link_pos_w[:, 2]` is the TRUNK, and on
+    this robot the head assembly is ~38% of total mass. Measured on the
+    SymFocus checkpoint (lsrr6d79) with the stand datum in place: the trunk root
+    rose 12.8 mm above standing height while the CoM rose 0.0 mm. The policy
+    straightens its legs and throws the head down, and root height calls that a
+    hop. It is not one -- the body's altitude did not change, so no ballistic
+    flight and no spring energy is involved. Worse, the posture gate (Patch 6)
+    frees the head during the hop window precisely so it can help, which is
+    exactly what makes this farm available.
+
+    Masses are read per env from `env.sim.model.body_mass`, so mass domain
+    randomisation is respected, and `asset.indexing.body_ids` maps the entity's
+    local body order (which `body_link_pos_w` uses) onto the sim model -- the
+    same idiom as `randomize_body_mass_inertia`.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    ids = asset.indexing.body_ids
+    z = asset.data.body_link_pos_w[:, :, 2].float()          # [N, nbody_local]
+    m = env.sim.model.body_mass[:, ids].float()              # [nworld, nbody_local]
+    if m.shape[0] == 1:
+        m = m.expand(z.shape[0], -1)
+    return (z * m).sum(dim=1) / m.sum(dim=1).clamp(min=1e-9)
+
+
 class _HopRiseTracker:
     """Per-env latch of the base height at the INSTANT OF TAKEOFF.
 
@@ -6765,6 +6809,31 @@ class _HopRiseTracker:
         self._have_stance = torch.zeros(
             env.num_envs, device=env.device, dtype=torch.bool
         )
+        # STAND datum -- the height the robot holds while the phase is FROZEN,
+        # i.e. while it is being commanded to stand. Distinct from the stance
+        # datum above, which is the last in-contact height and therefore sits at
+        # the BOTTOM OF THE CROUCH at the moment of takeoff.
+        #
+        # WHY IT EXISTS. The takeoff frame closes foot-flutter and tall-tuck
+        # (see above) but admits a third exploit that the SymFocus run
+        # (lsrr6d79) found and that this campaign then mistook for progress:
+        # CROUCH FARMING. Measured on its 3000-iteration checkpoint --
+        # Metrics/hop_rise_mean 19.5 mm, 89% of the working llu5t00x hopper's
+        # peak, while an independent measurement of altitude gained above the
+        # STANDING height was 0.0 mm in every one of 256 envs. The policy dips,
+        # unweights at the bottom, rises ~20 mm ballistically, and lands, all
+        # while below the height it started from. Every millimetre of that
+        # "hop" is recovery from its own crouch, and to the eye it is a robot
+        # standing still that occasionally topples.
+        #
+        # Rise-above-takeoff cannot see this, because the datum moves down with
+        # the crouch. Net gain above the stand can, and it stays boot-invariant
+        # (h_add, sag and posture headroom all cancel) because the datum is the
+        # robot's own stand, whatever the boot.
+        self._z_stand = torch.zeros(env.num_envs, device=env.device)
+        self._have_stand = torch.zeros(
+            env.num_envs, device=env.device, dtype=torch.bool
+        )
 
     def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
         """Clear the latch for the given envs. Called by RewardManager.reset."""
@@ -6774,11 +6843,18 @@ class _HopRiseTracker:
         self._z_stance[env_ids] = 0.0
         self._was_airborne[env_ids] = False
         self._have_stance[env_ids] = False
+        self._z_stand[env_ids] = 0.0
+        self._have_stand[env_ids] = False
 
     def _both_airborne_and_rise(
-        self, env: ManagerBasedRlEnv, sensor_name: str, asset_cfg: SceneEntityCfg
+        self,
+        env: ManagerBasedRlEnv,
+        sensor_name: str,
+        asset_cfg: SceneEntityCfg,
+        command_name: str = "twist",
+        height_source: str = "root",
     ):
-        """Returns ``(both_airborne, rise)``, or ``(None, None)`` with no sensor.
+        """Returns ``(both_airborne, rise, net)``, or all-None with no sensor.
 
         Latches ``z_takeoff`` on the TRANSITION into both-feet-airborne and holds
         it for the whole flight; regaining contact clears it, so a second hop in
@@ -6815,11 +6891,15 @@ class _HopRiseTracker:
         """
         both_airborne = _both_feet_airborne(env, sensor_name)
         if both_airborne is None:
-            return None, None
+            return None, None, None
 
         airborne = both_airborne > 0.5
         asset: Entity = env.scene[asset_cfg.name]
-        raw_z = asset.data.root_link_pos_w[:, 2].float()
+        raw_z = (
+            _robot_com_z(env, asset_cfg)
+            if height_source == "com"
+            else asset.data.root_link_pos_w[:, 2].float()
+        )
         # A NaN height must never be allowed to LATCH. nan_to_num alone maps it
         # to 0.0, which as a takeoff datum reads the next step as ~0.147 m of
         # rise and pays this term its full weight during a physics blow-up --
@@ -6871,7 +6951,30 @@ class _HopRiseTracker:
             torch.clamp(z - self._z_takeoff, min=0.0),
             torch.zeros_like(z),
         )
-        return both_airborne, rise
+
+        # Stand datum: refresh while in contact and the phase is FROZEN (the
+        # robot is standing by command), and seed it from the first in-contact
+        # step so an env that has not held yet still has an honest reference.
+        # A crouch during the hop window can never move it, which is the point.
+        # get_term directly, as hold_action_rate_l2 does. An `active_terms`
+        # membership test was written first and silently failed on mjlab 1.3.0's
+        # CommandManager, leaving `held` None -- which makes the stand datum
+        # collapse onto the takeoff height and the whole transform a no-op.
+        try:
+            held = getattr(env.command_manager.get_term(command_name), "_hold_left", None)
+        except (KeyError, ValueError, AttributeError):
+            held = None
+        standing = in_contact if held is None else (in_contact & (held > 0.0))
+        refresh = standing | (in_contact & ~self._have_stand)
+        self._z_stand = torch.where(refresh, z, self._z_stand)
+        self._have_stand = self._have_stand | in_contact
+
+        net = torch.where(
+            airborne & finite & self._have_stand,
+            torch.clamp(z - self._z_stand, min=0.0),
+            torch.zeros_like(z),
+        )
+        return both_airborne, rise, net
 
 
 class hop_both_feet_airborne(_HopRiseTracker):
@@ -6900,9 +7003,19 @@ class hop_both_feet_airborne(_HopRiseTracker):
         command_name: str = "twist",
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
         min_rise: float = 0.003,
+        stand_ramp: float = 0.0,
+        height_source: str = "root",
     ) -> torch.Tensor:
+        """`stand_ramp` > 0 additionally scales this reward by how far the body
+        rose above its STANDING height, ramping 0 -> 1 over that many metres.
+        A RAMP, NOT A GATE, deliberately: a hard `net > 0` requirement pays
+        nothing until the whole crouch has been recovered, which is the same
+        flat approach that kept three arms standing (see Patch 6). Off by
+        default, so every arm trained before 2026-09-09 keeps its semantics."""
         zeros = torch.zeros(env.num_envs, device=env.device)
-        both_airborne, rise = self._both_airborne_and_rise(env, sensor_name, asset_cfg)
+        both_airborne, rise, net = self._both_airborne_and_rise(
+            env, sensor_name, asset_cfg, command_name, height_source
+        )
         if both_airborne is None:
             return zeros
 
@@ -6924,16 +7037,34 @@ class hop_both_feet_airborne(_HopRiseTracker):
             log["Metrics/hop_rise_peak"] = (
                 rise_safe.max() if rise_safe.numel() > 0 else torch.zeros((), device=env.device)
             )
+            # The number that says whether this is a HOP: altitude gained above
+            # the standing height. hop_rise_* is measured from takeoff and so
+            # reads ~20 mm for a crouch-and-recover that never leaves stance
+            # height. Logged here for the same single-writer reason.
+            net_safe = torch.nan_to_num(net, nan=0.0, posinf=0.0, neginf=0.0)
+            airborne_net = net_safe[both_airborne > 0.5]
+            log["Metrics/hop_net_gain_mean"] = (
+                airborne_net.mean()
+                if airborne_net.numel() > 0
+                else torch.zeros((), device=env.device)
+            )
+            log["Metrics/hop_net_gain_peak"] = (
+                net_safe.max() if net_safe.numel() > 0 else torch.zeros((), device=env.device)
+            )
 
         cmd = env.command_manager.get_command(command_name)
         launch = torch.clamp(torch.nan_to_num(cmd[:, 1], nan=0.0), min=0.0)
-        return launch * both_airborne * (rise > min_rise).float()
+        payout = launch * both_airborne * (rise > min_rise).float()
+        if stand_ramp > 0.0:
+            payout = payout * torch.clamp(net / stand_ramp, min=0.0, max=1.0)
+        return payout
 
 def hop_upward_velocity(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     command_name: str = "twist",
     max_vel: float = 0.5,
+    height_source: str = "root",
 ) -> torch.Tensor:
     """Reward upward base velocity during the launch half-cycle.
 
@@ -6943,7 +7074,12 @@ def hop_upward_velocity(
     """
     asset: Entity = env.scene[asset_cfg.name]
     vel_z = torch.nan_to_num(
-        asset.data.root_link_lin_vel_w[:, 2].float(), nan=0.0, posinf=0.0, neginf=0.0
+        _robot_com_vz(env, asset_cfg).float()
+        if height_source == "com"
+        else asset.data.root_link_lin_vel_w[:, 2].float(),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0
     )
     upward = torch.clamp(vel_z / max_vel, min=0.0, max=1.0)
 
@@ -6989,13 +7125,21 @@ class hop_body_height(_HopRiseTracker):
         target_rise: float = 0.040,
         std: float = 0.020,
         sensor_name: str = "feet_ground_contact",
+        datum: str = "takeoff",
+        height_source: str = "root",
     ) -> torch.Tensor:
+        """`datum="stand"` shapes altitude gained above the STANDING height
+        instead of above takeoff, which is what makes `target_rise` mean hop
+        height rather than crouch depth plus hop height. Default unchanged."""
         zeros = torch.zeros(env.num_envs, device=env.device)
-        both_airborne, rise = self._both_airborne_and_rise(env, sensor_name, asset_cfg)
+        both_airborne, rise, net = self._both_airborne_and_rise(
+            env, sensor_name, asset_cfg, command_name, height_source
+        )
         if both_airborne is None:
             return zeros
 
-        rise_reward = torch.exp(-(((rise - target_rise) / std) ** 2))
+        measured = net if datum == "stand" else rise
+        rise_reward = torch.exp(-(((measured - target_rise) / std) ** 2))
 
         cmd = env.command_manager.get_command(command_name)
         launch = torch.clamp(torch.nan_to_num(cmd[:, 1], nan=0.0), min=0.0)

@@ -775,6 +775,59 @@ _HOLD_GATED_POSTURE_TERMS = (
 )
 
 
+# Ramp width for the airborne reward's stand-gain factor: full payout once the
+# body clears its standing height by this much. 10 mm is two thirds of the
+# 15.8 mm the llu5t00x hopper actually achieves above stance, so a real hop
+# saturates it while a crouch-and-recover earns nothing.
+STAND_RAMP = 0.010
+
+
+def make_true_hop_variant(cfg):
+    """Pay for altitude gained above the STANDING height, not above takeoff.
+
+    The datum, not the weights, is what three arms were optimising against.
+    SymFocus (lsrr6d79) ends with Metrics/hop_rise_mean 19.5 mm -- 89% of the
+    working llu5t00x hopper's peak -- while an independent measurement of
+    altitude above the standing height reads 0.0 mm in all 256 envs. It dips,
+    unweights at the bottom of the dip, rises ~20 mm, and lands, never
+    reaching the height it started from. Rise-above-takeoff cannot see that,
+    because the datum descends with the crouch; see `_HopRiseTracker._z_stand`.
+
+    THE THIRD CHANGE IS THE HEIGHT SOURCE, and it is the one that matters most.
+    Both terms now measure the mass-weighted CoM instead of the trunk root. With
+    the stand datum on the ROOT, the SymFocus policy still scored 12.8 mm while
+    its CoM rose 0.0 mm: it straightens the legs and throws its ~38%-of-mass
+    head down. The posture gate frees the head during the hop window on purpose,
+    so that farm is wide open until the reward names the CoM. See
+    `microduck_mdp._robot_com_z`.
+
+    Three changes, all opt-in so no previously trained arm's semantics move:
+      * hop_body_height shapes net gain above the stand, so its unchanged
+        40 mm target now means hop height instead of crouch depth + hop height.
+      * hop_both_feet_airborne is scaled by a RAMP on that net gain (not a
+        gate -- a hard requirement pays nothing until the crouch is fully
+        recovered, which is the flat approach that kept three arms standing).
+
+    `hop_upward_velocity` is untouched and still supplies the ungated,
+    in-contact gradient that bootstraps liftoff.
+    """
+    air = cfg.rewards.get("hop_both_feet_airborne")
+    if air is not None:
+        air.params["stand_ramp"] = STAND_RAMP
+        air.params["height_source"] = "com"
+    height = cfg.rewards.get("hop_body_height")
+    if height is not None:
+        height.params["datum"] = "stand"
+        height.params["height_source"] = "com"
+    # The dense bootstrap must read the same body as the terms it bootstraps,
+    # or the policy climbs the one gradient that pays before flight by throwing
+    # the head rather than by leaving the ground.
+    vel = cfg.rewards.get("hop_upward_velocity")
+    if vel is not None:
+        vel.params["height_source"] = "com"
+    return cfg
+
+
 def make_hop_window_focus_variant(cfg):
     """Pay the posture stack only while the phase is HELD.
 

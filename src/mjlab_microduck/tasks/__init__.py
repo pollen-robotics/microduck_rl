@@ -89,6 +89,7 @@ from .hop import (
     make_in_place_variant,
     make_robust_stand_variant,
     make_structural_symmetry_variant,
+    make_true_hop_variant,
     make_symmetric_variant,
 )
 from mjlab_microduck.robot.sprung_foot import H_ADD, K_MEASURED, PAD_MASS, PAD_MASS_V2, SOLE_LENGTH_V2, TRAVEL
@@ -307,7 +308,14 @@ for _label, _hp, _hr, _robust, _sole, _act in (
         # exactly 0, force ratio 0.986 -- and that it does not make the robot
         # hop: standing through the hop window pays 5.85/step for free, so the
         # first partial attempt runs downhill. This arm removes that income.
-        ("HopPauseR2-S50-SymFocus", 0.5, (1.0, 8.0), "r2", SOLE_LENGTH_V2, "bench")):
+        ("HopPauseR2-S50-SymFocus", 0.5, (1.0, 8.0), "r2", SOLE_LENGTH_V2, "bench"),
+        # SymHop: SymFocus plus the STAND datum. SymFocus escaped the standing
+        # basin and then farmed the takeoff datum -- 19.5 mm of "rise" that is
+        # all recovery from its own crouch, 0.0 mm of altitude above the height
+        # it stands at. This arm measures the hop from the stand, so the reward
+        # finally names the thing we want. Resume it from SymFocus: the
+        # crouch-and-push motion is already learned, only the target moves.
+        ("HopPauseR2-S50-SymHop", 0.5, (1.0, 8.0), "r2", SOLE_LENGTH_V2, "bench")):
     def _build_pause(play: bool, _hp=_hp, _hr=_hr, _robust=_robust, _sole=_sole, _act=_act, _label=_label):
         cfg = make_in_place_variant(make_symmetric_variant(make_hop_variant(
             make_microduck_velocity_env_cfg(play=play), stiffness=K_MEASURED,
@@ -336,6 +344,9 @@ for _label, _hp, _hr, _robust, _sole, _act in (
             cfg.rewards.pop("hop_symmetric_push", None)
         if _label.endswith("SymFocus"):
             cfg = make_hop_window_focus_variant(make_structural_symmetry_variant(cfg))
+        if _label.endswith("SymHop"):
+            cfg = make_true_hop_variant(
+                make_hop_window_focus_variant(make_structural_symmetry_variant(cfg)))
         return apply_hop_corrections(make_sprung_variant(cfg, **sprung_kw), actuator=_act)
     _tid = f"Mjlab-{_label}-Sym-K3344-MicroDuck"
     register_mjlab_task(task_id=_tid, env_cfg=_build_pause(False), play_env_cfg=_build_pause(True),
