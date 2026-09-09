@@ -191,12 +191,14 @@ def test_sampled_params_use_measured_envelope_defaults():
     # boxes and not the pre-measurement placeholders.
     env = _FakeEnv(num_envs=256)
     microduck_mdp.reset_backflip_launch_params(env, torch.arange(256))
-    assert torch.all((env._backflip_vz >= 2.20) & (env._backflip_vz <= 2.80))
-    assert torch.all((env._backflip_w0 >= 18.0) & (env._backflip_w0 <= 24.0))
-    # A short flick is the violent one: t_launch=0.08 lands at up to 3.97 m/s,
-    # which is why the low end sits at 0.12.
-    assert torch.all(env._backflip_t_launch >= 0.14)
-    assert torch.all(env._backflip_t_launch <= 0.16)
+    assert torch.all((env._backflip_vz >= 2.20) & (env._backflip_vz <= 2.60))
+    assert torch.all((env._backflip_w0 >= 5.0) & (env._backflip_w0 <= 6.0))
+    # The flick is LONG now, and both bounds are gates: the ceiling is the
+    # plate-sweep cap (0.5*w0*t_launch <= 45 deg) and the floor is the
+    # forward-tip limit (a short flick means a huge vz/t_launch and the
+    # head-heavy robot goes over its toes).
+    assert torch.all(env._backflip_t_launch >= 0.22)
+    assert torch.all(env._backflip_t_launch <= 0.26)
     # The slab rests ON the floor at z0 = PLATE_HALF_THICKNESS = 0.01; the
     # spread is operator variation.
     assert torch.all((env._backflip_z0 >= 0.01) & (env._backflip_z0 <= 0.03))
@@ -1304,3 +1306,63 @@ def test_the_launch_gate_multiplies_BOTH_the_flip_and_the_landing():
     )
     assert floored_flip == pytest.approx(0.3 * good_flip, rel=1e-6)
     assert floored_land == pytest.approx(0.3 * good_land, rel=1e-6)
+
+
+# --- THE PLATE'S SWEPT ANGLE. -----------------------------------------------
+#
+# The user, watching the previous run: the robot "takes something like a force
+# that makes it rotate". It did. The plate was sweeping 72-110 deg under its
+# feet -- a catapult paddle levering it over, not a hand imparting an impulse.
+# Nobody was watching the quantity: every probe table reported the ROBOT's
+# rotation, the landing speed and the apex, and none reported what the PLATE
+# did, which is how it survived thirteen measurement waves.
+
+
+def test_the_sweep_formula_matches_the_plate_kinematics_it_describes():
+    # backflip_plate_sweep_deg must not be an independent claim about the
+    # launch: it has to equal the pitch the kinematics ACTUALLY reach at the
+    # end of the ramp, or the docstring and the gate drift away from the code.
+    for w0, t_launch in ((5.0, 0.22), (6.0, 0.26), (18.0, 0.14), (24.0, 0.16),
+                         (12.0, 0.05), (3.0, 0.30)):
+        t = torch.tensor([t_launch])            # t_hold = 0 -> end of the ramp
+        _, pitch, _, _, _ = microduck_mdp.backflip_plate_kinematics(
+            t, torch.zeros(1), torch.tensor([t_launch]), torch.tensor([0.02]),
+            torch.tensor([2.4]), torch.tensor([w0]),
+        )
+        measured = abs(math.degrees(float(pitch[0])))
+        assert measured == pytest.approx(
+            microduck_mdp.backflip_plate_sweep_deg(w0, t_launch), rel=1e-6
+        ), (w0, t_launch)
+
+
+def test_the_sweep_is_the_product_of_the_two_knobs():
+    # Which is the whole point: t_launch cannot be trimmed on its own, and w0's
+    # ceiling is set by whatever t_launch is.
+    assert microduck_mdp.backflip_plate_sweep_deg(6.0, 0.26) == pytest.approx(
+        microduck_mdp.backflip_plate_sweep_deg(12.0, 0.13)
+    )
+    # monotone in both
+    assert (microduck_mdp.backflip_plate_sweep_deg(5.0, 0.22)
+            < microduck_mdp.backflip_plate_sweep_deg(6.0, 0.22)
+            < microduck_mdp.backflip_plate_sweep_deg(6.0, 0.26))
+    # the withdrawn box, for the record: 72-110 deg
+    assert microduck_mdp.backflip_plate_sweep_deg(18.0, 0.14) == pytest.approx(
+        72.2, abs=0.1)
+    assert microduck_mdp.backflip_plate_sweep_deg(24.0, 0.16) == pytest.approx(
+        110.0, abs=0.1)
+
+
+def test_the_lazy_play_defaults_are_inside_the_shipped_box():
+    # `uv run play` runs a whole first episode on these (mjlab never resets
+    # before the viewer's first episode), so a stale default is a wrong video
+    # -- which is how a plate once hovered through the robot's body. They must
+    # also satisfy the sweep gate, since that is what the video shows.
+    env = _FakeEnv(num_envs=2)
+    microduck_mdp._backflip_state(env)
+    t_launch = float(env._backflip_t_launch[0])
+    w0 = float(env._backflip_w0[0])
+    assert 0.22 <= t_launch <= 0.26
+    assert 5.0 <= w0 <= 6.0
+    assert 2.20 <= float(env._backflip_vz[0]) <= 2.60
+    assert 0.01 <= float(env._backflip_z0[0]) <= 0.03
+    assert microduck_mdp.backflip_plate_sweep_deg(w0, t_launch) <= 45.0

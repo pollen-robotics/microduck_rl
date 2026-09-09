@@ -16,13 +16,22 @@ showed, and what answers each:
     collapse does not count. See the mass table below.
   * The hold was invisible in play, and priced only at the last curriculum
     stage. The hold is now plain DR, 1-5 s uniform from step 0 (no curriculum
-    at all), the episode is 7.5 s to fit it, and the landing annuity pays over
+    at all), the episode is 7.6 s to fit it, and the landing annuity pays over
     a FIXED window latched at touchdown so its payout does not depend on the
     hold draw.
-  * The ejection was too strong. VZ_RANGE came DOWN to 2.20-2.80 (from
-    3.00-4.00), with W0_RANGE and LAUNCH_RANGE trimmed to keep the direction
-    gate; landings fall from 2.39-4.93 to 1.78-3.65 m/s and the apex halves.
-    The measured ladder for going gentler still is at VZ_RANGE.
+  * The ejection was too strong, and then the user described what it actually
+    looked like: the robot "takes something like a force that makes it
+    rotate". It did. THE PLATE WAS SWEEPING 72-110 DEG UNDER THE FEET
+    (0.5 * w0 * t_launch — see ``mdp.backflip_plate_sweep_deg``), which is a
+    catapult paddle levering the robot over, not a hand imparting an impulse.
+    No probe had ever reported that quantity. It is now a first-class measured
+    column and a HARD acceptance gate at 45 deg, next to direction, and the
+    box was re-measured under it: w0 18-24 / t_launch 0.14-0.16 became
+    w0 5-6 / t_launch 0.22-0.26 (sweep 32-45 deg), a LONGER and much gentler
+    flick. The honest cost is stated at the ranges: a hand-like sweep cannot
+    close 360 deg open-loop at any landing speed the user would accept, so
+    open-loop closure is now 0% and the last 50-160 deg has to come from the
+    policy's tuck.
 Everything above is measured on CPU MuJoCo with BAM actuators and recorded in
 docs/backflip_envelope_results.md, which is append-only: it contains the
 superseded boxes too, and its header names the one that is current.
@@ -53,36 +62,46 @@ MEASURED LAUNCH ENVELOPE — the ranges below are MEASURED, from the env's ACTUA
 standing spawn with the plate on the ground, with BAM actuators
 (docs/backflip_envelope_results.md, "Gentler ejection"; probe mode
 ``scripts/backflip_envelope.py --box-check --bam``). Do not "tidy" them:
-  z0 in [0.01, 0.03] m, vz in [2.20, 2.80] m/s, w0 in [18, 24] rad/s,
-  t_launch in [0.14, 0.16] s, hold 1-5 s. The probe imports these from THIS
+  z0 in [0.01, 0.03] m, vz in [2.20, 2.60] m/s, w0 in [5, 6] rad/s,
+  t_launch in [0.22, 0.26] s, hold 1-5 s. The probe imports these from THIS
   module, so there is one source of truth.
 
-  THE ACCEPTANCE RULE IS DIRECTION, and only direction: every cell of the box
-  must rotate BACKWARD. That is a hard gate — a cell that comes out forward is
-  not a gentler backflip, it is a different maneuver, and the accumulator's
-  sign convention would refuse to pay it anyway.
-    * The direction gate binds from BOTH sides. w0 above ~24-27 overdrives the
-      sole contact and comes out forward; and a LOW vz with a low w0 and a
-      SHORT flick does the same (vz 2.2, w0 15, t_launch 0.12 measures
-      -110 deg). Trimming t_launch's low end 0.12 -> 0.14 and w0's 15 -> 18 is
-      what let vz come down to 2.20 while keeping the gate.
-    * A SHORT flick is the violent one: t_launch = 0.08 lands at up to
-      3.97 m/s. The flick duration is not free DR.
+  TWO HARD ACCEPTANCE GATES, both per-cell:
+    1. DIRECTION — every cell must rotate BACKWARD. A cell that comes out
+       forward is not a gentler backflip, it is a different maneuver, and the
+       accumulator's sign convention would refuse to pay it anyway. It binds
+       from BOTH ends: w0 above ~24-27 overdrives the sole contact and comes
+       out forward, and so does a SHORT flick (t_launch <= 0.08 s, i.e. a
+       linear acceleration of 28-56 m/s^2 under a head-heavy body whose CoM is
+       ahead of the sole contact: EVERY such cell measured forward, -88 to
+       -269 deg).
+    2. PLATE SWEEP <= 45 deg — ``sweep = 0.5 * w0 * t_launch``
+       (``mdp.backflip_plate_sweep_deg``; the launch ramps the pitch rate 0 ->
+       w0 over t_launch, so the swept angle is the area under that ramp). A
+       hand sweeps 30-40 deg and lets go; a surface that sweeps 90 deg is a
+       paddle levering the robot over, and the feet cannot stay on it. This
+       box sweeps 32-45 deg. The withdrawn box swept 72-110 deg in all 243 of
+       its cells, and no probe mode reported the number until it was made a
+       column.
 
-  OPEN-LOOP CLOSURE IS INFORMATION, NOT A BAR. 27% of the box closes a full
-  360 deg with the joints FROZEN at the home command. Requiring the whole box
-  to close open-loop was an over-specified acceptance bar that has been
-  dropped: the policy is supposed to tuck to spin up and extend to brake, so
-  an open-loop probe measures the launcher, not the task. It is reported so a
-  range change can be compared against what has actually trained (27% reached
-  landing +1.72 by iteration 279; the previous 62% box was not gentler in any
-  way the user cared about).
+  OPEN-LOOP CLOSURE IS INFORMATION, NOT A BAR — and it is now 0%. The box
+  rotates 198-309 deg with a full tuck held from the flick, landing at
+  2.37-3.58 m/s. That is arithmetic, not tuning: the sweep cap forces
+  w0 <= 1.571 / t_launch, the forward-tip limit forces t_launch >= ~0.16 s, so
+  w0 <= ~9.8 rad/s; the robot leaves at roughly the plate's final rate, so
+  closing 2*pi needs >= 0.64 s of airtime, i.e. vz >= ~3.1 m/s, i.e. a
+  3.7-4.9 m/s landing. A HAND-LIKE SWEEP AND OPEN-LOOP CLOSURE ARE
+  INCOMPATIBLE at an acceptable landing speed. The last 50-160 deg is the
+  policy's tuck — which is the skill the task exists to train, but it is a
+  bet, and the measured alternative (vz 3.0-3.6: 29% closure at 3.73-4.88 m/s)
+  is one row down the ladder at the ranges if the user prefers to pay for it.
 
 HARDWARE CONSTRAINT (the user's): landings above roughly 2.6 m/s — about a
 34 cm free fall — risk damaging the real duck. The current box lands at
-1.78-3.65 m/s, with 52 of its 243 sampled cells under the threshold (the
-previous box had 5); the gentlest measured alternative that still keeps the
-direction gate lands at 1.54-3.50 and is written down at VZ_RANGE. The same
+2.37-3.58 m/s, with 49 of its 243 sampled cells under the threshold. The apex
+is 0.45-0.67 m. Both are set by ``vz``, which is also the only remaining lever
+on rotation now that the sweep is capped — the trade is written out at
+VZ_RANGE. The same
 concern is why the |a_z| impact penalty starts at 2x the roulade weight and
 ramps higher,
 and why ``backflip_landing`` prices SETTLING rather than merely passing
@@ -265,14 +284,18 @@ KP_RANDOMIZATION_RANGE              = (0.85, 1.15)  # unused (kp DR off)
 KD_RANDOMIZATION_RANGE              = (0.9, 1.1)    # unused (kd DR off)
 IMU_ORIENTATION_RANDOMIZATION_ANGLE = 6.0
 
-# Episode budget, MEASURED rather than guessed: hold (up to 5.0 s once the
-# curriculum has widened it) + launch ramp (<= 0.16 s) + the airborne window
-# (0.42-0.88 s measured when vz reached 4.0; the gentler retune cut the apex
-# to 0.28-0.64 m so the real flight is shorter now, and 0.88 s is kept as a
-# CONSERVATIVE bound) + settle. At
-# 7.5 s the worst case leaves 7.5 - 5.0 - 0.16 - 0.88 = 1.46 s to settle on the
-# feet, and a short hold leaves over 6 s.
-EPISODE_LENGTH_S = 7.5
+# Episode budget, MEASURED rather than guessed: hold (up to 5.0 s, sampled
+# uniformly from step 0) + launch ramp (<= 0.26 s, the flick is LONG now — see
+# LAUNCH_RANGE and the plate-sweep gate) + the airborne window (0.88 s is kept
+# as a CONSERVATIVE bound; it was measured when vz reached 4.0, and the current
+# apex of 0.45-0.67 m flies for ~0.55-0.75 s) + settle. 7.5 -> 7.6 s when the
+# flick lengthened to 0.26 s: the worst case must leave at least the full
+# LANDING_WINDOW_S to settle, or a long hold would TRUNCATE the annuity and
+# make the landing hold-dependent again — the exact defect the fixed window
+# exists to remove. At 7.6 s it leaves 7.6 - 5.0 - 0.26 - 0.88 = 1.46 s
+# against a 1.4 s window, and a short hold leaves over 6 s. A cfg test derives
+# this from LAUNCH_RANGE so lengthening the flick again cannot slip through.
+EPISODE_LENGTH_S = 7.6
 
 # How long after the first terrain contact `backflip_landing` keeps paying.
 # 1.4 s is what the WORST case can always afford (7.5 - 5.0 - 0.16 - 0.88 =
@@ -397,24 +420,67 @@ PLATE_HALF_THICKNESS = 0.01
 # throw is exactly the policy's job. Open-loop closure is now reported as
 # INFORMATION about starting difficulty, not a gate.
 #
-# THE ONE HARD LIMIT IS DIRECTION, and it binds from BOTH sides now. Above
-# roughly w0 = 24-27 rad/s from a standing hold the flick overdrives the sole
-# contact and the robot comes out FORWARD, face-down — a different maneuver the
-# rotation accumulator would have to be re-signed to even score. And at the
-# gentle end, a LOW vz with a LOW w0 and a SHORT flick also comes out forward:
-# vz 2.2 with w0 15 at t_launch 0.12 measures -110 deg. Those two facts are
-# what set all four bounds. Every corner of this box is direction-checked
-# backward; re-check with `--box-check` if you move any of them.
+# TWO HARD GATES. Both are checked by `--box-check`, and a box that fails
+# either is not a box.
 #
-# The gentler-retune ladder, all direction-verified, for whoever wants to move
-# further (`--box-check` after editing the ranges reproduces each row):
-#     vz        w0      t_launch     landing m/s   closure   apex m
-#     3.0-4.0   15-24   0.12-0.16    2.39-4.93     62%       0.47-1.19
-#     2.5-3.2   15-24   0.12-0.16    2.17-4.08     28%       0.34-0.83
-#     2.2-2.8   18-24   0.14-0.16    1.78-3.65     27%       0.28-0.64  <- here
-#     2.1-2.7   18-24   0.15-0.16    1.59-3.57     15%       0.24-0.60
-#     2.0-2.6   18-24   0.14-0.16    1.54-3.50     10%       0.26-0.58
-# Ranges with vz below ~2.2 at t_launch 0.12 FAIL the direction gate outright.
+# 1. DIRECTION: every cell must rotate BACKWARD. It binds from BOTH ends.
+#    Above roughly w0 = 24-27 rad/s the flick overdrives the sole contact and
+#    the robot comes out FORWARD, face-down. And a SHORT flick does the same
+#    for a different reason: t_launch <= 0.08 s means a linear acceleration of
+#    vz / t_launch = 28-56 m/s^2 under a body whose CoM (38% of it is the head)
+#    sits ahead of the sole contact, which tips the robot forward over its toes
+#    — measured, EVERY cell at t_launch 0.05-0.08 rotates forward, by -88 to
+#    -269 deg. That is why the fix for the sweep was a LONGER flick, not a
+#    shorter one.
+#
+# 2. PLATE SWEEP <= 45 deg: the plate may not sweep more than 45 deg of pitch
+#    under the robot's feet during the flick.
+#
+#        sweep = 0.5 * w0 * t_launch          (mdp.backflip_plate_sweep_deg)
+#
+#    A human hand tossing an object sweeps 30-40 deg — it imparts an impulse
+#    and lets go. The shipped box swept 72-110 deg, which is not a hand at all:
+#    it is a catapult paddle levering the robot over, and the user watching the
+#    video said the robot "takes something like a force that makes it rotate".
+#    THIS QUANTITY WAS NEVER REPORTED BY ANY PROBE MODE until 2026-09-09, which
+#    is how it survived thirteen measurement waves — every table showed the
+#    robot's rotation, the landing speed and the apex, and none showed what the
+#    plate itself did.
+#
+# WHAT THE SWEEP CAP COSTS, measured, and it is not small. With the sweep
+# capped, w0 <= 1.571 / t_launch; with t_launch >= ~0.16 s (below that the
+# launch flips forward), that means w0 <= ~9.8 rad/s. The robot leaves at
+# roughly the plate's final rate, so closing 360 deg needs airtime >= 2*pi/w0
+# ~ 0.64 s, which needs vz >= ~3.1 m/s, which lands at 3.7-4.9 m/s. So:
+# A HAND-LIKE SWEEP AND OPEN-LOOP 360 DEG CLOSURE ARE INCOMPATIBLE at any
+# landing speed the user would accept. The box below therefore closes 0%
+# open-loop and the last 50-160 deg must come from the policy's own tuck. That
+# is a real bet, stated plainly rather than hidden by widening the cap; the
+# alternative (a harder landing) is the last row of the ladder.
+#
+# The ladder, every row measured with `--box-check --bam --posture standing`
+# (rotation and landing are the full 243-cell min-max, closure the fraction
+# reaching 360 deg with a FULL TUCK held from the flick):
+#     vz        w0      t_launch    sweep deg   rot deg    landing m/s  closure
+#     2.2-2.8   18-24   0.14-0.16   72-110 X    98-442     1.78-3.65    27%
+#     2.2-2.8   4-7     0.18-0.22   21-44       163-355    2.36-3.95     0%
+#     2.2-2.6   4-6     0.20-0.26   23-45       156-310    2.39-3.58     0%
+#     2.2-2.6   5-6     0.22-0.26   32-45       198-309    2.37-3.58     0%  <- here
+#     3.0-3.6   5-6     0.22-0.26   32-45       261-453    3.73-4.88    29%
+# The first row is the SHIPPED-AND-WITHDRAWN box: it fails the sweep gate in
+# every one of its 243 cells. The last row is what buying closure back costs.
+# All rows pass the direction gate; the chosen row was additionally
+# orientation-verified backward at 8/8 of its (vz, w0, t_launch) corners with
+# `--check-direction`.
+#
+# ALSO MEASURED AND REJECTED: pivoting the plate about its REAR EDGE instead of
+# its centre (`--pivot rear`), so the surface lifts as it tilts like a
+# springboard rather than dropping its front edge. At the same swept angle it
+# converts the sweep into LIFT, not into spin: same rotation per unit landing
+# speed (188 deg at 2.42 m/s against the centre pivot's 221 at 2.62), a higher
+# apex for the same vz, and a WORSE attitude at release (22-41 deg of tilt
+# against 11-22). It is not the fix, so the plate still pivots about its
+# centre.
 HOLD_RANGE    = (1.0, 5.0)     # sampled uniformly from step 0, NO curriculum.
                                # A long, random wait so the policy has to learn
                                # to STAND on the launcher: the first training
@@ -424,39 +490,45 @@ HOLD_RANGE    = (1.0, 5.0)     # sampled uniformly from step 0, NO curriculum.
                                # 5.0 s worst case, and backflip_landing pays
                                # over a FIXED window so the hold draw does not
                                # change what a given backflip is worth.
-LAUNCH_RANGE  = (0.14, 0.16)   # how long the hands stay with the robot. The
-                               # low end moved 0.12 -> 0.14 as part of the
-                               # gentler retune: at 0.12 the low-vz / low-w0
-                               # corner rotates FORWARD, and trimming it is
-                               # what let vz come down at all.
+LAUNCH_RANGE  = (0.22, 0.26)   # how long the hands stay with the robot, and
+                               # HALF OF THE SWEPT-ANGLE PRODUCT: the plate
+                               # sweeps 0.5 * w0 * t_launch under the feet
+                               # (mdp.backflip_plate_sweep_deg). It was
+                               # 0.14-0.16 with w0 18-24, which swept 72-110
+                               # deg — a paddle levering the robot over, which
+                               # is what the user saw and called "a force that
+                               # makes it rotate". LONGER, not shorter: a short
+                               # flick raises vz/t_launch enough to tip the
+                               # robot FORWARD over its toes (measured: every
+                               # cell at t_launch <= 0.08 comes out forward).
 Z0_RANGE      = (0.01, 0.03)   # plate CENTRE. 0.01 = PLATE_HALF_THICKNESS, so
                                # the slab rests exactly on the floor; the DR
                                # spread is operator variation. Standing's
                                # lowest geoms ARE the feet, so the plate can
                                # sit on the ground and a test asserts nothing
                                # tunnels.
-VZ_RANGE      = (2.20, 2.80)   # lift. LOWERED from 3.00-4.00 because the user
-                               # watched the video and said the ejection was
-                               # too strong. Landing speed is their binding
-                               # constraint and this is the whole point of the
-                               # change: 2.39-4.93 m/s -> 1.78-3.65, with 191
-                               # of 243 sampled cells over the ~2.6 m/s comfort
-                               # threshold instead of 238, and apex halved from
-                               # 0.47-1.19 m to 0.28-0.64. The price is
-                               # open-loop closure: 62% -> 27%. That is the
-                               # right trade — a fixed-pose robot is not the
-                               # robot being trained, and the policy's whole
-                               # job is to spin faster by tucking. Gentler
-                               # still is available and measured: vz 2.0-2.6
-                               # lands at 1.54-3.50 with 10% closure.
-W0_RANGE      = (18.0, 24.0)   # backward flick. The low end moved 15 -> 18 for
-                               # the same reason as t_launch: at w0 15 the
-                               # low-vz corner rotates forward. 24 keeps clear
-                               # of the measured 24-27 direction reversal.   # backward flick; 24 keeps clear of the
-                               # measured 24-27 direction reversal
-MAX_PAID_RATE = 25.0           # rad/s; measured peak in the box is 23.0,
-                               # mean over a flip 15.6-20.1 — 25 forfeits
-                               # nothing a real flip needs
+VZ_RANGE      = (2.20, 2.60)   # lift. Landing speed is the user's binding
+                               # constraint: this box lands at 2.37-3.58 m/s
+                               # (apex 0.45-0.67 m). Raising it is the ONLY
+                               # lever left for open-loop closure now that the
+                               # sweep is capped, and it is expensive: vz
+                               # 3.0-3.6 buys 29% closure at 3.73-4.88 m/s.
+W0_RANGE      = (5.0, 6.0)     # backward flick. Down from 18-24, which is a
+                               # 12-16 rad/s flick a hand does not deliver
+                               # anyway. The ceiling is the SWEEP GATE:
+                               # w0 * t_launch <= 1.571 keeps the sweep under
+                               # 45 deg, so at t_launch 0.26 the most w0 can be
+                               # is 6.0. The robot leaves at roughly the
+                               # plate's final w0, which is why rotation is now
+                               # 198-309 deg open-loop instead of 98-442.
+MAX_PAID_RATE = 25.0           # rad/s. Deliberately SLACK now: the launcher
+                               # only imparts 5-6 rad/s, and a flip that
+                               # closes 360 deg in the 0.5-0.6 s of airtime
+                               # needs ~11-13 rad/s — the difference is the
+                               # policy's own tuck, which is the whole skill.
+                               # The cap exists to price genuine violence, and
+                               # 25 is above anything the measured box or a
+                               # legitimate tuck produces.
 
 # Spawn scatter on the plate. x/y: the plate is 18 cm across and the robot's
 # feet span ~8 cm, so 1 cm of jitter is what fits. yaw: the flick axis is world

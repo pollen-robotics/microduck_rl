@@ -82,6 +82,7 @@ cell.
 
 import argparse
 import itertools
+from typing import NamedTuple
 import math
 
 import mujoco
@@ -247,9 +248,26 @@ def trunk_tilt_deg(data):
     return math.degrees(math.acos(max(-1.0, min(1.0, float(zw[2])))))
 
 
+class Cell(NamedTuple):
+    """One measured launch. Added fields must go at the END (call sites index)."""
+
+    rot: float            # deg of BACKWARD rotation accumulated while airborne
+    land: float           # m/s at first ground contact after real flight
+    apex: float           # m, highest trunk z
+    tilt0: float          # deg of trunk tilt AT THE FLICK (what the hold left)
+    sweep: float          # deg the PLATE swept under the feet during the flick
+    tilt1: float          # deg of trunk tilt at the END of the flick
+    plate_frac: float     # fraction of the flick with the feet still on the plate
+
+
+# Half-length of the plate along x (launcher.xml: box size 0.09 0.09 0.01).
+PLATE_HALF_LEN_X = 0.09
+_PIVOTS = ("center", "rear")
+
+
 def run_cell(model, data, vz, w0, tuck_factor, z0, t_hold=0.3, t_launch=0.12,
              duration=2.0, on_step=None, posture="standing", tuck_at_flick=False,
-             bam_ctrl=None, hold_lerp=None):
+             bam_ctrl=None, hold_lerp=None, pivot="center"):
     if hold_lerp is None:
         hold_lerp = HOLD_LERP
     mujoco.mj_resetData(model, data)
@@ -264,6 +282,8 @@ def run_cell(model, data, vz, w0, tuck_factor, z0, t_hold=0.3, t_launch=0.12,
     # Robot: free joint at qpos[0:7], 14 servos after it.
     if posture not in _POSTURES:
         raise ValueError(f"posture must be one of {_POSTURES}, got {posture!r}")
+    if pivot not in _PIVOTS:
+        raise ValueError(f"pivot must be one of {_PIVOTS}, got {pivot!r}")
     # ctrl held during HOLD (and, unless --tuck-at-flick, for the whole cell).
     if posture == "tucked":
         hold_ctrl = _tuck_ctrl(model.nu, tuck_factor)
@@ -325,6 +345,17 @@ def run_cell(model, data, vz, w0, tuck_factor, z0, t_hold=0.3, t_launch=0.12,
     airborne_seen = False
     landed = False
     tilt_at_flick = None
+    # THE PLATE'S OWN SWEPT ANGLE, and what it does to the robot. Measured, not
+    # taken from the formula, so the report cross-checks
+    # mdp.backflip_plate_sweep_deg rather than restating it. plate_steps /
+    # launch_steps is how much of the flick the feet were still ON the surface:
+    # a paddle that pivots out from under them transfers rotation by TIPPING,
+    # and that shows up here as a fraction well below 1.
+    max_sweep = 0.0
+    tilt_at_release = None
+    launch_steps = 0
+    plate_contact_steps = 0
+    prev_phase = None
     t = 0.0
     while t < duration:
         z, pitch, vz_t, w_t, phase = microduck_mdp.backflip_plate_kinematics(
@@ -341,12 +372,46 @@ def run_cell(model, data, vz, w0, tuck_factor, z0, t_hold=0.3, t_launch=0.12,
             tilt_at_flick = trunk_tilt_deg(data)
             _apply_ctrl(data, bam_ctrl, flick_ctrl)
 
+        max_sweep = max(max_sweep, abs(math.degrees(float(pitch))))
+        if int(phase) == microduck_mdp.BACKFLIP_PHASE_LAUNCH:
+            launch_steps += 1
+        # The flick has just ended: snapshot the attitude the LAUNCH ITSELF
+        # produced. tilt0 is what the hold left, tilt1 is what the robot is
+        # actually thrown with -- and the launch-attitude gate scores the
+        # former while the flight is flown from the latter.
+        if (
+            tilt_at_release is None
+            and prev_phase == microduck_mdp.BACKFLIP_PHASE_LAUNCH
+            and int(phase) != microduck_mdp.BACKFLIP_PHASE_LAUNCH
+        ):
+            tilt_at_release = trunk_tilt_deg(data)
+        prev_phase = int(phase)
+
         half = float(pitch) * 0.5
-        data.qpos[plate_qadr + 0 : plate_qadr + 3] = [0.0, 0.0, float(z)]
+        # WHERE THE PLATE PIVOTS. "center" is what the env does today: the
+        # surface rotates about the body origin, so the FRONT edge rises while
+        # the REAR edge drops -- a lever. "rear" pivots at the rear edge
+        # instead, so the whole surface LIFTS as it tilts, which is what a
+        # springboard (or a hand) does. Same pitch schedule either way, so the
+        # swept angle is identical and only the transfer differs.
+        px, pz = 0.0, float(z)
+        vx_t = 0.0
+        if pivot == "rear":
+            th = float(pitch)
+            rx = PLATE_HALF_LEN_X * math.cos(th)
+            rz = -PLATE_HALF_LEN_X * math.sin(th)
+            px = -PLATE_HALF_LEN_X + rx
+            pz = float(z) + rz
+            # v_center = v_pivot + omega x r, omega = (0, w_t, 0)
+            vx_t = float(w_t) * rz
+            vz_center = float(vz_t) - float(w_t) * rx
+        else:
+            vz_center = float(vz_t)
+        data.qpos[plate_qadr + 0 : plate_qadr + 3] = [px, 0.0, pz]
         data.qpos[plate_qadr + 3 : plate_qadr + 7] = [
             math.cos(half), 0.0, math.sin(half), 0.0
         ]
-        data.qvel[plate_vadr + 0 : plate_vadr + 3] = [0.0, 0.0, float(vz_t)]
+        data.qvel[plate_vadr + 0 : plate_vadr + 3] = [vx_t, 0.0, vz_center]
         data.qvel[plate_vadr + 3 : plate_vadr + 6] = [0.0, float(w_t), 0.0]
 
         # Snapshot BEFORE stepping. The contact constraint solved INSIDE
@@ -379,6 +444,12 @@ def run_cell(model, data, vz, w0, tuck_factor, z0, t_hold=0.3, t_launch=0.12,
         # now ABOVE and beside the floor (BACKFLIP_GONE_POS), which removes the
         # spurious contacts at the source; this filter is kept as cheap
         # belt-and-braces so the probe measures ROBOT-floor contact only.
+        if int(phase) == microduck_mdp.BACKFLIP_PHASE_LAUNCH and any(
+            plate_gid in (data.contact.geom1[i], data.contact.geom2[i])
+            for i in range(data.ncon)
+        ):
+            plate_contact_steps += 1
+
         touching = any(
             (data.contact.geom1[i] == floor_gid and data.contact.geom2[i] != plate_gid)
             or (data.contact.geom2[i] == floor_gid and data.contact.geom1[i] != plate_gid)
@@ -416,11 +487,16 @@ def run_cell(model, data, vz, w0, tuck_factor, z0, t_hold=0.3, t_launch=0.12,
         if on_step is not None:
             on_step(t, math.degrees(accum_pitch), data, phase=int(phase), touching=touching)
 
-    return (
-        math.degrees(accum_pitch),
-        landing_speed,
-        apex,
-        float("nan") if tilt_at_flick is None else tilt_at_flick,
+    return Cell(
+        rot=math.degrees(accum_pitch),
+        land=landing_speed,
+        apex=apex,
+        tilt0=float("nan") if tilt_at_flick is None else tilt_at_flick,
+        sweep=max_sweep,
+        tilt1=float("nan") if tilt_at_release is None else tilt_at_release,
+        plate_frac=(
+            plate_contact_steps / launch_steps if launch_steps else float("nan")
+        ),
     )
 
 
@@ -466,15 +542,17 @@ def check_direction(model, data, vz=3.0, w0=15.0, tuck_factor=1.0, z0=0.15,
                 print("  -> +x component: robot is FACE-DOWN (forward roll). WRONG direction.")
             state["reported"] = True
 
-    rot, land, apex, tilt = run_cell(
+    c = run_cell(
         model, data, vz, w0, tuck_factor, z0, t_hold=t_hold, t_launch=t_launch,
         on_step=on_step, posture=posture, tuck_at_flick=tuck_at_flick,
         bam_ctrl=bam_ctrl,
     )
+    rot = c.rot
     print(f"  cell result: posture={posture} tuck_at_flick={tuck_at_flick} "
           f"vz={vz} w0={w0} tuck={tuck_factor} z0={z0} "
-          f"-> rot_deg={rot:.1f} land_m/s={land:.2f} apex_m={apex:.3f} "
-          f"tilt_at_flick={tilt:.1f}deg")
+          f"-> rot_deg={c.rot:.1f} land_m/s={c.land:.2f} apex_m={c.apex:.3f} "
+          f"tilt_at_flick={c.tilt0:.1f}deg sweep={c.sweep:.1f}deg "
+          f"tilt_at_release={c.tilt1:.1f}deg feet_on_plate={c.plate_frac:.2f}")
     if not state["reported"]:
         print("  WARNING: never reached 90deg of accumulated rotation — cannot verify direction "
               "with this cell. NOTE a NEGATIVE rot_deg means the robot rotated FORWARD: "
@@ -649,13 +727,31 @@ BOX_CHECK_HOLDS = (0.1, 0.2, 0.3)
 BOX_MIN_ROT_DEG = 360.0
 BOX_MAX_LAND = 2.6
 
+# HARD GATE, the way DIRECTION is one: the plate may not sweep more than this
+# many degrees under the robot's feet during the flick.
+#
+# sweep = 0.5 * w0 * t_launch (mdp.backflip_plate_sweep_deg). A human hand
+# tossing an object sweeps 30-40 deg — it imparts an impulse and lets go. A
+# surface that sweeps 90 deg is a catapult paddle levering the robot over: the
+# feet cannot stay on it, the rotation arrives by TIPPING rather than by a
+# push, and the launch attitude is destroyed by the launch itself. The user saw
+# exactly that and called it "a force that makes it rotate".
+#
+# 45 deg is the cap because it is the top of the hand-like range with a little
+# margin, and because nothing about the mechanism improves above it. This
+# quantity had NEVER been reported by any probe mode before 2026-09-09, which
+# is how a 72-110 deg box shipped through thirteen measurement waves.
+BOX_MAX_SWEEP_DEG = 45.0
+
 
 def _edges(rng, mid=True):
     lo, hi = rng
     return (lo, 0.5 * (lo + hi), hi) if mid else (lo, hi)
 
 
-def box_check_report(model, data, bam_ctrl=None, posture="tucked_env"):
+def box_check_report(model, data, bam_ctrl=None, posture="tucked_env",
+                     vz_range=None, w0_range=None, launch_range=None,
+                     z0_range=None, label=None, pivot="center"):
     """WHOLE-BOX check of the cfg's DR ranges from the env's actual spawn.
 
     Reports the WORST cell, not the best. The rule this enforces is the one the
@@ -674,10 +770,14 @@ def box_check_report(model, data, bam_ctrl=None, posture="tucked_env"):
     # extend this grid with its ceiling. Reading a stale range here was a real
     # hole once: the check never saw the state the policy trained into after
     # the tail opened, and a 1-D corner scan got used instead.
-    vzs = _edges(VZ_RANGE)
-    w0s = _edges(W0_RANGE)
-    z0s = _edges(Z0_RANGE)
-    laus = _edges(LAUNCH_RANGE)
+    vz_range = VZ_RANGE if vz_range is None else vz_range
+    w0_range = W0_RANGE if w0_range is None else w0_range
+    z0_range = Z0_RANGE if z0_range is None else z0_range
+    launch_range = LAUNCH_RANGE if launch_range is None else launch_range
+    vzs = _edges(vz_range)
+    w0s = _edges(w0_range)
+    z0s = _edges(z0_range)
+    laus = _edges(launch_range)
     holds = BOX_CHECK_HOLDS
     # The FOLD DEPTH the policy reaches at the flick. It is not DR -- it is
     # the policy's action -- and the standing launch only closes at a full
@@ -686,10 +786,19 @@ def box_check_report(model, data, bam_ctrl=None, posture="tucked_env"):
     # requires it to be flown.
     tucks = (1.0,)
 
-    print(f"# box-check posture={posture} bam={bam_ctrl is not None} "
+    print(f"# box-check{'' if label is None else ' ' + label} "
+          f"posture={posture} pivot={pivot} bam={bam_ctrl is not None} "
           f"dt={model.opt.timestep}")
-    print(f"#   z0 {Z0_RANGE} vz {VZ_RANGE} w0 {W0_RANGE} "
-          f"launch {LAUNCH_RANGE}")
+    print(f"#   z0 {z0_range} vz {vz_range} w0 {w0_range} "
+          f"launch {launch_range}")
+    # The sweep is analytic, so print it before spending a minute on physics:
+    # a box that fails this cannot be rescued by anything the sweep measures.
+    sweep_lo = microduck_mdp.backflip_plate_sweep_deg(
+        min(w0_range), min(launch_range))
+    sweep_hi = microduck_mdp.backflip_plate_sweep_deg(
+        max(w0_range), max(launch_range))
+    print(f"#   PLATE SWEEP {sweep_lo:.1f}-{sweep_hi:.1f} deg "
+          f"(0.5*w0*t_launch; cap {BOX_MAX_SWEEP_DEG:.0f}, a hand sweeps 30-40)")
     print(f"#   z0 grid {z0s}")
     print(f"#   hold {holds} (NOT the env's {HOLD_RANGE} — see "
           f"BOX_CHECK_HOLDS) tuck {tucks}")
@@ -697,18 +806,22 @@ def box_check_report(model, data, bam_ctrl=None, posture="tucked_env"):
     for z0, vz, w0, lau, hold, tk in itertools.product(
         z0s, vzs, w0s, laus, holds, tucks
     ):
-        rot, land, apex, tilt = run_cell(
+        c = run_cell(
             model, data, vz, w0, tk, z0, t_hold=hold, t_launch=lau,
             posture=posture, tuck_at_flick=True, bam_ctrl=bam_ctrl,
+            pivot=pivot,
         )
-        rows.append((rot, land, apex, tilt, z0, vz, w0, lau, hold, tk))
+        rows.append((c.rot, c.land, c.apex, c.tilt0, z0, vz, w0, lau, hold, tk,
+                     c.sweep, c.tilt1, c.plate_frac))
 
-    def show(label, ordered):
-        print(f"  {label}")
+    def show(head, ordered):
+        print(f"  {head}")
         for r in ordered[:5]:
             print(f"    rot={r[0]:7.1f} land={r[1]:5.2f} apex={r[2]:.3f} "
-                  f"tilt0={r[3]:5.1f}  z0={r[4]:.3f} vz={r[5]:.3f} w0={r[6]:.2f} "
-                  f"launch={r[7]:.3f} hold={r[8]:.2f} tuck={r[9]:.2f}")
+                  f"tilt0={r[3]:5.1f} sweep={r[10]:5.1f} tilt1={r[11]:6.1f} "
+                  f"feet={r[12]:4.2f}  z0={r[4]:.3f} vz={r[5]:.3f} "
+                  f"w0={r[6]:.2f} launch={r[7]:.3f} hold={r[8]:.2f} "
+                  f"tuck={r[9]:.2f}")
 
     min_rot = min(r[0] for r in rows)
     max_land = max(r[1] for r in rows)
@@ -734,6 +847,20 @@ def box_check_report(model, data, bam_ctrl=None, posture="tucked_env"):
     # throw is the policy's job) and it once squeezed w0 to a single value no
     # human hand could reproduce.
     n_forward = sum(1 for r in rows if r[0] < 0.0)
+    max_sweep = max(r[10] for r in rows)
+    n_swept = sum(1 for r in rows if r[10] > BOX_MAX_SWEEP_DEG)
+    tilt1s = [r[11] for r in rows if r[11] == r[11]]
+    feet = [r[12] for r in rows if r[12] == r[12]]
+    print(f"  PLATE SWEEP: {'PASS' if n_swept == 0 else 'FAIL'} — "
+          f"max {max_sweep:.1f} deg (cap {BOX_MAX_SWEEP_DEG:.0f}); "
+          f"{n_swept}/{len(rows)} cells over")
+    if tilt1s:
+        print(f"  ATTITUDE AT RELEASE: {min(tilt1s):.1f}-{max(tilt1s):.1f} deg "
+              f"of tilt (tilt0 at the flick: "
+              f"{min(r[3] for r in rows):.1f}-{max(r[3] for r in rows):.1f})")
+    if feet:
+        print(f"  FEET ON THE PLATE during the flick: "
+              f"{min(feet):.2f}-{max(feet):.2f} of the ramp")
     min_land = min(r[1] for r in rows)
     closed = len(rows) - n_short
     print(f"  DIRECTION: {'PASS' if n_forward == 0 else 'FAIL'} — "
@@ -744,7 +871,7 @@ def box_check_report(model, data, bam_ctrl=None, posture="tucked_env"):
     print(f"  LANDING: {min_land:.2f}-{max_land:.2f} m/s "
           f"(operator comfort threshold {BOX_MAX_LAND} m/s; "
           f"{n_hard}/{len(rows)} cells over)")
-    return rows, n_forward == 0
+    return rows, (n_forward == 0 and n_swept == 0)
 
 
 # Flop basins audited by --flop-audit. AGENTS.md: "audit each positive term
@@ -1030,6 +1157,26 @@ def main():
                          "w0 / t_launch, crossed with the hold extremes and "
                          "tuck depths, must close 360 deg under 2.6 m/s. "
                          "Reports the worst cell, not the best.")
+    ap.add_argument(
+        "--box-vz", type=_float_list, default=None,
+        help="Override VZ_RANGE for --box-check, as 'lo,hi'. For scanning "
+             "candidate boxes reproducibly; the default is the shipped range.",
+    )
+    ap.add_argument("--box-w0", type=_float_list, default=None,
+                    help="Override W0_RANGE for --box-check, as 'lo,hi'.")
+    ap.add_argument("--box-launch", type=_float_list, default=None,
+                    help="Override LAUNCH_RANGE for --box-check, as 'lo,hi'.")
+    ap.add_argument("--box-z0", type=_float_list, default=None,
+                    help="Override Z0_RANGE for --box-check, as 'lo,hi'.")
+    ap.add_argument(
+        "--pivot", choices=_PIVOTS, default="center",
+        help="Where the plate rotates about during the flick. 'center' is what "
+             "the env does (the front edge rises, the rear drops - a lever); "
+             "'rear' pivots at the rear edge so the whole surface lifts while "
+             "it tilts, like a springboard or a hand. Same swept angle.",
+    )
+    ap.add_argument("--box-label", default=None,
+                    help="Label printed in the --box-check header.")
     ap.add_argument("--flop-audit", action="store_true",
                     help="Settle the tucked robot from every flop orientation "
                          "(side / back / face / inverted) and score "
@@ -1098,7 +1245,15 @@ def main():
         return
 
     if args.box_check:  # noqa: E501
-        box_check_report(model, data, bam_ctrl=bam_ctrl, posture=args.posture)
+        box_check_report(
+            model, data, bam_ctrl=bam_ctrl, posture=args.posture,
+            vz_range=None if args.box_vz is None else tuple(args.box_vz),
+            w0_range=None if args.box_w0 is None else tuple(args.box_w0),
+            launch_range=(
+                None if args.box_launch is None else tuple(args.box_launch)),
+            z0_range=None if args.box_z0 is None else tuple(args.box_z0),
+            label=args.box_label, pivot=args.pivot,
+        )
         return
 
     if args.measure_tuck_z:
@@ -1144,18 +1299,23 @@ def main():
     print(f"# posture={args.posture} tuck_at_flick={args.tuck_at_flick} "
           f"z0={args.z0} hold={args.hold} launch={args.launch} "
           f"bam={args.bam} dt={model.opt.timestep}")
+    print(f"#   plate sweep at launch={args.launch:.3f}s: "
+          f"{microduck_mdp.backflip_plate_sweep_deg(min(args.w0), args.launch):.1f}"
+          f"-{microduck_mdp.backflip_plate_sweep_deg(max(args.w0), args.launch):.1f}"
+          f" deg (0.5*w0*t_launch; a hand sweeps 30-40)")
     print(f"{'vz':>5} {'w0':>6} {'tuck':>5} {'rot_deg':>8} {'land_m/s':>9} "
-          f"{'apex_m':>7} {'tilt0':>6}")
+          f"{'apex_m':>7} {'tilt0':>6} {'sweep':>6} {'tilt1':>6} {'feet':>5}")
     for vz, w0, tuck in itertools.product(args.vz, args.w0, args.tuck):
-        rot, land, apex, tilt = run_cell(
+        c = run_cell(
             model, data, vz, w0, tuck, args.z0,
             t_hold=args.hold, t_launch=args.launch,
             posture=args.posture, tuck_at_flick=args.tuck_at_flick,
-            bam_ctrl=bam_ctrl,
+            bam_ctrl=bam_ctrl, pivot=args.pivot,
         )
         flag = "*" if w0 > SAFE_W0_CEILING else " "
-        print(f"{vz:5.2f} {w0:6.1f} {tuck:5.2f} {rot:8.1f} {land:9.2f} "
-              f"{apex:7.3f} {tilt:6.1f} {flag}")
+        print(f"{vz:5.2f} {w0:6.1f} {tuck:5.2f} {c.rot:8.1f} {c.land:9.2f} "
+              f"{c.apex:7.3f} {c.tilt0:6.1f} {c.sweep:6.1f} {c.tilt1:6.1f} "
+              f"{c.plate_frac:5.2f} {flag}")
 
 
 if __name__ == "__main__":

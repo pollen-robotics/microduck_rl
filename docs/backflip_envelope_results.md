@@ -46,13 +46,26 @@ survive?
 > after the flop audit found the side-lying tuck outscoring the upright one.
 > See "**Flop audit, and two corrections**".
 
-> **CURRENT BOX — the final section, "Gentler ejection":**
+> **CURRENT BOX — the final section, "The plate was a catapult":**
 > STANDING hold on a plate RESTING ON THE GROUND, `z0` in [0.01, 0.03],
-> `vz` in [2.20, 2.80], `w0` in [18, 24], `t_launch` in [0.14, 0.16], hold
+> `vz` in [2.20, 2.60], `w0` in [5, 6], `t_launch` in [0.22, 0.26], hold
 > 1-5 s uniform (no curriculum), episode 7.5 s, landing annuity over a fixed
-> 1.4 s window. Direction-verified backward in every cell; rotation
-> 98-442 deg; landing 1.78-3.65 m/s; apex 0.28-0.64 m; 27% close 360 deg
-> open-loop.
+> 1.4 s window, launch-attitude gate on both task terms. **Plate sweep
+> 32-45 deg** — the new hard gate, alongside direction. Direction-verified
+> backward in every cell (8/8 corners orientation-checked); rotation
+> 198-309 deg; landing 2.37-3.58 m/s; apex 0.45-0.67 m; **0% close 360 deg
+> open-loop**, which is the measured cost of a hand-like sweep and is
+> explained in that section.
+
+> **Superseded box — "Gentler ejection":**
+> STANDING hold on a plate on the ground, `z0` in [0.01, 0.03], `vz` in
+> [2.20, 2.80], `w0` in [18, 24], `t_launch` in [0.14, 0.16]. Rotation
+> 98-442 deg; landing 1.78-3.65 m/s; 27% closure. **Withdrawn 2026-09-09: it
+> swept the plate 72-110 deg under the robot's feet in all 243 of its cells**,
+> i.e. it levered the robot over instead of throwing it. Every box above this
+> line in this document has the same defect — the swept angle was never
+> measured until now, so treat the rotation numbers in all of them as
+> describing a catapult, not a throw.
 
 > **Superseded box — "After the first training run":**
 > STANDING hold on a plate RESTING ON THE GROUND, `z0` in [0.01, 0.03],
@@ -5486,3 +5499,176 @@ rewritten to the shipped values: STATUS, the launch-envelope block (now stating
 the direction gate as the only acceptance rule with closure at 27% reported as
 information), the `ready_stance` and annuity bullets, and the SPAWN paragraph.
 The constants block itself was already current; the prose around it was not.
+
+
+# The plate was a catapult — the swept angle nobody measured
+
+The user, watching the previous run: the robot *"takes something like a force
+that makes it rotate"*. They were describing the mechanism exactly.
+
+## The arithmetic
+
+The launch ramps the plate's pitch rate from 0 to `w0` over `t_launch` at
+constant angular acceleration, so the plate **sweeps** the area under that
+ramp:
+
+```
+sweep = 0.5 * w0 * t_launch          (mdp.backflip_plate_sweep_deg)
+```
+
+For the shipped box (`w0` 18-24, `t_launch` 0.14-0.16):
+
+| | w0 | t_launch | sweep |
+|---|---|---|---|
+| min | 18 | 0.14 | 1.26 rad = **72.2°** |
+| max | 24 | 0.16 | 1.92 rad = **110.0°** |
+
+A human hand tossing an object sweeps 30-40° — it imparts an impulse and lets
+go. A surface that pivots 72-110° under the feet is a **catapult paddle
+levering the robot over**: the rotation arrives by tipping, not by a push.
+Measured through the full 243-cell box check, **243/243 cells** were over 45°,
+and the plate stayed in contact with the feet for **94-100% of the ramp** —
+the robot rides the paddle round.
+
+**Nobody was watching this quantity.** Every probe table in this document
+reports the ROBOT's rotation, the landing speed, the apex and (since the
+standing revert) the tilt at the flick. None of them reported what the PLATE
+did. That is how a 72-110° sweep survived thirteen measurement waves, and it
+is the same class of miss as the tucked spawn whose feet were inside the slab:
+a quantity that was never a column.
+
+Fixed at the source: `sweep` is now a column in `--box-check` and in the plain
+grid, `mdp.backflip_plate_sweep_deg` puts the formula next to the kinematics it
+describes (with a test that it equals the pitch the kinematics actually reach),
+and `BOX_MAX_SWEEP_DEG = 45` is a **hard acceptance gate** next to direction —
+a box that fails it is not a box. Two more columns went in with it, both cheap
+and both diagnostic of this failure: `tilt1` (trunk tilt at the END of the
+flick, against `tilt0` at its start) and `feet` (the fraction of the ramp the
+feet were still on the plate).
+
+## The trade the cap exposes, and it is not a small one
+
+For a given `w0` the only lever is a shorter flick — and shortening it raises
+the angular acceleration `w0 / t_launch` AND the linear one `vz / t_launch`.
+The earlier note that `t_launch = 0.08` "lands at 3.97 m/s" was measured at the
+old `vz` 3.0-4.0, so it was re-measured at the current 2.2-2.8. The result was
+not a harder landing. It was a **forward flip**:
+
+| t_launch | sweep (w0 12-28) | rotation, vz 2.2-3.4, w0 12-28 |
+|---|---|---|
+| 0.05 | 17-40° | **−88 to −227°** (every cell FORWARD) |
+| 0.06 | 21-48° | **−89 to −260°** (every cell FORWARD) |
+| 0.08 | 27-64° | **−122 to −373°** (every cell FORWARD) |
+| 0.10 | 34-80° | −119 to −375, except w0 ≥ 24 at sweep 69-80° |
+
+A short flick means a linear acceleration of 28-56 m/s² under a body whose CoM
+sits **ahead of the sole contact** (the head is ~38% of the mass and the neck
+is pitched forward at HOME), and it tips the robot over its toes. So the
+direction gate now binds from below for a second, different reason, and the
+answer to the sweep problem is a **LONGER, gentler** flick, not a shorter one.
+
+That is where the backward-rotating region with a hand-like sweep lives:
+`t_launch` 0.18-0.28 with `w0` 4-8. And it is expensive, by arithmetic that is
+worth writing out because it is not a tuning question:
+
+* sweep ≤ 45° ⇒ `w0 ≤ 1.571 / t_launch`
+* forward-tip limit ⇒ `t_launch ≥ ~0.16 s`
+* therefore `w0 ≤ ~9.8 rad/s`
+* the robot leaves at roughly the plate's final rate, so closing 2π needs
+  ≥ 0.64 s of airtime, i.e. `vz ≥ ~3.1 m/s`, i.e. a **3.7-4.9 m/s landing**.
+
+**A hand-like sweep and open-loop 360° closure are incompatible at any landing
+speed the user would accept.** Reported rather than resolved by widening the
+cap.
+
+## The candidates, all measured (243 cells each, BAM, standing spawn)
+
+| box | vz | w0 | t_launch | sweep | rotation | landing m/s | apex m | closure | sweep gate | direction |
+|---|---|---|---|---|---|---|---|---|---|---|
+| shipped (withdrawn) | 2.2-2.8 | 18-24 | 0.14-0.16 | 72-110° | 98-442 | 1.78-3.65 | 0.28-0.64 | 27% | **FAIL 243/243** | PASS |
+| Q | 2.2-2.8 | 4-7 | 0.18-0.22 | 21-44° | 163-355 | 2.36-3.95 | — | 0% | PASS | PASS |
+| S | 2.2-2.6 | 4-6 | 0.20-0.26 | 23-45° | 156-310 | 2.39-3.58 | — | 0% | PASS | PASS |
+| **P (chosen)** | **2.2-2.6** | **5-6** | **0.22-0.26** | **32-45°** | **198-309** | **2.37-3.58** | **0.45-0.67** | **0%** | **PASS** | **PASS** |
+| R (closure) | 3.0-3.6 | 5-6 | 0.22-0.26 | 32-45° | 261-453 | 3.73-4.88 | — | 29% | PASS | PASS |
+
+**Why P.** Its sweep band (32-45°) sits exactly in the hand-like range, and it
+has the highest rotation FLOOR of the compliant boxes (198° against S's 156°
+and Q's 163°), so the policy has the least to make up in the worst cell. Its
+landing envelope is the same as S's and gentler than Q's, and its release
+attitude is the cleanest measured anywhere on this branch: **tilt at release
+0.3-22.4°**, and at the long end of `t_launch` it is 2-10° — the robot leaves
+essentially upright, which is what the whole complaint was about. 8/8 of its
+(vz, w0, t_launch) corners were orientation-verified backward with
+`--check-direction`, not just sign-checked.
+
+**Why not R.** It buys the 29% closure back — the fraction that has actually
+trained — but every one of its 243 cells lands above the 2.6 m/s comfort
+threshold, at 3.73-4.88 m/s, which is harder than the box the user had already
+called too strong. It is written into the cfg ladder so switching to it needs
+no new measurement.
+
+**What P costs.** 0% open-loop closure: rotation 198-309° where 360° is the
+target, so the policy must find the last 50-160° in its own tuck. The probe
+already holds a FULL tuck from the flick, so that gap is not something a fixed
+pose can close — it needs timing (tuck early, extend late), which is exactly
+the skill the task exists to train. This is a bet, and it is the honest one:
+the alternative is a launch the user has already rejected twice.
+
+## The rear-edge pivot: measured, and it is not the fix
+
+Today the plate rotates about its **body origin**, so the front edge rises
+while the rear edge drops — the lever. Pivoting about the **rear edge** instead
+lifts the whole surface while tilting it, which is what a springboard or a hand
+does. Implemented in the probe as `--pivot rear` (same pitch schedule, so the
+swept angle is identical; only the transfer differs) and measured over the same
+grids:
+
+| pivot | vz | w0 | t_launch | sweep | rotation | landing m/s | apex m | tilt at release |
+|---|---|---|---|---|---|---|---|---|
+| centre | 2.2 | 6 | 0.24 | 41.3° | 221 | 2.62 | 0.51 | **2.3°** |
+| rear | 2.2 | 6 | 0.24 | 41.3° | 260 | 3.42 | 0.70 | 10.1° |
+| rear | 1.4 | 6 | 0.24 | 41.3° | 188 | 2.42 | 0.43 | 8.7° |
+| centre | 2.2-3.0 | 4-8 | 0.20 | 23-46° | 176-378 | 2.63-4.18 | 0.50-0.83 | 11-23° |
+| rear | 2.2-3.0 | 4-10 | 0.20 | 23-57° | −142 to 313 | 3.20-4.56 | 0.65-1.15 | 24-41° |
+
+It converts the sweep into **lift, not spin**: at the same `vz` it throws the
+robot 0.13-0.22 m higher and lands 0.3-0.6 m/s harder, and once `vz` is dropped
+to compensate (1.4 m/s) the rotation per unit landing speed is the same as the
+centre pivot's (188° at 2.42 m/s against 221° at 2.62). Its release attitude is
+also *worse* at the shorter flicks (up to 41° of tilt against 22°). So it
+changes the numbers but not the picture, and it is not worth the extra
+machinery in the env. **The plate still pivots about its centre**; `--pivot
+rear` stays in the probe so the measurement is reproducible.
+
+## What changed
+
+* `mdp.backflip_plate_sweep_deg` — the formula, next to the kinematics, with
+  the reasoning and the trade in its docstring.
+* `LAUNCH_RANGE` 0.14-0.16 → **0.22-0.26**, `W0_RANGE` 18-24 → **5-6**,
+  `VZ_RANGE` 2.20-2.80 → **2.20-2.60**. `Z0_RANGE` unchanged.
+* The `play`/pre-reset lazy defaults moved to the middle of the new box
+  (`t_launch` 0.24, `w0` 5.5, `vz` 2.4) — `play` runs a whole first episode on
+  them.
+* `MAX_PAID_RATE` stays 25 rad/s and is now deliberately slack: the launcher
+  imparts only 5-6 rad/s and a closing flip needs ~11-13, so the difference is
+  the policy's tuck. The cap prices violence, not the skill.
+* Probe: `sweep` / `tilt1` / `feet` columns everywhere, `BOX_MAX_SWEEP_DEG`
+  hard gate, `--box-vz/--box-w0/--box-launch/--box-z0/--box-label` so a
+  candidate box is reproducible from the command line, and `--pivot rear`.
+* Tests: the sweep formula must equal the pitch the kinematics reach; the
+  shipped ranges must sweep ≤ 45°; the flick floor is now 0.16 s with the
+  forward-tip reason recorded; the lazy `play` defaults must sit inside the box
+  and satisfy the gate. Falsified by restoring `w0` 18-24 / `t_launch`
+  0.14-0.16, which fails with "the plate sweeps 110.0 deg under the feet: that
+  is a lever, not a throw".
+
+Nothing else moved: the launch-attitude gate, the 1-5 s hold as plain DR, the
+fixed annuity window, the 10/45° tilt gate and the NaN guards all stand.
+
+**One knock-on.** `EPISODE_LENGTH_S` 7.5 → **7.6 s**. The worst case is
+`hold 5.0 + flick 0.26 + flight 0.88`, and the annuity needs a full
+`LANDING_WINDOW_S = 1.4` s after touchdown or a long hold truncates it — which
+would make the landing hold-dependent again, the exact defect the fixed window
+exists to remove. 7.6 leaves 1.46 s. The cfg test now derives that slack from
+`LAUNCH_RANGE` instead of a hardcoded 0.16, because the hardcoded value is what
+let the lengthened flick through unnoticed.

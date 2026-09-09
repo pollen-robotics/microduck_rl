@@ -120,6 +120,45 @@ Status: approved design, ready for implementation planning
 >   that has to out-bid the flip on its own.
 > Evidence: `docs/backflip_envelope_results.md`, "The collapse, third report".
 
+> **AMENDMENT 5 — 2026-09-09 — the plate may not sweep more than 45 deg under
+> the feet. The launcher was a catapult, not a pair of hands.**
+> The user, watching the previous run: the robot "takes something like a force
+> that makes it rotate". It did. The launch ramps the plate's pitch rate 0 ->
+> `w0` over `t_launch`, so the plate sweeps `0.5 * w0 * t_launch` under the
+> robot's feet — **72-110 deg** at the shipped `w0` 18-24 / `t_launch`
+> 0.14-0.16, in all 243 cells of the box, with the soles in contact for
+> 94-100% of the ramp. A hand tossing an object sweeps 30-40 deg. **No probe
+> mode had ever reported this quantity**: every table showed the robot's
+> rotation, the landing speed and the apex, and none showed what the plate did.
+> - **New hard gate**, next to direction: `BOX_MAX_SWEEP_DEG = 45`, reported
+>   per cell by `--box-check`, with the formula in
+>   `mdp.backflip_plate_sweep_deg` and a cfg test on the shipped ranges.
+> - **Box re-measured under it [AMENDED]:** `w0` 18-24 -> **5-6**, `t_launch`
+>   0.14-0.16 -> **0.22-0.26**, `vz` 2.20-2.80 -> **2.20-2.60**; `z0`
+>   unchanged. Sweep 32-45 deg, rotation 198-309 deg, landing 2.37-3.58 m/s,
+>   apex 0.45-0.67 m, direction verified backward at 8/8 corners.
+>   `EPISODE_LENGTH_S` 7.5 -> 7.6 so the longer flick cannot truncate the
+>   landing annuity.
+> - **The fix is a LONGER flick, not a shorter one.** Shortening it raises
+>   `vz / t_launch` to 28-56 m/s^2 under a body whose CoM (38% head) sits ahead
+>   of the sole contact, and the robot tips FORWARD over its toes: every
+>   measured cell at `t_launch` 0.05-0.08 rotated forward. The direction gate
+>   now binds from below for that second, independent reason.
+> - **Open-loop closure is 0%, and that is the measured price of a hand.**
+>   sweep <= 45 deg gives `w0 <= 1.571 / t_launch`; the forward-tip limit gives
+>   `t_launch >= ~0.16`; so `w0 <= ~9.8 rad/s`; closing 2*pi then needs >= 0.64 s
+>   of airtime, i.e. `vz >= ~3.1 m/s`, i.e. a 3.7-4.9 m/s landing. A hand-like
+>   sweep and open-loop closure are incompatible at an acceptable landing
+>   speed. Reported rather than papered over by widening the cap; the last
+>   50-160 deg is the policy's tuck, and the alternative (29% closure at
+>   3.73-4.88 m/s) is one row down the ladder in the cfg.
+> - **Rejected after measuring:** a REAR-EDGE pivot (the surface lifting as it
+>   tilts, springboard-style, rather than dropping its front edge). It converts
+>   the sweep into lift, not spin — same rotation per unit landing speed, a
+>   higher apex, and a worse attitude at release — so the plate still pivots
+>   about its centre. `--pivot rear` stays in the probe.
+> Evidence: `docs/backflip_envelope_results.md`, "The plate was a catapult".
+
 ## Problem
 
 Microduck (~800 g, ~25 cm, 14 XL330 servos) cannot generate the vertical

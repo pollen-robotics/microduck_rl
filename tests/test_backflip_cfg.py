@@ -491,28 +491,63 @@ def test_the_standing_box_is_a_plausible_human_throw(cfg):
     # open-loop closure once squeezed w0 to the single value 18.5 rad/s, which
     # no hand reproduces, and it is the wrong bar -- compensating for an
     # imperfect throw is the policy's job. Measured over 243 cells from the
-    # floor-resting plate: 0 rotate forward, 27% close 360 deg open-loop,
-    # rotation 98-442 deg, landing 1.78-3.65 m/s, apex 0.28-0.64 m -- the
-    # gentler retune after the user said the ejection was too strong.
+    # floor-resting plate: sweep 32-45 deg, 0 cells rotate forward, rotation
+    # 198-309 deg, landing 2.37-3.58 m/s, apex 0.45-0.67 m, 0% open-loop
+    # closure -- see the ladder at the ranges for what closure would cost.
     p = cfg.events["backflip_launch_params"].params
-    assert p["vz_range"] == VZ_RANGE == (2.20, 2.80)
-    assert p["w0_range"] == W0_RANGE == (18.0, 24.0)
-    assert p["launch_range"] == LAUNCH_RANGE == (0.14, 0.16)
+    assert p["vz_range"] == VZ_RANGE == (2.20, 2.60)
+    assert p["w0_range"] == W0_RANGE == (5.0, 6.0)
+    assert p["launch_range"] == LAUNCH_RANGE == (0.22, 0.26)
     assert p["z0_range"] == Z0_RANGE == (0.01, 0.03)
 
 
+def test_the_plate_may_not_sweep_more_than_a_hand_does(cfg):
+    # HARD GATE, added 2026-09-09 after the user said the robot "takes
+    # something like a force that makes it rotate". It did: the launch ramps
+    # the plate's pitch rate 0 -> w0 over t_launch, so the plate SWEEPS
+    # 0.5 * w0 * t_launch under the feet, and the shipped box swept 72-110 deg
+    # -- a catapult paddle levering the robot over rather than a hand imparting
+    # an impulse. A hand sweeps 30-40 deg.
+    #
+    # Nobody was watching this quantity: every probe table reported the ROBOT's
+    # rotation, the landing speed and the apex, and none reported what the
+    # plate itself did, which is how a 72-110 deg box survived thirteen
+    # measurement waves. It is now a column in --box-check and a gate here.
+    p = cfg.events["backflip_launch_params"].params
+    lo = microduck_mdp.backflip_plate_sweep_deg(
+        p["w0_range"][0], p["launch_range"][0])
+    hi = microduck_mdp.backflip_plate_sweep_deg(
+        p["w0_range"][1], p["launch_range"][1])
+    assert hi <= 45.0, (
+        f"the plate sweeps {hi:.1f} deg under the feet: that is a lever, not a "
+        "throw. Re-measure with scripts/backflip_envelope.py --box-check "
+        "before widening this."
+    )
+    # and it must not be so small that no rotation is transferred at all --
+    # the measured box delivers 198-309 deg with this sweep.
+    assert lo >= 20.0
+    # the constants agree with the event params (one source of truth)
+    assert microduck_mdp.backflip_plate_sweep_deg(
+        W0_RANGE[1], LAUNCH_RANGE[1]) == hi
+
+
 def test_the_flick_stays_inside_the_direction_reversal_boundary(cfg):
-    # THE one hard limit. Above roughly w0 24-27 rad/s from a standing hold the
-    # flick overdrives the sole contact and the robot comes out FORWARD,
-    # face-down -- a different maneuver the accumulator would have to be
-    # re-signed to score. Every corner of the box is direction-checked backward;
-    # widening w0 past this needs a fresh --box-check.
-    assert cfg.events["backflip_launch_params"].params["w0_range"][1] <= 24.0
-    # ... and the gate binds from BELOW too: a low vz with a low w0 and a short
-    # flick also comes out forward (vz 2.2, w0 15, t_launch 0.12 = -110 deg),
-    # which is what sets these two floors.
-    assert cfg.events["backflip_launch_params"].params["w0_range"][0] >= 18.0
-    assert cfg.events["backflip_launch_params"].params["launch_range"][0] >= 0.14
+    # THE other hard limit, and it binds from BOTH ends.
+    # ABOVE: past roughly w0 24-27 rad/s from a standing hold the flick
+    # overdrives the sole contact and the robot comes out FORWARD, face-down --
+    # a different maneuver the accumulator would have to be re-signed to score.
+    p = cfg.events["backflip_launch_params"].params
+    assert p["w0_range"][1] <= 24.0
+    # BELOW: a SHORT flick comes out forward too, for a different reason -- it
+    # means a linear acceleration of vz/t_launch (28-56 m/s^2 at t_launch
+    # 0.05-0.08) under a head-heavy body whose CoM sits ahead of the sole
+    # contact, which tips the robot over its toes. EVERY measured cell at
+    # t_launch 0.05-0.08 rotated forward, by -88 to -269 deg. This floor is why
+    # the sweep gate was answered with a LONGER flick, not a shorter one.
+    assert p["launch_range"][0] >= 0.16
+    # w0 has no useful floor of its own any more (the sweep cap does the
+    # binding), but a flick that imparts nothing is not a throw.
+    assert p["w0_range"][0] >= 3.0
 
 
 def test_the_pre_reset_state_is_coherent(cfg):
@@ -791,10 +826,14 @@ def test_there_is_no_hold_curriculum(cfg):
 
 
 def test_the_episode_fits_the_worst_case_hold(cfg):
-    # 5.0 s hold + 0.16 s flick + the MEASURED 0.88 s worst-case flight leaves
-    # 1.46 s to settle, which is what LANDING_WINDOW_S is sized against.
-    assert cfg.episode_length_s == pytest.approx(7.5)
-    settle = cfg.episode_length_s - HOLD_RANGE[1] - 0.16 - 0.88
+    # 5.0 s hold + the LONGEST flick + the MEASURED 0.88 s worst-case flight
+    # must still leave LANDING_WINDOW_S to settle, or the worst-case hold
+    # TRUNCATES the annuity and the landing goes back to being hold-dependent.
+    # Derived from LAUNCH_RANGE, not hardcoded: the flick has lengthened once
+    # already (0.16 -> 0.26 for the plate-sweep gate) and a hardcoded 0.16 let
+    # that change through silently.
+    assert cfg.episode_length_s == pytest.approx(7.6)
+    settle = cfg.episode_length_s - HOLD_RANGE[1] - LAUNCH_RANGE[1] - 0.88
     assert settle >= LANDING_WINDOW_S
     assert settle - LANDING_WINDOW_S < 0.2, (
         "the payout window should use nearly all of the worst case's "

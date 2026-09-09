@@ -7286,6 +7286,37 @@ BACKFLIP_PHASE_GONE = 2
 BACKFLIP_GONE_POS = (5.0, 5.0, 5.0)
 
 
+def backflip_plate_sweep_deg(w0: float, t_launch: float) -> float:
+    """Degrees of pitch the plate SWEEPS under the robot's feet during the flick.
+
+    THE QUANTITY NOBODY WAS WATCHING. The launch ramps the plate's pitch rate
+    from 0 to ``w0`` over ``t_launch`` at constant angular acceleration, so the
+    swept angle is the area under that ramp:
+
+        sweep = 0.5 * w0 * t_launch          [rad]
+
+    It is a pure function of the two knobs — no simulation needed, which is why
+    it belongs in the docstring of every box that quotes them.
+
+    WHY IT MATTERS. A hand tossing an object sweeps 30-40 deg: it imparts an
+    impulse and lets go. A surface that sweeps 90 deg under the feet is not a
+    hand, it is a catapult paddle levering the robot over — the feet cannot stay
+    on it, the rotation is transferred by TIPPING rather than by a push, and the
+    launch attitude is destroyed by the launch itself. The user described the
+    result as the robot "taking something like a force that makes it rotate".
+    A shipped box of ``w0`` 18-24 with ``t_launch`` 0.14-0.16 swept 72-110 deg.
+
+    THE TRADE THIS EXPOSES. For a given ``w0`` the only lever is a shorter
+    flick, and shortening it raises BOTH the angular acceleration
+    (``w0 / t_launch``) and the linear one (``vz / t_launch``) — which is what
+    makes a short flick land hard and, past some point, simply slip out from
+    under the soles. So ``t_launch`` cannot be trimmed on this formula alone;
+    every candidate has to be re-measured
+    (``scripts/backflip_envelope.py --box-check``).
+    """
+    return math.degrees(0.5 * w0 * t_launch)
+
+
 def backflip_plate_kinematics(
     t: torch.Tensor,
     t_hold: torch.Tensor,
@@ -7385,10 +7416,10 @@ def _backflip_state(env: ManagerBasedRlEnv) -> tuple:
         # feet"). They now describe a plausible mid-box toss instead.
         z = torch.zeros(env.num_envs, device=env.device)
         env._backflip_t_hold = torch.full_like(z, 1.0)
-        env._backflip_t_launch = torch.full_like(z, 0.15)
+        env._backflip_t_launch = torch.full_like(z, 0.24)
         env._backflip_z0 = torch.full_like(z, 0.02)
-        env._backflip_vz = torch.full_like(z, 2.5)
-        env._backflip_w0 = torch.full_like(z, 21.0)
+        env._backflip_vz = torch.full_like(z, 2.4)
+        env._backflip_w0 = torch.full_like(z, 5.5)
         env._backflip_accum = z.clone()
         env._backflip_max = z.clone()
         env._backflip_paid = z.clone()
@@ -7423,10 +7454,10 @@ def reset_backflip_launch_params(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
     hold_range: tuple = (1.0, 5.0),
-    launch_range: tuple = (0.14, 0.16),
+    launch_range: tuple = (0.22, 0.26),
     z0_range: tuple = (0.01, 0.03),
-    vz_range: tuple = (2.20, 2.80),
-    w0_range: tuple = (18.0, 24.0),
+    vz_range: tuple = (2.20, 2.60),
+    w0_range: tuple = (5.0, 6.0),
 ) -> None:
     """Sample this episode's toss and clear the rotation accounting.
 
