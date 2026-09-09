@@ -46,16 +46,43 @@ survive?
 > after the flop audit found the side-lying tuck outscoring the upright one.
 > See "**Flop audit, and two corrections**".
 
-> **CURRENT BOX — the final section, "The plate was a catapult":**
-> STANDING hold on a plate RESTING ON THE GROUND, `z0` in [0.01, 0.03],
+> **CURRENT BOX — the last two sections, "The plate was a catapult" and
+> "Standing still is the task":**
+> STANDING hold on a plate RESTING ON THE GROUND, **`z0` = 0.010 (a single
+> value, not a range — a suspended slab free-falls between rewrites)**,
 > `vz` in [2.20, 2.60], `w0` in [5, 6], `t_launch` in [0.22, 0.26], hold
-> 1-5 s uniform (no curriculum), episode 7.5 s, landing annuity over a fixed
-> 1.4 s window, launch-attitude gate on both task terms. **Plate sweep
-> 32-45 deg** — the new hard gate, alongside direction. Direction-verified
-> backward in every cell (8/8 corners orientation-checked); rotation
-> 198-309 deg; landing 2.37-3.58 m/s; apex 0.45-0.67 m; **0% close 360 deg
-> open-loop**, which is the measured cost of a hand-like sweep and is
-> explained in that section.
+> 1-5 s uniform (no curriculum), episode 7.6 s, landing annuity over a fixed
+> 1.4 s window, launch-attitude gate on both task terms, `ready_stance` at
+> weight **3.0** with a joint-pose factor. **Plate sweep 32-45 deg** — a hard
+> gate alongside direction. Direction-verified backward in every cell (8/8
+> corners orientation-checked); rotation 198-305 deg; landing 2.37-3.50 m/s;
+> apex 0.45-0.65 m; **0% close 360 deg open-loop**, which is the measured cost
+> of a hand-like sweep and is explained in that section.
+
+> **ACTUATOR PROVENANCE — READ BEFORE TRUSTING ANY TABLE ABOVE.**
+> `scripts/backflip_envelope.py` used to default to the scene XML's own
+> position servos (kp 0.386-0.55 N·m/rad), with BAM — the actuator TRAINING
+> uses — behind an opt-in `--bam`. Those servos deliver **9-30x less torque**
+> than BAM at a realistic 0.05-0.20 rad of tracking error, and a robot with
+> legs that soft absorbs the flick in its knees instead of transmitting it,
+> which contaminates rotation, apex, landing speed and the direction
+> boundaries. Measured open-loop drift from the standing spawn, same command,
+> same spawn: **BAM** tilts 4.8° / 8.8° / 13.6° / 26.0° at 0.3 / 0.5 / 0.7 /
+> 1.0 s and topples by 1.5 s; **XML PD** tilts 6.5° / 15.6° / 32.5° and has
+> already toppled by 1.0 s.
+> * **Every table above the "Standing-spawn re-measurement" section is XML PD**
+>   (they carry no `bam=` header because the flag did not exist yet) and is
+>   NOT representative of the trained dynamics. That includes the original
+>   459-cell sweeps, the "reversal" section and the box they recommended. The
+>   `w0 > 24-27 ⇒ forward` boundary quoted in later sections originated there;
+>   it is no longer load-bearing (`W0_RANGE` is 5-6) but it should not be
+>   re-used as a measurement.
+> * **Every table from that section onward carries `bam=True`**, except two
+>   deliberately-labelled `bam=False` settle controls (the `dt=0.002` rows).
+>   The settle numbers the tilt gate's 10/45° widths were derived from
+>   (3.5° at 0.3 s, 7.3° at 0.5, 11.6° at 0.7, 23.2° at 1.0) are BAM.
+> * The probe now **defaults to BAM**; `--xml-pd` opts out and `--bam` is
+>   accepted and ignored so the commands recorded here still run verbatim.
 
 > **Superseded box — "Gentler ejection":**
 > STANDING hold on a plate on the ground, `z0` in [0.01, 0.03], `vz` in
@@ -5672,3 +5699,198 @@ would make the landing hold-dependent again, the exact defect the fixed window
 exists to remove. 7.6 leaves 1.46 s. The cfg test now derives that slack from
 `LAUNCH_RANGE` instead of a hardcoded 0.16, because the hardcoded value is what
 let the lengthened flick through unnoticed.
+
+
+# Standing still is the task — the stance was underpaid by an invalid argument
+
+The user, after three waves of launch work: *"je veux juste qu'il reste
+immobile droit sur une plateforme immobile, ça m'a pas l'air d'être la tâche la
+plus dure au monde."* And separately: *"le robot tient droit presque sans rien
+faire et c'est simple de lui apprendre à rester droit."* Both are right, and
+the reward stack did not reflect either.
+
+## 1. The retracted ceiling
+
+`ready_stance` was capped at 1.0, then 1.10, by this argument: *a stance worth
+more than the landing annuity would make "stand still and never flip" the
+argmax.* **The argument is invalid.** `backflip_plate_step` is a `mode="step"`
+event — it fires on its prescribed schedule every control step on every env,
+with no dependence on the robot's state. There is no "never flip" strategy to
+farm, so there was never a ceiling. The only way to dodge the flick at all is
+to walk off the plate, and that pays nothing: the stance's height factor is
+measured against the plate top (the floor beside it is 12.5 cm down, ~4 sigma
+at `height_std` 0.03), the launch-attitude gate never latches a good posture,
+and the landing annuity is gated on a near-complete flip that never happens.
+
+The test that encoded the ceiling
+(`test_the_stance_never_outweighs_the_landing_at_any_hold`) has been **deleted**
+and replaced by two that encode the retraction and the fact it rests on
+(`test_the_stance_is_a_MAJOR_term_not_shaping`,
+`test_the_robot_cannot_decline_the_flip`, which asserts the event's
+`mode == "step"`).
+
+**Weight 1.10 -> 3.0.** Mass table (episode sums, dt-scaled; H = hold draw):
+
+| launch posture | flip | landing | ready_stance (H=1 / H=5) | total |
+|---|---|---|---|---|
+| upright | 8.0 | 5.6 | **3.0 / 15.0** | **16.6 / 28.6** |
+| collapsed, gate floor 0.30 | 2.4 | 1.68 | ~0 | 4.1 |
+| collapsed, gate floor 0.05 | 0.4 | 0.28 | ~0 | 0.7 |
+
+The hold is now co-equal with the flip (8.0) and above the annuity (5.6) at the
+median 3 s draw (9.0). Standing through the hold is worth **12.5 (H=1) to 24.5
+(H=5)** more than collapsing — the stance mass plus (1 - floor) of both gated
+terms. It was 1.1-5.5 for three waves, for the hardest sustained requirement in
+the task, because of an argument that could not survive reading the event's
+mode.
+
+## 2. "Immobile DROIT" — the pose factor, and why it is a factor
+
+`upright x height` says nothing about the joints: a robot sagging into a
+different configuration at the same trunk height and tilt scored identically.
+The term is now `window x height x upright x pose`, with
+
+```
+pose = exp(-mean((q - q_spawn)^2) / pose_std^2),   pose_std = 0.20
+```
+
+against `default_joint_pos` (HOME/STAND2) — exactly what `reset_robot_joints`
+scatters +-0.05 rad around. Measured, so the std comes from the error we care
+about rather than a guess:
+
+| configuration | rms err | pose @0.15 | **@0.20** | @0.25 |
+|---|---|---|---|---|
+| spawn scatter, mid draw | 0.035 | 0.946 | **0.970** | 0.980 |
+| spawn scatter, worst corner (all +0.05) | 0.050 | 0.895 | **0.939** | 0.961 |
+| 0.5 s of open-loop drift | 0.044 | 0.917 | **0.952** | 0.969 |
+| 1.0 s of open-loop drift | 0.086 | 0.721 | **0.832** | 0.889 |
+| both knees 0.3 rad off | 0.113 | 0.565 | **0.725** | 0.814 |
+| both legs sagged 0.3 rad (6 joints) | 0.196 | 0.180 | **0.381** | 0.539 |
+| half squat | 0.231 | 0.094 | **0.264** | 0.426 |
+| `HOLD_LERP` squat | 0.462 | 0.000 | **0.005** | 0.033 |
+| full tuck | 0.710 | 0.000 | **0.000** | 0.000 |
+
+0.20 leaves the spawn untaxed (0.94-0.97) and the currently-drifting policy
+visibly scoring (0.83-0.95) — AGENTS.md's rule for a multiplicative composite —
+while pricing a real sag.
+
+**It must never be an additive term of its own, and that is measured, not
+assumed.** Open loop from the standing spawn the joint error against HOME
+*falls* once the robot has toppled — rms 0.086 rad while still upright at 1.0 s
+against 0.056-0.076 rad lying on its side at 1.5-3.0 s — because a servo that
+is no longer fighting gravity sits closer to its command. The flop audit says
+the same for every basin:
+
+```
+ orientation   clr    tilt   drift  trunk_z    pose  height    pre  upright   TOTAL  on?
+   side_left 0.015    95.4   0.014    0.053   0.962   0.001  0.001    0.000   0.000  yes
+  side_right 0.025    95.4   0.014    0.053   0.962   0.001  0.001    0.000   0.000  yes
+   face_down 0.005    81.0   0.009    0.048   0.986   0.000  0.000    0.000   0.000  yes
+     on_back 0.015    91.0   0.007    0.062   0.898   0.003  0.002    0.000   0.000  yes
+    inverted 0.035    78.1   0.161    0.054   0.942   0.001  0.001    0.000   0.000  OFF
+  upright, HELD (0.1 s): pose=0.996 height=0.992 upright=1.000 TOTAL=0.988
+  best flop: pre(pose x height)=0.002 TOTAL=0.000
+  RESULT: PASS - the held pose wins (0.988 vs 0.000)
+```
+
+`pose` alone would pay **0.90-0.99 for lying down** — AGENTS.md's "never gate a
+positive reward on being in a bad state", and the same trap the tucked hold was
+caught farming. Inside the product, `height` (4 sigma out) and `upright`
+(78-95 deg of tilt) zero every one of them.
+
+The flop audit itself had to be fixed to be able to say this: its "upright"
+reference row settles open-loop for 3 s, and standing has no passive
+equilibrium, so the reference was a toppled robot scoring 0.000 and the verdict
+compared two failures. It now reports the **held** pose (0.1 s in), which is
+what the reward actually pays a policy that is doing the task.
+
+## 3. Is the platform static? Measured — and the answer was the opposite of the guess
+
+The plate is a 50 kg free body whose pose and velocity are rewritten by a
+`mode="step"` event **once per control step**, with 4 physics substeps in
+between. So the question is what it does during those 20 ms. `--plate-jitter`
+(new probe mode, mirroring the env's decimation):
+
+| z0 | plate dz | dpitch | vz | plate-floor contacts | sole force by substep | peak | robot vz std |
+|---|---|---|---|---|---|---|---|
+| **0.010** | **0.48 mm** | **0.0007** | **0.005** | 4-4 (steady) | 2.3 / 9.9 / 9.0 / 8.2 N | 11.1 N | **0.013** |
+| 0.015 | 2.51 mm | 0.007 | 0.200 | 0-0 | **15.7 / 8.3 / 3.8 / 1.1 N** | 18.0 N | 0.039 |
+| 0.020 | 2.51 mm | 0.007 | 0.200 | 0-0 | same | 18.0 N | 0.039 |
+| 0.030 | 2.51 mm | 0.007 | 0.200 | 0-0 | same | 18.0 N | 0.039 |
+
+At any `z0` above `PLATE_HALF_THICKNESS` the slab is suspended, so it **free
+falls** between rewrites — 2.51 mm and 0.20 m/s, which is exactly 0.5gT^2 and
+gT for T = 20 ms — and is then teleported back up into the soles. The sole
+force cycles 15.7 -> 1.1 N at 50 Hz, peaking at 18 N against the robot's 7.85 N
+weight: a hammer, twice body weight, fifty times a second. At `z0` = 0.010 the
+floor holds the slab and it is genuinely static (0.48 mm, 0.0007 deg, four
+steady contacts, a steady ~8.2 N under the soles).
+
+So the fix is the **opposite** of lifting `z0` by 5 mm: `Z0_RANGE` becomes the
+single value **0.010**. There is no operator variation to model — the ground
+sets the height — and the launcher's compiled default and the lazy `play`
+defaults moved with it. `_edges` now deduplicates, so `--box-check` reports 81
+distinct cells instead of 243 with two thirds repeated; re-run on the new box:
+sweep 32-45 deg PASS, direction PASS, rotation 198-305 deg, landing
+2.37-3.50 m/s.
+
+**The hammer was not what makes the robot fall, though.** The robot's own drift
+is the same in all four cases and on the bare floor (tilt 4.7-4.9 deg at 0.3 s,
+8.8-9.0 at 0.5, 26-29 at 1.0; horizontal drift 32-39 mm), which confirms the
+earlier finding: the plate is exonerated as the cause of the drift. It was
+still worth removing — the user asked for a static platform, and a 50 Hz hammer
+under the feet is noise injected into the one skill this wave is about.
+
+## 4. Which actuator each published table used, and what standing really costs
+
+The probe defaulted to the scene XML's own position servos (kp 0.386-0.55
+N.m/rad) with BAM opt-in. BAM's effective small-signal stiffness is
+`kt*kp_fw/R` ~ 26 N.m/rad, saturating its 0.96 N.m forcerange past 0.037 rad of
+error, so at a realistic 0.05-0.20 rad the XML PD delivers 0.02-0.11 N.m where
+BAM delivers 0.96 — **9-30x less torque**. Measured drift, same spawn, same
+command:
+
+| t | 0.3 s | 0.5 s | 0.7 s | 1.0 s | 1.5 s |
+|---|---|---|---|---|---|
+| **BAM** | 4.8 | 8.8 | 13.6 | 26.0 | 90.0 (toppled) |
+| **XML PD** | 6.5 | 15.6 | 32.5 | 88.4 (toppled) | 87.0 |
+
+Provenance verdict, checked by header: **every table above "Standing-spawn
+re-measurement" is XML PD** (no `bam=` header — the flag did not exist yet),
+and **everything from there on is `bam=True`** except two deliberately-labelled
+`bam=False` settle controls. So the settle numbers the 10/45 deg tilt gate was
+sized from (3.5 / 7.3 / 11.6 / 23.2 deg) are BAM and stand; the gate does not
+need tightening. The XML-PD-era claim that survived longest into later prose is
+the `w0 > 24-27 => forward` boundary; it is no longer load-bearing (`W0_RANGE`
+is 5-6) but it should not be re-used as a measurement. The probe now defaults
+to BAM (`--xml-pd` opts out, `--bam` accepted and ignored).
+
+**What standing costs, plainly.** With the command frozen at the ideal pose the
+robot is NOT in equilibrium under either actuator: it drifts monotonically and
+topples inside 1.0-1.5 s. So a motionless 1-5 s hold is **active balancing** —
+which is not the same as hard. The corrections needed are small (the drift is
+under 9 deg at 0.5 s and the pose factor still scores 0.95 there), this robot's
+walking and standup policies already do far more than this, and the user's
+judgement that it is easy to teach is consistent with everything measured here.
+What was missing was not difficulty, it was payment: 1.1-5.5 points for the
+skill, and no signal at all about the joints.
+
+**Defensible hold duration: keep 1-5 s.** Nothing measured argues for
+shortening it. The open-loop topple at 1.0-1.5 s is a statement about a frozen
+command, not about a policy; the stance now pays 3.0 per second held, so the
+gradient is strongest exactly where the current policy fails; and the landing
+annuity is already hold-independent, so a long draw no longer devalues the
+flip. If the next run shows `ready_stance` rising while `flip_progress` stalls,
+the thing to change is the stance's SHAPE or the launch gate's floor schedule —
+not the hold, which is the user's stated requirement and now the best-paid part
+of the episode. The one number to watch: at a 5 s hold the stance is 15.0
+against the flip's 8.0, so if the policy ever starts trading the flip for the
+hold, that ratio is where to look first.
+
+**One addition that makes the big stance weight safe.** A term paying 3.0 per
+second over a 1-5 s draw is 3.0-15.0 points the value function cannot predict:
+a static plate looks identical at t = 1 s and t = 4 s, and `plate_phase` only
+says "still holding", so the whole 5x spread would land in the advantage as
+noise. The critic now gets `hold_remaining` (seconds until the flick, 0 after
+it) — privileged information, critic-only, the same pattern as the plate state.
+The actor stays 61D and plate-blind.

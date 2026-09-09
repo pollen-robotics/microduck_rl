@@ -21,6 +21,8 @@ from mjlab_microduck.tasks.microduck_backflip_env_cfg import (
     LAUNCH_GATE_FLOOR,
     LAUNCH_GATE_FLOOR_FINAL,
     LAUNCH_RANGE,
+    POSE_STD,
+    READY_STANCE_WEIGHT,
     VZ_RANGE,
     W0_RANGE,
     MicroduckBackflipRlCfg,
@@ -471,18 +473,26 @@ def test_critic_plate_terms_are_the_gone_masked_ones(cfg):
     assert not any("plate" in name for name in cfg.observations["actor"].terms)
 
 
-def test_there_is_no_z0_dr_tail(cfg):
-    # The tail was removed, and both ends of the argument are measured
-    # (docs "Lower and gentler"): upward, whole-box landing speed crosses the
-    # ~2.6 m/s hardware limit between z0=0.21 and 0.225; downward, Z0_RANGE is
-    # floored at 0.07 by the hold pose's own geometry (the kneeling tuck's feet
-    # hang ~8 cm below the surface it rests on). A 2 cm range does not need a
-    # curriculum stage. If the hold posture changes, re-measure first.
+def test_the_plate_rests_on_the_floor_and_z0_is_not_dr(cfg):
+    # MEASURED, with --plate-jitter. The plate is a free body BETWEEN rewrites:
+    # the step event runs once per control step and the physics takes 4
+    # substeps in between. So any z0 that leaves the slab suspended puts it in
+    # free fall for 20 ms at a time -- at z0 >= 0.015 it drops 2.51 mm, reaches
+    # 0.20 m/s, and is teleported back up into the soles, cycling the sole
+    # force 15.0 -> 8.4 -> 4.2 -> 1.6 N at 50 Hz (peak 18.0 N against the
+    # robot's 7.85 N weight). At z0 = PLATE_HALF_THICKNESS the floor holds it:
+    # 0.48 mm of deviation, 0.0007 deg, |vz| 0.005 m/s, a steady 8.1 N under
+    # the soles. The user asked for "une plateforme immobile"; this is the line
+    # that makes it one, and there is no operator variation to model because
+    # the ground sets the height.
     assert "backflip_z0_range" not in cfg.curriculum
     assert cfg.events["backflip_launch_params"].params["z0_range"] == Z0_RANGE
-    # the slab rests ON the floor at the low end (z0 = PLATE_HALF_THICKNESS)
-    assert Z0_RANGE == (0.01, 0.03)
+    assert Z0_RANGE == (0.010, 0.010)
     assert Z0_RANGE[0] == pytest.approx(PLATE_HALF_THICKNESS)
+    assert Z0_RANGE[1] == pytest.approx(PLATE_HALF_THICKNESS), (
+        "a suspended slab free-falls between rewrites; re-run --plate-jitter "
+        "before widening this"
+    )
 
 
 def test_the_standing_box_is_a_plausible_human_throw(cfg):
@@ -492,13 +502,13 @@ def test_the_standing_box_is_a_plausible_human_throw(cfg):
     # no hand reproduces, and it is the wrong bar -- compensating for an
     # imperfect throw is the policy's job. Measured over 243 cells from the
     # floor-resting plate: sweep 32-45 deg, 0 cells rotate forward, rotation
-    # 198-309 deg, landing 2.37-3.58 m/s, apex 0.45-0.67 m, 0% open-loop
+    # 198-305 deg, landing 2.37-3.50 m/s, apex 0.45-0.65 m, 0% open-loop
     # closure -- see the ladder at the ranges for what closure would cost.
     p = cfg.events["backflip_launch_params"].params
     assert p["vz_range"] == VZ_RANGE == (2.20, 2.60)
     assert p["w0_range"] == W0_RANGE == (5.0, 6.0)
     assert p["launch_range"] == LAUNCH_RANGE == (0.22, 0.26)
-    assert p["z0_range"] == Z0_RANGE == (0.01, 0.03)
+    assert p["z0_range"] == Z0_RANGE == (0.010, 0.010)
 
 
 def test_the_plate_may_not_sweep_more_than_a_hand_does(cfg):
@@ -524,7 +534,7 @@ def test_the_plate_may_not_sweep_more_than_a_hand_does(cfg):
         "before widening this."
     )
     # and it must not be so small that no rotation is transferred at all --
-    # the measured box delivers 198-309 deg with this sweep.
+    # the measured box delivers 198-305 deg with this sweep.
     assert lo >= 20.0
     # the constants agree with the event params (one source of truth)
     assert microduck_mdp.backflip_plate_sweep_deg(
@@ -601,7 +611,8 @@ def test_the_default_launch_params_are_a_plausible_toss(cfg):
 
     env = _Env()
     microduck_mdp._backflip_state(env)
-    assert Z0_RANGE[0] <= float(env._backflip_z0[0]) <= Z0_RANGE[1]
+    # (float32: the buffer holds Z0_RANGE's value to ~1e-9, hence approx)
+    assert float(env._backflip_z0[0]) == pytest.approx(Z0_RANGE[0], abs=1e-6)
     assert VZ_RANGE[0] <= float(env._backflip_vz[0]) <= VZ_RANGE[1]
     assert W0_RANGE[0] <= float(env._backflip_w0[0]) <= W0_RANGE[1]
     assert LAUNCH_RANGE[0] <= float(env._backflip_t_launch[0]) <= LAUNCH_RANGE[1]
@@ -859,22 +870,62 @@ def test_the_landing_annuity_is_hold_independent(cfg):
     )
 
 
-def test_the_stance_never_outweighs_the_landing_at_any_hold(cfg):
-    # The ceiling on the stance weight comes from the LONGEST hold, where the
-    # stance is largest and the (now fixed) annuity is unchanged.
+def test_the_stance_is_a_MAJOR_term_not_shaping(cfg):
+    # THE RETRACTED CEILING. For three revisions this weight was capped (1.0,
+    # then 1.10) by the argument that a stance worth more than the landing
+    # annuity would make "stand still and never flip" the argmax. The argument
+    # is INVALID: the robot cannot decline to flip (see the test below), so
+    # there is no such strategy to farm. The test that encoded the ceiling has
+    # been deleted rather than loosened, and this one encodes the opposite --
+    # the hold is the hardest sustained requirement in the task and its mass
+    # has to say so.
     stance_w = cfg.rewards["ready_stance"].weight
+    flip_mass = cfg.rewards["flip_progress"].weight
     landing_mass = cfg.rewards["landing"].weight * LANDING_WINDOW_S
-    flip_w = cfg.rewards["flip_progress"].weight
-    for hold in (HOLD_RANGE[0], 0.5 * sum(HOLD_RANGE), HOLD_RANGE[1]):
-        stance_mass = 0.975 * stance_w * hold
-        assert landing_mass >= stance_mass, (
-            f"at a {hold}s hold the stance ({stance_mass:.2f}) outweighs the "
-            f"landing annuity ({landing_mass:.2f})"
-        )
-        # never flipping must never beat flipping and landing
-        assert stance_mass < flip_w + landing_mass
-    # and the hold must be long enough that the term is worth defending at all
-    assert 0.975 * stance_w * HOLD_RANGE[0] >= 1.0
+    median_hold = 0.5 * sum(HOLD_RANGE)
+    stance_mass = stance_w * median_hold
+
+    assert stance_w == READY_STANCE_WEIGHT == 3.0
+    # co-equal with the flip at the median draw, not a rounding error
+    assert stance_mass >= 0.75 * flip_mass, (
+        f"stance mass {stance_mass:.2f} at the median {median_hold}s hold is "
+        f"not comparable to the flip's {flip_mass:.2f}"
+    )
+    # and it is allowed to exceed the annuity at a long hold -- that is the
+    # retraction, stated as an assertion so reinstating the cap fails here
+    assert stance_w * HOLD_RANGE[1] > landing_mass
+    # but not so large that the flip stops mattering at the SHORTEST hold
+    assert stance_w * HOLD_RANGE[0] < flip_mass + landing_mass
+
+
+def test_the_robot_cannot_decline_the_flip(cfg):
+    # This is the fact that invalidates the retracted ceiling, so it is pinned:
+    # the plate fires on a PRESCRIBED schedule, as a mode="step" event that
+    # runs every control step on every env, with no dependence on the robot's
+    # state. There is no "never flip" strategy to farm, so a large stance
+    # weight cannot buy one.
+    assert cfg.events["backflip_plate"].mode == "step"
+    # ... and the only way to dodge the flick -- walking off the plate -- pays
+    # nothing: the stance's height factor is measured against the plate top, so
+    # standing on the floor beside it is ~3 sigma out.
+    stance = cfg.rewards["ready_stance"].params
+    off_plate_err = PLATE_HALF_THICKNESS + STAND_Z  # trunk drops by this much
+    assert off_plate_err > 3.0 * stance["height_std"]
+
+
+def test_the_stance_prices_the_joints_not_just_the_trunk(cfg):
+    # "immobile DROIT". upright x height say nothing about the joints: a robot
+    # sagging into a different leg configuration at the same trunk height and
+    # tilt scored identically before the pose factor existed.
+    stance = cfg.rewards["ready_stance"].params
+    assert stance["pose_std"] == POSE_STD == 0.20
+    # Wide enough that the SPAWN is not taxed (reset_robot_joints scatters
+    # +-0.05 rad) and that the current, drifting policy scores visibly --
+    # AGENTS.md's rule for multiplicative composites.
+    assert math.exp(-(0.05**2) / POSE_STD**2) > 0.9
+    # ... and tight enough to price a real sag: 6 leg joints 0.3 rad off is a
+    # mean squared error of 6*0.09/14.
+    assert math.exp(-(6 * 0.09 / 14) / POSE_STD**2) < 0.5
 
 
 def test_the_stance_prices_a_LEAN_not_just_a_topple(cfg):
@@ -1058,3 +1109,19 @@ def test_the_play_cfg_ships_the_final_launch_gate_floor():
         assert play.rewards[term].params["launch_gate_floor"] == pytest.approx(
             LAUNCH_GATE_FLOOR_FINAL
         )
+
+
+def test_hold_remaining_goes_to_the_critic_only(cfg):
+    # Privileged information: the real robot cannot know when the hands will
+    # move. It earns its place because ready_stance now pays per second of a
+    # 1-5 s hold (3.0-15.0 points on an unobservable draw), and `plate_phase`
+    # only says "still holding".
+    assert "hold_remaining" in cfg.observations["critic"].terms
+    assert "hold_remaining" not in cfg.observations["actor"].terms
+    assert (
+        cfg.observations["critic"].terms["hold_remaining"].func
+        is microduck_mdp.backflip_hold_remaining_obs
+    )
+    # the actor's plate-blindness is unchanged
+    for term in cfg.observations["actor"].terms:
+        assert "plate" not in term and "hold" not in term

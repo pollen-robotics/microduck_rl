@@ -10,7 +10,10 @@
              friction: high sliding friction so the pitch flick actually
              transfers backspin through the soles instead of slipping.
 
-             pos z = 0.02 is the MIDDLE of Z0_RANGE, not a placeholder. It is
+             pos z = 0.01 IS Z0_RANGE (a single value: PLATE_HALF_THICKNESS,
+             so the slab rests exactly on the floor -- a suspended plate is a
+             free body between the step event's rewrites and free-falls 2.5 mm
+             per control step into the soles; measured with --plate-jitter). It is
              the state the scene compiles to, and mjlab does NOT reset before
              the viewer's first episode (ManagerBasedRlEnv.__init__ never
              resets; mjlab/viewer/base.py only calls env.reset() on the RESET
@@ -19,7 +22,7 @@
              compiled trunk height (0.12) and intersected its BODY, which is
              exactly what a user reported as "the plate is stuck in the middle
              of the robot, not under its feet". Keep it inside Z0_RANGE. -->
-        <body name="plate" pos="0 0 0.02">
+        <body name="plate" pos="0 0 0.01">
             <freejoint name="plate_free"/>
             <inertial pos="0 0 0" mass="50.0" diaginertia="0.5 0.5 1.0"/>
             <geom type="box" name="plate_geom" size="0.09 0.09 0.01"

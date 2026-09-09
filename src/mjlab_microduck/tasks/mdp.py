@@ -7417,7 +7417,7 @@ def _backflip_state(env: ManagerBasedRlEnv) -> tuple:
         z = torch.zeros(env.num_envs, device=env.device)
         env._backflip_t_hold = torch.full_like(z, 1.0)
         env._backflip_t_launch = torch.full_like(z, 0.24)
-        env._backflip_z0 = torch.full_like(z, 0.02)
+        env._backflip_z0 = torch.full_like(z, 0.01)
         env._backflip_vz = torch.full_like(z, 2.4)
         env._backflip_w0 = torch.full_like(z, 5.5)
         env._backflip_accum = z.clone()
@@ -7455,7 +7455,7 @@ def reset_backflip_launch_params(
     env_ids: torch.Tensor,
     hold_range: tuple = (1.0, 5.0),
     launch_range: tuple = (0.22, 0.26),
-    z0_range: tuple = (0.01, 0.03),
+    z0_range: tuple = (0.010, 0.010),
     vz_range: tuple = (2.20, 2.60),
     w0_range: tuple = (5.0, 6.0),
 ) -> None:
@@ -7831,18 +7831,45 @@ def backflip_ready_stance(
     height_std: float = 0.03,
     tilt_full_deg: float = 40.0,
     tilt_zero_deg: float = 70.0,
+    pose_std: float = 0.20,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Pay for STANDING STILL on the operator's hands. HOLD phase only.
+    """Pay for STANDING STILL AND STRAIGHT on the operator's hands. HOLD only.
 
-    ``upright x height``, gated by the HOLD window:
+    The user's own statement of the task: *"je veux juste qu'il reste immobile
+    droit sur une plateforme immobile"*. This is the term that pays for that,
+    and it is a MAJOR term, not shaping — see the retraction below.
+
+    ``window x height x upright x pose``:
       * ``height`` — exp on trunk z against ``z0 + stand_z`` (the caller passes
         ``STAND_Z + PLATE_HALF_THICKNESS``, because the robot stands on the
         plate's TOP surface while the term measures against its centre ``z0``).
-      * ``upright`` — smoothstep on trunk TILT: 1 below ``tilt_full_deg`` (40
-        deg), 0 above ``tilt_zero_deg`` (70). WIDE on purpose: it costs exactly
-        zero for a robot that is actually standing, and hard-zeroes every
-        lying-down basin.
+        Also what prices stepping OFF the plate: the floor beside it is ~3
+        sigma down.
+      * ``upright`` — smoothstep on trunk TILT, 1 below ``tilt_full_deg``,
+        0 above ``tilt_zero_deg``.
+      * ``pose`` — Gaussian on the MEAN SQUARED joint error against the spawn
+        pose (``default_joint_pos``, i.e. HOME/STAND2, which is exactly what
+        ``reset_robot_joints`` scatters +-0.05 rad around). "Droit" is a
+        statement about the JOINTS, and the other two factors say nothing about
+        them: a robot sagging into a different leg configuration at the same
+        trunk height and tilt scored identically before this factor existed.
+        MEASURED at ``pose_std`` 0.20: the worst spawn-scatter corner scores
+        0.94 and a mid draw 0.97 (so the spawn is not taxed), 1 s of open-loop
+        drift 0.83, both knees 0.3 rad off 0.73, both legs sagged 0.3 rad
+        (6 joints) 0.38, a half squat 0.26, the HOLD_LERP squat 0.005 and a
+        full tuck 0.000.
+
+    IT IS A FACTOR, NOT A SEPARATE ADDITIVE TERM, AND THAT IS MEASURED.
+    Open-loop from the standing spawn, the robot's joint error against HOME
+    *falls* once it has TOPPLED — rms 0.086 rad while still upright at 1.0 s,
+    0.056-0.076 rad lying on its side at 1.5-3.0 s — because a servo that is no
+    longer fighting gravity sits closer to its command. An additive pose term
+    would therefore pay MORE for lying down than for standing: exactly the
+    "positive reward for being in a bad state" trap in AGENTS.md, and the same
+    shape as the flop that the tucked hold was caught farming. Inside the
+    product it is safe, because ``height`` (2.8 sigma out) and ``upright``
+    (86 deg of tilt) both collapse for that basin. Never split it out.
 
     DO NOT DROP THE UPRIGHT FACTOR. It was dropped once, when the hold posture
     was briefly a tuck, on the reasoning that a tight upright term would fight
@@ -7852,18 +7879,42 @@ def backflip_ready_stance(
     costing less ``action_rate`` — outscored the intended pose. The flop audit
     that proves it is a probe mode (``--flop-audit``) and a test.
 
-    WHY THIS IS NOT THE "positive reward for being in a bad state" TRAP that
-    AGENTS.md warns about:
+    RETRACTED: THE "IT MUST STAY SMALLER THAN THE LANDING" CEILING.
+    For three revisions this term was capped (1.0, then 1.10) by the argument
+    that a stance worth more than the landing annuity would make "stand still
+    and never flip" the argmax. **That argument is invalid, and it blocked the
+    obvious fix.** The robot cannot decline to flip: ``backflip_plate_step`` is
+    a ``mode="step"`` event that fires on its prescribed schedule whatever the
+    policy does, so there is no "never flip" strategy to farm. The only way to
+    dodge the launch at all is to walk off the plate, and that pays nothing —
+    ``height`` collapses on the floor beside the plate, the launch-attitude
+    gate never latches a good posture, and the landing annuity is gated on a
+    near-complete flip that never happens. So there was never a ceiling here.
+    Do not reinstate one; if you think you have found a reason, check first
+    whether it requires the robot to be able to REFUSE the flick.
+
+    What remains true, and is the reason this is still a bounded term:
       1. Standing on the launcher is the GOOD state — it is the launch posture
-         the envelope is measured from, and the pose the operator actually
-         hands the robot over in.
+         the envelope is measured from, and the pose the operator hands the
+         robot over in.
       2. It cannot be camped. The payout is multiplied by
          ``backflip_hold_window``, which the plate's PRESCRIBED schedule closes
          at ``t_hold`` regardless of what the policy does. No action extends
          the paying window.
-      3. It is small: episode-summed at most ~0.5 (weight x the longest hold)
-         against the flip's 8.0 and the landing's ~8.0.
-      4. It dies at launch, so it can never oppose the flip itself.
+      3. It dies at launch, so it can never oppose the flip itself, and it
+         cannot make the robot reluctant to tuck WHEN the tuck matters.
+    The residual risk is mild shaping: a policy could optimise the hold into a
+    posture it cannot tuck out of fast enough. That is a training observation
+    to watch (``flip_progress`` falling while ``ready_stance`` rises), not a
+    failure mode to pre-emptively weight against.
+
+    WHY IT HAD TO BE A MAJOR TERM. A motionless 1-5 s hold on this robot is
+    ACTIVE BALANCING, measured: with the ideal command frozen, trunk tilt runs
+    3.5 deg at 0.3 s, 7.3 at 0.5, 11.6 at 0.7, 23.2 at 1.0 and it has toppled
+    by 1.5 s — identically on the bare floor, so it is the pose, not the
+    launcher. At the old 1.10 the whole skill was worth 1.1-5.5 against the
+    flip's 8.0 and the annuity's 5.6, i.e. the task's third-smallest positive
+    term for its hardest sustained requirement.
     """
     asset: Entity = env.scene[asset_cfg.name]
     z_err = (
@@ -7876,7 +7927,28 @@ def backflip_ready_stance(
         tilt_full_deg,
         tilt_zero_deg,
     )
-    return backflip_hold_window(env) * height * upright
+    joint_err = _servo_joint_pos(env, asset) - _servo_default_joint_pos(env, asset)
+    pose = torch.exp(
+        -torch.nan_to_num(joint_err, nan=1.0).pow(2).mean(dim=-1) / pose_std**2
+    )
+    return backflip_hold_window(env) * height * upright * pose
+
+
+def backflip_hold_remaining_obs(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """CRITIC-ONLY: seconds of HOLD left before the flick, 0 once it has fired.
+
+    Never put this in the actor group — the real robot has no launcher sensing
+    and cannot know when the hands will move. The CRITIC may have it, and with
+    ``ready_stance`` now paying per second of holding it should: the hold is
+    drawn uniformly 1-5 s and the stance term is worth 3-15 points depending on
+    that draw, so without this the value function faces a 5x spread it has no
+    way to predict, and the whole difference lands in the advantage as noise.
+    The plate obs cannot substitute — a static plate looks the same at t=1 s
+    and t=4 s.
+    """
+    _backflip_state(env)
+    remaining = torch.clamp(env._backflip_t_hold - _backflip_time(env), min=0.0)
+    return _finite(remaining.unsqueeze(-1))
 
 
 def _backflip_landing_window(env: ManagerBasedRlEnv, window_s: float) -> torch.Tensor:

@@ -1364,5 +1364,114 @@ def test_the_lazy_play_defaults_are_inside_the_shipped_box():
     assert 0.22 <= t_launch <= 0.26
     assert 5.0 <= w0 <= 6.0
     assert 2.20 <= float(env._backflip_vz[0]) <= 2.60
-    assert 0.01 <= float(env._backflip_z0[0]) <= 0.03
+    assert float(env._backflip_z0[0]) == pytest.approx(0.01, abs=1e-6)
     assert microduck_mdp.backflip_plate_sweep_deg(w0, t_launch) <= 45.0
+
+
+# --- "immobile DROIT": the pose factor, and why it is a FACTOR. -------------
+#
+# The user's statement of the whole task: "je veux juste qu'il reste immobile
+# droit sur une plateforme immobile". upright x height says nothing about the
+# joints, so this adds a Gaussian on the joint error against the spawn pose --
+# but only ever as a factor, for the reason the first test below measures.
+
+
+def _pose_env(z0=0.01, hold=3.0):
+    env = _FakeEnvWithScene(num_envs=1)
+    microduck_mdp.reset_backflip_launch_params(
+        env, torch.arange(1), hold_range=(hold, hold), launch_range=(0.24, 0.24),
+        z0_range=(z0, z0), vz_range=(2.4, 2.4), w0_range=(5.5, 5.5),
+    )
+    env.episode_length_buf[:] = 0          # HOLD
+    return env
+
+
+def _stance_of(env, trunk_z, tilt_deg=0.0, joint_offset=None):
+    env.robot.data.root_link_pos_w[:, 2] = trunk_z
+    half = math.radians(tilt_deg) * 0.5
+    env.robot.data.root_link_quat_w = torch.tensor(
+        [[math.cos(half), 0.0, math.sin(half), 0.0]]
+    )
+    env.robot.data.joint_pos = env.robot.data.default_joint_pos.clone()
+    if joint_offset is not None:
+        env.robot.data.joint_pos += joint_offset
+    return float(
+        microduck_mdp.backflip_ready_stance(
+            env, stand_z=_STAND_Z + _PHT, height_std=0.03,
+            tilt_full_deg=10.0, tilt_zero_deg=45.0, pose_std=0.20,
+        )[0]
+    )
+
+
+def test_a_standalone_pose_term_would_pay_for_FLOPPING():
+    # THE MEASUREMENT THAT DECIDES THE SHAPE. Open loop from the standing
+    # spawn, the joint error against HOME is LOWER once the robot has toppled
+    # (rms 0.056-0.076 rad lying down against 0.086 rad still upright at 1.0 s)
+    # because a servo that is no longer fighting gravity sits closer to its
+    # command; --flop-audit measures pose 0.90-0.99 for every flop basin. An
+    # additive pose term would therefore pay MORE for lying down -- AGENTS.md's
+    # "never gate a positive reward on being in a bad state". Inside the
+    # product it is safe.
+    env = _pose_env()
+    on_plate = 0.01 + _PHT + _STAND_Z
+
+    # a flop: joints CLOSER to the command than the loaded standing pose
+    flopped = _stance_of(env, 0.053, tilt_deg=95.0, joint_offset=torch.full((1, 14), 0.02))
+    held = _stance_of(env, on_plate, tilt_deg=0.0, joint_offset=torch.full((1, 14), 0.06))
+    assert flopped == 0.0, "height x upright must zero every flop basin"
+    assert held > 0.8, "a held pose with realistic scatter must still score"
+
+    # and the pose factor ALONE is what would have inverted it
+    err_flop, err_held = 0.02, 0.06
+    assert math.exp(-(err_flop**2) / 0.20**2) > math.exp(-(err_held**2) / 0.20**2)
+
+
+def test_the_stance_prices_a_sag_the_trunk_factors_cannot_see():
+    # The point of the factor: same trunk height, same tilt, different
+    # configuration. Before it, these two scored identically.
+    env = _pose_env()
+    on_plate = 0.01 + _PHT + _STAND_Z
+    straight = _stance_of(env, on_plate, joint_offset=None)
+    sag = torch.zeros(1, 14)
+    sag[0, [2, 3, 4, 11, 12, 13]] = 0.3          # both legs, 0.3 rad
+    sagged = _stance_of(env, on_plate, joint_offset=sag)
+    assert straight > 0.99
+    assert sagged < 0.5 * straight
+    # and the spawn's own +-0.05 rad scatter is NOT taxed
+    scattered = _stance_of(env, on_plate, joint_offset=torch.full((1, 14), 0.05))
+    assert scattered > 0.9 * straight
+
+
+def test_the_stance_still_dies_at_launch_with_the_pose_factor():
+    # It must not fight the tuck: the hold window closes at t_hold.
+    env = _pose_env(hold=0.3)
+    on_plate = 0.01 + _PHT + _STAND_Z
+    assert _stance_of(env, on_plate) > 0.99
+    env.episode_length_buf[:] = int(round(0.3 / env.step_dt)) + 1
+    assert _stance_of(env, on_plate) == 0.0
+
+
+# --- The critic's hold-remaining scalar. ------------------------------------
+
+
+def test_hold_remaining_counts_down_and_is_zero_after_the_flick():
+    # ready_stance pays per second of a 1-5 s hold, i.e. 3.0-15.0 points on a
+    # draw the value function cannot otherwise see (a static plate looks the
+    # same at t=1 s and t=4 s). Critic-only privileged info.
+    env = _FakeEnvWithScene(num_envs=1)
+    microduck_mdp.reset_backflip_launch_params(
+        env, torch.arange(1), hold_range=(2.0, 2.0), launch_range=(0.24, 0.24),
+        z0_range=(0.01, 0.01), vz_range=(2.4, 2.4), w0_range=(5.5, 5.5),
+    )
+    seen = []
+    for step in (0, 25, 50, 75, 99, 100, 200):
+        env.episode_length_buf[:] = step
+        obs = microduck_mdp.backflip_hold_remaining_obs(env)
+        assert obs.shape == (1, 1)
+        assert torch.isfinite(obs).all()
+        seen.append(float(obs[0, 0]))
+    assert seen[0] == pytest.approx(2.0)
+    assert seen[1] == pytest.approx(1.5)
+    assert seen[3] == pytest.approx(0.5)
+    assert seen[-1] == 0.0, "it must not go negative once the flick has fired"
+    assert seen == sorted(seen, reverse=True)

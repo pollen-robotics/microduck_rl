@@ -32,9 +32,40 @@ showed, and what answers each:
     close 360 deg open-loop at any landing speed the user would accept, so
     open-loop closure is now 0% and the last 50-160 deg has to come from the
     policy's tuck.
+  * And then the user restated the actual ask: "je veux juste qu'il reste
+    immobile droit sur une plateforme immobile" — stand still and straight on a
+    static platform. Three things were wrong with how that was paid for.
+    (a) ``ready_stance`` was capped at 1.10 by an INVALID argument (that a
+    stance worth more than the landing annuity would make "stand still and
+    never flip" the argmax — impossible, since the plate fires on a prescribed
+    schedule and the robot cannot decline to flip). Retracted; the weight is
+    now 3.0, i.e. 3-15 points across the hold draw, a co-equal major term.
+    (b) The term said nothing about the JOINTS, so a robot sagging into a
+    different configuration at the same trunk height scored the same. It now
+    carries a pose factor against the spawn pose — as a FACTOR, never an
+    additive term, because measured open-loop the joint error against HOME is
+    LOWER once the robot has toppled. (c) The platform was not static: at any
+    ``z0`` above PLATE_HALF_THICKNESS the plate free-falls 2.5 mm per control
+    step between the step event's rewrites and hammers the soles at 50 Hz
+    (measured, ``--plate-jitter``), so ``Z0_RANGE`` is now the single value
+    that rests the slab on the floor.
+
 Everything above is measured on CPU MuJoCo with BAM actuators and recorded in
 docs/backflip_envelope_results.md, which is append-only: it contains the
 superseded boxes too, and its header names the one that is current.
+
+ACTUATORS, AND A PROBE DEFAULT THAT MISLED THIS BRANCH TWICE. Training uses
+BAM (voltage-controlled XL330). The scene XML's own position servos are
+kp 0.386-0.55 N.m/rad, which at a realistic 0.05-0.20 rad of tracking error
+deliver 9-30x LESS torque than BAM does, and a robot with legs that soft
+absorbs the flick in its knees instead of transmitting it. Measured open-loop
+drift from the standing spawn, same command: BAM tilts 4.8 / 8.8 / 13.6 /
+26.0 deg at 0.3 / 0.5 / 0.7 / 1.0 s; the XML PD tilts 6.5 / 15.6 / 32.5 and has
+toppled by 1.0 s. ``scripts/backflip_envelope.py`` therefore defaults to BAM
+now (``--xml-pd`` opts out, ``--bam`` is accepted and ignored), and every table
+in the results doc above its "Standing-spawn re-measurement" section — which is
+all of them measured on the XML PD — is marked there as not representative of
+the trained dynamics.
 
 WHY THE PLATE SITS ON THE GROUND NOW. An earlier revision floored Z0_RANGE at
 0.07 m because the then-current KNEELING tuck rested on its shins with its feet
@@ -85,8 +116,9 @@ standing spawn with the plate on the ground, with BAM actuators
        column.
 
   OPEN-LOOP CLOSURE IS INFORMATION, NOT A BAR — and it is now 0%. The box
-  rotates 198-309 deg with a full tuck held from the flick, landing at
-  2.37-3.58 m/s. That is arithmetic, not tuning: the sweep cap forces
+  rotates 198-305 deg with a full tuck held from the flick, landing at
+  2.37-3.50 m/s (81 cells, z0 being a single value now). That is arithmetic,
+  not tuning: the sweep cap forces
   w0 <= 1.571 / t_launch, the forward-tip limit forces t_launch >= ~0.16 s, so
   w0 <= ~9.8 rad/s; the robot leaves at roughly the plate's final rate, so
   closing 2*pi needs >= 0.64 s of airtime, i.e. vz >= ~3.1 m/s, i.e. a
@@ -98,8 +130,8 @@ standing spawn with the plate on the ground, with BAM actuators
 
 HARDWARE CONSTRAINT (the user's): landings above roughly 2.6 m/s — about a
 34 cm free fall — risk damaging the real duck. The current box lands at
-2.37-3.58 m/s, with 49 of its 243 sampled cells under the threshold. The apex
-is 0.45-0.67 m. Both are set by ``vz``, which is also the only remaining lever
+2.37-3.50 m/s, with 23 of its 81 sampled cells under the threshold. The apex
+is 0.45-0.65 m. Both are set by ``vz``, which is also the only remaining lever
 on rotation now that the sweep is capped — the trade is written out at
 VZ_RANGE. The same
 concern is why the |a_z| impact penalty starts at 2x the roulade weight and
@@ -149,42 +181,50 @@ DESIGN CHOICES AND WHERE THEY CAME FROM
     and it is a pure motion-blocker on the one thing the maneuver is made of.
     Anti-violence pressure lives on |a_z|, action_rate and the landing's
     settle factor instead.
-  * REWARD MASS, WITH THE LAUNCH-ATTITUDE GATE (episode sums, dt-scaled —
-    AGENTS.md: compare mass, not weight). The hold H is sampled uniformly
-    1-5 s, the landing annuity pays over a fixed 1.4 s window, and BOTH
-    flip_progress and landing are multiplied by the gate latched at the flick
-    (``mdp._backflip_launch_gate``), which is 1.0 for an upright launch and
+  * REWARD MASS (episode sums, dt-scaled — AGENTS.md: compare mass, not
+    weight). The hold H is drawn uniformly 1-5 s, the landing annuity pays over
+    a fixed 1.4 s window, and BOTH flip_progress and landing are multiplied by
+    the launch-attitude gate latched at the flick
+    (``mdp._backflip_launch_gate``), 1.0 for an upright launch and
     ``LAUNCH_GATE_FLOOR`` for a collapsed one:
 
-      launch posture   flip   landing   ready_stance (H=1 / H=5)   TOTAL
-      upright          8.0     5.6      1.07 / 5.36               14.7 / 19.0
-      collapsed        2.4     1.68     ~0                         4.1
-      (floor 0.3)
-      collapsed        0.4     0.28     ~0                         0.7
-      (floor 0.05, after the curriculum)
+      launch posture      flip   landing   ready_stance (H=1 / H=5)   TOTAL
+      upright              8.0     5.6      3.0 / 15.0             16.6 / 28.6
+      collapsed (0.3)      2.4     1.68     ~0                       4.1
+      collapsed (0.05)     0.4     0.28     ~0                       0.7
 
-    THIS IS THE POINT. Before the gate, a collapsed robot still got flicked,
-    still accumulated rotation and still collected the annuity — 13.6 of the
-    14.7 — and forfeited only ready_stance's 1.07-5.36. And a lower, more
-    compact body rotates MORE at the same flick (measured), so collapsing was
-    not merely free, it was slightly PROFITABLE. The user reported it three
-    times, and two rounds of tuning ready_stance could not fix it because that
-    term is capped by the annuity's ceiling. Standing is now worth 10.6-14.9
-    points instead of 1.07-5.36, and the gate is what prices it: ready_stance
-    is shaping for the gate, not the thing pricing the hold.
+    READY_STANCE IS 3.0, NOT 1.10, AND THE OLD CEILING IS RETRACTED. For three
+    revisions this weight was capped by "a stance worth more than the landing
+    annuity makes 'stand still and never flip' the argmax". That argument is
+    INVALID: ``backflip_plate_step`` is a ``mode="step"`` event, so the plate
+    fires on its prescribed schedule whatever the policy does — the robot
+    cannot decline to flip, and there is no such strategy to farm. The only way
+    to dodge the flick is to walk off the plate, which pays nothing (the
+    stance's height factor collapses on the floor beside it, the attitude gate
+    never latches a good posture, and the annuity is gated on a flip that never
+    happens). The invalid ceiling is what kept the hold at 7-28% of the stack
+    for three waves while the user reported the same collapse three times.
 
-    THE ACCEPTANCE STATEMENT, checked at every hold draw:
-      1. Collapsing during the hold costs far more than the rotation it buys.
-         It forfeits (1 - floor) of BOTH main terms — 9.5 points at floor 0.3,
-         12.9 at floor 0.05 — plus the stance mass. The extra rotation a
-         compact body buys cannot pay for that, and flip_progress caps at one
-         turn anyway.
-      2. Flipping and landing still beats never flipping, at every draw: an
-         upright launch adds 13.6 on top of the stance, and even a collapsed
-         one adds 4.1 rather than nothing (the floor is what keeps discovery
-         alive).
-      3. `landing` stays the dominant attractor at every draw: 5.6 against
-         ready_stance's maximum of 5.36.
+    So the hold is now a co-equal major term: 3.0-15.0 against the flip's 8.0
+    and the annuity's 5.6, median 9.0. Standing upright through the hold is
+    worth 12.5 (H=1) to 24.5 (H=5) more than collapsing into the plate — the
+    stance mass plus the (1 - floor) of both gated terms.
+
+    THE ACCEPTANCE STATEMENT, at both ends of the hold draw:
+      1. Collapsing is heavily unprofitable: it forfeits the stance mass AND
+         9.5 points of gated flip+landing at floor 0.3 (12.9 at 0.05). The
+         extra rotation a compact body buys cannot pay for that, and
+         flip_progress caps at one turn anyway.
+      2. Flipping still beats not flipping at every draw — an upright launch
+         adds 13.6 on top of the stance, and a collapsed one still adds 4.1
+         (the floor is what keeps flip discovery alive).
+      3. Nothing rewards being in a bad state. `pose` is a FACTOR of
+         ready_stance, never an additive term: measured open loop, the joint
+         error against HOME is LOWER after the robot has toppled than while it
+         is still upright and loaded (rms 0.056-0.076 vs 0.086 rad), and every
+         flop basin scores pose 0.90-0.99 — inside the product, height and
+         upright zero all of them (measured: held pose 0.988, best flop 0.000,
+         `--flop-audit`).
   * The landing annuity (weight 4.0) is gated on a near-complete flip (300-345
     deg): "stand still and never flip" satisfies feet/upright/height/calm
     trivially, and without the gate it is the argmax. It pays over a FIXED
@@ -288,7 +328,7 @@ IMU_ORIENTATION_RANDOMIZATION_ANGLE = 6.0
 # uniformly from step 0) + launch ramp (<= 0.26 s, the flick is LONG now — see
 # LAUNCH_RANGE and the plate-sweep gate) + the airborne window (0.88 s is kept
 # as a CONSERVATIVE bound; it was measured when vz reached 4.0, and the current
-# apex of 0.45-0.67 m flies for ~0.55-0.75 s) + settle. 7.5 -> 7.6 s when the
+# apex of 0.45-0.65 m flies for ~0.55-0.75 s) + settle. 7.5 -> 7.6 s when the
 # flick lengthened to 0.26 s: the worst case must leave at least the full
 # LANDING_WINDOW_S to settle, or a long hold would TRUNCATE the annuity and
 # make the landing hold-dependent again — the exact defect the fixed window
@@ -465,7 +505,7 @@ PLATE_HALF_THICKNESS = 0.01
 #     2.2-2.8   18-24   0.14-0.16   72-110 X    98-442     1.78-3.65    27%
 #     2.2-2.8   4-7     0.18-0.22   21-44       163-355    2.36-3.95     0%
 #     2.2-2.6   4-6     0.20-0.26   23-45       156-310    2.39-3.58     0%
-#     2.2-2.6   5-6     0.22-0.26   32-45       198-309    2.37-3.58     0%  <- here
+#     2.2-2.6   5-6     0.22-0.26   32-45       198-305    2.37-3.50     0%  <- here
 #     3.0-3.6   5-6     0.22-0.26   32-45       261-453    3.73-4.88    29%
 # The first row is the SHIPPED-AND-WITHDRAWN box: it fails the sweep gate in
 # every one of its 243 cells. The last row is what buying closure back costs.
@@ -501,15 +541,30 @@ LAUNCH_RANGE  = (0.22, 0.26)   # how long the hands stay with the robot, and
                                # flick raises vz/t_launch enough to tip the
                                # robot FORWARD over its toes (measured: every
                                # cell at t_launch <= 0.08 comes out forward).
-Z0_RANGE      = (0.01, 0.03)   # plate CENTRE. 0.01 = PLATE_HALF_THICKNESS, so
-                               # the slab rests exactly on the floor; the DR
-                               # spread is operator variation. Standing's
-                               # lowest geoms ARE the feet, so the plate can
-                               # sit on the ground and a test asserts nothing
-                               # tunnels.
+Z0_RANGE      = (0.010, 0.010)  # plate CENTRE = PLATE_HALF_THICKNESS, so the
+                               # slab RESTS ON THE FLOOR. Not a range any
+                               # more, and that is a MEASUREMENT, not tidying:
+                               # the plate is a free body between rewrites (the
+                               # step event runs once per CONTROL step and the
+                               # physics takes 4 substeps in between), so any
+                               # z0 that leaves the slab suspended puts it in
+                               # FREE FALL for 20 ms at a time. Measured with
+                               # `--plate-jitter`: at z0 >= 0.015 the plate
+                               # drops 2.51 mm per control step, reaches
+                               # 0.20 m/s, and is teleported back up into the
+                               # soles, so the sole force cycles
+                               # 15.0 -> 8.4 -> 4.2 -> 1.6 N at 50 Hz (peak
+                               # 18.0 N against the robot's 7.85 N weight). At
+                               # z0 = 0.010 the floor holds it: deviation
+                               # 0.48 mm and 0.0007 deg, |vz| 0.005 m/s, four
+                               # steady plate-floor contacts, and a steady
+                               # 8.1 N under the soles. The user asked for "une
+                               # plateforme immobile" and this is what makes it
+                               # one. There is no operator variation to model
+                               # here: the ground sets the height.
 VZ_RANGE      = (2.20, 2.60)   # lift. Landing speed is the user's binding
-                               # constraint: this box lands at 2.37-3.58 m/s
-                               # (apex 0.45-0.67 m). Raising it is the ONLY
+                               # constraint: this box lands at 2.37-3.50 m/s
+                               # (apex 0.45-0.65 m). Raising it is the ONLY
                                # lever left for open-loop closure now that the
                                # sweep is capped, and it is expensive: vz
                                # 3.0-3.6 buys 29% closure at 3.73-4.88 m/s.
@@ -521,6 +576,12 @@ W0_RANGE      = (5.0, 6.0)     # backward flick. Down from 18-24, which is a
                                # is 6.0. The robot leaves at roughly the
                                # plate's final w0, which is why rotation is now
                                # 198-309 deg open-loop instead of 98-442.
+# ready_stance's weight and its pose-factor width. Both are chosen from the
+# mass table in the module docstring and the measured drift; see the reward
+# term's comment for the retraction of the old 1.10 ceiling.
+READY_STANCE_WEIGHT = 3.0
+POSE_STD = 0.20
+
 MAX_PAID_RATE = 25.0           # rad/s. Deliberately SLACK now: the launcher
                                # only imparts 5-6 rad/s, and a flip that
                                # closes 360 deg in the 0.5-0.6 s of airtime
@@ -756,52 +817,76 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
 
-    # Stand still on the operator's hands. HOLD-phase only — it dies at
-    # launch, so it can never oppose the flip. upright x height: the height
-    # Gaussian says "be on the plate at standing height", the tilt smoothstep
-    # says "be UPRIGHT, not leaning".
+    # STAND STILL AND STRAIGHT on the operator's hands, HOLD-phase only. The
+    # user's own words for the whole ask: "je veux juste qu'il reste immobile
+    # droit sur une plateforme immobile". This is the term that pays for it.
     #
-    # The upright factor is NOT optional and was dropped once, during the
-    # tucked-hold experiment. height alone cannot tell an upright robot from an
-    # inverted one at the same trunk height, and the side-lying basin --
-    # passively stable, needing no balancing, costing less action_rate --
-    # outscored the intended pose by 4%. Re-run `--flop-audit` after touching
-    # any factor here.
+    # window x height x upright x pose:
+    #   height  — "be on the plate at standing height" (and the thing that
+    #             prices stepping OFF it: the floor beside the plate is ~3
+    #             sigma down)
+    #   upright — "be upright, not leaning" (10/45 deg)
+    #   pose    — "and STRAIGHT": Gaussian on the mean squared joint error
+    #             against the spawn pose, std 0.20. New. The other two factors
+    #             say nothing about the joints, so a robot sagging into a
+    #             different leg configuration at the same trunk height and tilt
+    #             used to score identically.
+    #
+    # WEIGHT 3.0, up from 1.10, and the CEILING THAT KEPT IT AT 1.10 IS
+    # RETRACTED. That ceiling came from "a stance worth more than the landing
+    # annuity makes 'stand still and never flip' the argmax". The robot CANNOT
+    # decline to flip: backflip_plate_step is a mode="step" event that fires on
+    # its prescribed schedule whatever the policy does. There is no "never
+    # flip" strategy to farm, so there was never a ceiling — the argument was
+    # invalid and it blocked the obvious fix for three revisions. The only way
+    # to dodge the flick is to walk off the plate, which pays nothing (height
+    # collapses, the launch gate never latches, the annuity is gated on a flip
+    # that never happens). See the function docstring for the full retraction;
+    # do not reinstate a ceiling without first checking whether your reason
+    # requires the robot to be able to REFUSE the flick.
+    #
+    # 3.0 makes the hold a co-equal major term rather than the task's
+    # third-smallest positive one: mass 3.0-15.0 across the 1-5 s hold, median
+    # 9.0, against the flip's 8.0 and the annuity's 5.6. That is what "worth
+    # defending" means for a skill the robot has to hold for up to five
+    # seconds. See the module docstring's table.
+    #
+    # WHY IT HAS TO BE MAJOR. A motionless hold on this robot is ACTIVE
+    # BALANCING, measured with the ideal command frozen: tilt 3.5 deg at 0.3 s,
+    # 7.3 at 0.5, 11.6 at 0.7, 23.2 at 1.0, toppled by 1.5 s — and IDENTICAL on
+    # the bare floor, so it is the pose, not the launcher. At 1.10 the hardest
+    # sustained requirement in the task was worth 1.1-5.5.
     #
     # THE GATE IS 10/45 deg, NOT 40/70. The wide 40/70 pair was sized for the
     # short-lived TUCKED hold, whose own equilibrium is pitched 14 deg, and it
     # made a LEAN FREE: the user saw the robot launch leaning ~35 deg back and
     # this term charged nothing for it, because 35 < 40. At 10/45 a genuinely
-    # upright stance still costs nothing (measured open-loop drift is 3.5 deg
-    # at 0.3 s, 7.3 at 0.5), a 20 deg lean loses 20% of the term, a 35 deg lean
-    # loses 80%, and every flop basin (80-126 deg) is still hard-zeroed. This
-    # is a SHAPE fix, not a mass fix -- the mass ceiling below is set by the
-    # landing annuity and there is no headroom in it.
+    # upright stance still costs nothing (the measured drift is 3.5 deg at
+    # 0.3 s, 7.3 at 0.5), a 20 deg lean loses 20% of the term, a 35 deg lean
+    # loses 80%, and every flop basin (80-126 deg) is still hard-zeroed.
     #
-    # WEIGHT 1.10, chosen by MASS across the WHOLE hold range (AGENTS.md), not
-    # at one draw. See the module docstring's table. The ceiling is set by the
-    # LONGEST hold, where this term is largest while the landing annuity -- now
-    # a fixed 1.4 s window -- stays at 5.6: `landing` must remain the dominant
-    # attractor, so 0.975*w*5.0 <= 5.6 gives w <= 1.148, and 1.10 keeps a
-    # margin. The fixed window did NOT raise that ceiling: the binding case was
-    # always the longest hold, and pinning the annuity to the worst case's
-    # affordance pins the ceiling with it. The hold authority the policy needed
-    # came from the tilt gate above instead.
-    # The floor is why the hold is 1-5 s and not 0.1-0.3: at a 0.3 s hold no
-    # admissible weight makes this term matter (it caps at 0.3*1.148 = 0.34
-    # against ~14 for flip+landing), which is how the policy came to crouch
-    # before the impulse.
+    # The upright factor is NOT optional and was dropped once, during the
+    # tucked-hold experiment. height alone cannot tell an upright robot from an
+    # inverted one at the same trunk height, and the side-lying basin --
+    # passively stable, needing no balancing, costing less action_rate --
+    # outscored the intended pose by 4%. The same trap applies to `pose`, which
+    # is why it is a FACTOR and never an additive term of its own: measured
+    # open loop, the joint error against HOME is LOWER after the robot has
+    # toppled (rms 0.056-0.076 rad lying down against 0.086 upright at 1.0 s),
+    # because a servo that is not fighting gravity sits closer to its command.
+    # Re-run `--flop-audit` after touching any factor here.
     #
     # stand_z carries the plate half-thickness: the term measures trunk height
     # against the plate CENTRE (z0) while the robot stands on its top surface.
     cfg.rewards["ready_stance"] = RewardTermCfg(
         func=microduck_mdp.backflip_ready_stance,
-        weight=1.10,
+        weight=READY_STANCE_WEIGHT,
         params={
             "stand_z":       STAND_Z + PLATE_HALF_THICKNESS,
             "height_std":    0.03,
             "tilt_full_deg": 10.0,   # free while genuinely upright
             "tilt_zero_deg": 45.0,   # << the 80-126 deg flop basins
+            "pose_std":      POSE_STD,
         },
     )
 
@@ -990,6 +1075,17 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
     cfg.observations["critic"].terms["plate_phase"] = ObservationTermCfg(
         func=microduck_mdp.backflip_phase_obs,
+    )
+    # SECONDS OF HOLD LEFT — critic-only, and it earns its place now that
+    # `ready_stance` is a major term paying per second of holding. The hold is
+    # drawn uniformly 1-5 s, so the stance is worth 3.0-15.0 points depending
+    # on a draw the value function has no other way to see: a static plate
+    # looks identical at t = 1 s and t = 4 s, and `plate_phase` only says
+    # "still holding". Without this the whole 5x spread lands in the advantage
+    # as noise. Privileged information the real robot does not have, which is
+    # exactly what the critic group is for.
+    cfg.observations["critic"].terms["hold_remaining"] = ObservationTermCfg(
+        func=microduck_mdp.backflip_hold_remaining_obs,
     )
 
     # ── Command: tiny noise around zero (kept for obs-shape parity) ──────────

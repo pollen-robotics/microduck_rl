@@ -102,6 +102,8 @@ from mjlab_microduck.tasks.microduck_backflip_env_cfg import (  # noqa: E402
     HOLD_Z,
     LAUNCH_RANGE,
     PLATE_HALF_THICKNESS,
+    POSE_STD,
+    READY_STANCE_WEIGHT,
     STAND_Z,
     TUCK_FACTOR,
     TUCK_OVERRIDES,
@@ -190,20 +192,38 @@ def _hold_pose(nu, lerp):
     return ctrl
 
 
-def build_scene(bam=False, vin=7.4, vin_drop_gain=0.0, timestep=None):
-    """Load scene_backflip.xml, optionally with BAM actuators.
+def build_scene(bam=True, vin=7.4, vin_drop_gain=0.0, timestep=None):
+    """Load scene_backflip.xml. BAM actuators by DEFAULT.
 
-    ``bam=False`` keeps the XML's own position actuators (MuJoCo built-in PD),
-    which is what every table in docs/backflip_envelope_results.md before the
-    "Standing-spawn re-measurement" section used.
+    ``bam=True`` (the default, and ``--xml-pd`` is what turns it off) hands the
+    14 servos to the BAM M6 voltage-controlled XL330 model — the actuator
+    TRAINING actually uses (AGENTS.md: "Actuators are BAM"). Reuses
+    scripts/infer_policy.py's loader rather than re-deriving it, so the CPU
+    probe and the CPU deployment rehearsal cannot drift apart. The default
+    timestep also switches to the training sim dt (0.005) in this mode.
 
-    ``bam=True`` hands the 14 servos to the BAM M6 voltage-controlled XL330
-    model — the actuator TRAINING actually uses (AGENTS.md: "Actuators are
-    BAM"). Reuses scripts/infer_policy.py's loader rather than re-deriving it,
-    so the CPU probe and the CPU deployment rehearsal cannot drift apart. The
-    default timestep also switches to the training sim dt (0.005) in this mode.
+    ``bam=False`` keeps the XML's own position actuators, and THEY ARE NOT THE
+    TRAINED DYNAMICS. joints_properties.xml gives them kp 0.386-0.55 N.m/rad,
+    so at a realistic 0.05-0.20 rad of tracking error they deliver 0.02-0.11
+    N.m where BAM saturates its 0.96 N.m forcerange — 9-30x less torque, and
+    26x less small-signal stiffness (BAM's effective kt*kp_fw/R is ~26
+    N.m/rad, saturating past 0.037 rad of error). A robot whose legs are that
+    soft absorbs the flick in its knees instead of transmitting it. MEASURED
+    open-loop drift from the standing spawn, same command, same spawn:
 
-    Returns ``(model, data, bam_ctrl)``; ``bam_ctrl`` is None without --bam.
+        t         0.3 s   0.5 s   0.7 s   1.0 s   1.5 s
+        BAM        4.8     8.8    13.6    26.0    90.0 (toppled)
+        XML PD     6.5    15.6    32.5    88.4 (toppled)
+
+    THIS DEFAULT WAS FLIPPED on 2026-09-09. It used to be ``bam=False``, and
+    it misled this branch twice. Every table in
+    docs/backflip_envelope_results.md ABOVE the "Standing-spawn
+    re-measurement" section was measured on the XML PD and is marked there as
+    not representative; every table from that section on carries a
+    ``bam=True`` header except two deliberately-labelled ``bam=False`` settle
+    controls.
+
+    Returns ``(model, data, bam_ctrl)``; ``bam_ctrl`` is None under --xml-pd.
     """
     if not bam:
         model = mujoco.MjModel.from_xml_path(SCENE)
@@ -557,7 +577,7 @@ def check_direction(model, data, vz=3.0, w0=15.0, tuck_factor=1.0, z0=0.15,
         print("  WARNING: never reached 90deg of accumulated rotation — cannot verify direction "
               "with this cell. NOTE a NEGATIVE rot_deg means the robot rotated FORWARD: "
               "this check can only confirm a backward arc, so read the sign first.")
-    return rot, land, apex, tilt
+    return c
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -745,8 +765,20 @@ BOX_MAX_SWEEP_DEG = 45.0
 
 
 def _edges(rng, mid=True):
+    """Corners (and the midpoint) of a DR range, deduplicated.
+
+    Z0_RANGE is a single value now (the slab rests on the floor), and a
+    degenerate range must contribute ONE grid point, not three identical ones:
+    a box-check that reports 243 cells when 81 were distinct is lying about its
+    coverage.
+    """
     lo, hi = rng
-    return (lo, 0.5 * (lo + hi), hi) if mid else (lo, hi)
+    vals = (lo, 0.5 * (lo + hi), hi) if mid else (lo, hi)
+    out = []
+    for v in vals:
+        if not any(abs(v - o) < 1e-9 for o in out):
+            out.append(v)
+    return tuple(out)
 
 
 def box_check_report(model, data, bam_ctrl=None, posture="tucked_env",
@@ -887,7 +919,7 @@ FLOP_ORIENTATIONS = {
 }
 
 
-def _ready_stance_factors(data, z0, tuck_factor, joint_std=0.35, height_std=0.03,
+def _ready_stance_factors(data, z0, tuck_factor, joint_std=POSE_STD, height_std=0.03,
                           tilt_full_deg=40.0, tilt_zero_deg=70.0,
                           posture="standing"):
     """Score backflip_ready_stance's factors from a raw MuJoCo state.
@@ -898,9 +930,13 @@ def _ready_stance_factors(data, z0, tuck_factor, joint_std=0.35, height_std=0.03
     real function.
     """
     if posture == "standing":
-        # backflip_ready_stance is upright x height only; `pose` is reported as
-        # 1.0 so the columns line up with the tucked-hold tables above.
-        target, pose = HOME, 1.0
+        # backflip_ready_stance is window x height x upright x POSE since
+        # 2026-09-09: "immobile DROIT" is a statement about the joints, and the
+        # trunk factors say nothing about them. The target is the spawn pose
+        # (HOME/STAND2), which is what the env's default_joint_pos is.
+        target = HOME
+        err = np.asarray(data.qpos[7 : 7 + len(HOME)]) - target
+        pose = math.exp(-float((err ** 2).mean()) / joint_std ** 2)
         rest_z = STAND_Z
     else:
         target = _home_tuck_ctrl(len(HOME), tuck_factor)[: len(HOME)]
@@ -1004,15 +1040,224 @@ def flop_audit_report(model, data, z0, tuck_factor, bam_ctrl=None, duration=3.0,
     up = rows["upright"]
     best_pre = max((v[5] for v in flops.values()), default=0.0)
     best_total = max((v[7] for v in flops.values()), default=0.0)
-    print(f"  upright: pre={up[5]:.3f} TOTAL={up[7]:.3f}   "
-          f"best flop: pre={best_pre:.3f} TOTAL={best_total:.3f}")
+
+    # THE REFERENCE HAS TO BE A HELD POSE, NOT A SETTLED ONE. Standing has no
+    # passive equilibrium on this robot: settled open-loop for `duration` the
+    # "upright" row TOPPLES (86 deg, off the plate) and scores 0.000, so
+    # comparing it against the flops compares two failures and reports FAIL
+    # whichever way it goes. What the reward actually pays a policy that is
+    # DOING the task is the term's value while the pose is still held, so the
+    # reference is measured 0.1 s in -- the flops, which are passively stable,
+    # are still scored after the full settle.
+    held = _held_stance_reference(
+        model, data, z0, tuck_factor, bam_ctrl=bam_ctrl, posture=posture
+    )
+    print(f"  upright, HELD (0.1 s): pose={held[0]:.3f} height={held[1]:.3f} "
+          f"upright={held[2]:.3f} TOTAL={held[3]:.3f}")
+    print(f"  upright, settled {duration:.1f}s open loop: TOTAL={up[7]:.3f} "
+          f"(it topples -- standing is not a passive equilibrium, which is why "
+          f"the held row is the reference)")
+    print(f"  best flop: pre(pose x height)={best_pre:.3f} TOTAL={best_total:.3f}")
     print(f"  WITHOUT the upright factor: "
-          f"{'a flop would pay MORE' if best_pre > up[5] else 'upright would win'} "
-          f"({best_pre:.3f} vs {up[5]:.3f})")
-    print(f"  RESULT: {'PASS - upright wins' if up[7] > best_total else 'FAIL - a flop pays more'} "
-          f"({up[7]:.3f} vs {best_total:.3f})")
+          f"{'a flop would pay MORE' if best_pre > held[0] * held[1] else 'upright would win'} "
+          f"({best_pre:.3f} vs {held[0] * held[1]:.3f})")
+    print(f"  RESULT: {'PASS - the held pose wins' if held[3] > best_total else 'FAIL - a flop pays more'} "
+          f"({held[3]:.3f} vs {best_total:.3f})")
     return rows
 
+
+def _held_stance_reference(model, data, z0, tuck_factor, bam_ctrl=None,
+                           posture="standing", settle=0.1):
+    """What ready_stance pays while the pose is still HELD (0.1 s in)."""
+    plate_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "plate_free")
+    qa = model.jnt_qposadr[plate_jid]
+    va = model.jnt_dofadr[plate_jid]
+    ctrl = (
+        np.concatenate([HOME, np.zeros(model.nu - len(HOME))])
+        if posture == "standing"
+        else _home_tuck_ctrl(model.nu, tuck_factor)
+    )
+    rest_z = STAND_Z if posture == "standing" else TUCK_Z
+    mujoco.mj_resetData(model, data)
+    data.qpos[0:3] = [0.0, 0.0, z0 + PLATE_HALF_THICKNESS + rest_z]
+    data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
+    data.qpos[7 : 7 + model.nu] = ctrl
+    if bam_ctrl is not None:
+        bam_ctrl.reset(data.qpos)
+    _apply_ctrl(data, bam_ctrl, ctrl)
+    t = 0.0
+    while t < settle - 1e-9:
+        data.qpos[qa : qa + 3] = [0.0, 0.0, z0]
+        data.qpos[qa + 3 : qa + 7] = [1.0, 0.0, 0.0, 0.0]
+        data.qvel[va : va + 6] = 0.0
+        if bam_ctrl is not None:
+            bam_ctrl.update()
+        mujoco.mj_step(model, data)
+        t += model.opt.timestep
+    pose, height, upright, _tilt = _ready_stance_factors(
+        data, z0, tuck_factor, posture=posture
+    )
+    return pose, height, upright, pose * height * upright
+
+
+
+# The env rewrites the plate's pose and velocity once per CONTROL step and
+# lets the physics run `decimation` substeps in between (mjlab: sim dt 0.005,
+# decimation 4, control step 0.02). The probe's run_cell rewrites every
+# PHYSICS step, which is a strictly stiffer plate than the env's -- so a
+# jitter measurement has to mirror the decimation or it cannot see the thing
+# it is looking for.
+PLATE_JITTER_DECIMATION = 4
+
+
+def plate_jitter_report(model, data, z0s, bam_ctrl=None, duration=1.5,
+                        decimation=PLATE_JITTER_DECIMATION, no_plate=True):
+    """Is the surface under the feet actually STATIC, step to step?
+
+    The plate is a 50 kg free body whose pose and velocity are OVERWRITTEN
+    every control step, and at z0 = PLATE_HALF_THICKNESS its underside is
+    exactly coplanar with MuJoCo's floor plane, which produces zero-distance
+    contacts. If that arrangement transmits any micro-jitter into the soles, it
+    is a real destabiliser of the hold and the fix is 5 mm of clearance.
+
+    Reports, per z0, measured at the END of each control step (i.e. after the
+    substeps the env leaves the plate free to deviate, just before the next
+    rewrite):
+      * dz / dpitch  — how far the plate moved from its commanded pose
+      * |vz| / |w|   — the velocity it acquired
+      * ncon         — plate-floor and plate-robot contact counts (min-max)
+      * sole force   — total normal force on plate-robot contacts (mean/std)
+      * the ROBOT's tilt at 0.3 / 0.5 / 1.0 s and its total x/y drift, which
+        is the quantity that actually matters: a static surface that still
+        loses the pose means the pose is the problem, not the surface.
+    ``no_plate`` adds the control row: the same hold on the bare floor with the
+    plate parked far away.
+    """
+    plate_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "plate_free")
+    qadr = model.jnt_qposadr[plate_jid]
+    vadr = model.jnt_dofadr[plate_jid]
+    plate_gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "plate_geom")
+    floor_gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+    dt = model.opt.timestep
+    ctrl = np.concatenate([HOME, np.zeros(model.nu - len(HOME))])
+    force6 = np.zeros(6)
+
+    print(f"# plate-jitter bam={bam_ctrl is not None} dt={dt} "
+          f"decimation={decimation} (control step {dt * decimation:.3f}s) "
+          f"duration={duration}s")
+    print(f"{'z0':>7} {'dz_mm':>7} {'dpitch':>7} {'|vz|':>7} {'|w|':>7} "
+          f"{'pl-fl':>7} {'pl-rb':>7} {'soleN':>13} "
+          f"{'tilt@.3':>8} {'tilt@.5':>8} {'tilt@1':>8} {'drift_mm':>9}")
+
+    rows = []
+    cases = [(z0, True) for z0 in z0s] + ([(None, False)] if no_plate else [])
+    for z0, with_plate in cases:
+        mujoco.mj_resetData(model, data)
+        if with_plate:
+            spawn_z = z0 + PLATE_HALF_THICKNESS + STAND_Z
+        else:
+            spawn_z = STAND_Z
+        data.qpos[0:3] = [0.0, 0.0, spawn_z]
+        data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
+        data.qpos[7 : 7 + model.nu] = ctrl
+        if bam_ctrl is not None:
+            bam_ctrl.reset(data.qpos)
+        _apply_ctrl(data, bam_ctrl, ctrl)
+
+        max_dz = max_dpitch = max_vz = max_w = 0.0
+        n_pf = []
+        n_pr = []
+        sole = []
+        # Sole force by SUBSTEP INDEX within the control step. If the plate
+        # free-falls between rewrites and is then teleported back up into the
+        # soles, the impulse lands on substep 0 and the end-of-step sample
+        # (substep decimation-1) never sees it.
+        sole_by_phase = [[] for _ in range(decimation)]
+        vz_robot = []
+        tilts = {}
+        t = 0.0
+        step = 0
+        x0, y0 = float(data.qpos[0]), float(data.qpos[1])
+        while t < duration:
+            if step % decimation == 0:
+                # exactly what backflip_plate_step writes during HOLD
+                if with_plate:
+                    data.qpos[qadr + 0 : qadr + 3] = [0.0, 0.0, z0]
+                    data.qpos[qadr + 3 : qadr + 7] = [1.0, 0.0, 0.0, 0.0]
+                else:
+                    data.qpos[qadr + 0 : qadr + 3] = [5.0, 5.0, 5.0]
+                    data.qpos[qadr + 3 : qadr + 7] = [1.0, 0.0, 0.0, 0.0]
+                data.qvel[vadr + 0 : vadr + 6] = 0.0
+            if bam_ctrl is not None:
+                bam_ctrl.update()
+            mujoco.mj_step(model, data)
+            t += dt
+            step += 1
+
+            if step % decimation == 0 and with_plate:
+                # END of a control step: the deviation the env's next rewrite
+                # will silently erase.
+                max_dz = max(max_dz, abs(float(data.qpos[qadr + 2]) - z0))
+                q = data.qpos[qadr + 3 : qadr + 7]
+                max_dpitch = max(
+                    max_dpitch,
+                    math.degrees(2.0 * math.acos(min(1.0, abs(float(q[0]))))),
+                )
+                max_vz = max(max_vz, abs(float(data.qvel[vadr + 2])))
+                max_w = max(max_w, float(np.linalg.norm(data.qvel[vadr + 3 : vadr + 6])))
+                pf = pr = 0
+                f_sum = 0.0
+                for i in range(data.ncon):
+                    g1, g2 = int(data.contact.geom1[i]), int(data.contact.geom2[i])
+                    if plate_gid in (g1, g2):
+                        if floor_gid in (g1, g2):
+                            pf += 1
+                        else:
+                            pr += 1
+                            mujoco.mj_contactForce(model, data, i, force6)
+                            f_sum += float(np.linalg.norm(force6[:3]))
+                n_pf.append(pf)
+                n_pr.append(pr)
+                sole.append(f_sum)
+            if with_plate:
+                f_sum = 0.0
+                for i in range(data.ncon):
+                    g1, g2 = int(data.contact.geom1[i]), int(data.contact.geom2[i])
+                    if plate_gid in (g1, g2) and floor_gid not in (g1, g2):
+                        mujoco.mj_contactForce(model, data, i, force6)
+                        f_sum += float(np.linalg.norm(force6[:3]))
+                sole_by_phase[(step - 1) % decimation].append(f_sum)
+                vz_robot.append(float(data.qvel[2]))
+
+            for mark in (0.3, 0.5, 1.0):
+                if mark not in tilts and t >= mark:
+                    tilts[mark] = trunk_tilt_deg(data)
+
+        drift = 1000.0 * math.hypot(float(data.qpos[0]) - x0, float(data.qpos[1]) - y0)
+        label = "floor" if not with_plate else f"{z0:.3f}"
+        if with_plate:
+            phases = " ".join(
+                f"{np.mean(f):5.2f}" if f else "  -  " for f in sole_by_phase
+            )
+            print(f"           sole force by substep after the rewrite: {phases} N"
+                  f" | peak {max(max(f) for f in sole_by_phase if f):.2f} N"
+                  f" | robot vz std {np.std(vz_robot):.4f} m/s")
+            print(f"{label:>7} {1000.0 * max_dz:7.4f} {max_dpitch:7.4f} "
+                  f"{max_vz:7.4f} {max_w:7.4f} "
+                  f"{min(n_pf)}-{max(n_pf):<5} {min(n_pr)}-{max(n_pr):<5} "
+                  f"{np.mean(sole):6.2f}+/-{np.std(sole):<5.2f} "
+                  f"{tilts.get(0.3, float('nan')):8.2f} "
+                  f"{tilts.get(0.5, float('nan')):8.2f} "
+                  f"{tilts.get(1.0, float('nan')):8.2f} {drift:9.2f}")
+        else:
+            print(f"{label:>7} {'-':>7} {'-':>7} {'-':>7} {'-':>7} "
+                  f"{'-':>7} {'-':>7} {'-':>13} "
+                  f"{tilts.get(0.3, float('nan')):8.2f} "
+                  f"{tilts.get(0.5, float('nan')):8.2f} "
+                  f"{tilts.get(1.0, float('nan')):8.2f} {drift:9.2f}")
+        rows.append((label, max_dz, max_dpitch, max_vz, max_w,
+                     n_pf, n_pr, sole, tilts, drift))
+    return rows
 
 def measure_tuck_z_report(model, data, z0, tuck_factors, offsets, bam_ctrl=None,
                           duration=3.0):
@@ -1129,11 +1374,17 @@ def main():
     ap.add_argument("--launch", type=float, default=0.12,
                     help="t_launch in seconds (env samples 0.08-0.15).")
     ap.add_argument(
+        "--xml-pd", action="store_true",
+        help="Use the XML's own position actuators (kp 0.386-0.55 N.m/rad) "
+             "instead of BAM. NOT the trained dynamics -- 9-30x less torque at "
+             "a realistic tracking error, and the robot topples twice as fast "
+             "open-loop. For reproducing the pre-2026-09-07 tables only.",
+    )
+    ap.add_argument(
         "--bam", action="store_true",
-        help="Run the 14 servos through the BAM M6 XL330 model (what training "
-             "uses) instead of the XML's position actuators, at the training "
-             "sim timestep. Slower per cell, but the only mode whose HOLD-phase "
-             "posture drift means anything for the env.",
+        help="ACCEPTED AND IGNORED -- BAM is now the default. Kept so the "
+             "commands recorded in docs/backflip_envelope_results.md still "
+             "run verbatim. Use --xml-pd for the old soft-actuator behaviour.",
     )
     ap.add_argument("--vin", type=float, default=7.4,
                     help="BAM supply voltage (training samples 6.5-8.2; 7.4 = nominal 2S).")
@@ -1184,6 +1435,15 @@ def main():
                          "AGENTS.md mandates for any positive per-step term: if "
                          "a stable flop keeps most of the stack, the policy "
                          "will flop.")
+    ap.add_argument(
+        "--plate-jitter", action="store_true",
+        help="Is the surface under the feet genuinely static? Rewrites the "
+             "plate pose/velocity once per CONTROL step (like the env, "
+             "decimation 4) and reports how far the 50 kg body deviates in "
+             "between, the plate-floor and plate-sole contact counts, the "
+             "sole force, and the robot's own tilt/drift -- at several z0 "
+             "plus a bare-floor control.",
+    )
     ap.add_argument("--measure-tuck-z", action="store_true",
                     help="Re-measure TUCK_Z: drop the tucked robot from several "
                          "offsets above the plate top, hold the tuck ctrl, and "
@@ -1231,7 +1491,7 @@ def main():
     args = ap.parse_args()
 
     model, data, bam_ctrl = build_scene(
-        bam=args.bam, vin=args.vin, vin_drop_gain=args.vin_drop_gain,
+        bam=not args.xml_pd, vin=args.vin, vin_drop_gain=args.vin_drop_gain,
         timestep=args.timestep,
     )
 
@@ -1253,6 +1513,13 @@ def main():
                 None if args.box_launch is None else tuple(args.box_launch)),
             z0_range=None if args.box_z0 is None else tuple(args.box_z0),
             label=args.box_label, pivot=args.pivot,
+        )
+        return
+
+    if args.plate_jitter:
+        plate_jitter_report(
+            model, data, (0.010, 0.015, 0.020, 0.030),
+            bam_ctrl=bam_ctrl, duration=args.settle_duration,
         )
         return
 

@@ -159,6 +159,59 @@ Status: approved design, ready for implementation planning
 >   about its centre. `--pivot rear` stays in the probe.
 > Evidence: `docs/backflip_envelope_results.md`, "The plate was a catapult".
 
+> **AMENDMENT 6 — 2026-09-09 — standing still IS the task. The stance ceiling
+> is retracted, the stance prices the joints, and the platform is actually
+> static.**
+> The user, restating the ask after three waves of launch work: "je veux juste
+> qu'il reste immobile droit sur une plateforme immobile", and "le robot tient
+> droit presque sans rien faire et c'est simple de lui apprendre à rester
+> droit". Three things were wrong with how that was paid for.
+> - **RETRACTED: the `ready_stance` ceiling.** The term was capped at 1.0, then
+>   1.10, by "a stance worth more than the landing annuity makes 'stand still
+>   and never flip' the argmax". INVALID: `backflip_plate_step` is a
+>   `mode="step"` event, so the plate fires whatever the policy does and there
+>   is no "never flip" strategy to farm. Walking off the plate — the only way
+>   to dodge the flick — pays nothing (height collapses, the attitude gate
+>   never latches, the annuity is gated on a flip that never happens). The
+>   ceiling test is DELETED and replaced by tests that assert the retraction
+>   and the event's mode. **Weight 1.10 -> 3.0**: mass 3.0-15.0 across the
+>   1-5 s draw, median 9.0, against the flip's 8.0 and the annuity's 5.6.
+>   Standing through the hold is now worth 12.5-24.5 more than collapsing.
+> - **"Droit" is about the JOINTS [AMENDED]:** `ready_stance` becomes
+>   `window x height x upright x pose`, with `pose` a Gaussian
+>   (`pose_std` 0.20) on the mean squared joint error against the spawn pose.
+>   Measured: spawn scatter 0.94-0.97, 1 s of drift 0.83, both legs sagged
+>   0.3 rad 0.38, a half squat 0.26, the squat 0.005, a full tuck 0.000.
+>   It is a FACTOR and never an additive term, and that is measured: open loop
+>   the joint error against HOME is LOWER once the robot has TOPPLED (rms
+>   0.056-0.076 vs 0.086 rad upright), and every flop basin scores pose
+>   0.90-0.99 — an additive pose term would pay for flopping.
+> - **`Z0_RANGE` -> the single value 0.010 [AMENDED].** Measured with the new
+>   `--plate-jitter`: the plate is a free body between the step event's
+>   rewrites, so any suspended `z0` free-falls 2.51 mm and 0.20 m/s per control
+>   step and is teleported back into the soles, cycling the sole force
+>   15.7 -> 1.1 N at 50 Hz (peak 18 N against the robot's 7.85 N weight). At
+>   `z0` = PLATE_HALF_THICKNESS the floor holds it: 0.48 mm, 0.0007 deg, a
+>   steady 8.2 N. The fix is the opposite of raising `z0`. The robot's own
+>   drift is unchanged in all cases and on bare floor, so the plate remains
+>   exonerated as the CAUSE of the drift — but the platform is now static, as
+>   asked.
+> - **Critic-only `hold_remaining`** (seconds to the flick): a term paying 3.0
+>   per second over an unobservable 1-5 s draw is 3.0-15.0 points the value
+>   function could not predict. The actor stays 61D and plate-blind.
+> - **The probe now defaults to BAM.** It defaulted to the scene XML's own
+>   position servos (kp 0.386-0.55 N.m/rad), which deliver 9-30x less torque
+>   than BAM at a realistic tracking error; measured drift BAM 4.8/8.8/13.6/
+>   26.0 deg at 0.3/0.5/0.7/1.0 s against XML PD 6.5/15.6/32.5/toppled. Every
+>   table above "Standing-spawn re-measurement" in the results doc is XML PD
+>   and is marked there as not representative; everything after it is BAM,
+>   including the settle numbers the 10/45 deg tilt gate was sized from.
+> - **Hold duration: 1-5 s stands.** A motionless hold is active balancing
+>   (frozen-command drift topples in 1.0-1.5 s under either actuator), but the
+>   corrections are small and this robot's other policies do more. It was never
+>   too hard; it was underpaid.
+> Evidence: `docs/backflip_envelope_results.md`, "Standing still is the task".
+
 ## Problem
 
 Microduck (~800 g, ~25 cm, 14 XL330 servos) cannot generate the vertical
