@@ -67,6 +67,12 @@ from .microduck_roller_standup_env_cfg import (
     make_microduck_roller_standup_env_cfg,
     MicroduckRollerStandUpRlCfg,
 )
+from .microduck_step_up_env_cfg import (
+    make_microduck_step_up_env_cfg,
+    make_microduck_step_up_full_env_cfg,
+    MicroduckStepUpRlCfg,
+    MicroduckStepUpFullRlCfg,
+)
 from .microduck_spin_env_cfg import (
     make_microduck_spin_env_cfg,
     MicroduckSpinRlCfg,
@@ -83,6 +89,24 @@ register_mjlab_task(
     env_cfg=make_microduck_velocity_env_cfg(),
     play_env_cfg=make_microduck_velocity_env_cfg(play=True),
     rl_cfg=MicroduckRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Dedicated skill for one camera-aligned 0–25 mm square-edged step curriculum.
+register_mjlab_task(
+    task_id="Mjlab-StepUp-MicroDuck",
+    env_cfg=make_microduck_step_up_env_cfg(),
+    play_env_cfg=make_microduck_step_up_env_cfg(play=True),
+    rl_cfg=MicroduckStepUpRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Fixed-height continuation task for final 25 mm policy tuning.
+register_mjlab_task(
+    task_id="Mjlab-StepUpFull-MicroDuck",
+    env_cfg=make_microduck_step_up_full_env_cfg(),
+    play_env_cfg=make_microduck_step_up_full_env_cfg(play=True),
+    rl_cfg=MicroduckStepUpFullRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
