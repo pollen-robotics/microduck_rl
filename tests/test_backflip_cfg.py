@@ -18,6 +18,8 @@ from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.microduck_backflip_env_cfg import (
     HOLD_RANGE,
     LANDING_WINDOW_S,
+    LAUNCH_GATE_FLOOR,
+    LAUNCH_GATE_FLOOR_FINAL,
     LAUNCH_RANGE,
     VZ_RANGE,
     W0_RANGE,
@@ -747,9 +749,14 @@ def test_play_cfg_carries_every_curriculum_to_its_last_stage(play_cfg, cfg):
     # different env from the one the checkpoint knows.
     for name, term in cfg.curriculum.items():
         params = term.params
-        if "param_stages" in params:
+        if "param_stages" in params and "event_name" in params:
             last = params["param_stages"][-1]["params"]
             got = play_cfg.events[params["event_name"]].params
+            for key, value in last.items():
+                assert got[key] == value, f"{name}: {key}"
+        elif "param_stages" in params and "reward_name" in params:
+            last = params["param_stages"][-1]["params"]
+            got = play_cfg.rewards[params["reward_name"]].params
             for key, value in last.items():
                 assert got[key] == value, f"{name}: {key}"
         elif "weight_stages" in params:
@@ -935,3 +942,80 @@ def test_nconmax_clears_the_measured_worst_case_contact_count(cfg):
         f"nconmax={cfg.sim.nconmax} leaves less than 2x the measured worst "
         f"case ({measured_worst_case}); re-measure before lowering it"
     )
+
+
+# ── The launch-attitude gate's wiring ────────────────────────────────────────
+
+
+def test_the_launch_gate_is_wired_into_BOTH_task_terms_with_the_same_shape(cfg):
+    # The gate is ONE latched value (mdp._backflip_launch_gate); the two reward
+    # terms only re-read it. Different hold_z would mean the two terms disagree
+    # about what "upright on the plate" is, and different floors would leave
+    # part of the task collectable from a collapse -- the exact hole the gate
+    # exists to close.
+    flip = cfg.rewards["flip_progress"].params
+    land = cfg.rewards["landing"].params
+    assert flip["launch_gate_floor"] == land["launch_gate_floor"]
+    assert flip["hold_z"] == land["hold_z"]
+    # and it is measured from the plate TOP, like ready_stance's target
+    assert flip["hold_z"] == pytest.approx(STAND_Z + PLATE_HALF_THICKNESS)
+    assert flip["hold_z"] == pytest.approx(
+        cfg.rewards["ready_stance"].params["stand_z"]
+    )
+
+
+def test_the_launch_gate_floor_starts_open_enough_to_learn_from(cfg):
+    # FLOORED, not binary: a hard zero starves flip discovery, because the
+    # robot cannot balance on the launcher yet and a bad stance would then pay
+    # nothing for the flip either. AGENTS.md: no attempt-tax while a hard skill
+    # is being explored.
+    floor = cfg.rewards["flip_progress"].params["launch_gate_floor"]
+    assert floor == pytest.approx(LAUNCH_GATE_FLOOR)
+    assert 0.2 <= floor <= 0.35
+    assert LAUNCH_GATE_FLOOR_FINAL < LAUNCH_GATE_FLOOR
+
+
+def test_the_launch_gate_floor_curriculum_moves_both_terms_together(cfg):
+    tables = {}
+    for name, term in cfg.curriculum.items():
+        if term.func is not microduck_mdp.reward_param_curriculum:
+            continue
+        params = term.params
+        if "launch_gate_floor" not in params["param_stages"][-1]["params"]:
+            continue
+        tables[params["reward_name"]] = params["param_stages"]
+    assert set(tables) == {"flip_progress", "landing"}, (
+        "both task terms must be moved, or a collapse keeps part of the reward"
+    )
+    assert tables["flip_progress"] == tables["landing"]
+
+    stages = tables["flip_progress"]
+    floors = [s["params"]["launch_gate_floor"] for s in stages]
+    steps = [s["step"] for s in stages]
+    # it TIGHTENS, monotonically, from the shipped floor to the final one
+    assert floors[0] == pytest.approx(LAUNCH_GATE_FLOOR)
+    assert floors[-1] == pytest.approx(LAUNCH_GATE_FLOOR_FINAL)
+    assert floors == sorted(floors, reverse=True)
+    assert steps == sorted(steps)
+    assert steps[0] == 0
+    # phase-aligned: not before the stance has had time to consolidate
+    # (steps are env steps = iteration x NUM_STEPS_PER_ENV = 24)
+    assert steps[1] >= 1000 * 24
+
+
+def test_the_launch_gate_curriculum_mutates_through_the_reward_manager(cfg):
+    # env.cfg.rewards is a deepcopy -- writing to it is a silent no-op
+    # (AGENTS.md). The curriculum must go through get_term_cfg, which is what
+    # mdp.reward_param_curriculum does; this pins that it is the function used.
+    for name in ("launch_gate_floor_flip_progress", "launch_gate_floor_landing"):
+        assert name in cfg.curriculum
+        assert cfg.curriculum[name].func is microduck_mdp.reward_param_curriculum
+
+
+def test_the_play_cfg_ships_the_final_launch_gate_floor():
+    # play must show what the trained policy is actually scored on.
+    play = make_microduck_backflip_env_cfg(play=True)
+    for term in ("flip_progress", "landing"):
+        assert play.rewards[term].params["launch_gate_floor"] == pytest.approx(
+            LAUNCH_GATE_FLOOR_FINAL
+        )

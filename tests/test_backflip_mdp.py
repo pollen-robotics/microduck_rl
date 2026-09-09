@@ -1104,3 +1104,203 @@ def test_the_phase_obs_is_finite():
     env = _FakeEnv(num_envs=4)
     microduck_mdp.reset_backflip_launch_params(env, torch.arange(4))
     assert torch.isfinite(microduck_mdp.backflip_phase_obs(env)).all()
+
+
+# --- The LAUNCH-ATTITUDE GATE. ----------------------------------------------
+#
+# The user reported "il s'effondre avant que la plaque bouge" three times, and
+# two rounds of tuning ready_stance never touched it -- because the incentive
+# was structural, not mis-weighted: the plate fires on its own schedule
+# whatever the robot is doing, so a collapsed robot still collected
+# flip_progress (8.0) and landing (5.6) and forfeited only ready_stance
+# (1.07-5.36). And a lower, more compact body rotates MORE at the same flick,
+# so collapsing was not merely free, it was slightly PROFITABLE.
+
+_GATE_HOLD_Z = 0.125          # STAND_Z + PLATE_HALF_THICKNESS
+_GATE_Z0 = 0.02
+_GATE_HOLD_S = 0.3
+
+
+def _gate_env(num_envs=1, sensors=None):
+    env = _FakeEnvWithScene(num_envs=num_envs, sensors=sensors)
+    microduck_mdp.reset_backflip_launch_params(
+        env, torch.arange(num_envs),
+        hold_range=(_GATE_HOLD_S, _GATE_HOLD_S), launch_range=(0.15, 0.15),
+        z0_range=(_GATE_Z0, _GATE_Z0), vz_range=(2.5, 2.5), w0_range=(21.0, 21.0),
+    )
+    return env
+
+
+def _past_hold(env):
+    """First control step of the LAUNCH phase."""
+    return int(round(_GATE_HOLD_S / env.step_dt)) + 1
+
+
+def _set_attitude(env, drop=0.0, tilt_deg=0.0):
+    """Put the trunk `drop` metres below the correct hold height, at `tilt_deg`."""
+    env.robot.data.root_link_pos_w[:, 2] = _GATE_Z0 + _GATE_HOLD_Z - drop
+    half = math.radians(tilt_deg) * 0.5
+    env.robot.data.root_link_quat_w = torch.tensor(
+        [[math.cos(half), 0.0, math.sin(half), 0.0]] * env.num_envs
+    )
+
+
+def _gate(env, floor=0.3):
+    return float(
+        microduck_mdp._backflip_launch_gate(env, env.robot, _GATE_HOLD_Z, floor)[0]
+    )
+
+
+def test_the_launch_gate_latches_at_the_hold_to_launch_transition():
+    env = _gate_env()
+
+    # DURING the hold nothing is latched, and the gate pays as if the launch
+    # were perfect -- the hold phase itself must not be taxed by it.
+    env.episode_length_buf[:] = 0
+    _set_attitude(env, drop=0.06, tilt_deg=60.0)          # fully collapsed
+    assert _gate(env) == pytest.approx(1.0)
+    assert float(env._backflip_launch_gate[0]) == -1.0
+
+    # the first step past HOLD latches whatever the attitude is at THAT instant
+    env.episode_length_buf[:] = _past_hold(env)
+    _set_attitude(env, drop=0.0, tilt_deg=0.0)
+    assert _gate(env) == pytest.approx(1.0, abs=1e-6)
+    assert float(env._backflip_launch_gate[0]) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_the_launch_gate_is_immutable_once_latched():
+    # A robot that straightens up mid-flight must not retroactively earn the
+    # launch it did not have; one that collapses after a clean launch keeps it.
+    env = _gate_env()
+    env.episode_length_buf[:] = _past_hold(env)
+    _set_attitude(env, drop=0.06, tilt_deg=60.0)          # collapsed launch
+    latched = _gate(env)
+    assert latched == pytest.approx(0.3, abs=1e-6)        # nothing but the floor
+
+    for extra in (5, 50, 200):
+        env.episode_length_buf[:] = _past_hold(env) + extra
+        _set_attitude(env, drop=0.0, tilt_deg=0.0)        # now perfect
+        assert _gate(env) == pytest.approx(latched, abs=1e-9)
+
+
+def test_the_launch_gate_clears_on_reset():
+    # No buffer may survive an episode boundary: a stale latch would price the
+    # next episode's launch with the last one's posture.
+    env = _gate_env(num_envs=3)
+    env._backflip_launch_gate = torch.tensor([0.5, 0.5, 0.5])
+    microduck_mdp.reset_backflip_launch_params(env, torch.tensor([0, 2]))
+    assert float(env._backflip_launch_gate[0]) == -1.0
+    assert float(env._backflip_launch_gate[2]) == -1.0
+    assert float(env._backflip_launch_gate[1]) == 0.5     # untouched env keeps its
+
+
+def test_the_launch_gate_floors_where_it_is_set():
+    # FLOORED, not binary, on purpose: a hard zero starves flip discovery,
+    # because the robot cannot balance yet and a stance it cannot hold would
+    # then pay nothing for the flip either. The curriculum moves the floor.
+    for floor in (0.3, 0.15, 0.05, 0.0):
+        env = _gate_env()
+        env.episode_length_buf[:] = _past_hold(env)
+        _set_attitude(env, drop=0.10, tilt_deg=90.0)      # as bad as it gets
+        assert _gate(env, floor=floor) == pytest.approx(floor, abs=1e-6)
+
+
+def test_the_launch_gate_is_visible_at_the_MEASURED_open_loop_drift():
+    # The widths come from the MEASURED drift, not from what a good launch
+    # looks like: standing on the plate drifts 7.3 deg of tilt by 0.5 s and
+    # 23.2 deg by 1.0 s, and the hold runs 1-5 s, so the current policy
+    # presents at large tilts. AGENTS.md: pick stds wide enough that the
+    # CURRENT policy scores visibly, or the gradient is invisible.
+    tilts = {}
+    for tilt in (0.0, 7.3, 23.2, 40.0, 60.0):
+        env = _gate_env()
+        env.episode_length_buf[:] = _past_hold(env)
+        _set_attitude(env, tilt_deg=tilt)
+        tilts[tilt] = _gate(env, floor=0.0)
+    assert tilts[0.0] == pytest.approx(1.0, abs=1e-6)
+    assert tilts[7.3] > 0.95                  # the pose's own drift is free
+    assert 0.3 < tilts[23.2] < 0.9            # visibly priced, not zeroed
+    assert tilts[40.0] < 0.2
+    assert tilts[60.0] == 0.0
+    assert list(tilts.values()) == sorted(tilts.values(), reverse=True)
+
+    # and the height factor is the collapse detector proper
+    crouch = {}
+    for drop in (0.0, 0.02, 0.04, 0.06, 0.08):
+        env = _gate_env()
+        env.episode_length_buf[:] = _past_hold(env)
+        _set_attitude(env, drop=drop)
+        crouch[drop] = _gate(env, floor=0.0)
+    assert crouch[0.02] > 0.6
+    assert crouch[0.04] < 0.5
+    assert crouch[0.08] < 0.05
+    assert list(crouch.values()) == sorted(crouch.values(), reverse=True)
+
+
+def test_the_launch_gate_multiplies_BOTH_the_flip_and_the_landing():
+    # THE TEST THAT WOULD FAIL IF SOMEONE APPLIED IT TO ONE TERM ONLY.
+    # flip_progress is 8.0 of mass and landing 5.6; gating just one still
+    # leaves 5.6 or 8.0 of the 13.6 collectable from a collapse, which is
+    # exactly the hole the gate exists to close.
+    def measure(drop, tilt_deg):
+        env = _gate_env(
+            sensors={
+                "feet_ground_contact": _FakeSensor(torch.ones(1, 1)),
+                "robot_ground_contact": _FakeSensor(torch.ones(1, 1)),
+            },
+        )
+        env.episode_length_buf[:] = _past_hold(env)
+        env._backflip_max[:] = 2 * math.pi     # a full turn already banked,
+        env._backflip_paid[:] = 0.0            # none of it paid yet
+        _set_attitude(env, drop=drop, tilt_deg=tilt_deg)
+        env.common_step_counter += 1
+        flip = float(
+            microduck_mdp.backflip_progress(
+                env, launch_gate_floor=0.0, hold_z=_GATE_HOLD_Z, max_paid_rate=1e9
+            )[0]
+        )
+        # The landing term scores the SETTLED pose, so give both cases the same
+        # perfect touchdown; only the latched launch gate differs. (This also
+        # re-checks immutability through the real reward path.)
+        env.robot.data.root_link_pos_w[:, 2] = 0.115
+        env.robot.data.root_link_quat_w = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+        land = float(
+            microduck_mdp.backflip_landing(
+                env, launch_gate_floor=0.0, hold_z=_GATE_HOLD_Z, window_s=1.4
+            )[0]
+        )
+        return flip, land
+
+    good_flip, good_land = measure(0.0, 0.0)
+    assert good_flip > 0.0 and good_land > 0.5
+
+    bad_flip, bad_land = measure(0.10, 90.0)
+    assert bad_flip == 0.0, "the launch gate is not applied to flip_progress"
+    assert bad_land == 0.0, "the launch gate is not applied to backflip_landing"
+
+    # and at the shipped floor a collapse keeps exactly that fraction of BOTH
+    env = _gate_env(
+        sensors={
+            "feet_ground_contact": _FakeSensor(torch.ones(1, 1)),
+            "robot_ground_contact": _FakeSensor(torch.ones(1, 1)),
+        },
+    )
+    env.episode_length_buf[:] = _past_hold(env)
+    env._backflip_max[:] = 2 * math.pi
+    env._backflip_paid[:] = 0.0
+    _set_attitude(env, drop=0.10, tilt_deg=90.0)
+    env.common_step_counter += 1
+    floored_flip = float(
+        microduck_mdp.backflip_progress(
+            env, launch_gate_floor=0.3, hold_z=_GATE_HOLD_Z, max_paid_rate=1e9
+        )[0]
+    )
+    env.robot.data.root_link_pos_w[:, 2] = 0.115
+    env.robot.data.root_link_quat_w = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    floored_land = float(
+        microduck_mdp.backflip_landing(
+            env, launch_gate_floor=0.3, hold_z=_GATE_HOLD_Z, window_s=1.4
+        )[0]
+    )
+    assert floored_flip == pytest.approx(0.3 * good_flip, rel=1e-6)
+    assert floored_land == pytest.approx(0.3 * good_land, rel=1e-6)

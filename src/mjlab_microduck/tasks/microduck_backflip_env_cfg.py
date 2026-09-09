@@ -1,16 +1,31 @@
 """Microduck backflip task — launched by the operator's hands, land on the feet.
 
-STATUS. First training run (4096 envs, 279 iterations) worked: flip_progress
-+1.97, landing +1.72, every penalty negative, and the 300 deg landing gate
-opening — so the env does produce real backflips. It also collapsed into the
-plate before the impulse, because the hold was 0.1-0.3 s and ready_stance
-could only ever earn 0.1-0.3 (it logged +0.036). This revision answers that:
-the plate now rests on the ground, the hold is 1-5 s (curriculum-ramped), the
-episode is 7.5 s to fit it, and the stance weight is re-derived by reward MASS.
-Open-loop the robot lands at 2.4-4.9 m/s, above the ~2.6 m/s the operator
-would like; a trained policy that tucks to spin faster and extends to brake
-before contact may do better, and that — along with how much of the launch box
-it can complete — is answered by training rather than by more probing.
+STATUS. The first training run (4096 envs, 279 iterations) worked as a proof
+that the env produces real backflips: flip_progress +1.97, landing +1.72, every
+penalty negative, and the 300 deg landing gate opening. Three things it also
+showed, and what answers each:
+  * It COLLAPSED into the plate before the impulse — reported three times, and
+    two rounds of re-weighting and re-shaping ``ready_stance`` never touched
+    it, because it was never a tuning problem. The plate fires on its own
+    schedule whatever the robot is doing, so a collapsed robot still collected
+    flip_progress and the landing annuity (13.6 of 14.7) and forfeited only the
+    stance term. And a lower, more compact body rotates MORE at the same flick
+    (measured), so collapsing was slightly PROFITABLE. Answered structurally by
+    the LAUNCH-ATTITUDE GATE (``mdp._backflip_launch_gate``): a latched,
+    smooth, floored factor on BOTH task terms, so a flip that launches from a
+    collapse does not count. See the mass table below.
+  * The hold was invisible in play, and priced only at the last curriculum
+    stage. The hold is now plain DR, 1-5 s uniform from step 0 (no curriculum
+    at all), the episode is 7.5 s to fit it, and the landing annuity pays over
+    a FIXED window latched at touchdown so its payout does not depend on the
+    hold draw.
+  * The ejection was too strong. VZ_RANGE came DOWN to 2.20-2.80 (from
+    3.00-4.00), with W0_RANGE and LAUNCH_RANGE trimmed to keep the direction
+    gate; landings fall from 2.39-4.93 to 1.78-3.65 m/s and the apex halves.
+    The measured ladder for going gentler still is at VZ_RANGE.
+Everything above is measured on CPU MuJoCo with BAM actuators and recorded in
+docs/backflip_envelope_results.md, which is append-only: it contains the
+superseded boxes too, and its header names the one that is current.
 
 WHY THE PLATE SITS ON THE GROUND NOW. An earlier revision floored Z0_RANGE at
 0.07 m because the then-current KNEELING tuck rested on its shins with its feet
@@ -18,8 +33,10 @@ hanging ~8 cm below the slab, so a lower plate put them through the floor. That
 posture is gone. Standing's LOWEST GEOMS ARE THE FEET, so the plate can rest on
 the ground (z0 = PLATE_HALF_THICKNESS puts the slab exactly on the floor) and
 the spawn still puts the soles on its top surface by construction. The honest
-cost is altitude: a floor-level launch has less airtime, nothing closes at
-vz 2.5 any more, and VZ_RANGE had to come up to 3.0-4.0 — which lands harder.
+cost is altitude: a floor-level launch has less airtime, so a given ``vz``
+closes less rotation than it did from a 0.10 m plate. That is a real trade the
+user accepted, and it is why the open-loop closure fraction is now REPORTED
+rather than required (see below).
 
 HAND-OFF PREMISE. On the real robot there is no launcher and no launcher
 sensing: a human picks the duck up, holds it on two flat palms, and flicks.
@@ -32,36 +49,42 @@ rest of the family (61D: 48 proprioception + [twist(3), head_pose(4),
 body_pose(6)], head/body slots zero-padded): the runtime hot-swaps ONNX files
 walk/stand/trick through one buffer.
 
-MEASURED LAUNCH ENVELOPE — WHOLE-BOX verified from the ACTUAL spawn
-(docs/backflip_envelope_results.md "Tucked hold"; BAM actuators, probe mode
-``--posture tucked_env --box-check``. These numbers are measured, not guessed
-— do not "tidy" them):
-  z0 in [0.10, 0.20] m, vz in [2.00, 2.10] m/s, w0 in [21, 23] rad/s,
-  t_launch in [0.12, 0.14] s. All 486 sampled combinations of the CORNERS AND
-  MIDPOINTS of those four ranges — crossed with the hold extremes (0.1 s and
-  the curriculum's 1.0 s) and tuck depths 0.5 / 0.75 / 1.0 — close a full
-  360 deg BACKWARD flip and land under the hardware limit. Worst cell in the
-  box: 393.6 deg (33.6 deg of margin) and 2.51 m/s (0.09 m/s of margin). All
-  16 (z0, vz, w0, t_launch) corners plus the two worst cells and both tuck
-  extremes were orientation-verified backward (20/20).
-  WHOLE-BOX is the acceptance rule, and it is not pedantry: the previous box
-  was picked from best corners and its interior contained cells that rotated
-  3 deg. If you widen any range, re-run --box-check; a box with one dead cell
-  inside it is not a box.
-  * A SHORT flick is the violent one: t_launch=0.08 lands at up to 3.97 m/s,
-    half again over the limit. The operator's flick duration is not free DR.
-  * vz above 2.10 pushes the z0=0.20 corner to 2.65-2.70 m/s.
-  * w0 above 23 runs out of AIRTIME rather than spin: w0=25 at t_launch=0.14
-    drops to 372 deg and w0=30 to 279 deg, because a harder flick trades apex
-    for rotation rate.
-  * The tuck depth is fixed at TUCK_FACTOR for the SPAWN, but the box was
-    verified across 0.5-1.0 because the policy can deepen or open the tuck
-    during HOLD and LAUNCH.
+MEASURED LAUNCH ENVELOPE — the ranges below are MEASURED, from the env's ACTUAL
+standing spawn with the plate on the ground, with BAM actuators
+(docs/backflip_envelope_results.md, "Gentler ejection"; probe mode
+``scripts/backflip_envelope.py --box-check --bam``). Do not "tidy" them:
+  z0 in [0.01, 0.03] m, vz in [2.20, 2.80] m/s, w0 in [18, 24] rad/s,
+  t_launch in [0.14, 0.16] s, hold 1-5 s. The probe imports these from THIS
+  module, so there is one source of truth.
+
+  THE ACCEPTANCE RULE IS DIRECTION, and only direction: every cell of the box
+  must rotate BACKWARD. That is a hard gate — a cell that comes out forward is
+  not a gentler backflip, it is a different maneuver, and the accumulator's
+  sign convention would refuse to pay it anyway.
+    * The direction gate binds from BOTH sides. w0 above ~24-27 overdrives the
+      sole contact and comes out forward; and a LOW vz with a low w0 and a
+      SHORT flick does the same (vz 2.2, w0 15, t_launch 0.12 measures
+      -110 deg). Trimming t_launch's low end 0.12 -> 0.14 and w0's 15 -> 18 is
+      what let vz come down to 2.20 while keeping the gate.
+    * A SHORT flick is the violent one: t_launch = 0.08 lands at up to
+      3.97 m/s. The flick duration is not free DR.
+
+  OPEN-LOOP CLOSURE IS INFORMATION, NOT A BAR. 27% of the box closes a full
+  360 deg with the joints FROZEN at the home command. Requiring the whole box
+  to close open-loop was an over-specified acceptance bar that has been
+  dropped: the policy is supposed to tuck to spin up and extend to brake, so
+  an open-loop probe measures the launcher, not the task. It is reported so a
+  range change can be compared against what has actually trained (27% reached
+  landing +1.72 by iteration 279; the previous 62% box was not gentler in any
+  way the user cared about).
+
 HARDWARE CONSTRAINT (the user's): landings above roughly 2.6 m/s — about a
-34 cm free fall — risk damaging the real duck. The box's LOW-vz corner lands
-around 1.5 m/s, so the defaults sit at the low-vz end (2.00-2.25, not the
-2.5-3.0 that the first sweep's best-rotation cells wanted). The same concern is
-why the |a_z| impact penalty starts at 2x the roulade weight and ramps higher,
+34 cm free fall — risk damaging the real duck. The current box lands at
+1.78-3.65 m/s, with 52 of its 243 sampled cells under the threshold (the
+previous box had 5); the gentlest measured alternative that still keeps the
+direction gate lands at 1.54-3.50 and is written down at VZ_RANGE. The same
+concern is why the |a_z| impact penalty starts at 2x the roulade weight and
+ramps higher,
 and why ``backflip_landing`` prices SETTLING rather than merely passing
 through a good pose between bounces.
 
@@ -107,65 +130,66 @@ DESIGN CHOICES AND WHERE THEY CAME FROM
     and it is a pure motion-blocker on the one thing the maneuver is made of.
     Anti-violence pressure lives on |a_z|, action_rate and the landing's
     settle factor instead.
-  * REWARD MASS ACROSS THE HOLD RANGE (episode sums, dt-scaled — AGENTS.md:
-    compare mass, not weight, and price every draw the env can make). The hold
-    H is sampled uniformly 1-5 s from step 0, and the landing annuity pays over
-    a FIXED 1.4 s window after touchdown, so only the stance varies with H:
+  * REWARD MASS, WITH THE LAUNCH-ATTITUDE GATE (episode sums, dt-scaled —
+    AGENTS.md: compare mass, not weight). The hold H is sampled uniformly
+    1-5 s, the landing annuity pays over a fixed 1.4 s window, and BOTH
+    flip_progress and landing are multiplied by the gate latched at the flick
+    (``mdp._backflip_launch_gate``), which is 1.0 for an upright launch and
+    ``LAUNCH_GATE_FLOOR`` for a collapsed one:
 
-      hold H     ready_stance   landing   flip   never-flip cap
-      1.0 s      1.07           5.6       8.0    1.07
-      3.0 s      3.21           5.6       8.0    3.21
-      5.0 s      5.36           5.6       8.0    5.36
+      launch posture   flip   landing   ready_stance (H=1 / H=5)   TOTAL
+      upright          8.0     5.6      1.07 / 5.36               14.7 / 19.0
+      collapsed        2.4     1.68     ~0                         4.1
+      (floor 0.3)
+      collapsed        0.4     0.28     ~0                         0.7
+      (floor 0.05, after the curriculum)
 
-    (ready_stance = 0.975 x 1.10 x H; landing = 4.0 x 1.4.)
+    THIS IS THE POINT. Before the gate, a collapsed robot still got flicked,
+    still accumulated rotation and still collected the annuity — 13.6 of the
+    14.7 — and forfeited only ready_stance's 1.07-5.36. And a lower, more
+    compact body rotates MORE at the same flick (measured), so collapsing was
+    not merely free, it was slightly PROFITABLE. The user reported it three
+    times, and two rounds of tuning ready_stance could not fix it because that
+    term is capped by the annuity's ceiling. Standing is now worth 10.6-14.9
+    points instead of 1.07-5.36, and the gate is what prices it: ready_stance
+    is shaping for the gate, not the thing pricing the hold.
 
     THE ACCEPTANCE STATEMENT, checked at every hold draw:
-      1. Collapsing during the hold costs more than the rotation it buys.
-         Collapsing forfeits the whole stance mass — 1.07 at the shortest hold,
-         5.36 at the longest — where the old 0.1-0.3 s first curriculum stage
-         forfeited only 0.1-0.3. And the rotation a PRE-FLICK crouch buys is
-         bounded: the policy can fold AT the flick for free (ready_stance dies
-         at launch) and flip_progress is capped at one turn, so extra rotation
-         beyond 360 deg pays nothing. A LEAN is now priced too — see the tilt
-         gate on the term.
-      2. Flipping and landing still beats never flipping, at every draw. The
-         never-flip cap is the stance mass alone (1.07-5.36); flipping adds
-         flip 8.0 + landing 5.6 = 13.6 on top, whatever the hold was.
+      1. Collapsing during the hold costs far more than the rotation it buys.
+         It forfeits (1 - floor) of BOTH main terms — 9.5 points at floor 0.3,
+         12.9 at floor 0.05 — plus the stance mass. The extra rotation a
+         compact body buys cannot pay for that, and flip_progress caps at one
+         turn anyway.
+      2. Flipping and landing still beats never flipping, at every draw: an
+         upright launch adds 13.6 on top of the stance, and even a collapsed
+         one adds 4.1 rather than nothing (the floor is what keeps discovery
+         alive).
       3. `landing` stays the dominant attractor at every draw: 5.6 against
          ready_stance's maximum of 5.36.
-
-    WHAT THE FIXED WINDOW BOUGHT: the annuity no longer swings 3.7x with the
-    hold draw, so an identical backflip is worth the same whenever it happens.
-    What it did NOT buy is stance headroom — the binding case was always the
-    longest hold, and pinning the annuity to the worst case's affordance pins
-    the ceiling with it. If more hold authority is ever needed, lengthening
-    EPISODE_LENGTH_S raises the affordable window and the ceiling with it (at
-    8.0 s the window could be 1.9 s and w could go to 1.56).
   * The landing annuity (weight 4.0) is gated on a near-complete flip (300-345
     deg): "stand still and never flip" satisfies feet/upright/height/calm
-    trivially, and without the gate it is the argmax. Reward MASS (episode
-    sums, dt-scaled): flip 8.0, landing up to 4.0 x ~2 s of post-landing
-    annuity = ~8.0, ready_stance 0.4-1.0 (weight x the hold, which the
-    curriculum widens from 0.4 s to 1.0 s). So a flip-and-crash earns ~8 and a
-    flip-and-land earns ~16 — the landing is worth a second flip, and the hold
-    is worth 5-12% of one.
-  * ``ready_stance`` (weight 1.0) pays only during HOLD and dies at launch, so
-    it can never oppose the flip. It pays ``pose x height`` for HOLDING THE
-    TUCK: the joint Gaussian says "be folded", the height Gaussian says "be
-    folded ON THE PLATE" (a standing trunk is ~2.9 sigma out, scoring ~3e-4),
-    and a WIDE tilt smoothstep (full below 40 deg, zero above 70) says "be
-    folded UPRIGHT". Its ``tuck_z`` is TUCK_Z + PLATE_HALF_THICKNESS because
-    the robot rests on the plate's TOP surface while the term measures against
-    the plate's centre height ``z0``. The upright factor is load-bearing: pose
-    and height cannot tell an upright tuck from an inverted one, and the
-    SIDE-LYING tuck is a passively stable on-plate basin that measured 0.991
-    against upright's 0.950 without it — a premium for flopping, which would
-    have produced a SIDE flip. It costs zero at the tuck's own 14 deg resting
-    tilt, so it does not fight the pose. It pays a crouched robot per step,
-    which is the shape AGENTS.md warns about; the function's docstring argues
-    why that is legitimate here (the tuck is the GOOD state, and the paying
-    window is closed by the plate's PRESCRIBED schedule rather than by anything
-    the policy does, so it cannot be camped).
+    trivially, and without the gate it is the argmax. It pays over a FIXED
+    LANDING_WINDOW_S window latched at touchdown, so the same landing is worth
+    the same 5.6 whenever it happens — before that it paid "all the time
+    remaining", and an identical backflip earned 21.8 at a 1 s hold against
+    5.84 at a 5 s hold, a 4x swing in the main attractor decided by a draw the
+    policy neither controls nor observes.
+  * ``ready_stance`` (weight 1.10) pays only during HOLD and dies at launch, so
+    it can never oppose the flip. It pays ``height x upright`` for STANDING ON
+    THE PLATE: the height Gaussian (std 0.03) says "be at full standing height
+    on the plate" — the floor beside the plate is ~3 sigma out and a 5 cm
+    crouch scores under a fifth of upright — and a tilt smoothstep (full below
+    10 deg, zero above 45) says "and be upright". Its ``stand_z`` carries
+    PLATE_HALF_THICKNESS because the robot rests on the plate's TOP surface
+    while the term measures against the plate's centre height ``z0``. The
+    upright factor is load-bearing: height alone cannot tell a standing robot
+    from a stable side-lying one, and the measured flop basins sit at 80-126
+    deg of tilt, so without it a flop could out-earn the stance (it did, on the
+    tucked hold: 0.991 against upright's 0.950). It costs nothing at the pose's
+    own measured drift (7.3 deg by 0.5 s).
+    It is SHAPING for the launch-attitude gate, not the thing pricing the hold:
+    the gate is what makes a collapse worthless, and this term is what gives
+    the policy a dense gradient toward the posture the gate scores.
   * Motion-blockers (body_ang_vel, angular_momentum) stay at roulade's
     near-zero weights. Arithmetic, since this is the term most likely to eat
     the task: at a typical 14 rad/s flip, body_ang_vel costs
@@ -180,12 +204,16 @@ DESIGN CHOICES AND WHERE THEY CAME FROM
     landing", which is a training-time finding, and this branch stops before
     training.
 
-SPAWN. ``reset_backflip_robot_on_plate`` folds the robot to
-TUCK_OVERRIDES x TUCK_FACTOR and derives its spawn height from the SAME ``z0``
-the plate uses, plus the MEASURED tucked resting height TUCK_Z. It runs after
-``backflip_launch_params`` (which samples ``z0``) and after
-``reset_robot_joints`` (whose +-0.05 rad of joint scatter it shifts rather than
-overwrites), events firing in dict insertion order. The base template's +-0.5 m x/y scatter
+SPAWN. ``reset_backflip_robot_on_plate`` stands the robot on the plate's TOP
+surface: it derives its spawn height from the SAME ``z0`` the plate uses, plus
+PLATE_HALF_THICKNESS, plus the MEASURED standing trunk height STAND_Z. It sets
+height only and leaves the joints to ``reset_robot_joints`` (whose +-0.05 rad of
+scatter is a standing pose plus noise), and it runs after
+``backflip_launch_params``, which samples ``z0`` — events fire in dict insertion
+order. The TUCKED spawn is withdrawn (AMENDMENT 3): the tucked rest put the feet
+2.2 cm INSIDE the plate slab, and the whole envelope measured from it was
+measured from a state the physics would never produce.
+The base template's +-0.5 m x/y scatter
 and random yaw are narrowed to a small on-plate jitter with near-zero yaw: the
 plate is only 18 cm across, and the flick axis is world +y, so a random heading
 would turn the backflip into a side flip.
@@ -254,6 +282,18 @@ EPISODE_LENGTH_S = 7.5
 # in the MAIN attractor decided by a draw the policy cannot observe, and it
 # made a long-hold episode worth less than a short one for the same skill.
 LANDING_WINDOW_S = 1.4
+
+# Floor of the LAUNCH-ATTITUDE GATE, which multiplies BOTH flip_progress and
+# landing (see mdp._backflip_launch_gate). A collapsed launch earns
+# floor x the task reward instead of all of it.
+#
+# 0.3 at step 0, tightened toward 0 by curriculum once the stance consolidates.
+# It is floored rather than binary on purpose: a hard zero starves flip
+# discovery, because the robot cannot balance yet and a stance it cannot yet
+# hold would pay nothing for the flip either. AGENTS.md's "introduce the tax
+# after the skill exists" applies to the FLOOR, not to the gate.
+LAUNCH_GATE_FLOOR = 0.3
+LAUNCH_GATE_FLOOR_FINAL = 0.05
 
 # Empirically-measured standing trunk height above the sole contact plane
 # (standup lesson: measure it on the actual model, never carry it across
@@ -476,7 +516,7 @@ def _apply_final_curriculum(cfg) -> None:
     """
     for name, term in list(cfg.curriculum.items()):
         params = term.params
-        if "param_stages" in params:
+        if "param_stages" in params and "event_name" in params:
             last = params["param_stages"][-1]["params"]
             cfg.events[params["event_name"]].params.update(last)
         elif "weight_stages" in params:
@@ -485,6 +525,9 @@ def _apply_final_curriculum(cfg) -> None:
         elif "range_stages" in params:
             last = params["range_stages"][-1]["range"]
             cfg.events[params["event_name"]].params["ranges"] = (-last, last)
+        elif "param_stages" in params and "reward_name" in params:
+            last = params["param_stages"][-1]["params"]
+            cfg.rewards[params["reward_name"]].params.update(last)
         else:
             raise AssertionError(
                 f"curriculum term {name!r} has no stage list this function "
@@ -611,7 +654,12 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["flip_progress"] = RewardTermCfg(
         func=microduck_mdp.backflip_progress,
         weight=8.0,
-        params={"target_angle": 2 * math.pi, "max_paid_rate": MAX_PAID_RATE},
+        params={
+            "target_angle":      2 * math.pi,
+            "max_paid_rate":     MAX_PAID_RATE,
+            "launch_gate_floor": LAUNCH_GATE_FLOOR,
+            "hold_z":            STAND_Z + PLATE_HALF_THICKNESS,
+        },
     )
 
     # Completion-gated landing annuity — the dominant attractor and the whole
@@ -630,6 +678,8 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "omega_std":   3.0,
             "lin_vel_std": 0.5,
             "window_s":    LANDING_WINDOW_S,
+            "launch_gate_floor": LAUNCH_GATE_FLOOR,
+            "hold_z":            STAND_Z + PLATE_HALF_THICKNESS,
             "sensor_name": feet_ground_cfg.name,
         },
     )
@@ -1081,6 +1131,33 @@ def make_microduck_backflip_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     if "terrain_levels" in cfg.curriculum:
         del cfg.curriculum["terrain_levels"]
     del cfg.curriculum["command_vel"]
+
+    # Tighten the launch-attitude gate's FLOOR once the stance consolidates.
+    # Phase-aligned per AGENTS.md: at step 0 a bad stance still yields 30% of
+    # the flip signal, which is what lets the flip be discovered at all while
+    # the robot is still learning to balance on the launcher. Only after that
+    # does a collapse become nearly worthless. If wandb shows ready_stance
+    # flat while flip_progress stalls at a stage boundary, this ramp is too
+    # early — stretch it, never move it earlier.
+    #
+    # BOTH reward terms must be moved together: the gate is one latched value
+    # and applying different floors to flip_progress and landing would leave
+    # part of the task collectable from a collapse. A cfg test pins them equal.
+    for _term in ("flip_progress", "landing"):
+        cfg.curriculum[f"launch_gate_floor_{_term}"] = CurriculumTermCfg(
+            func=microduck_mdp.reward_param_curriculum,
+            params={
+                "reward_name": _term,
+                "param_stages": [
+                    {"step": 0, "params": {
+                        "launch_gate_floor": LAUNCH_GATE_FLOOR}},
+                    {"step": 2000 * 24, "params": {
+                        "launch_gate_floor": 0.15}},
+                    {"step": 4000 * 24, "params": {
+                        "launch_gate_floor": LAUNCH_GATE_FLOOR_FINAL}},
+                ],
+            },
+        )
 
     # NO HOLD CURRICULUM. HOLD_RANGE is sampled uniformly 1-5 s from step 0.
     #

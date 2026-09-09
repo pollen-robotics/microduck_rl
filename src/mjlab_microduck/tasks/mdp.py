@@ -4497,6 +4497,31 @@ def event_param_curriculum(
     return torch.tensor(float(first_val) if isinstance(first_val, (int, float)) else 0.0)
 
 
+def reward_param_curriculum(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    reward_name: str,
+    param_stages: list[dict],
+) -> torch.Tensor:
+    """Mutate a reward term's params at scheduled steps.
+
+    Mirror of ``event_param_curriculum`` for rewards. Uses the live
+    RewardManager term cfg via ``get_term_cfg``, since ``env.cfg.rewards`` is a
+    deepcopy and writing to it is a silent no-op (AGENTS.md).
+    ``param_stages``: list of ``{step: int, params: dict}``, shallow-merged at
+    the latest matching stage.
+    """
+    del env_ids
+    reward_cfg = env.reward_manager.get_term_cfg(reward_name)
+    current = param_stages[0]["params"]
+    for stage in param_stages:
+        if env.common_step_counter >= stage["step"]:
+            current = stage["params"]
+    reward_cfg.params.update(current)
+    first_val = next(iter(current.values()))
+    return torch.tensor(float(first_val) if isinstance(first_val, (int, float)) else 0.0)
+
+
 def face_down_prob_curriculum(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
@@ -7372,6 +7397,10 @@ def _backflip_state(env: ManagerBasedRlEnv) -> tuple:
         # payout window; see that function. Not part of the returned tuple, so
         # the `*_, max_accum, paid` unpacking elsewhere stays valid.
         env._backflip_land_step = torch.full_like(z, -1.0)
+        # Launch-posture quality, latched at HOLD -> LAUNCH; -1 = not yet
+        # latched. See _backflip_launch_gate. Not in the returned tuple, so the
+        # `*_, max_accum, paid` unpacking elsewhere stays valid.
+        env._backflip_launch_gate = torch.full_like(z, -1.0)
         env._backflip_last_update_step = -1
     return (
         env._backflip_t_hold,
@@ -7449,6 +7478,7 @@ def reset_backflip_launch_params(
     env._backflip_max[env_ids] = 0.0
     env._backflip_paid[env_ids] = 0.0
     env._backflip_land_step[env_ids] = -1.0
+    env._backflip_launch_gate[env_ids] = -1.0
 
 
 def _backflip_time(env: ManagerBasedRlEnv) -> torch.Tensor:
@@ -7536,6 +7566,91 @@ _BACKFLIP_GROUND_SENSOR = "robot_ground_contact"
 # stance nor a face-plant halfway round can collect it.
 BACKFLIP_LANDING_GATE_LO = math.radians(300.0)
 BACKFLIP_LANDING_GATE_HI = math.radians(345.0)
+
+
+# Launch-attitude gate shape. ONE definition, because both flip_progress and
+# backflip_landing multiply by the same latched value and a mismatch would be
+# invisible. Only the FLOOR is a per-term parameter (the curriculum moves it),
+# and a cfg test pins the two terms' floors equal.
+#
+# The widths are chosen from the MEASURED open-loop drift, not from what a good
+# launch looks like: standing on the plate drifts 7.3 deg of tilt by 0.5 s and
+# 23.2 deg by 1.0 s, and the hold now runs 1-5 s, so a policy that has not
+# learned to balance presents at LARGE tilts. The gate has to be visible there
+# or there is no gradient to climb. With 10/45 deg: 7 deg scores 1.00, 23 deg
+# scores 0.69, 40 deg scores 0.06. The height Gaussian is the collapse
+# detector and is deliberately a touch wider than ready_stance's 0.03: a 2 cm
+# crouch scores 0.78, 4 cm 0.37, 6 cm 0.11, 8 cm 0.02.
+_BACKFLIP_LAUNCH_GATE_HEIGHT_STD = 0.04
+_BACKFLIP_LAUNCH_GATE_TILT_FULL_DEG = 10.0
+_BACKFLIP_LAUNCH_GATE_TILT_ZERO_DEG = 45.0
+
+
+def _backflip_launch_gate(
+    env: ManagerBasedRlEnv,
+    asset: Entity,
+    hold_z: float,
+    floor: float,
+) -> torch.Tensor:
+    """How good the launch POSTURE was, latched at the HOLD -> LAUNCH instant.
+
+    WHY THIS EXISTS. The plate fires on its own schedule whatever the robot is
+    doing, so a COLLAPSED robot still got flicked, still accumulated rotation
+    and still collected the landing annuity — about 14 points — while
+    forfeiting only ``ready_stance``'s 1.1-5.4. And a lower, more compact body
+    rotates MORE at the same flick (measured directly: that is why the tucked
+    hold once looked like it flew). So the incentive was: collapse, THEN flip.
+    The user reported the collapse three times and two rounds of weight and
+    shape tuning did not touch it, because ``ready_stance`` is capped by the
+    landing annuity's ceiling — no weight fixes a structural incentive.
+
+    This is the fix AGENTS.md prescribes: "encode what counts as the maneuver
+    in hard state-based gates, not in small penalty nudges." The flip does not
+    COUNT if it launched from a collapsed posture. Both ``backflip_progress``
+    and ``backflip_landing`` multiply by this, so a collapsed launch forfeits
+    the whole task reward rather than a fifth of it.
+
+    Shape: ``floor + (1 - floor) * height * upright``, on the same two
+    quantities ``ready_stance`` scores but sampled ONCE at the flick rather
+    than integrated over the hold.
+      * LATCHED and IMMUTABLE. The attitude at the flick is the whole point; a
+        robot that straightens up mid-flight must not retroactively earn it.
+      * FLOORED, not binary. A hard zero would starve flip discovery: the robot
+        cannot balance yet, and if a bad stance pays nothing it never learns the
+        flip either. The floor starts around 0.3 and a curriculum tightens it
+        toward 0 once the stance consolidates.
+    Cleared on reset like every other buffer.
+    """
+    _backflip_state(env)
+    phase = backflip_phase(env)
+    fresh = (env._backflip_launch_gate < 0.0) & (phase != BACKFLIP_PHASE_HOLD)
+    if bool(fresh.any()):
+        z_err = (
+            asset.data.root_link_pos_w[:, 2]
+            - (env.scene.terrain.env_origins[:, 2] + env._backflip_z0 + hold_z)
+        )
+        height = torch.exp(
+            -torch.nan_to_num(z_err, nan=1.0) ** 2
+            / _BACKFLIP_LAUNCH_GATE_HEIGHT_STD**2
+        )
+        upright = _trunk_tilt_smoothstep(
+            torch.nan_to_num(asset.data.root_link_quat_w, nan=0.0),
+            _BACKFLIP_LAUNCH_GATE_TILT_FULL_DEG,
+            _BACKFLIP_LAUNCH_GATE_TILT_ZERO_DEG,
+        )
+        env._backflip_launch_gate = torch.where(
+            fresh, height * upright, env._backflip_launch_gate
+        )
+    # Still in HOLD (never latched): pay as if the launch were perfect, so the
+    # HOLD phase itself is not taxed. Nothing in HOLD earns flip or landing
+    # reward anyway (the accumulator needs the airborne gate, the annuity needs
+    # touchdown), so this only avoids a spurious zero.
+    raw = torch.where(
+        env._backflip_launch_gate < 0.0,
+        torch.ones_like(env._backflip_launch_gate),
+        env._backflip_launch_gate,
+    )
+    return floor + (1.0 - floor) * raw
 
 
 def _update_backflip_accum(env: ManagerBasedRlEnv, asset: Entity) -> None:
@@ -7626,6 +7741,8 @@ def backflip_progress(
     env: ManagerBasedRlEnv,
     target_angle: float = 2 * math.pi,
     max_paid_rate: float = 25.0,
+    launch_gate_floor: float = 0.3,
+    hold_z: float = 0.125,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """The single dense signal: paid increments of the airborne rotation frontier.
@@ -7641,10 +7758,16 @@ def backflip_progress(
     peak while tucked. A 14 rad/s cap would forfeit rotation during a
     perfectly good flip and blunt the only dense learning signal in the task.
     25 rad/s still prices genuinely violent spins above the measured envelope.
+
+    MULTIPLIED BY THE LAUNCH-ATTITUDE GATE (see ``_backflip_launch_gate``): a
+    flip launched from a collapsed posture does not count. ``backflip_landing``
+    multiplies by the same latched value — applying it to only one of the two
+    would leave most of the task reward collectable from a collapse.
     """
     asset: Entity = env.scene[asset_cfg.name]
     _update_backflip_accum(env, asset)
-    return _backflip_pay(env, target_angle, max_paid_rate)
+    gate = _backflip_launch_gate(env, asset, hold_z, launch_gate_floor)
+    return _backflip_pay(env, target_angle, max_paid_rate) * gate
 
 
 def backflip_hold_window(env: ManagerBasedRlEnv) -> torch.Tensor:
@@ -7763,6 +7886,8 @@ def backflip_landing(
     omega_std: float = 3.0,
     lin_vel_std: float = 0.5,
     window_s: float = 1.4,
+    launch_gate_floor: float = 0.3,
+    hold_z: float = 0.125,
     sensor_name: str = "feet_ground_contact",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
@@ -7779,6 +7904,10 @@ def backflip_landing(
     "stand still on the plate" (which already trivially satisfies
     feet-contact/upright/height/calm) becomes the argmax and the flip itself
     never gets learned.
+
+    MULTIPLIED BY THE LAUNCH-ATTITUDE GATE (see ``_backflip_launch_gate``), the
+    same latched value ``backflip_progress`` uses: an otherwise perfect landing
+    from a collapsed launch is not the maneuver.
 
     FIXED PAYOUT WINDOW (``window_s``): the annuity pays for at most
     ``window_s`` seconds after the first terrain contact, so an identical
@@ -7824,7 +7953,8 @@ def backflip_landing(
     )
     settle = torch.exp(-(lin_vel**2) / (lin_vel_std**2))
     window = _backflip_landing_window(env, window_s)
-    return gate * feet_f * up * height * calm * settle * window
+    launch = _backflip_launch_gate(env, asset, hold_z, launch_gate_floor)
+    return gate * feet_f * up * height * calm * settle * window * launch
 
 
 def _backflip_present_mask(env: ManagerBasedRlEnv) -> torch.Tensor:

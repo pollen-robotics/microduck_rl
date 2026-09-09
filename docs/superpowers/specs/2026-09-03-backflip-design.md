@@ -84,6 +84,42 @@ Status: approved design, ready for implementation planning
 >   immune to the tunnelling that killed the tuck.
 > Evidence: `docs/backflip_envelope_results.md`, "Back to standing".
 
+> **AMENDMENT 4 — 2026-09-09 — the flip does not COUNT if it launches from a
+> collapsed posture (the LAUNCH-ATTITUDE GATE).**
+> The user reported "it collapses before the plate even moves" three times, and
+> two waves of re-pricing the hold (1-5 s, then priced at every curriculum
+> stage, then no curriculum at all) never touched it — because it was never a
+> pricing problem. The plate fires on its own prescribed schedule whatever the
+> robot is doing, so a collapsed robot still got flicked, still accumulated
+> rotation and still collected the annuity: 13.6 of 14.7 points, forfeiting
+> only `ready_stance`. And a lower, more compact body rotates MORE at the same
+> flick (measured repeatedly on this branch — it is why the tuck once looked
+> like it flew), so collapsing was slightly PROFITABLE. `ready_stance` cannot
+> out-bid it at any admissible weight: its ceiling is set by the landing
+> annuity, since a stance worth more than the landing makes "stand still and
+> never flip" the argmax.
+> - **New:** `mdp._backflip_launch_gate` — `floor + (1 - floor) * height *
+>   upright`, on the trunk height and tilt at the flick, **latched at the
+>   HOLD -> LAUNCH transition, immutable afterwards, cleared on reset**, and
+>   multiplying **both** `flip_progress` and `landing`. Gating one term alone
+>   would leave 5.6 or 8.0 of the 13.6 collectable from a collapse.
+> - **Floored, not binary, and the floor is the curriculum:** 0.30 at step 0,
+>   tightened to 0.05 by iteration 4000 on both terms together (new
+>   `mdp.reward_param_curriculum`). A hard zero would switch off the only dense
+>   signal in the task during the discovery phase, which AGENTS.md warns makes
+>   "do nothing" win.
+> - **Widths from the MEASURED drift, not from the ideal:** open-loop standing
+>   on the plate drifts 7.3 deg of tilt by 0.5 s and 23.2 deg by 1.0 s, so the
+>   gate scores 1.00 / 0.68 there and only reaches 0 at 45 deg. Wide enough
+>   that the current policy scores visibly, per AGENTS.md.
+> - **Effect:** standing on the plate is now worth 10.6-14.9 points where it
+>   was worth 1.07-5.36; a collapsed launch drops from 13.6 to 4.1, and to 0.7
+>   after the curriculum.
+> - `ready_stance` is now **shaping for the gate** — the dense per-step
+>   gradient toward the posture the gate samples at the flick — not the term
+>   that has to out-bid the flip on its own.
+> Evidence: `docs/backflip_envelope_results.md`, "The collapse, third report".
+
 ## Problem
 
 Microduck (~800 g, ~25 cm, 14 XL330 servos) cannot generate the vertical

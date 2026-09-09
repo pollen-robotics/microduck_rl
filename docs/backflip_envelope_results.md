@@ -5314,3 +5314,175 @@ sensor cannot silently reopen the hole; one asserts **no** critic term comes
 from mjlab's unsanitized sensor module (with `foot_contact` whitelisted as a
 0/1 flag); one feeds `inf` and `NaN` plate states through both plate obs terms
 in both phases and requires finite, zeroed output.
+
+
+# The collapse, third report — a structural fix, not a third tuning pass
+
+The user, watching the current policy: *"il s'effondre avant que la plaque
+bouge"* — it collapses before the plate even moves. Third report of the same
+behaviour. The two previous answers were both **pricing** answers:
+
+| wave | what changed | result |
+|---|---|---|
+| 8 | hold 0.1-0.3 s -> 1-5 s, stance weight re-derived by mass | still collapses |
+| 9-10 | hold priced at every curriculum stage, then the hold curriculum deleted entirely and the annuity made hold-independent | still collapses |
+| 12 (this) | the flip does not COUNT if it launches from a collapse | — |
+
+## Why no weight could have fixed it
+
+The plate fires on its **own prescribed schedule**, whatever the robot is
+doing. So a collapsed robot still gets flicked, still accumulates airborne
+rotation, and still collects the landing annuity. The mass account before the
+gate, at the shipped weights (episode sums, dt-scaled):
+
+| term | upright hold | collapsed hold |
+|---|---|---|
+| flip_progress | 8.00 | 8.00 |
+| landing | 5.60 | 5.60 |
+| ready_stance (H=1 s / H=5 s) | 1.07 / 5.36 | ~0 |
+| **total** | **14.7 / 19.0** | **13.6** |
+
+Collapsing forfeited **1.07-5.36 out of 14.7-19.0**, i.e. 7-28% of the stack,
+and bought back:
+
+* **more rotation.** A lower, more compact body rotates faster at the same
+  flick. This was measured directly and at length on this branch — it is the
+  entire reason the tucked hold looked like it flew and the standing hold did
+  not (see "Standing-spawn re-measurement" and "Back to standing" above).
+* **no risk.** Standing on an 18 cm plate for up to 5 seconds is the hard part
+  of the task; lying on it is passively stable. The measured flop basins sit at
+  80-126 deg of tilt and hold there indefinitely.
+
+So the collapse was not merely cheap, it was **slightly profitable**, and
+`ready_stance` cannot out-bid it at any admissible weight: its ceiling is set
+by the landing annuity (a stance term worth more than the landing would make
+"stand still and never flip" the argmax — the failure this env's first design
+review already caught). Two tuning waves confirmed exactly that.
+
+AGENTS.md prescribes the fix directly: *"Encode what counts as the maneuver in
+hard state-based gates, not in small penalty nudges."*
+
+## The gate
+
+`mdp._backflip_launch_gate`, latched at the **HOLD -> LAUNCH** transition:
+
+```
+gate = floor + (1 - floor) * height * upright        # sampled ONCE, at the flick
+height  = exp(-(z - (z0 + hold_z))^2 / 0.04^2)
+upright = smoothstep(tilt: 10 deg -> 45 deg)
+```
+
+and **both** `flip_progress` and `landing` are multiplied by it. Four
+properties, each deliberate:
+
+1. **Latched and immutable.** The attitude *at the flick* is the whole point.
+   A robot that straightens up mid-flight must not retroactively earn the
+   launch it did not have, and one that gets knocked over after a clean launch
+   must not lose it. `-1` is the not-yet-latched sentinel; the buffer is
+   cleared on reset like every other one.
+2. **Both terms.** Gating only one leaves 5.6 or 8.0 of the 13.6 collectable
+   from a collapse — the same hole, two thirds as wide. There is a test that
+   fails if either multiplication is removed.
+3. **Smooth, not binary.** A cliff would make the reward discontinuous in a
+   quantity the policy controls only approximately, and would pay identically
+   for a 46 deg lean and a face-plant.
+4. **Floored, and the floor is what the curriculum moves.** A hard zero would
+   starve flip discovery: the robot cannot balance on the launcher yet, and if
+   a bad stance paid nothing for the flip either, the only dense signal in the
+   task would be off for the whole discovery phase — AGENTS.md's "an
+   attempt-tax active while a hard skill is being explored makes 'do nothing'
+   win". The floor starts at **0.30** and the curriculum tightens it to
+   **0.05** (2000 and 4000 iterations x 24 steps), on both terms together.
+
+### The widths come from the MEASURED drift, not from what a good launch looks like
+
+AGENTS.md: *"pick stds wide enough that the CURRENT policy scores visibly, or
+the gradient is invisible and nothing changes."* The current policy is not
+good at standing on the plate — standing open-loop with the joints frozen at
+the home command drifts **7.3 deg of tilt by 0.5 s and 23.2 deg by 1.0 s**
+(measured earlier on this branch, "Back to standing"), and the hold now runs
+1-5 s. A gate that is flat-zero past 20 deg would score the current policy at
+0 everywhere and teach it nothing. Measured through the real function
+(`tests/test_backflip_mdp.py::test_the_launch_gate_is_visible_at_the_MEASURED_open_loop_drift`),
+at floor 0:
+
+| trunk tilt at the flick | gate | | trunk z below target | gate |
+|---|---|---|---|---|
+| 0 deg | 1.000 | | 0 cm | 1.000 |
+| 7.3 deg (the pose's own drift) | 1.000 | | 2 cm | 0.778 |
+| 23.2 deg (drift at 1.0 s) | 0.680 | | 4 cm | 0.368 |
+| 40 deg | 0.055 | | 6 cm | 0.105 |
+| >= 45 deg | 0.000 | | 8 cm | 0.018 |
+
+The height Gaussian is the collapse detector proper and is a touch wider than
+`ready_stance`'s 0.03 on purpose: it is scoring one instant rather than
+integrating over the hold, so it must tolerate the normal wobble of a policy
+that is holding, not the ideal of one that has finished learning.
+
+## Reward mass with the gate — what a collapse now earns
+
+| launch posture | flip | landing | ready_stance (H=1 / H=5) | **total** |
+|---|---|---|---|---|
+| upright | 8.00 | 5.60 | 1.07 / 5.36 | **14.7 / 19.0** |
+| collapsed, floor 0.30 (step 0) | 2.40 | 1.68 | ~0 | **4.1** |
+| collapsed, floor 0.05 (after the curriculum) | 0.40 | 0.28 | ~0 | **0.7** |
+
+**Standing on the plate is now worth 10.6-14.9 points, where it was worth
+1.07-5.36.** The gate is what prices the hold; `ready_stance` is now *shaping
+for the gate* — the dense per-step gradient toward the posture the gate scores
+at the flick — rather than the thing that has to out-bid the flip on its own.
+
+Three properties that must survive, checked at both ends of the hold range:
+
+1. **Collapsing costs far more than the rotation it buys**: it forfeits
+   (1 - floor) of *both* main terms — 9.5 points at floor 0.30, 12.9 at 0.05 —
+   plus the stance mass. No amount of extra spin pays that back, and
+   `flip_progress` caps at one turn anyway.
+2. **Flipping still beats not flipping, at every draw**: an upright launch adds
+   13.6 on top of the stance, and even a collapsed one adds 4.1 rather than
+   nothing. That is the floor doing its job.
+3. **`landing` stays the dominant single attractor**: 5.60 against
+   `ready_stance`'s maximum of 5.36.
+
+## Tests
+
+`tests/test_backflip_mdp.py` (6) and `tests/test_backflip_cfg.py` (5):
+
+* latches at the HOLD -> LAUNCH transition, and is a no-op (pays 1.0, latches
+  nothing) during the hold itself;
+* immutable once latched — 5, 50 and 200 steps of a *perfect* attitude after a
+  collapsed launch do not move it;
+* cleared on reset, per env, leaving other envs' latches untouched;
+* returns exactly the floor for a hopeless attitude, at each of 0.30 / 0.15 /
+  0.05 / 0.0;
+* visible at the measured drift (the table above), and monotone in both tilt
+  and height;
+* **multiplies both terms**: end-to-end through `backflip_progress` and
+  `backflip_landing`, a collapsed launch at floor 0 earns exactly 0.0 from both
+  and at floor 0.3 earns exactly 0.3x each. Falsified by deleting each
+  multiplication in turn — removing it from `landing` leaves `bad_land = 1.0`,
+  removing it from the flip leaves `bad_flip = 50.0`, and removing the latch's
+  `fresh` guard fails the immutability test.
+* cfg: both reward terms carry the SAME `hold_z` and the same
+  `launch_gate_floor` (a mismatch would leave part of the task collectable from
+  a collapse); `hold_z` equals `ready_stance`'s target; the floor curriculum
+  exists for BOTH terms with identical, monotonically tightening stage tables
+  that start at step 0; it goes through `reward_param_curriculum` (i.e. through
+  the reward manager, not `env.cfg.rewards`, which is a deepcopy); and the
+  `play` cfg ships the FINAL floor.
+
+`mdp.reward_param_curriculum` is new — the branch had `event_param_curriculum`
+for event ranges and `reward_weight` for weights, but no way to schedule a
+reward term's *params*. It mirrors the event one and mutates through
+`env.reward_manager.get_term_cfg`.
+
+## Docstring rot, corrected in the same pass
+
+The cfg module docstring still described the **tucked** hold and its box
+(withdrawn by AMENDMENT 3), the deleted hold curriculum, the pre-annuity
+payout, and `VZ_RANGE` 3.0-4.0 (superseded two waves ago) — under a heading
+that says "these numbers are measured, do not tidy them". Four blocks were
+rewritten to the shipped values: STATUS, the launch-envelope block (now stating
+the direction gate as the only acceptance rule with closure at 27% reported as
+information), the `ready_stance` and annuity bullets, and the SPAWN paragraph.
+The constants block itself was already current; the prose around it was not.
