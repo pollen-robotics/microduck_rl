@@ -33,6 +33,7 @@ MICRODUCK_GROUNDCONTACT_ROLLERS_XML: Path = _ROBOT_DIR / "robot_groundcontact_ro
 MICRODUCK_GROUNDCONTACT_BACKLASH_XML: Path = _ROBOT_DIR / "robot_groundcontact_backlash.xml"
 MICRODUCK_WALK_BACKLASH_XML: Path = _ROBOT_DIR / "robot_walk_backlash.xml"
 MICRODUCK_GROUNDCONTACT_ROLLERS_BACKLASH_XML: Path = _ROBOT_DIR / "robot_groundcontact_rollers_backlash.xml"
+MICRODUCK_ALLCOLLISIONS_BACKLASH_XML: Path = _ROBOT_DIR / "robot_allcollisions_backlash.xml"
 
 assert MICRODUCK_WALK_XML.exists(), f"XML not found: {MICRODUCK_WALK_XML}"
 assert MICRODUCK_GROUNDCONTACT_XML.exists(), f"XML not found: {MICRODUCK_GROUNDCONTACT_XML}"
@@ -42,6 +43,7 @@ assert MICRODUCK_GROUNDCONTACT_ROLLERS_XML.exists(), f"XML not found: {MICRODUCK
 assert MICRODUCK_GROUNDCONTACT_BACKLASH_XML.exists(), f"XML not found: {MICRODUCK_GROUNDCONTACT_BACKLASH_XML}"
 assert MICRODUCK_WALK_BACKLASH_XML.exists(), f"XML not found: {MICRODUCK_WALK_BACKLASH_XML}"
 assert MICRODUCK_GROUNDCONTACT_ROLLERS_BACKLASH_XML.exists(), f"XML not found: {MICRODUCK_GROUNDCONTACT_ROLLERS_BACKLASH_XML}"
+assert MICRODUCK_ALLCOLLISIONS_BACKLASH_XML.exists(), f"XML not found: {MICRODUCK_ALLCOLLISIONS_BACKLASH_XML}"
 
 
 def get_walk_spec() -> mujoco.MjSpec:
@@ -62,8 +64,37 @@ def get_walk_rollers_spec() -> mujoco.MjSpec:
     return mujoco.MjSpec.from_file(str(MICRODUCK_GROUNDCONTACT_ROLLERS_XML))
 
 
+SERVO_MESH_NAME = "xl330"
+SERVO_GEOM_SUFFIX = "_servo_collision"
+
+
+def name_servo_collision_geoms(spec: mujoco.MjSpec) -> mujoco.MjSpec:
+    """Name every collision geom that is an XL330 housing mesh.
+
+    The onshape-to-robot export leaves collision geoms unnamed (only the two
+    foot soles are named by the export config). The protective-fall tasks need a
+    contact sensor on the servo housings specifically — a servo hitting the floor
+    is the event that strips gears — so this names each housing collision geom
+    ``<body>_<k>_servo_collision``. The ``_collision`` suffix puts them under
+    FULL_COLLISION (condim 1) like the other named collision geoms.
+    """
+    counts: dict[str, int] = {}
+    for geom in spec.geoms:
+        if geom.meshname != SERVO_MESH_NAME or (geom.contype == 0 and geom.conaffinity == 0):
+            continue
+        body = geom.parent.name
+        k = counts.get(body, 0)
+        counts[body] = k + 1
+        geom.name = f"{body}_{k}{SERVO_GEOM_SUFFIX}"
+    return spec
+
+
 def get_allcollisions_spec() -> mujoco.MjSpec:
-    return mujoco.MjSpec.from_file(str(MICRODUCK_ALLCOLLISIONS_XML))
+    return name_servo_collision_geoms(mujoco.MjSpec.from_file(str(MICRODUCK_ALLCOLLISIONS_XML)))
+
+
+def get_allcollisions_backlash_spec() -> mujoco.MjSpec:
+    return name_servo_collision_geoms(mujoco.MjSpec.from_file(str(MICRODUCK_ALLCOLLISIONS_BACKLASH_XML)))
 
 
 def get_ball_spec() -> mujoco.MjSpec:
@@ -188,6 +219,19 @@ MICRODUCK_STANDUP_ROBOT_CFG = EntityCfg(
     ),
 )
 
+# True full-collision model (every part collides, servo housings named — see
+# name_servo_collision_geoms). For tasks where the robot falls onto arbitrary
+# parts and the reward must know WHICH part hit: VelStand / protective fall.
+MICRODUCK_ALLCOLLISIONS_ROBOT_CFG = EntityCfg(
+    spec_fn=get_allcollisions_spec,
+    init_state=HOME_FRAME,
+    collisions=(FULL_COLLISION,),
+    articulation=EntityArticulationInfoCfg(
+        actuators=(actuators,),
+        soft_joint_pos_limit_factor=0.9,
+    ),
+)
+
 MICRODUCK_GROUND_PICK_ROBOT_CFG = EntityCfg(
     spec_fn=get_ground_pick_spec,
     init_state=HOME_FRAME,
@@ -217,6 +261,18 @@ MICRODUCK_BACKLASH_ROBOT_CFG = EntityCfg(
 
 MICRODUCK_WALK_BACKLASH_ROBOT_CFG = EntityCfg(
     spec_fn=get_walk_backlash_spec,
+    init_state=BACKLASH_HOME_FRAME,
+    collisions=(FULL_COLLISION,),
+    articulation=EntityArticulationInfoCfg(
+        actuators=(backlash_actuators,),
+        soft_joint_pos_limit_factor=0.9,
+    ),
+)
+
+# All-collisions backlash robot → VelStand backlash tasks (mirrors
+# MICRODUCK_ALLCOLLISIONS_ROBOT_CFG).
+MICRODUCK_ALLCOLLISIONS_BACKLASH_ROBOT_CFG = EntityCfg(
+    spec_fn=get_allcollisions_backlash_spec,
     init_state=BACKLASH_HOME_FRAME,
     collisions=(FULL_COLLISION,),
     articulation=EntityArticulationInfoCfg(

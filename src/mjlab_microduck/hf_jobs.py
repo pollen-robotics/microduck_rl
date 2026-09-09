@@ -325,6 +325,11 @@ def submit(argv: list[str]) -> int:
         "CKPT_REPO": ckpt_repo,
         "TRAIN_ARGS": " ".join(shlex.quote(a) for a in [args.task, *train_args]),
     }
+    # Warm start (tasks/mdp.py Patch 5): curricula restart at 0 after the
+    # checkpoint load. Forwarded so `MICRODUCK_WARM_START=1 uv run train ... --hf-jobs`
+    # behaves like the local run.
+    if os.environ.get("MICRODUCK_WARM_START"):
+        env["MICRODUCK_WARM_START"] = os.environ["MICRODUCK_WARM_START"]
     secrets: dict[str, str] = {"HF_TOKEN": token}
 
     # Forward wandb credentials (env var, then ~/.netrc)

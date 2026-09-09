@@ -1,6 +1,7 @@
 """MDP functions for microduck tasks"""
 
 import math
+import os
 from dataclasses import dataclass as _dataclass
 
 import numpy as np
@@ -111,6 +112,38 @@ except Exception:
     pass
 
 print("[mdp] Patch 4 active: ONNX export filters passive_* joints")
+
+# Patch 5: warm start. MjlabOnPolicyRunner.load restores env.common_step_counter
+# (and rsl_rl restores the iteration) from the checkpoint so a RESUMED run keeps
+# its curricula. A WARM START loads another task's weights into a new task —
+# there the restored counter (e.g. 90 000 from a 3750-iter walk) would jump
+# every step-based curriculum straight to its final stage (seen 2026-09-09:
+# fell_over disabled and all protection costs at full weight in iteration 1).
+# With MICRODUCK_WARM_START=1 the counters restart at 0 after loading (weights,
+# normalizers and optimizer are kept). Forwarded into HF Jobs by hf_jobs.py.
+WARM_START_ENV = "MICRODUCK_WARM_START"
+
+try:
+    from mjlab.rl.runner import MjlabOnPolicyRunner as _MjlabRunner  # noqa: E402
+
+    _orig_runner_load = _MjlabRunner.load
+
+    def _load_with_warm_start(self, path, *args, **kwargs):
+        infos = _orig_runner_load(self, path, *args, **kwargs)
+        if os.environ.get(WARM_START_ENV, "") not in ("", "0"):
+            restored = self.env.unwrapped.common_step_counter
+            self.env.unwrapped.common_step_counter = 0
+            self.current_learning_iteration = 0
+            print(
+                f"[mdp] Patch 5: WARM START from {path} — common_step_counter "
+                f"{restored} → 0, iteration → 0 (curricula restart; weights/normalizer/optimizer kept)"
+            )
+        return infos
+
+    _MjlabRunner.load = _load_with_warm_start
+    print("[mdp] Patch 5 active: MICRODUCK_WARM_START=1 restarts curricula after checkpoint load")
+except Exception as _e:  # pragma: no cover
+    print(f"[mdp] Patch 5 NOT applied ({_e!r})")
 
 if TYPE_CHECKING:
     from mjlab.viewer.debug_visualizer import DebugVisualizer
@@ -678,6 +711,66 @@ def recovery_success(
     fired = env._recovery_armed & up
     env._recovery_armed &= ~fired
     return fired.float()
+
+
+# ── VelStand / protective fall: servo-protection costs ────────────────────────
+# What breaks an XL330 (plastic gear train, ~288:1): (1) a limb back-driven
+# fast by an impact — even torque-off, the rotor inertia reflected through
+# 288² makes the gears see the spike, so joint ACCELERATION at contact is the
+# damage proxy; (2) stall — a limb pinned under the body while the servo pushes
+# at max torque strips teeth / overheats; (3) the housing itself striking the
+# floor. All three costs below return >= 0 (mjlab-style) → NEGATIVE weight, and
+# are ~0 during clean walking, so they price only falls and bad recoveries.
+
+
+def servo_stall_penalty(
+    env: ManagerBasedRlEnv,
+    torque_thresh: float = 0.4,
+    vel_thresh: float = 0.5,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Number of servos pushing hard against something that does not move.
+
+    A servo is "stalled" when |actuator torque| > ``torque_thresh`` (N·m) AND
+    |joint velocity| < ``vel_thresh`` (rad/s). BAM's voltage-bounded torque
+    saturates at vin·kt/R ≈ 0.85–1.07 N·m over the trained vin range; a
+    quasi-static stand loads the knees at a few 1e-2 N·m, so 0.4 fires only
+    when the servo is genuinely fighting a pin/jam. Returns the per-step count
+    (>= 0) — weight it negatively.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    torque = torch.nan_to_num(asset.data.actuator_force, nan=0.0)
+    vel = torch.nan_to_num(_servo_joint_vel(env, asset), nan=0.0)
+    stalled = (torque.abs() > torque_thresh) & (vel.abs() < vel_thresh)
+    return stalled.float().sum(dim=1)
+
+
+def servo_acc_spike_penalty(
+    env: ManagerBasedRlEnv,
+    acc_thresh: float = 300.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Sum over servos of ReLU(|joint accel| - acc_thresh), accel by finite
+    difference of joint velocity at the control rate.
+
+    Impact back-driving is what loads the gear train (reflected rotor inertia);
+    a CPU baseline of pushed falls peaks at 450–550 rad/s² on the servo joints
+    in EVERY strategy (hold / partial limp / torque-off), so the policy's lever
+    is how and where it lands. State lives on the env; the reset step is zeroed
+    so a new episode's first frame cannot bill the previous episode's velocity.
+    Returns >= 0 (rad/s² above threshold) — weight it negatively.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    vel = torch.nan_to_num(_servo_joint_vel(env, asset), nan=0.0)
+    prev = getattr(env, "_servo_acc_prev_vel", None)
+    if prev is None or prev.shape != vel.shape:
+        prev = vel.detach().clone()
+    acc = (vel - prev) / env.step_dt
+    if hasattr(env, "episode_length_buf"):
+        reset_mask = (env.episode_length_buf <= 1).unsqueeze(1)
+        acc = torch.where(reset_mask, torch.zeros_like(acc), acc)
+    env._servo_acc_prev_vel = vel.detach().clone()
+    return torch.clamp(acc.abs() - acc_thresh, min=0.0).sum(dim=1)
 
 
 def body_upright_linear(
