@@ -1129,3 +1129,29 @@ def test_symhop_measures_the_com_above_the_stand_and_leaves_other_arms_alone():
     assert f_air.get("height_source", "root") == "root"
     assert focus.rewards["hop_body_height"].params.get("datum", "takeoff") == "takeoff"
     assert focus.rewards["hop_upward_velocity"].params.get("height_source", "root") == "root"
+
+
+def test_hopsym_is_the_llu5t00x_recipe_plus_symmetry_and_the_real_pads():
+    """HopSym-S50 must carry NONE of the R2 robustness stack: llu5t00x hops
+    22.3 mm of CoM altitude on this very boot (re-measured 2026-09-09) and
+    every arm carrying that stack reaches 4-6 mm at p90. It keeps the 50 mm
+    sole, the real 38 g pads, and symmetry by construction."""
+    from mjlab.tasks.registry import load_env_cfg
+
+    sym = load_env_cfg("Mjlab-HopSym-S50-Sym-K3344-MicroDuck")
+    r2 = load_env_cfg("Mjlab-HopPauseR2-S50-Sym-K3344-MicroDuck")
+
+    # No robustness stack: no kp randomisation, no hold-gated action-rate tax.
+    assert "randomize_motor_gains" not in sym.events
+    assert "randomize_motor_gains" in r2.events
+    assert "hold_action_rate_l2" not in sym.rewards
+    assert "hold_action_rate_l2" in r2.rewards
+    # No posture gate and no stand-datum retarget either -- this is the recipe
+    # that already works, changed in exactly one way.
+    assert getattr(sym, "hold_gated_rewards", ()) == ()
+    assert sym.rewards["hop_body_height"].params.get("datum", "takeoff") == "takeoff"
+    # The one change: symmetry by construction.
+    assert getattr(sym, "symmetric_actions", False) is True
+    # llu5t00x's hold schedule, not R2's.
+    assert sym.commands["twist"].hold_prob == 0.5
+    assert sym.commands["twist"].hold_range == (1.0, 5.0)

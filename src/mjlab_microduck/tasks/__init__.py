@@ -315,7 +315,21 @@ for _label, _hp, _hr, _robust, _sole, _act in (
         # it stands at. This arm measures the hop from the stand, so the reward
         # finally names the thing we want. Resume it from SymFocus: the
         # crouch-and-push motion is already learned, only the target moves.
-        ("HopPauseR2-S50-SymHop", 0.5, (1.0, 8.0), "r2", SOLE_LENGTH_V2, "bench")):
+        ("HopPauseR2-S50-SymHop", 0.5, (1.0, 8.0), "r2", SOLE_LENGTH_V2, "bench"),
+        # HopSym: the llu5t00x recipe -- hold_prob 0.5, holds 1-5 s, NO kp
+        # randomisation and NO hold-gated action-rate penalty -- on the 50 mm
+        # boot with its real 38 g pads, plus symmetry by construction.
+        #
+        # WHY THIS AND NOT MORE R2 DERIVATIVES. Re-measured 2026-09-09 with a
+        # corrected CoM (the earlier eval paired each body with the previous
+        # body's mass and read the CoM 20.8 mm low), all five policies in one
+        # env on the 50 mm boot: llu5t00x gains 22.3 mm of CoM altitude above
+        # its stand, median, with 70% of flights over 10 mm and 244 N peak foot
+        # force. R2, SymHard, SymFocus and SymHop reach 4-6 mm at p90 and none
+        # clears 10 mm at the median. The boot is NOT the obstacle -- the
+        # hopper hops fine on it. What llu5t00x lacks is the R2 robustness
+        # stack, which is an attempt-tax on the exact skill being discovered.
+        ("HopSym-S50", 0.5, (1.0, 5.0), "v2pads", SOLE_LENGTH_V2, "bench")):
     def _build_pause(play: bool, _hp=_hp, _hr=_hr, _robust=_robust, _sole=_sole, _act=_act, _label=_label):
         cfg = make_in_place_variant(make_symmetric_variant(make_hop_variant(
             make_microduck_velocity_env_cfg(play=play), stiffness=K_MEASURED,
@@ -323,9 +337,12 @@ for _label, _hp, _hr, _robust, _sole, _act in (
         if _robust == "r2":
             cfg = make_robust_stand_variant(cfg, kp_range=(0.8, 1.8), kd_range=(0.8, 1.3),
                                             hold_action_rate_weight=-1.0)
-        elif _robust:
+        elif _robust is True:
             # HopPauseR: kp randomisation (0.7-2.5x) + hold-gated action-rate
             # penalty -- the two things the first hardware stand showed missing.
+            # `is True`, not truthiness: "v2pads" means "the real boot mass and
+            # nothing else", and a bare `elif _robust` silently gave it the
+            # whole robustness stack -- the exact stack that arm exists to omit.
             cfg = make_robust_stand_variant(cfg)
         # The head cannot deliver the whip on hardware (real neck sags 5.4 deg
         # under static load, ~15x the model), so it is tracked, not freed.
@@ -336,7 +353,7 @@ for _label, _hp, _hr, _robust, _sole, _act in (
         sprung_kw = dict(stiffness=K_MEASURED, travel=TRAVEL, pad_mass=PAD_MASS, h_add=H_ADD)
         if _sole is not None:
             sprung_kw["sole_length"] = _sole
-        if _robust == "r2":
+        if _robust in ("r2", "v2pads"):
             sprung_kw["pad_mass"] = PAD_MASS_V2      # the boot that is on the robot
         if _label.endswith("SymHard"):
             cfg = make_structural_symmetry_variant(cfg)
@@ -344,6 +361,8 @@ for _label, _hp, _hr, _robust, _sole, _act in (
             cfg.rewards.pop("hop_symmetric_push", None)
         if _label.endswith("SymFocus"):
             cfg = make_hop_window_focus_variant(make_structural_symmetry_variant(cfg))
+        if _label == "HopSym-S50":
+            cfg = make_structural_symmetry_variant(cfg)
         if _label.endswith("SymHop"):
             cfg = make_true_hop_variant(
                 make_hop_window_focus_variant(make_structural_symmetry_variant(cfg)))
