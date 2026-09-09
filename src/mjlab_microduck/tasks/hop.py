@@ -828,6 +828,69 @@ def make_true_hop_variant(cfg):
     return cfg
 
 
+# Per-landing hop payment. Weight is calibrated against what competes with it
+# INSIDE the hop window once posture is gated to the holds: the dense
+# hop_upward_velocity realises ~0.7/step on the working hopper and the
+# regularisers cost ~0.1-1/step. At a plausible 2-3 Hz this pays 1.6-2.4/step
+# on average, so it dominates without being a jackpot -- it is one bounded
+# payment per flight, and chatter earns ~0 because the amount is the height.
+LANDING_WEIGHT = 40.0
+# 30 mm of CoM gain above the STANDING height for full credit. The only working
+# hopper reaches 22 mm median and 52 mm p90, so the gradient sits where the
+# hardware actually lives. The old 40 mm target was measured from takeoff and
+# nothing ever reached it. Raise this once the robot saturates it.
+LANDING_TARGET_GAIN = 0.030
+LANDING_MIN_AIR_S = 0.04
+
+
+def make_free_hop_variant(cfg):
+    """Pay per hop, not per step in a phase window -- let the rate emerge.
+
+    The 1 s clock never set the hop rate. Measured on llu5t00x, the only policy
+    in the campaign that genuinely hops: 3.03 takeoffs per 1 s cycle, median
+    flight 140 ms, and just 65% of takeoffs inside the sin>0 launch window
+    against 50% by chance. The robot bounces at its own ~3 Hz and the phase
+    gate only decides which bounces get paid, while the 500 ms window against a
+    140 ms flight caps what a perfect hop can earn.
+
+    So this transform:
+      * turns slot 2 into a hop-ENABLE bit (see GroundPickPhaseCommand). The
+        clock still says stand-or-hop, it no longer says when to push.
+      * drops `hop_both_feet_airborne` and `hop_body_height`, both per-step and
+        phase-gated, for `hop_landing_height`, one payment per landing sized by
+        the CoM height that landing actually reached.
+      * re-gates the two dense terms (`hop_upward_velocity`, `hop_load_force`)
+        from the sin/cos halves onto the enable bit, so they too stop imposing
+        a rhythm. They stay because without a term that pays in contact, a
+        robot that never leaves the ground has no gradient at all.
+    """
+    object.__setattr__(cfg, "enable_bit", True)
+    cmd = cfg.commands.get("twist")
+    if cmd is not None:
+        object.__setattr__(cmd, "enable_bit", True)
+
+    cfg.rewards.pop("hop_both_feet_airborne", None)
+    cfg.rewards.pop("hop_body_height", None)
+    cfg.rewards["hop_landing_height"] = RewardTermCfg(
+        func=microduck_mdp.hop_landing_height,
+        weight=LANDING_WEIGHT,
+        params={
+            "target_gain": LANDING_TARGET_GAIN,
+            "min_air_s": LANDING_MIN_AIR_S,
+            "max_tilt": FALL_LIMIT_ANGLE,
+            "height_source": "com",
+        },
+    )
+    for name in ("hop_upward_velocity", "hop_load_force"):
+        term = cfg.rewards.get(name)
+        if term is not None:
+            term.params["gate"] = "enable"
+    vel = cfg.rewards.get("hop_upward_velocity")
+    if vel is not None:
+        vel.params["height_source"] = "com"
+    return cfg
+
+
 def make_hop_window_focus_variant(cfg):
     """Pay the posture stack only while the phase is HELD.
 

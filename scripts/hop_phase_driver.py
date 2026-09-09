@@ -50,9 +50,19 @@ class Robot:
             if not line: return None
             m = json.loads(line)
             if m.get("id") == self.id: return m
-    def move_phase(self, phi):
+    def move_phase(self, phi, enable_bit=None):
+        """Write the phase into the twist slots, and optionally the enable bit.
+
+        `enable_bit` is the vyaw slot. HopFree-and-later policies read it as
+        "hopping is wanted" (1.0) versus "stand" (0.0), because a frozen phase
+        and an advancing phase are indistinguishable at the instant the clock
+        passes through the hold point. Leave it None for every policy trained
+        before 2026-09-09: those saw a hard zero there and read a non-zero as a
+        YAW-RATE COMMAND -- measured, llu5t00x spins and topples when fed 1.0.
+        """
         a = 2 * math.pi * phi
-        self.notify("robot.move", {"vx": math.cos(a), "vy": math.sin(a), "vyaw": 0.0})
+        self.notify("robot.move", {"vx": math.cos(a), "vy": math.sin(a),
+                                   "vyaw": 0.0 if enable_bit is None else float(enable_bit)})
     def enable(self, on):
         r = self.call("robot.enable", {"on": on, "toggle": False})
         print(f"[pad] enable({on}) -> {(r or {}).get('result', r)}", flush=True)
@@ -68,6 +78,10 @@ def main():
     ap.add_argument("--hold", type=float, default=0.65)
     ap.add_argument("--hops", type=int, default=1, help="cycles per A press")
     ap.add_argument("--hz", type=float, default=50.0)
+    ap.add_argument("--enable-bit", action="store_true",
+                    help="write 1.0 into the vyaw slot while the phase advances and 0.0 while it "
+                         "is frozen (HopFree and later). REQUIRED for those policies and WRONG "
+                         "for earlier ones, which read that slot as a yaw-rate command.")
     ap.add_argument("--hop-slot", action="store_true",
                     help="A triggers the ground-pick slot (a separate hop network) instead of "
                          "advancing this driver's phase. Use when the walk slot holds a stand-only policy.")
@@ -141,7 +155,10 @@ def main():
                 hop_t0 = None; phi = args.hold; print("[pad] back to stand", flush=True)
             else:
                 phi = (args.hold + el / HOP_PERIOD) % 1.0
-        robot.move_phase(phi)
+        # hop_t0 is not None exactly while the phase is advancing, which is what
+        # the enable bit means. None keeps the slot at a hard zero for policies
+        # that predate it.
+        robot.move_phase(phi, (1.0 if hop_t0 is not None else 0.0) if args.enable_bit else None)
         # --- pace ---
         sleep = dt - (time.time() - t_prev)
         if sleep > 0: time.sleep(sleep)

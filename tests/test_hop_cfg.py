@@ -1155,3 +1155,67 @@ def test_hopsym_is_the_llu5t00x_recipe_plus_symmetry_and_the_real_pads():
     # llu5t00x's hold schedule, not R2's.
     assert sym.commands["twist"].hold_prob == 0.5
     assert sym.commands["twist"].hold_range == (1.0, 5.0)
+
+
+# ── HopFree: pay per landing, let the rate emerge ────────────────────────────
+
+
+def test_hopfree_pays_per_landing_and_gates_on_the_enable_bit():
+    """HopFree drops the two per-step phase-gated hop terms for one payment per
+    landing, turns slot 2 into a hop-enable bit, and re-gates the dense terms
+    onto that bit so nothing imposes a hop rate. Measured justification: the
+    only working hopper takes off 3.03 times per commanded 1 s cycle, so the
+    clock never set the rate -- it only chose which bounces were paid."""
+    from mjlab.tasks.registry import load_env_cfg
+
+    free = load_env_cfg("Mjlab-HopFree-S50-Sym-K3344-MicroDuck")
+    sym = load_env_cfg("Mjlab-HopSym-S50-Sym-K3344-MicroDuck")
+
+    assert "hop_landing_height" in free.rewards
+    assert "hop_both_feet_airborne" not in free.rewards
+    assert "hop_body_height" not in free.rewards
+    lh = free.rewards["hop_landing_height"]
+    assert lh.weight == 40.0
+    assert lh.params["target_gain"] == 0.030
+    assert lh.params["height_source"] == "com"
+    # Both dense terms read the enable bit, not the sin/cos halves.
+    assert free.rewards["hop_upward_velocity"].params["gate"] == "enable"
+    assert free.rewards["hop_load_force"].params["gate"] == "enable"
+    assert free.commands["twist"].enable_bit is True
+    # Posture gated to the holds, and symmetry by construction.
+    assert len(getattr(free, "hold_gated_rewards", ())) == 4
+    assert getattr(free, "symmetric_actions", False) is True
+
+    # No earlier arm moves: the enable bit and both gates stay off.
+    assert getattr(sym.commands["twist"], "enable_bit", False) is False
+    assert sym.rewards["hop_upward_velocity"].params.get("gate", "launch") == "launch"
+    assert "hop_both_feet_airborne" in sym.rewards
+
+
+def test_enable_bit_is_off_by_default_so_old_arms_see_a_hard_zero():
+    """Slot 2 carried a hard zero for every arm trained before 2026-09-09, and
+    those policies read a non-zero there as a YAW-RATE command: llu5t00x spins
+    and topples when fed 1.0. So the bit must stay opt-in."""
+    from mjlab.tasks.registry import load_env_cfg
+
+    for tid in ("Mjlab-HopPause-Sym-K3344-MicroDuck",
+                "Mjlab-HopPauseR2-S50-Sym-K3344-MicroDuck",
+                "Mjlab-HopPauseR2-S50-SymHop-Sym-K3344-MicroDuck",
+                "Mjlab-HopSym-S50-Sym-K3344-MicroDuck"):
+        cfg = load_env_cfg(tid)
+        assert getattr(cfg.commands["twist"], "enable_bit", False) is False, tid
+
+
+def test_landing_payment_is_bounded_and_unfarmable_by_chatter():
+    """min(gain/target, 1): one bounded payment per flight, zero for a flicker.
+    A Gaussian was rejected because it would score a 60 mm hop BELOW a 30 mm
+    one, which is the opposite of the goal."""
+    target = 0.030
+    def quality(gain_m):
+        return min(max(gain_m / target, 0.0), 1.0)
+
+    assert quality(0.0) == 0.0            # chatter earns nothing
+    assert quality(0.001) < 0.04          # a 1 mm unloading is worth ~nothing
+    assert abs(quality(0.015) - 0.5) < 1e-9
+    assert quality(0.030) == 1.0
+    assert quality(0.060) == 1.0          # never punished for going higher

@@ -85,6 +85,7 @@ from .hop import (
     apply_hop_corrections,
     hop_rl_cfg,
     make_hop_variant,
+    make_free_hop_variant,
     make_hop_window_focus_variant,
     make_in_place_variant,
     make_robust_stand_variant,
@@ -329,7 +330,15 @@ for _label, _hp, _hr, _robust, _sole, _act in (
         # clears 10 mm at the median. The boot is NOT the obstacle -- the
         # hopper hops fine on it. What llu5t00x lacks is the R2 robustness
         # stack, which is an attempt-tax on the exact skill being discovered.
-        ("HopSym-S50", 0.5, (1.0, 5.0), "v2pads", SOLE_LENGTH_V2, "bench")):
+        ("HopSym-S50", 0.5, (1.0, 5.0), "v2pads", SOLE_LENGTH_V2, "bench"),
+        # HopFree: pay per LANDING and let the robot choose its own bounce rate.
+        # llu5t00x hops 3.03 times per commanded 1 s cycle, so the clock never
+        # set the rate anyway -- it only decided which bounces were paid. Slot 2
+        # becomes a hop-enable bit, posture is gated to the holds so the hop
+        # window's only income is hopping, and the action is symmetric by
+        # construction. No kp randomisation and no hold penalty: that stack is
+        # an attempt-tax on the skill being discovered.
+        ("HopFree-S50", 0.5, (1.0, 5.0), "v2pads", SOLE_LENGTH_V2, "bench")):
     def _build_pause(play: bool, _hp=_hp, _hr=_hr, _robust=_robust, _sole=_sole, _act=_act, _label=_label):
         cfg = make_in_place_variant(make_symmetric_variant(make_hop_variant(
             make_microduck_velocity_env_cfg(play=play), stiffness=K_MEASURED,
@@ -363,6 +372,9 @@ for _label, _hp, _hr, _robust, _sole, _act in (
             cfg = make_hop_window_focus_variant(make_structural_symmetry_variant(cfg))
         if _label == "HopSym-S50":
             cfg = make_structural_symmetry_variant(cfg)
+        if _label == "HopFree-S50":
+            cfg = make_free_hop_variant(make_hop_window_focus_variant(
+                make_structural_symmetry_variant(cfg)))
         if _label.endswith("SymHop"):
             cfg = make_true_hop_variant(
                 make_hop_window_focus_variant(make_structural_symmetry_variant(cfg)))

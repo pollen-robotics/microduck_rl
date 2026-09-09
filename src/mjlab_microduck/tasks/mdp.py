@@ -5112,6 +5112,9 @@ class GroundPickPhaseCommand(UniformVelocityCommand):
         self._hold_at = float(getattr(cfg, "hold_at", 0.65))
         self._hold_range = tuple(getattr(cfg, "hold_range", (1.0, 5.0)))
         self._hold_left = torch.zeros(self.num_envs, device=self.device)  # seconds
+        # Off by default: every arm trained before 2026-09-09 saw a hard zero in
+        # slot 2 and must keep seeing one.
+        self._enable_bit = bool(getattr(cfg, "enable_bit", False))
 
     @property
     def command(self) -> torch.Tensor:
@@ -5137,7 +5140,20 @@ class GroundPickPhaseCommand(UniformVelocityCommand):
                                          self._gp_phase)
         self.vel_command_b[:, 0] = torch.cos(2 * torch.pi * self._gp_phase)
         self.vel_command_b[:, 1] = torch.sin(2 * torch.pi * self._gp_phase)
-        self.vel_command_b[:, 2] = 0.0
+        # SLOT 2 IS THE HOP-ENABLE BIT when `enable_bit` is set, else 0 as before.
+        #
+        # WHY IT HAS TO EXIST. Frozen means the command sits at the constant
+        # [cos, sin](0.65) = [-0.588, -0.809]. An advancing clock sweeps the
+        # whole circle and passes through that exact point once per turn, so
+        # from a SINGLE observation the policy cannot tell "frozen at 0.65"
+        # from "passing through 0.65". With per-step phase-gated rewards that
+        # hardly mattered -- passing through is one step, worth almost nothing.
+        # Once the clock becomes a pure enable and the hop is paid per landing
+        # regardless of phase, that distinction is the single most important bit
+        # in the observation, and it was not observable. Slot 2 (the yaw-rate
+        # slot) was hardwired to 0.0 here and carried no information, so it is
+        # free. The 61-value obs contract is unchanged; only a dead slot wakes.
+        self.vel_command_b[:, 2] = (~holding).float() if self._enable_bit else 0.0
 
     def reset(self, env_ids: torch.Tensor | None) -> dict:
         # The construction-time reset passes None. The historical guard skipped
@@ -7106,6 +7122,7 @@ def hop_upward_velocity(
     command_name: str = "twist",
     max_vel: float = 0.5,
     height_source: str = "root",
+    gate: str = "launch",
 ) -> torch.Tensor:
     """Reward upward base velocity during the launch half-cycle.
 
@@ -7125,7 +7142,14 @@ def hop_upward_velocity(
     upward = torch.clamp(vel_z / max_vel, min=0.0, max=1.0)
 
     cmd = env.command_manager.get_command(command_name)
-    launch = torch.clamp(torch.nan_to_num(cmd[:, 1], nan=0.0), min=0.0)
+    # gate="launch": the sin>0 half, which IMPOSES when the push may happen.
+    # gate="enable": slot 2's hop-enable bit, which only says whether hopping
+    # is wanted at all and leaves the rate to the policy. Measured on the one
+    # working hopper: it takes off 3.03 times per 1 s cycle and only 65% of
+    # those takeoffs fall inside the sin>0 window, so the phase gate is fighting
+    # the robot's own bounce rather than shaping it.
+    gate_slot = 2 if gate == "enable" else 1
+    launch = torch.clamp(torch.nan_to_num(cmd[:, gate_slot], nan=0.0), min=0.0)
     return launch * upward
 
 
@@ -7185,6 +7209,131 @@ class hop_body_height(_HopRiseTracker):
         cmd = env.command_manager.get_command(command_name)
         launch = torch.clamp(torch.nan_to_num(cmd[:, 1], nan=0.0), min=0.0)
         return launch * both_airborne * rise_reward
+
+
+class hop_landing_height(_HopRiseTracker):
+    """Pay ONCE PER LANDING, in proportion to how high that hop actually went.
+
+    Replaces the two per-step, phase-gated terms (`hop_both_feet_airborne` at
+    12 and `hop_body_height` at 8), and the reason is measured. The working
+    hopper takes off 3.03 times per 1 s phase cycle with a median flight of
+    140 ms, and only 65% of its takeoffs fall inside the sin>0 launch window
+    against 50% by chance. So the 1 s clock never set the hop rate -- the robot
+    bounces at its own ~3 Hz and the phase gate merely decides which of those
+    bounces get paid. Worse, the launch window is 500 ms wide while a flight
+    lasts 140 ms, so most of the window pays zero for an entirely correct
+    reason and caps what a perfect hop can earn. That same dilution was
+    diagnosed for `hop_symmetric_push` and fixed there by switching to a ratio;
+    it was never fixed for the primary task term.
+
+    Paying per event removes the imposed frequency altogether. The rate becomes
+    the policy's to choose, which is the point: let the spring-boot system find
+    its natural bounce instead of being told one.
+
+    WHY AT LANDING, not at takeoff or apex: only at touchdown is the whole
+    flight known, so the payment can be a function of the height actually
+    reached. Takeoff cannot know the apex, and apex detection needs a
+    derivative test that contact chatter breaks.
+
+    WHY IT IS NOT A JACKPOT. It pays once per flight, bounded, and the amount
+    is `min(peak_gain / target, 1)` measured on the CoM against the STANDING
+    height. Contact chatter -- which is most of the 3.03 takeoffs per second --
+    has a peak gain near zero and therefore earns near zero, so raising the
+    event rate without raising the hops buys nothing. Three further conditions
+    close the remaining holes:
+
+      * the enable bit must have been on AT TAKEOFF, so hopping while the phase
+        is frozen (i.e. while asked to stand) is never paid;
+      * the flight must last at least `min_air_s`, which prices out a one-step
+        sensor flicker;
+      * the robot must be UPRIGHT at touchdown, so a hop that ends in a topple
+        earns nothing. Without this the term would pay for the launch half of
+        every fall, which is exactly how the stand datum went wrong.
+
+    `min(h/target, 1)` rather than a Gaussian on purpose: a Gaussian centred on
+    the target PUNISHES exceeding it, and a 60 mm hop scoring less than a 30 mm
+    one is not what anyone wants. Linear-then-saturating gives gradient the
+    whole way up and no reason to aim low. Raise `target_gain` when the robot
+    starts saturating it.
+    """
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv) -> None:
+        super().__init__(cfg, env)
+        self._flight_peak = torch.zeros(env.num_envs, device=env.device)
+        self._flight_steps = torch.zeros(env.num_envs, device=env.device)
+        self._enabled_at_takeoff = torch.zeros(
+            env.num_envs, device=env.device, dtype=torch.bool
+        )
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        super().reset(env_ids)
+        if env_ids is None:
+            env_ids = slice(None)
+        self._flight_peak[env_ids] = 0.0
+        self._flight_steps[env_ids] = 0.0
+        self._enabled_at_takeoff[env_ids] = False
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        sensor_name: str = "feet_ground_contact",
+        command_name: str = "twist",
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+        target_gain: float = 0.030,
+        min_air_s: float = 0.04,
+        max_tilt: float = 0.8727,
+        height_source: str = "com",
+    ) -> torch.Tensor:
+        zeros = torch.zeros(env.num_envs, device=env.device)
+        both_airborne, _rise, net = self._both_airborne_and_rise(
+            env, sensor_name, asset_cfg, command_name, height_source
+        )
+        if both_airborne is None:
+            return zeros
+        airborne = both_airborne > 0.5
+
+        cmd = env.command_manager.get_command(command_name)
+        enabled = torch.nan_to_num(cmd[:, 2], nan=0.0) > 0.5
+
+        # Latch at takeoff, accumulate through the flight.
+        took_off = airborne & (self._flight_steps <= 0)
+        self._enabled_at_takeoff = torch.where(took_off, enabled, self._enabled_at_takeoff)
+        self._flight_peak = torch.where(
+            airborne, torch.maximum(self._flight_peak, net), self._flight_peak
+        )
+        self._flight_steps = torch.where(
+            airborne, self._flight_steps + 1.0, self._flight_steps
+        )
+
+        # Pay on the air -> contact transition.
+        landed = (~airborne) & (self._flight_steps > 0)
+        asset: Entity = env.scene[asset_cfg.name]
+        _grav = getattr(asset.data, "projected_gravity_b", None)
+        if _grav is None:
+            upright = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+        else:
+            gz = torch.nan_to_num(_grav[:, 2].float(), nan=0.0)
+            upright = torch.arccos(torch.clamp(-gz, -1.0, 1.0)) < max_tilt
+        long_enough = self._flight_steps * env.step_dt >= min_air_s
+        quality = torch.clamp(self._flight_peak / max(target_gain, 1e-6), min=0.0, max=1.0)
+        payout = torch.where(
+            landed & upright & long_enough & self._enabled_at_takeoff, quality, zeros
+        )
+
+        # Log the hop the way a human would judge it: height per PAID landing.
+        log = env.extras.get("log") if hasattr(env, "extras") else None
+        if log is not None:
+            paid = landed & upright & long_enough & self._enabled_at_takeoff
+            gains = self._flight_peak[paid]
+            log["Metrics/hop_landing_gain_mean"] = (
+                gains.mean() if gains.numel() > 0 else torch.zeros((), device=env.device)
+            )
+            log["Metrics/hop_landings_per_step"] = paid.float().mean()
+
+        # Clear the flight accumulators for everyone who has landed.
+        self._flight_peak = torch.where(landed, zeros, self._flight_peak)
+        self._flight_steps = torch.where(landed, zeros, self._flight_steps)
+        return payout
 
 
 def hop_energy_monitor(
@@ -7374,6 +7523,7 @@ def hop_load_force(
     command_name: str = "twist",
     body_weight_n: float = 8.60,
     max_ratio: float = 2.0,
+    gate: str = "launch",
 ) -> torch.Tensor:
     """Reward pressing INTO the ground during the LOAD half-cycle.
 
@@ -7448,7 +7598,11 @@ def hop_load_force(
     # The countermovement-into-launch window, bracketing takeoff at phi = 0:
     # cos(2*pi*phi) > 0, i.e. clamp(cmd[:, 0], 0). See the docstring on why this
     # is NOT the sin < 0 "load half".
-    load_gate = torch.clamp(torch.nan_to_num(cmd[:, 0], nan=0.0), min=0.0)
+    # gate="enable" reads slot 2 instead: press whenever hopping is enabled,
+    # at whatever rate the policy chooses. See hop_upward_velocity's note.
+    load_gate = torch.clamp(
+        torch.nan_to_num(cmd[:, 2 if gate == "enable" else 0], nan=0.0), min=0.0
+    )
     return load_gate * load
 
 
