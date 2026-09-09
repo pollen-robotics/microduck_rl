@@ -6700,6 +6700,16 @@ def _both_feet_airborne(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tenso
     return ((found[:, 0] <= 0) & (found[:, 1] <= 0)).float()
 
 
+# Stand-datum admission thresholds. See `_HopRiseTracker._both_airborne_and_rise`.
+# cos(10 deg) = 0.985: the stand datum is only captured while the trunk is within
+# 10 degrees of vertical, which excludes every stage of a topple.
+_STAND_DATUM_COS_TILT = 0.985
+# Each boot must carry at least this fraction of body weight, so a robot resting
+# on a knee or the head with a pad grazing the floor cannot set the datum.
+_STAND_DATUM_MIN_LOAD = 0.30
+_STAND_DATUM_BODY_WEIGHT_N = 8.506
+
+
 def _robot_com_vz(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Mass-weighted vertical CoM velocity of the whole robot, per env.
 
@@ -6895,6 +6905,13 @@ class _HopRiseTracker:
 
         airborne = both_airborne > 0.5
         asset: Entity = env.scene[asset_cfg.name]
+        # Per-pad normal force, for the stand datum's "actually loaded" test.
+        _f = env.scene.sensors[sensor_name].data.force
+        forces_z = (
+            _f[..., 2].float().abs()
+            if _f is not None and _f.dim() == 3 and _f.shape[-1] == 3
+            else torch.zeros(env.num_envs, 2, device=env.device)
+        )
         raw_z = (
             _robot_com_z(env, asset_cfg)
             if height_source == "com"
@@ -6964,7 +6981,31 @@ class _HopRiseTracker:
             held = getattr(env.command_manager.get_term(command_name), "_hold_left", None)
         except (KeyError, ValueError, AttributeError):
             held = None
-        standing = in_contact if held is None else (in_contact & (held > 0.0))
+        # UPRIGHT AND LOADED, not merely "held and touching". A robot toppling
+        # while the phase is frozen still has a pad on the ground for many
+        # steps, and capturing the datum there puts it tens of millimetres
+        # BELOW the real stand -- after which simply rotating back up reads as
+        # net gain. That is what produced Metrics/hop_net_gain_mean 27.0 mm on
+        # run aw34hcx4 while a faithful replay of the same policy measured
+        # 0.6 mm and the viewer showed a robot that plainly never hops. The
+        # datum has to come from a pose we would call standing.
+        # getattr: the nan-safety tests drive these terms with a minimal asset
+        # stub that has no IMU view. Missing the field means "cannot tell", and
+        # the honest fallback is the old, looser admission rather than refusing
+        # to ever capture a datum.
+        _grav = getattr(asset.data, "projected_gravity_b", None)
+        upright = (
+            torch.nan_to_num(_grav[:, 2].float(), nan=0.0) < -_STAND_DATUM_COS_TILT
+            if _grav is not None
+            else torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+        )
+        loaded = torch.nan_to_num(forces_z, nan=0.0).min(dim=1).values > (
+            _STAND_DATUM_MIN_LOAD * _STAND_DATUM_BODY_WEIGHT_N
+        )
+        quiescent = upright & loaded
+        standing = quiescent if held is None else (quiescent & (held > 0.0))
+        # The seed still falls back to first contact, so an env that has not yet
+        # stood quietly has an honest reference rather than a stale 0.0.
         refresh = standing | (in_contact & ~self._have_stand)
         self._z_stand = torch.where(refresh, z, self._z_stand)
         self._have_stand = self._have_stand | in_contact
