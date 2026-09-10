@@ -75,7 +75,19 @@ Run-1 lesson (wandb 4otqmkb4, killed @1098, headless eval of ckpt 750):
   (2) SPAWN HOLE. 79% of falls end ON THE SIDE, 20% face-up, 0% face-down; the
       prone init only knew face-down/face-up. Fix: side_prob in the prone slice.
   Also: recovery ramps pulled earlier (walk needs no bootstrap window) and the
-  crouch slice enlarged. Impact costs were confirmed real but weak (face-plant
+  crouch slice enlarged.
+
+Run-2 lesson (wandb 1bqctpkq, killed @1085, per-spawn battery of ckpt 1000):
+  standing 98% / crouch→stand 97% / face-down, face-up, side 0% — still lies
+  still (fallen |Δa| a quarter of upright). Relieving the attempt tax was not
+  enough: the warm-started walk has action std ≈ 0.2, random flailing from
+  lying never yields a partial rise, so the potential-based terms never pay →
+  no gradient at all (the from-scratch velstand runs discovered recovery with
+  std 1.0 flailing, at the cost of the walk). The deployed stand expert
+  (69u48n8l@9750) run through the same battery: 100/100/95% (side never
+  trained!) within ~1 s. Fix: PpoWithExpertBc — fallen-gated behavior cloning
+  toward that frozen expert after each PPO update (distill.py). The walk frames
+  are untouched; RL keeps shaping the fall itself and the last mile. Impact costs were confirmed real but weak (face-plant
   spikes 129 N at 0.5% of steps ≈ -0.3 per fall vs ~7/step walking) — to be
   raised ×5 once recoveries exist, not before.
 
@@ -176,6 +188,7 @@ from mjlab_microduck.tasks.microduck_velocity_env_cfg import (
     HEAD_BODY_NAMES,
     make_microduck_velocity_env_cfg,
 )
+from mjlab_microduck.tasks.distill import PpoWithExpertBcCfg, default_bc_cfg
 from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg
 
 NUM_STEPS_PER_ENV = 24
@@ -230,6 +243,13 @@ RECOVERED_UP_Z = 0.09
 # at 1200) where natural-fall get-up attempts cost nothing and the dense
 # progress terms alone could teach them. Run-7 restores it.
 RECOVERY_ECON_KICKIN_ITER = 600 if WARM_START else 1200
+
+# Run-2 fix (1bqctpkq, 0 recoveries @1085 even with the attempt tax relieved):
+# distill the deployed stand expert into the fallen frames (see distill.py).
+# The expert recovers 100% face-down/up and 95% side on this model in ~1 s.
+ENABLE_EXPERT_BC = True
+EXPERT_BC_COEF = 1.0
+EXPERT_BC_GATE_TILT_DEG = 35.0
 
 # Run-1 fix (1): smoothness taxes scaled down while fallen so get-up attempts
 # are affordable; full weight while upright (the walk's smoothness is untouched).
@@ -655,7 +675,7 @@ MicroduckVelStandRlCfg = RslRlOnPolicyRunnerCfg(
         activation="elu",
         obs_normalization=True,
     ),
-    algorithm=PpoWithSymmetryCfg(
+    algorithm=PpoWithExpertBcCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
@@ -669,6 +689,7 @@ MicroduckVelStandRlCfg = RslRlOnPolicyRunnerCfg(
         desired_kl=0.01,
         max_grad_norm=1.0,
         symmetry_cfg=None,
+        bc_cfg={**default_bc_cfg(), "coef": EXPERT_BC_COEF, "gate_tilt_deg": EXPERT_BC_GATE_TILT_DEG} if ENABLE_EXPERT_BC else None,
     ),
     wandb_project="mjlab_microduck",
     experiment_name="velstand",

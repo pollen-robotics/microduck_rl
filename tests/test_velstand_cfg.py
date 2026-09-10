@@ -317,3 +317,43 @@ def test_fallen_scaled_action_rate(monkeypatch):
     out = microduck_mdp.action_rate_l2_fallen_scaled(_E(), fallen_scale=0.1, gate_tilt_above_deg=40.0)
     assert calls["tilt"] == 40.0
     assert torch.allclose(out, torch.tensor([1.4, 14.0]))
+
+
+# ── Run-2 fix: fallen-gated expert BC ────────────────────────────────────────
+
+def test_runner_cfg_uses_expert_bc():
+    from rsl_rl.utils import resolve_callable
+    from mjlab_microduck.tasks import distill
+    alg = vs.MicroduckVelStandRlCfg.algorithm
+    assert resolve_callable(alg.class_name) is distill.PpoWithExpertBc
+    if vs.ENABLE_EXPERT_BC:
+        assert alg.bc_cfg["coef"] > 0
+        assert alg.bc_cfg["gate_tilt_deg"] <= vs.REWARD_GATE_TILT_DEG
+        assert tuple(alg.bc_cfg["gravity_slice"]) == (3, 6)
+        assert tuple(alg.bc_cfg["twist_slice"]) == (48, 51)
+        assert alg.bc_cfg["wandb_run_path"].endswith("69u48n8l")  # alpha_stand.onnx's run
+
+
+def test_fallen_mask_from_obs():
+    from mjlab_microduck.tasks.distill import fallen_mask_from_obs, expert_input
+    obs = torch.zeros(4, 61)
+    obs[0, 3:6] = torch.tensor([0.0, 0.0, -1.0])                       # upright
+    obs[1, 3:6] = torch.tensor([math.sin(math.radians(30)), 0, -math.cos(math.radians(30))])   # 30°
+    obs[2, 3:6] = torch.tensor([math.sin(math.radians(60)), 0, -math.cos(math.radians(60))])   # 60°
+    obs[3, 3:6] = torch.tensor([0.0, 1.0, 0.0])                        # on the side
+    m = fallen_mask_from_obs(obs, (3, 6), 35.0)
+    assert m.tolist() == [False, False, True, True]
+    obs[:, 48:51] = 1.0
+    e = expert_input(obs, (48, 51))
+    assert (e[:, 48:51] == 0).all() and (obs[:, 48:51] == 1).all()   # copy, not in place
+    assert torch.equal(e[:, :48], obs[:, :48])
+
+
+def test_load_expert_is_frozen_copy():
+    from mjlab_microduck.tasks.distill import load_expert_from
+    actor = torch.nn.Sequential(torch.nn.Linear(3, 2))
+    sd = {"0.weight": torch.ones(2, 3), "0.bias": torch.zeros(2)}
+    exp = load_expert_from(actor, sd)
+    assert exp is not actor and not exp.training
+    assert all(not p.requires_grad for p in exp.parameters())
+    assert torch.equal(exp[0].weight, torch.ones(2, 3)) and not torch.equal(actor[0].weight, torch.ones(2, 3))
