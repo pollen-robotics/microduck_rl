@@ -86,6 +86,7 @@ from .hop import (
     hop_rl_cfg,
     make_hop_variant,
     make_free_hop_variant,
+    make_hop_sim2real_variant,
     make_hop_window_focus_variant,
     make_in_place_variant,
     make_robust_stand_variant,
@@ -338,7 +339,14 @@ for _label, _hp, _hr, _robust, _sole, _act in (
         # window's only income is hopping, and the action is symmetric by
         # construction. No kp randomisation and no hold penalty: that stack is
         # an attempt-tax on the skill being discovered.
-        ("HopFree-S50", 0.5, (1.0, 5.0), "v2pads", SOLE_LENGTH_V2, "bench")):
+        ("HopFree-S50", 0.5, (1.0, 5.0), "v2pads", SOLE_LENGTH_V2, "bench"),
+        # HopFree + the sim2real stack, meant to be RESUMED from a HopFree
+        # checkpoint: foot-spring damping/stiffness randomisation (the dominant
+        # unknown for a spring-powered pogo), actuator gain randomisation, and
+        # the quiet-hold penalty. Applied from step 0 this stack has stood and
+        # never hopped in every arm that tried it; applied to a policy that
+        # already hops, it is the transfer pass.
+        ("HopFree-S50-DR", 0.5, (1.0, 5.0), "v2pads", SOLE_LENGTH_V2, "bench")):
     def _build_pause(play: bool, _hp=_hp, _hr=_hr, _robust=_robust, _sole=_sole, _act=_act, _label=_label):
         cfg = make_in_place_variant(make_symmetric_variant(make_hop_variant(
             make_microduck_velocity_env_cfg(play=play), stiffness=K_MEASURED,
@@ -372,9 +380,11 @@ for _label, _hp, _hr, _robust, _sole, _act in (
             cfg = make_hop_window_focus_variant(make_structural_symmetry_variant(cfg))
         if _label == "HopSym-S50":
             cfg = make_structural_symmetry_variant(cfg)
-        if _label == "HopFree-S50":
+        if _label.startswith("HopFree-S50"):
             cfg = make_free_hop_variant(make_hop_window_focus_variant(
                 make_structural_symmetry_variant(cfg)))
+        if _label == "HopFree-S50-DR":
+            cfg = make_hop_sim2real_variant(cfg)
         if _label.endswith("SymHop"):
             cfg = make_true_hop_variant(
                 make_hop_window_focus_variant(make_structural_symmetry_variant(cfg)))

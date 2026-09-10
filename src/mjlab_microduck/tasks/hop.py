@@ -843,6 +843,66 @@ LANDING_TARGET_GAIN = 0.030
 LANDING_MIN_AIR_S = 0.04
 
 
+# ── sim2real robustness for the pogo gait ───────────────────────────────────
+#
+# THE BOOT IS THE DOMINANT UNKNOWN FOR THIS GAIT, not the servo. HopFree bounces
+# at ~8.8 Hz with ground contacts of one to two control steps, so the energy
+# comes back out of the foot springs rather than out of the actuators, and the
+# whole behaviour lives or dies on restitution.
+#
+# The arithmetic that sets the damping range. The drop rig measured restitution
+# e = 0.57-0.70. For a linear spring-damper, e = exp(-pi*zeta/sqrt(1-zeta^2)),
+# so e = 0.70 -> zeta = 0.113 and e = 0.57 -> zeta = 0.176. The model's spring
+# is built at DAMPING_RATIO 0.3 against the PAD, which the sprung_foot note puts
+# at zeta_eff = 0.12 against the robot -- i.e. sitting at the OPTIMISTIC end of
+# what was measured. The uncertainty is therefore one-sided: the real boot is
+# never springier than the model, and may be up to ~1.6x more damped. The range
+# runs 1.0 to 2.0 so the policy must keep hopping at zeta_eff up to ~0.24,
+# beyond the pessimistic end of the measurement.
+HOP_SPRING_DAMPING_SCALE = (1.0, 2.0)
+# Stiffness is a bench fit on printed parts; print-to-print and temperature
+# variation is two-sided and modest.
+HOP_SPRING_STIFFNESS_SCALE = (0.85, 1.15)
+
+
+def make_hop_sim2real_variant(cfg, kp_range=(0.8, 1.8), kd_range=(0.8, 1.3),
+                              hold_action_rate_weight=-1.0):
+    """Add back the robustness that was stripped to let the hop be discovered.
+
+    Ordering is the whole point, and it is the repo's own rule: an attempt-tax
+    active while a hard skill is being explored makes "do nothing" win. Every
+    arm that carried this stack from step 0 stood and never hopped (paq347v4,
+    evnsrh1q, and the ungated runs after them). HopFree dropped it, found the
+    gait, and NOW the tax is safe to charge -- so this transform is meant to be
+    applied to a RESUME of a hopping checkpoint, not to a fresh run.
+
+    Three sources, in order of how much they matter for a spring-powered pogo:
+      * foot-spring damping and stiffness -- the dominant unknown, see above;
+      * actuator gain (kp x0.8-1.8, kd x0.8-1.3) -- the real hip_roll holds
+        6-13x tighter than the model, which diverged the first hardware stand;
+      * the quiet-hold action-rate penalty, which stopped the deployed stand
+        commanding ~260 deg/s of target motion while stationary.
+    """
+    cfg = make_robust_stand_variant(
+        cfg, kp_range=kp_range, kd_range=kd_range,
+        hold_action_rate_weight=hold_action_rate_weight,
+    )
+    spring_cfg = SceneEntityCfg("robot", joint_names=[r"^passive_.*_foot_spring$"])
+    cfg.events["randomize_foot_spring_damping"] = EventTermCfg(
+        func=microduck_mdp.randomize_dof_field_scaled,
+        mode="reset",
+        params={"field": "dof_damping", "scale_range": HOP_SPRING_DAMPING_SCALE,
+                "asset_cfg": spring_cfg},
+    )
+    cfg.events["randomize_foot_spring_stiffness"] = EventTermCfg(
+        func=microduck_mdp.randomize_joint_field_scaled,
+        mode="reset",
+        params={"field": "jnt_stiffness", "scale_range": HOP_SPRING_STIFFNESS_SCALE,
+                "asset_cfg": spring_cfg},
+    )
+    return cfg
+
+
 def make_free_hop_variant(cfg):
     """Pay per hop, not per step in a phase window -- let the rate emerge.
 

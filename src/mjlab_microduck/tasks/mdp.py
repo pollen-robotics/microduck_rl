@@ -5910,6 +5910,47 @@ def randomize_com(
     return torch.tensor(float(hi))
 
 
+def randomize_joint_field_scaled(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    field: str,
+    scale_range: tuple[float, float],
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Scale a per-JOINT model field (e.g. jnt_stiffness) per episode, without
+    accumulating: restore nominal, then apply a fresh scale.
+
+    The sibling `randomize_dof_field_scaled` indexes by dof address, which is
+    correct for dof_damping/dof_frictionloss and WRONG for jnt_stiffness -- on
+    this robot the spring joints sit at dof 11/21 but joint 6/16, so reusing
+    the dof version would scale the wrong entries. Kept separate rather than
+    parameterised so the indexing is obvious at the call site.
+    """
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
+    else:
+        env_ids = env_ids.to(env.device, dtype=torch.int)
+
+    asset: Entity = env.scene[asset_cfg.name]
+    joint_ids = asset_cfg.joint_ids
+    if isinstance(joint_ids, slice):
+        joint_ids = list(range(len(asset.indexing.joint_ids)))[joint_ids]
+    indices = asset.indexing.joint_ids[joint_ids]
+
+    mf = getattr(env.sim.model, field)
+    cache_attr = f"_original_joint_{field}"
+    if not hasattr(env, cache_attr):
+        setattr(env, cache_attr, mf[0, indices].clone())
+    nominal = getattr(env, cache_attr)
+
+    num_envs, num_joints = len(env_ids), len(indices)
+    mf[env_ids[:, None], indices] = nominal.unsqueeze(0).expand(num_envs, -1)
+    lo, hi = scale_range
+    scales = torch.rand(num_envs, num_joints, device=env.device) * (hi - lo) + lo
+    mf[env_ids[:, None], indices] *= scales
+    return torch.tensor(float(hi))
+
+
 def randomize_dof_field_scaled(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,

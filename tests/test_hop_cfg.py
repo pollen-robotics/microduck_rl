@@ -1258,3 +1258,60 @@ def test_flags_survive_a_tyro_round_trip_like_the_train_path():
         assert rebuilt.symmetric_actions is sym, tid
         assert len(rebuilt.hold_gated_rewards or ()) == gated, tid
         assert rebuilt.enable_bit is bit, tid
+
+
+# ── HopFree-S50-DR: the sim2real pass ────────────────────────────────────────
+
+
+def test_hopfree_dr_adds_the_robustness_stack_without_touching_the_hop_reward():
+    """The transfer arm is HopFree plus randomisation, resumed from a hopping
+    checkpoint. The boot is the dominant unknown for a spring-powered pogo
+    (contacts of one to two control steps, energy out of the springs), so its
+    damping and stiffness are randomised alongside the actuator gains."""
+    from mjlab.tasks.registry import load_env_cfg
+
+    dr = load_env_cfg("Mjlab-HopFree-S50-DR-Sym-K3344-MicroDuck")
+    base = load_env_cfg("Mjlab-HopFree-S50-Sym-K3344-MicroDuck")
+
+    for name in ("randomize_foot_spring_damping", "randomize_foot_spring_stiffness",
+                 "randomize_motor_gains"):
+        assert name in dr.events, name
+        assert name not in base.events, name
+    assert "hold_action_rate_l2" in dr.rewards
+    assert "hold_action_rate_l2" not in base.rewards
+
+    # Damping is ONE-SIDED: the drop rig put real restitution at 0.57-0.70,
+    # i.e. zeta 0.11-0.18, and the model sits at 0.12 -- the springy end. The
+    # real boot is never less damped than the model.
+    damp = dr.events["randomize_foot_spring_damping"].params["scale_range"]
+    assert damp[0] == 1.0 and damp[1] == 2.0
+    stiff = dr.events["randomize_foot_spring_stiffness"].params["scale_range"]
+    assert stiff == (0.85, 1.15)
+    # Both must target the PASSIVE spring joints, never the servos.
+    for name in ("randomize_foot_spring_damping", "randomize_foot_spring_stiffness"):
+        jn = dr.events[name].params["asset_cfg"].joint_names
+        assert jn == [r"^passive_.*_foot_spring$"], (name, jn)
+
+    # The hop reward is untouched -- this arm changes the plant, not the goal.
+    for name in ("hop_landing_height", "hop_upward_velocity", "hop_load_force"):
+        assert dr.rewards[name].weight == base.rewards[name].weight, name
+        assert dr.rewards[name].params == base.rewards[name].params, name
+    assert dr.commands["twist"].enable_bit is True
+    assert dr.commands["twist"].symmetric_actions is True
+    assert len(dr.commands["twist"].hold_gated_rewards) == 4
+
+
+def test_spring_field_scalers_use_the_right_index_space():
+    """jnt_stiffness is per-JOINT and dof_damping is per-DOF. On this robot the
+    spring joints sit at joint 6/16 but dof 11/21, so using one scaler for both
+    would silently randomise the wrong entries."""
+    from mjlab.tasks.registry import load_env_cfg
+    from mjlab_microduck.tasks import mdp as microduck_mdp
+
+    dr = load_env_cfg("Mjlab-HopFree-S50-DR-Sym-K3344-MicroDuck")
+    assert dr.events["randomize_foot_spring_stiffness"].func is \
+        microduck_mdp.randomize_joint_field_scaled
+    assert dr.events["randomize_foot_spring_damping"].func is \
+        microduck_mdp.randomize_dof_field_scaled
+    assert dr.events["randomize_foot_spring_stiffness"].params["field"] == "jnt_stiffness"
+    assert dr.events["randomize_foot_spring_damping"].params["field"] == "dof_damping"
