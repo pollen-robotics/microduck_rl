@@ -864,10 +864,16 @@ def make_free_hop_variant(cfg):
         a rhythm. They stay because without a term that pays in contact, a
         robot that never leaves the ground has no gradient at all.
     """
-    object.__setattr__(cfg, "enable_bit", True)
     cmd = cfg.commands.get("twist")
-    if cmd is not None:
-        object.__setattr__(cmd, "enable_bit", True)
+    if cmd is None or not hasattr(type(cmd), "__dataclass_fields__") or \
+            "enable_bit" not in type(cmd).__dataclass_fields__:
+        raise ValueError(
+            "make_free_hop_variant needs a twist command whose cfg declares the "
+            "`enable_bit` FIELD (GroundPickPhaseCommandCfg). Setting it as a "
+            "dynamic attribute silently does not reach the training env -- see "
+            "run 53wlixam, which trained 3000 iterations with every hop term at 0."
+        )
+    cmd.enable_bit = True
 
     cfg.rewards.pop("hop_both_feet_airborne", None)
     cfg.rewards.pop("hop_body_height", None)
@@ -908,6 +914,14 @@ def make_hop_window_focus_variant(cfg):
     """
     names = tuple(n for n in _HOLD_GATED_POSTURE_TERMS if n in cfg.rewards)
     object.__setattr__(cfg, "hold_gated_rewards", names)
+    twist = cfg.commands.get("twist")
+    if twist is None or "hold_gated_rewards" not in type(twist).__dataclass_fields__:
+        raise ValueError(
+            "the posture gate needs a twist command declaring the "
+            "`hold_gated_rewards` FIELD -- as a dynamic attribute it does not "
+            "survive the train path (runs lsrr6d79 and aw34hcx4 trained ungated)."
+        )
+    twist.hold_gated_rewards = names
     return cfg
 
 
@@ -926,7 +940,18 @@ def make_structural_symmetry_variant(cfg):
         minimum and the head_pose_range curriculum (which widens them to
         1.4 rad) is removed, or head_pose_tracking becomes pure noise.
     """
+    # The FIELD on the command cfg is what training sees; the env-cfg attribute
+    # is kept only so `export.py` and older eval scripts keep working.
     object.__setattr__(cfg, "symmetric_actions", True)
+    _twist = cfg.commands.get("twist")
+    if _twist is None or "symmetric_actions" not in type(_twist).__dataclass_fields__:
+        raise ValueError(
+            "structural symmetry needs a twist command declaring the "
+            "`symmetric_actions` FIELD (GroundPickPhaseCommandCfg). As a dynamic "
+            "attribute it does not survive the train path's tyro round-trip -- "
+            "runs evnsrh1q, lsrr6d79 and aw34hcx4 all trained unprojected."
+        )
+    _twist.symmetric_actions = True
     cfg.rewards.pop("hop_symmetric_push", None)
     cfg.curriculum.pop("head_pose_range", None)
     head = cfg.commands.get("head_pose")

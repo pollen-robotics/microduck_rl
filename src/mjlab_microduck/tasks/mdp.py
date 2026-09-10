@@ -125,8 +125,25 @@ from mjlab.managers.action_manager import ActionManager as _ActionManager  # noq
 _orig_process_action = _ActionManager.process_action
 
 
+def _task_flag(env, name, default=None):
+    """Read a task flag from the twist command cfg, falling back to the env cfg.
+
+    The command cfg is the only carrier that survives the train path's tyro
+    round-trip; the env-cfg fallback keeps direct `load_env_cfg` users (evals,
+    export) working while any old dynamic attribute is still around. See
+    GroundPickPhaseCommandCfg for the full account.
+    """
+    cmds = getattr(env.cfg, "commands", None)
+    twist = cmds.get("twist") if hasattr(cmds, "get") else None
+    if twist is not None:
+        value = getattr(twist, name, None)
+        if value:
+            return value
+    return getattr(env.cfg, name, default)
+
+
 def _process_action_symmetric(self, action):
-    if getattr(self._env.cfg, "symmetric_actions", False):
+    if _task_flag(self._env, "symmetric_actions", False):
         from mjlab_microduck.tasks.symmetry import symmetrize_actions
         action = symmetrize_actions(action)
     return _orig_process_action(self, action)
@@ -202,7 +219,7 @@ def _reward_manager_init_hold_gated(self, *args, **kwargs):
     # *args/**kwargs, not (cfg, env): mjlab 1.3.0's RewardManager also takes
     # `scale_by_dt`, and a fixed signature here breaks on any future argument.
     _orig_reward_manager_init(self, *args, **kwargs)
-    names = getattr(self._env.cfg, "hold_gated_rewards", ())
+    names = _task_flag(self._env, "hold_gated_rewards", ()) or ()
     for name in names:
         if name not in self._term_names:
             # A term the variant expected is absent -- say so rather than
@@ -219,6 +236,43 @@ def _reward_manager_init_hold_gated(self, *args, **kwargs):
 
 _RewardManager.__init__ = _reward_manager_init_hold_gated
 print("[mdp] Patch 6 active: hold-gated posture rewards (cfg.hold_gated_rewards)")
+
+# ---------------------------------------------------------------------------
+# Patch 7: refuse to train a task whose hop rewards are structurally dead.
+#
+# Run 53wlixam trained 3000 iterations with hop_landing_height,
+# hop_upward_velocity and hop_load_force ALL reading exactly 0.0 the whole way,
+# because they gate on the command's slot-2 enable bit and the bit was never
+# turned on. Three primary task terms pinned at exactly zero is not a training
+# outcome, it is a wiring fault, and it is cheap to detect at construction.
+
+
+_orig_reward_manager_init_gate_check = _RewardManager.__init__
+
+
+def _reward_manager_init_gate_check(self, *args, **kwargs):
+    _orig_reward_manager_init_gate_check(self, *args, **kwargs)
+    wants_bit = [
+        name
+        for name in self._term_names
+        if self.get_term_cfg(name).params.get("gate") == "enable"
+        or self.get_term_cfg(name).func.__class__.__name__ == "hop_landing_height"
+    ]
+    if not wants_bit:
+        return
+    cmd_cfg = getattr(self._env.cfg, "commands", None)
+    twist = cmd_cfg.get("twist") if hasattr(cmd_cfg, "get") else None
+    if twist is not None and not getattr(twist, "enable_bit", False):
+        raise ValueError(
+            "These reward terms gate on the slot-2 hop-enable bit but the twist "
+            f"command has enable_bit=False, so every one of them is pinned at 0.0: "
+            f"{sorted(wants_bit)}. Set enable_bit=True on the command cfg "
+            "(hop.make_free_hop_variant does this)."
+        )
+
+
+_RewardManager.__init__ = _reward_manager_init_gate_check
+print("[mdp] Patch 7 active: enable-bit / hop-reward wiring check")
 
 if TYPE_CHECKING:
     from mjlab.viewer.debug_visualizer import DebugVisualizer
@@ -5201,6 +5255,38 @@ class GroundPickPhaseCommandCfg(UniformVelocityCommandCfg):
     hold_prob: float = 0.0
     hold_at: float = 0.65
     hold_range: tuple[float, float] = (1.0, 5.0)
+    # Slot 2 carries a hop-ENABLE bit instead of a hard zero. A REAL FIELD, not
+    # an `object.__setattr__` extra, and that distinction cost a 3000-iteration
+    # run (53wlixam): as a dynamic attribute it did not reach the training env,
+    # so the bit stayed 0, all three enable-gated hop terms read exactly 0.0 for
+    # the entire run, and the policy trained as a pure stand. It is also
+    # invisible in the wandb config when it is not a field, so the run's own
+    # record could not show what went wrong. Default False keeps every arm
+    # trained before 2026-09-09 seeing the hard zero it was trained on.
+    enable_bit: bool = False
+    # TASK FLAGS LIVE HERE, AND THAT IS NOT AN ACCIDENT OF TASTE.
+    #
+    # mjlab's `train` entry point builds its config through `tyro.cli`, which
+    # RECONSTRUCTS every dataclass from its declared fields. Anything attached
+    # with `object.__setattr__` therefore reaches `load_env_cfg`, every local
+    # eval, and the ONNX export -- but NOT training. Measured 2026-09-10:
+    # `symmetric_actions` and `hold_gated_rewards` both read True/4-terms after
+    # load_env_cfg and ABSENT after the train path.
+    #
+    # The cost was four runs. SymHard (evnsrh1q), SymFocus (lsrr6d79) and
+    # SymHop (aw34hcx4) were all trained with NO action projection, and the
+    # projection was then appended at export -- a train/deploy mismatch, on a
+    # policy that never saw it. SymFocus and SymHop also trained with NO
+    # hold-gated posture, so the "gating broke the standing basin" reading of
+    # that run has no support. HopFree (53wlixam) additionally lost the enable
+    # bit and trained 3000 iterations with all three hop terms at exactly 0.
+    #
+    # There is no env-cfg field we own to hang these on -- ManagerBasedRlEnvCfg
+    # is mjlab's -- and `commands` is a dict field whose VALUES survive intact,
+    # as `enable_bit` now demonstrates. This command already owns the hold that
+    # `hold_gated_rewards` gates on, so it is the natural carrier.
+    symmetric_actions: bool = False
+    hold_gated_rewards: tuple[str, ...] = ()
 
     def build(self, env: ManagerBasedRlEnv) -> "GroundPickPhaseCommand":
         return GroundPickPhaseCommand(self, env)

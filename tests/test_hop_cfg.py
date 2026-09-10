@@ -1219,3 +1219,42 @@ def test_landing_payment_is_bounded_and_unfarmable_by_chatter():
     assert abs(quality(0.015) - 0.5) < 1e-9
     assert quality(0.030) == 1.0
     assert quality(0.060) == 1.0          # never punished for going higher
+
+
+# ── task flags must survive the training entry point ─────────────────────────
+
+
+def test_task_flags_are_real_dataclass_fields_not_dynamic_attributes():
+    """mjlab's `train` builds its config through tyro.cli, which RECONSTRUCTS
+    every dataclass from its declared fields. A flag attached with
+    object.__setattr__ reaches load_env_cfg, every eval and the ONNX export --
+    but NOT training. That cost four runs: evnsrh1q, lsrr6d79 and aw34hcx4 all
+    trained with no action projection (it was appended at export instead), the
+    last two also with no posture gate, and 53wlixam additionally lost the
+    enable bit and trained 3000 iterations with every hop term at exactly 0."""
+    from mjlab_microduck.tasks.mdp import GroundPickPhaseCommandCfg
+
+    fields = GroundPickPhaseCommandCfg.__dataclass_fields__
+    for name in ("enable_bit", "symmetric_actions", "hold_gated_rewards"):
+        assert name in fields, f"{name} must be a FIELD, not a dynamic attribute"
+
+
+def test_flags_survive_a_tyro_round_trip_like_the_train_path():
+    """Reconstruct the config the way `train` does and check the flags live."""
+    import dataclasses
+
+    from mjlab.tasks.registry import load_env_cfg
+
+    for tid, sym, gated, bit in (
+        ("Mjlab-HopFree-S50-Sym-K3344-MicroDuck", True, 4, True),
+        ("Mjlab-HopPauseR2-S50-SymFocus-Sym-K3344-MicroDuck", True, 4, False),
+        ("Mjlab-HopPauseR2-S50-Sym-K3344-MicroDuck", False, 0, False),
+    ):
+        cfg = load_env_cfg(tid)
+        twist = cfg.commands["twist"]
+        # dataclasses.replace() keeps exactly the declared fields, which is the
+        # property tyro relies on -- a dynamic attribute does not come through.
+        rebuilt = dataclasses.replace(twist)
+        assert rebuilt.symmetric_actions is sym, tid
+        assert len(rebuilt.hold_gated_rewards or ()) == gated, tid
+        assert rebuilt.enable_bit is bit, tid
