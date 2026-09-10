@@ -86,8 +86,20 @@ Run-2 lesson (wandb 1bqctpkq, killed @1085, per-spawn battery of ckpt 1000):
   std 1.0 flailing, at the cost of the walk). The deployed stand expert
   (69u48n8l@9750) run through the same battery: 100/100/95% (side never
   trained!) within ~1 s. Fix: PpoWithExpertBc — fallen-gated behavior cloning
-  toward that frozen expert after each PPO update (distill.py). The walk frames
-  are untouched; RL keeps shaping the fall itself and the last mile. Impact costs were confirmed real but weak (face-plant
+  toward that frozen expert after each PPO update (distill.py). RL keeps
+  shaping the fall itself and the last mile.
+
+Run-3 lesson (wandb 4lflk7ii, @1060): IT STANDS UP from front and back — and
+  the walk died at the first BC pass (iteration 8: 20 Adam steps at 1e-3 on a
+  few hundred fallen frames; fall terminations 2 → 72 by iteration 12, then a
+  falls→fallen-frames→more-BC loop; yaw tracking error 0.9 → 3.4 rad/s).
+  Nothing constrained the shared weights on upright frames. Fix (distill.py):
+  the warm-start WALK checkpoint is a second frozen teacher anchoring frames
+  with tilt < 25°; stand expert on tilt > 35°; PPO alone in between and for
+  everything the reward adds on top. BC lr 3e-4, min mini-batch 512. 40-iter
+  check at 64 envs with 50% prone spawns + 1 m/s pushes: fallen frac 0.44 →
+  0.33 while upright lin-vel error stayed 0.22 m/s (run 3's recipe destroyed
+  the walk in 12 iterations under milder conditions). Impact costs were confirmed real but weak (face-plant
   spikes 129 N at 0.5% of steps ≈ -0.3 per fall vs ~7/step walking) — to be
   raised ×5 once recoveries exist, not before.
 
