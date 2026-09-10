@@ -237,3 +237,83 @@ def test_warm_start_patch_resets_counters(monkeypatch):
     MjlabOnPolicyRunner.load(r, "model_3750.pt")
     assert r.env.unwrapped.common_step_counter == 90024
     assert r.current_learning_iteration == 3750
+
+
+# ── Run-1 fixes: fallen-scaled smoothness + side spawns ──────────────────────
+
+def test_smoothness_costs_are_fallen_scaled():
+    cfg = vs.make_microduck_velstand_env_cfg()
+    for name in ("action_rate_l2", "joint_torque_rate_l2"):
+        term = cfg.rewards[name]
+        assert term.func.__name__.endswith("_fallen_scaled"), name
+        assert term.weight < 0
+        assert 0.0 < term.params["fallen_scale"] < 0.5
+        assert term.params["gate_tilt_above_deg"] == vs.REWARD_GATE_TILT_DEG
+    # the walk's full action_rate weight is still what the loaded policy was trained with
+    assert cfg.rewards["action_rate_l2"].weight == -1.0
+
+
+def test_prone_init_has_side_spawns():
+    cfg = vs.make_microduck_velstand_env_cfg()
+    assert cfg.events["random_prone_init"].params["side_prob"] == vs.PRONE_SIDE_PROB > 0
+    for st in vs.PRONE_RAMP_STAGES:
+        assert st["params"]["side_prob"] == vs.PRONE_SIDE_PROB
+
+
+class _SimData:
+    def __init__(self, n):
+        self.qpos = torch.zeros(n, 21); self.qpos[:, 3] = 1.0
+        self.qvel = torch.zeros(n, 20)
+
+
+class _Sim:
+    def __init__(self, n): self.data = _SimData(n)
+
+
+class _SpawnEnv:
+    def __init__(self, n):
+        self.num_envs = n; self.device = "cpu"; self.sim = _Sim(n); self.scene = {"robot": object()}
+
+
+def _tilt_and_axes(q):
+    w, x, y, z = q.unbind(1)
+    R22 = 1 - 2 * (x * x + y * y)                 # body z · world z
+    xz = 2 * (x * z - w * y)                      # body x · world z (nose up/down)
+    yz = 2 * (y * z + w * x)                      # body y · world z (side)
+    return torch.rad2deg(torch.acos(R22.clamp(-1, 1))), xz, yz
+
+
+def test_side_spawn_quaternions_lie_on_a_side():
+    torch.manual_seed(0)
+    env = _SpawnEnv(256)
+    microduck_mdp.set_random_prone_orientation(env, torch.arange(256), face_down_prob=0.5, side_prob=1.0)
+    q = env.sim.data.qpos[:, 3:7]
+    assert torch.allclose(q.norm(dim=1), torch.ones(256), atol=1e-5)
+    tilt, xz, yz = _tilt_and_axes(q)
+    assert (tilt > 89).all() and (tilt < 91).all()
+    assert (xz.abs() < 1e-4).all()                # nose horizontal → not face down/up
+    assert ((yz - 1).abs() < 1e-4).sum() > 80 and ((yz + 1).abs() < 1e-4).sum() > 80  # both sides used
+
+
+def test_side_prob_zero_keeps_face_spawns():
+    torch.manual_seed(0)
+    env = _SpawnEnv(128)
+    microduck_mdp.set_random_prone_orientation(env, torch.arange(128), face_down_prob=1.0, side_prob=0.0)
+    tilt, xz, yz = _tilt_and_axes(env.sim.data.qpos[:, 3:7])
+    assert (tilt > 89).all() and (xz < -0.99).all()   # face-down: nose points down
+
+
+def test_fallen_scaled_action_rate(monkeypatch):
+    class _AM:
+        action = torch.tensor([[1.0] * 14, [1.0] * 14]); prev_action = torch.zeros(2, 14)
+
+    class _E:
+        num_envs = 2; device = "cpu"; action_manager = _AM(); scene = {"robot": object()}
+
+    calls = {}
+    def fake_mask(env, asset, z_below, tilt_above):
+        calls["tilt"] = tilt_above; return torch.tensor([True, False])
+    monkeypatch.setattr(microduck_mdp, "_fallen_mask", fake_mask)
+    out = microduck_mdp.action_rate_l2_fallen_scaled(_E(), fallen_scale=0.1, gate_tilt_above_deg=40.0)
+    assert calls["tilt"] == 40.0
+    assert torch.allclose(out, torch.tensor([1.4, 14.0]))

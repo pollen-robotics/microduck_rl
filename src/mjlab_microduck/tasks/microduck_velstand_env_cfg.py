@@ -61,6 +61,24 @@ What changed vs the 2026-07 design (kept below, still valid):
   - NOT modelled on purpose (user decision 2026-09-09): the daemon limp. If the
     policy finds a gentler strategy with full authority, better let it.
 
+Run-1 lesson (wandb 4otqmkb4, killed @1098, headless eval of ckpt 750):
+  The walk transferred (iter 100 = source-run tracking/upright) and the topple
+  ramp produced falls, but 0 recoveries ever: 73% of eval env-steps fallen,
+  fallen action rate 1/5 of upright, torque 1/3 → the policy learned to LIE
+  STILL. Two causes, both fixed here:
+  (1) ATTEMPT TAX. The warm-start collapse pinned action_rate_l2 at -1.0 from
+      step 0 (-1.5..-2/step, the largest cost in the stack). With a flat -0.5
+      fallen tax, thrashing costs more than waiting → "do nothing" wins (the
+      AGENTS.md smoothness-after-discovery rule, hit from the other side).
+      Fix: action_rate / torque_rate are ×FALLEN_SMOOTHNESS_SCALE (0.1) while
+      tilt > 40° (action_rate_l2_fallen_scaled) — the walk keeps its full tax.
+  (2) SPAWN HOLE. 79% of falls end ON THE SIDE, 20% face-up, 0% face-down; the
+      prone init only knew face-down/face-up. Fix: side_prob in the prone slice.
+  Also: recovery ramps pulled earlier (walk needs no bootstrap window) and the
+  crouch slice enlarged. Impact costs were confirmed real but weak (face-plant
+  spikes 129 N at 0.5% of steps ≈ -0.3 per fall vs ~7/step walking) — to be
+  raised ×5 once recoveries exist, not before.
+
 REBASED (2026-07, audit follow-up) on the velocity recipe — the proven
 walker — instead of the abandoned older recipe the old velstand used.
 The 2026-07 audit found the old design starved the walk: only ~25% of
@@ -213,6 +231,10 @@ RECOVERED_UP_Z = 0.09
 # progress terms alone could teach them. Run-7 restores it.
 RECOVERY_ECON_KICKIN_ITER = 600 if WARM_START else 1200
 
+# Run-1 fix (1): smoothness taxes scaled down while fallen so get-up attempts
+# are affordable; full weight while upright (the walk's smoothness is untouched).
+FALLEN_SMOOTHNESS_SCALE = 0.1
+
 # Servo-protection costs ramp (see docstring). 25% from step 0 keeps the
 # gradient alive; full weight after the recovery economics are in place.
 PROTECT_FULL_ITER = RECOVERY_ECON_KICKIN_ITER + 400
@@ -257,14 +279,18 @@ FALLEN_TIMEOUT_S = 8.0
 # started prone+econ together at 800 and prone recovery never bootstrapped.
 # Crouch slice alone starts at 800: near-upright states, tax-free until econ,
 # and it doubles as full-stand posture data (run 6 stood truly vertical).
-# Warm start: same shape, ~2× sooner (the walk needs no bootstrap window).
-_PRONE_ITERS = (300, 800, 1200, 1600) if WARM_START else (800, 1500, 2000, 2500)
+# Warm start: same shape, sooner (the walk needs no bootstrap window). Run-1
+# fix (2): side_prob puts that fraction of the prone slice ON A SIDE (the
+# dominant natural fall end-state, 79% in eval); the rest splits by face_down_prob.
+# Crouch slice 0.15 → 0.20 and from iter 150: it doubles as stand-tall data.
+_PRONE_ITERS = (150, 700, 1000, 1400) if WARM_START else (800, 1500, 2000, 2500)
+PRONE_SIDE_PROB = 0.5
 PRONE_RAMP_STAGES = [
-    {"step": 0,                                   "params": {"prone_prob": 0.00, "face_down_prob": 1.0,  "crouch_prob": 0.00}},
-    {"step": _PRONE_ITERS[0] * NUM_STEPS_PER_ENV, "params": {"prone_prob": 0.00, "face_down_prob": 1.0,  "crouch_prob": 0.15}},
-    {"step": _PRONE_ITERS[1] * NUM_STEPS_PER_ENV, "params": {"prone_prob": 0.15, "face_down_prob": 0.80, "crouch_prob": 0.15}},
-    {"step": _PRONE_ITERS[2] * NUM_STEPS_PER_ENV, "params": {"prone_prob": 0.30, "face_down_prob": 0.65, "crouch_prob": 0.15}},
-    {"step": _PRONE_ITERS[3] * NUM_STEPS_PER_ENV, "params": {"prone_prob": 0.45, "face_down_prob": 0.50, "crouch_prob": 0.15}},
+    {"step": 0,                                   "params": {"prone_prob": 0.00, "face_down_prob": 1.0,  "side_prob": PRONE_SIDE_PROB, "crouch_prob": 0.00}},
+    {"step": _PRONE_ITERS[0] * NUM_STEPS_PER_ENV, "params": {"prone_prob": 0.00, "face_down_prob": 1.0,  "side_prob": PRONE_SIDE_PROB, "crouch_prob": 0.20}},
+    {"step": _PRONE_ITERS[1] * NUM_STEPS_PER_ENV, "params": {"prone_prob": 0.15, "face_down_prob": 0.80, "side_prob": PRONE_SIDE_PROB, "crouch_prob": 0.20}},
+    {"step": _PRONE_ITERS[2] * NUM_STEPS_PER_ENV, "params": {"prone_prob": 0.30, "face_down_prob": 0.65, "side_prob": PRONE_SIDE_PROB, "crouch_prob": 0.20}},
+    {"step": _PRONE_ITERS[3] * NUM_STEPS_PER_ENV, "params": {"prone_prob": 0.45, "face_down_prob": 0.50, "side_prob": PRONE_SIDE_PROB, "crouch_prob": 0.20}},
 ]
 
 
@@ -393,9 +419,17 @@ def make_microduck_velstand_env_cfg(play: bool = False, rough: bool = False) -> 
     )
     # Standup's proven anti-jitter term: penalizes torque CHANGE (not magnitude
     # or rotation) → smooths transfer without blocking the recovery flip.
+    # Run-1 fix (1): both smoothness taxes ×FALLEN_SMOOTHNESS_SCALE while fallen.
     cfg.rewards["joint_torque_rate_l2"] = RewardTermCfg(
-        func=microduck_mdp.joint_torque_rate_l2,
+        func=microduck_mdp.joint_torque_rate_l2_fallen_scaled,
         weight=-2e-3,
+        params={"fallen_scale": FALLEN_SMOOTHNESS_SCALE, "gate_tilt_above_deg": REWARD_GATE_TILT_DEG},
+    )
+    ar = cfg.rewards["action_rate_l2"]
+    cfg.rewards["action_rate_l2"] = RewardTermCfg(
+        func=microduck_mdp.action_rate_l2_fallen_scaled,
+        weight=ar.weight,
+        params={"fallen_scale": FALLEN_SMOOTHNESS_SCALE, "gate_tilt_above_deg": REWARD_GATE_TILT_DEG},
     )
 
     # ── Servo-protection costs (see module docstring) ─────────────────────────
@@ -489,6 +523,7 @@ def make_microduck_velstand_env_cfg(play: bool = False, rough: bool = False) -> 
         params={
             "prone_prob": 0.0,        # ramped by the prone_init_prob curriculum
             "face_down_prob": 1.0,
+            "side_prob": PRONE_SIDE_PROB,
             "prone_z_min": 0.05,
             "prone_z_max": 0.09,
             "crouch_prob": 0.0,       # ramped by the prone_init_prob curriculum

@@ -773,6 +773,43 @@ def servo_acc_spike_penalty(
     return torch.clamp(acc.abs() - acc_thresh, min=0.0).sum(dim=1)
 
 
+def _fallen_scale(env: ManagerBasedRlEnv, asset: Entity, fallen_scale: float, gate_tilt_above_deg: float) -> torch.Tensor:
+    fallen = _fallen_mask(env, asset, 0.0, gate_tilt_above_deg).bool()
+    return torch.where(fallen, torch.full_like(fallen, fallen_scale, dtype=torch.float), torch.ones(fallen.shape, device=env.device))
+
+
+def action_rate_l2_fallen_scaled(
+    env: ManagerBasedRlEnv,
+    fallen_scale: float = 0.1,
+    gate_tilt_above_deg: float = 40.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """mjlab action_rate_l2, multiplied by ``fallen_scale`` while tilt > gate.
+
+    Protective-fall velstand run 1 (2026-09-09) lesson: warm-starting from the
+    deployed walk pins action_rate at its final weight (-1.0, the largest cost in
+    the stack, -1.5..-2/step) from step 0. Against a flat -0.5 fallen tax, any
+    get-up attempt then costs more than lying still — the attempt-tax freeze:
+    0 recoveries in 800 iters, fallen action rate 1/5 of upright. The walk needs
+    its full smoothness tax; the fallen robot needs to be allowed to try. Returns
+    >= 0 → negative weight, same as action_rate_l2.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    base = torch.sum(torch.square(env.action_manager.action - env.action_manager.prev_action), dim=1)
+    return base * _fallen_scale(env, asset, fallen_scale, gate_tilt_above_deg)
+
+
+def joint_torque_rate_l2_fallen_scaled(
+    env: ManagerBasedRlEnv,
+    fallen_scale: float = 0.1,
+    gate_tilt_above_deg: float = 40.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """joint_torque_rate_l2 × ``fallen_scale`` while fallen (see action_rate_l2_fallen_scaled)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    return joint_torque_rate_l2(env, asset_cfg) * _fallen_scale(env, asset, fallen_scale, gate_tilt_above_deg)
+
+
 def body_upright_linear(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -4217,15 +4254,24 @@ def set_random_prone_orientation(
     env_ids: torch.Tensor,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     face_down_prob: float = 0.5,
+    side_prob: float = 0.0,
 ):
-    """Randomly initialize each env as face-down (belly) or face-up (back), with random yaw.
+    """Randomly initialize each env lying down, with random yaw.
+
+    First ``side_prob`` of the envs lie on a SIDE (±90° roll, left/right 50/50);
+    the rest split face-down / face-up by ``face_down_prob``.
 
     Face-down:  +90° pitch → quat = [s*cy, -s*sy,  s*cy,  s*sy]
     Face-up:    -90° pitch → quat = [s*cy,  s*sy, -s*cy,  s*sy]
+    On side:    ±90° roll  → quat = yaw ⊗ roll = [s*cy, ±s*cy, ±s*sy, s*sy]
+
+    Side spawns were added 2026-09 (protective-fall velstand run 1): a headless
+    eval showed 79% of pushed falls end ON THE SIDE, 20% face-up, 0% face-down —
+    the dominant fallen state had no reverse-curriculum data at all.
 
     Args:
-        face_down_prob: probability of sampling face-down (vs face-up). A curriculum
-            can ramp this from a high initial value (easier task) toward 0.5.
+        face_down_prob: probability of face-down (vs face-up) among the non-side envs.
+        side_prob: fraction of envs placed on a side.
     """
     if env_ids is None or len(env_ids) == 0:
         return
@@ -4239,9 +4285,14 @@ def set_random_prone_orientation(
 
     face_down = torch.stack([ s * cy, -s * sy,  s * cy,  s * sy], dim=1)
     face_up   = torch.stack([ s * cy,  s * sy, -s * cy,  s * sy], dim=1)
+    sign = torch.where(torch.rand(num, device=env.device) < 0.5, 1.0, -1.0)
+    on_side  = torch.stack([ s * cy, sign * s * cy, sign * s * sy, s * sy], dim=1)
 
+    u = torch.rand(num, device=env.device)
+    side_mask = u < side_prob
     mask = torch.rand(num, device=env.device) < face_down_prob  # True → face-down
     new_quat = torch.where(mask.unsqueeze(1), face_down, face_up)
+    new_quat = torch.where(side_mask.unsqueeze(1), on_side, new_quat)
 
     env.sim.data.qpos[env_ids, 3:7] = new_quat
     env.sim.data.qvel[env_ids, :6] = 0.0
@@ -4500,8 +4551,12 @@ def maybe_set_random_prone_orientation(
     prone_z_min: float = 0.20,
     prone_z_max: float = 0.25,
     crouch_prob: float = 0.0,
+    side_prob: float = 0.0,
 ):
     """Reset event that overrides orientation to prone with probability `prone_prob`.
+
+    ``side_prob`` (fraction of the prone slice lying on a side) is passed through
+    to set_random_prone_orientation.
 
     With prob `prone_prob`, replaces the upright orientation (already set by
     reset_base) with a prone orientation; otherwise leaves it upright. Among the
@@ -4534,7 +4589,7 @@ def maybe_set_random_prone_orientation(
     crouch_selected = env_ids_t[(u >= prone_prob) & (u < prone_prob + crouch_prob)]
     if len(selected) > 0:
         set_random_prone_orientation(
-            env, selected, asset_cfg=asset_cfg, face_down_prob=face_down_prob
+            env, selected, asset_cfg=asset_cfg, face_down_prob=face_down_prob, side_prob=side_prob
         )
         # Override z so the prone body has head/neck clearance when settling.
         z = torch.rand(len(selected), device=env.device) * (prone_z_max - prone_z_min) + prone_z_min
