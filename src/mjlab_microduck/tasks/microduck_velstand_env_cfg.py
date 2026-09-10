@@ -16,6 +16,12 @@ What changed vs the 2026-07 design (kept below, still valid):
     its final stage (WARM_START) — re-running them from stage 0 would re-teach
     the walk under easier conditions and drift it. Only velstand's own phases
     ramp, and they are ~2× shorter than the from-scratch schedule.
+    REFERENCE RUN (best policy so far, published 2026-09-10): wandb 6op8a8u8,
+    checkpoint model_5999.pt, code = commit d3edc1f (git tag velstand-best-6op8a8u8),
+    4096 envs, 6000 iterations on COACH2, launched EXACTLY as the LAUNCH line below
+    (MICRODUCK_WARM_START=1 set; wandb args: Mjlab-VelStand-Flat-MicroDuck
+    --env.scene.num-envs 4096 --agent.resume True --wandb-run-path
+    pollen-robotics/mjlab_microduck/441tzs6d --wandb-checkpoint-name model_3750.pt).
     LAUNCH:  MICRODUCK_WARM_START=1 uv run train Mjlab-VelStand-Flat-MicroDuck \
                --env.scene.num-envs 4096 --agent.resume True \
                --wandb-run-path pollen-robotics/mjlab_microduck/441tzs6d \
