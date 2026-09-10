@@ -117,7 +117,19 @@ Run-4 (wandb 6op8a8u8) WORKS, on the robot too. Benchmark vs the deployed
   0.34 → 0.12 rad/s over training (parked, not critical now).
   Relaunch as a plain RESUME of 6op8a8u8 (curricula already final), not a
   warm start: `uv run train ... --agent.resume True --wandb-run-path
-  pollen-robotics/mjlab_microduck/6op8a8u8 --wandb-checkpoint-name model_5750.pt`. Impact costs were confirmed real but weak (face-plant
+  pollen-robotics/mjlab_microduck/6op8a8u8 --wandb-checkpoint-name model_5999.pt`.
+
+Run-5 (wandb axr82ws4, resume of 5999 +1000 iters with post-fall-like spawns
+  and servo_stall ×3): NO gain on randomized-joint face-up spawns (85% → 82%,
+  seed noise) and WORSE on the robot: more aggressive rises, overshoot and fall
+  back. Sim agrees: ckpt 7000 re-falls after a front stand-up 9/188 (5999: 0)
+  with |Δa| during the rise 0.23 vs 0.10. Two causes: (1) servo_stall ×3 —
+  "high torque at low velocity" IS a slow careful push-up, so the policy went
+  ballistic instead; reverted to -0.05. (2) Teacher ceiling: the stand expert
+  itself is 83% on these spawns and BC coef 1.0 pins the student there; coef
+  0.3 on fallen frames (anchor stays 1.0). Plus, now that the skill exists:
+  fallen smoothness scale 0.1 → 0.4 and gentle_rise ×4 to damp thrash and
+  violent rises. Resume from 5999 (the published reference), not 7000. Impact costs were confirmed real but weak (face-plant
   spikes 129 N at 0.5% of steps ≈ -0.3 per fall vs ~7/step walking) — to be
   raised ×5 once recoveries exist, not before.
 
@@ -278,12 +290,17 @@ RECOVERY_ECON_KICKIN_ITER = 600 if WARM_START else 1200
 # distill the deployed stand expert into the fallen frames (see distill.py).
 # The expert recovers 100% face-down/up and 95% side on this model in ~1 s.
 ENABLE_EXPERT_BC = True
-EXPERT_BC_COEF = 1.0
+EXPERT_BC_COEF = 0.3            # was 1.0. Run-5 lesson: the stand expert is only 83% on post-fall-like
+                                # face-up spawns and the student plateaued at the same 82-85% under coef 1.0
+                                # (teacher ceiling). Loosened so PPO's recovery rewards can refine past it;
+                                # the walk anchor stays at 1.0.
 EXPERT_BC_GATE_TILT_DEG = 35.0
 
 # Run-1 fix (1): smoothness taxes scaled down while fallen so get-up attempts
 # are affordable; full weight while upright (the walk's smoothness is untouched).
-FALLEN_SMOOTHNESS_SCALE = 0.1
+FALLEN_SMOOTHNESS_SCALE = 0.4   # was 0.1 while the skill was being discovered (runs 2-4); the skill exists
+                                # now (BC), so the tax comes back to damp convulsions/thrash while fallen —
+                                # the AGENTS.md "smoothness AFTER discovery" step.
 
 # Servo-protection costs ramp (see docstring). 25% from step 0 keeps the
 # gradient alive; full weight after the recovery economics are in place.
@@ -293,8 +310,11 @@ SERVO_IMPACT_WEIGHT = -0.02     # per N above 2 N on servo housings, per step
 HEAD_IMPACT_WEIGHT = -0.01      # per N above 15 N on the head subtree
 TRUNK_IMPACT_WEIGHT = -0.01     # per N above 20 N on the trunk shell
 SERVO_ACC_SPIKE_WEIGHT = -1e-3  # per rad/s² above 300 (summed over servos)
-SERVO_STALL_WEIGHT = -0.15      # per stalled servo per step (was -0.05; ×3 after run 4: convulsions when rising face-up post-fall)
-GENTLE_RISE_WEIGHT = 0.005      # POSITIVE: trunk_vertical_accel_penalty is self-negating
+SERVO_STALL_WEIGHT = -0.05      # per stalled servo per step. Run-5 lesson: ×3 (-0.15) made the rise
+                                # BALLISTIC — "high torque at low velocity" is exactly a slow careful
+                                # push-up, so the policy stopped doing those (robot: overshoot + fall back).
+GENTLE_RISE_WEIGHT = 0.02       # POSITIVE: trunk_vertical_accel_penalty is self-negating. ×4 after run 5
+                                # (aggressive rises): prices |a_z| of the trunk during the rise directly.
 SERVO_IMPACT_THRESH_N = 2.0
 HEAD_IMPACT_THRESH_N = 15.0
 TRUNK_IMPACT_THRESH_N = 20.0

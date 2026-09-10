@@ -247,7 +247,7 @@ def test_smoothness_costs_are_fallen_scaled():
         term = cfg.rewards[name]
         assert term.func.__name__.endswith("_fallen_scaled"), name
         assert term.weight < 0
-        assert 0.0 < term.params["fallen_scale"] < 0.5
+        assert 0.0 < term.params["fallen_scale"] < 1.0
         assert term.params["gate_tilt_above_deg"] == vs.REWARD_GATE_TILT_DEG
     # the walk's full action_rate weight is still what the loaded policy was trained with
     assert cfg.rewards["action_rate_l2"].weight == -1.0
@@ -366,8 +366,17 @@ def test_prone_init_randomizes_joints_for_post_fall_like_spawns():
     p = cfg.events["random_prone_init"].params
     assert 0.5 <= p["joint_random_prob"] < 1.0          # most prone spawns post-fall-like, some keep HOME
     assert 0.5 <= p["joint_range_frac"] <= 0.9
-    assert cfg.rewards["servo_stall"].weight <= -0.15 * vs.PROTECT_STAGE0_FRAC
-    assert cfg.curriculum["servo_stall_weight"].params["weight_stages"][-1]["weight"] == vs.SERVO_STALL_WEIGHT <= -0.15
+    # Run-5 lesson: stall is also what a slow careful push-up looks like — keep it mild.
+    assert -0.1 <= vs.SERVO_STALL_WEIGHT < 0
+    assert cfg.curriculum["servo_stall_weight"].params["weight_stages"][-1]["weight"] == vs.SERVO_STALL_WEIGHT
+
+
+def test_post_discovery_regularization():
+    # Skill exists via BC → smoothness back on while fallen, violent rises priced, fallen BC loosened, anchor firm.
+    assert 0.25 <= vs.FALLEN_SMOOTHNESS_SCALE <= 0.6
+    assert vs.GENTLE_RISE_WEIGHT >= 0.02
+    alg = vs.MicroduckVelStandRlCfg.algorithm
+    assert 0.1 <= alg.bc_cfg["coef"] <= 0.5 < alg.bc_cfg["anchor_coef"] <= 1.0
 
 
 def test_randomize_servo_joints_uniform_respects_limits(monkeypatch):
