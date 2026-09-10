@@ -4542,6 +4542,27 @@ def set_random_crouch_state(
     env.sim.data.qvel[env_ids, :] = 0.0
 
 
+def randomize_servo_joints_uniform(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    range_frac: float = 0.8,
+):
+    """Sample every servo joint uniformly over the central ``range_frac`` of its
+    limits for ``env_ids``; zero joint velocities. Uses the entity write API, so it
+    is correct on backlash/roller models where passive joints interleave."""
+    asset: Entity = env.scene[asset_cfg.name]
+    ids = torch.as_tensor(_servo_joint_ids(env, asset), device=env.device, dtype=torch.long)
+    lim = asset.data.joint_pos_limits[env_ids][:, ids]  # (n, S, 2)
+    lo, hi = lim[..., 0], lim[..., 1]
+    mid, half = 0.5 * (lo + hi), 0.5 * (hi - lo) * range_frac
+    sample = mid + (torch.rand(len(env_ids), len(ids), device=env.device) * 2.0 - 1.0) * half
+    pos = asset.data.joint_pos[env_ids].clone()
+    pos[:, ids] = sample
+    asset.write_joint_position_to_sim(pos, env_ids=env_ids)
+    asset.write_joint_velocity_to_sim(torch.zeros_like(pos), env_ids=env_ids)
+
+
 def maybe_set_random_prone_orientation(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
@@ -4552,11 +4573,22 @@ def maybe_set_random_prone_orientation(
     prone_z_max: float = 0.25,
     crouch_prob: float = 0.0,
     side_prob: float = 0.0,
+    joint_random_prob: float = 0.0,
+    joint_range_frac: float = 0.8,
 ):
     """Reset event that overrides orientation to prone with probability `prone_prob`.
 
     ``side_prob`` (fraction of the prone slice lying on a side) is passed through
     to set_random_prone_orientation.
+
+    ``joint_random_prob``: fraction of the prone slice whose SERVO joints are
+    re-sampled uniformly over the central ``joint_range_frac`` of each joint's
+    limits (velocities zeroed). Post-fall-like spawns (2026-09-10, protective
+    fall run 4): a real fall leaves the legs wherever the gait had them — hip
+    roll pinned at its limit, head yaw 1.7 rad off, knees anywhere — and the
+    policy recovered only 58-77% of face-up landings after a push vs 100% from
+    HOME-pose face-up spawns. The remaining fraction keeps the HOME pose (the
+    daemon's stand-from-init case).
 
     With prob `prone_prob`, replaces the upright orientation (already set by
     reset_base) with a prone orientation; otherwise leaves it upright. Among the
@@ -4594,6 +4626,10 @@ def maybe_set_random_prone_orientation(
         # Override z so the prone body has head/neck clearance when settling.
         z = torch.rand(len(selected), device=env.device) * (prone_z_max - prone_z_min) + prone_z_min
         env.sim.data.qpos[selected, 2] = z
+        if joint_random_prob > 0.0:
+            jr = selected[torch.rand(len(selected), device=env.device) < joint_random_prob]
+            if len(jr) > 0:
+                randomize_servo_joints_uniform(env, jr, asset_cfg=asset_cfg, range_frac=joint_range_frac)
     if len(crouch_selected) > 0:
         set_random_crouch_state(env, crouch_selected, asset_cfg=asset_cfg)
 

@@ -99,7 +99,25 @@ Run-3 lesson (wandb 4lflk7ii, @1060): IT STANDS UP from front and back — and
   everything the reward adds on top. BC lr 3e-4, min mini-batch 512. 40-iter
   check at 64 envs with 50% prone spawns + 1 m/s pushes: fallen frac 0.44 →
   0.33 while upright lin-vel error stayed 0.22 m/s (run 3's recipe destroyed
-  the walk in 12 iterations under milder conditions). Impact costs were confirmed real but weak (face-plant
+  the walk in 12 iterations under milder conditions).
+
+Run-4 (wandb 6op8a8u8) WORKS, on the robot too. Benchmark vs the deployed
+  walk→limp→stand pipeline (sim, 3 seeds): recovers 88-95% vs 83-86% of push
+  falls, 2.7 s vs 3.3 s median, zero servo-housing contact vs 50 ms/fall, trunk
+  impact 0 vs 14 N, stall halved; forward speed equal to the walk expert; head
+  impact EQUAL (~32 N) — still the open target. Robot feedback + sim
+  reproduction: (a) convulsions rising from the BACK after a real fall — sim:
+  face-up LANDINGS after a push recover 58% (ckpt 1750) → 77% (5750) vs 100%
+  from a face-up SPAWN; the stand expert has the same hole (71%). Cause: spawns
+  start at HOME joints, a real fall leaves the legs anywhere. Fix here:
+  PRONE_JOINT_RANDOM_PROB of the prone slice gets uniformly random servo joints
+  (central 80% of limits) + servo_stall ×3. (b) backward overshoot after a
+  front stand-up on the robot — NOT reproduced in sim (0/192 re-falls), a
+  sim2real gap to chase with a recording. Turn-in-place yaw rate drifted
+  0.34 → 0.12 rad/s over training (parked, not critical now).
+  Relaunch as a plain RESUME of 6op8a8u8 (curricula already final), not a
+  warm start: `uv run train ... --agent.resume True --wandb-run-path
+  pollen-robotics/mjlab_microduck/6op8a8u8 --wandb-checkpoint-name model_5750.pt`. Impact costs were confirmed real but weak (face-plant
   spikes 129 N at 0.5% of steps ≈ -0.3 per fall vs ~7/step walking) — to be
   raised ×5 once recoveries exist, not before.
 
@@ -275,7 +293,7 @@ SERVO_IMPACT_WEIGHT = -0.02     # per N above 2 N on servo housings, per step
 HEAD_IMPACT_WEIGHT = -0.01      # per N above 15 N on the head subtree
 TRUNK_IMPACT_WEIGHT = -0.01     # per N above 20 N on the trunk shell
 SERVO_ACC_SPIKE_WEIGHT = -1e-3  # per rad/s² above 300 (summed over servos)
-SERVO_STALL_WEIGHT = -0.05      # per stalled servo per step
+SERVO_STALL_WEIGHT = -0.15      # per stalled servo per step (was -0.05; ×3 after run 4: convulsions when rising face-up post-fall)
 GENTLE_RISE_WEIGHT = 0.005      # POSITIVE: trunk_vertical_accel_penalty is self-negating
 SERVO_IMPACT_THRESH_N = 2.0
 HEAD_IMPACT_THRESH_N = 15.0
@@ -317,6 +335,13 @@ FALLEN_TIMEOUT_S = 8.0
 # Crouch slice 0.15 → 0.20 and from iter 150: it doubles as stand-tall data.
 _PRONE_ITERS = (150, 700, 1000, 1400) if WARM_START else (800, 1500, 2000, 2500)
 PRONE_SIDE_PROB = 0.5
+# Post-fall-like prone spawns (run-4 robot feedback): this fraction of the prone
+# slice gets servo joints re-sampled over the central 80% of their ranges; the
+# rest keeps HOME (daemon stand-from-init). Measured post-fall face-up joints:
+# hip_roll at its ±0.38 limit, head_yaw to -1.7, knees -0.2..0.7 — nothing a
+# HOME-pose spawn ever shows.
+PRONE_JOINT_RANDOM_PROB = 0.7
+PRONE_JOINT_RANGE_FRAC = 0.8
 PRONE_RAMP_STAGES = [
     {"step": 0,                                   "params": {"prone_prob": 0.00, "face_down_prob": 1.0,  "side_prob": PRONE_SIDE_PROB, "crouch_prob": 0.00}},
     {"step": _PRONE_ITERS[0] * NUM_STEPS_PER_ENV, "params": {"prone_prob": 0.00, "face_down_prob": 1.0,  "side_prob": PRONE_SIDE_PROB, "crouch_prob": 0.20}},
@@ -556,6 +581,8 @@ def make_microduck_velstand_env_cfg(play: bool = False, rough: bool = False) -> 
             "prone_prob": 0.0,        # ramped by the prone_init_prob curriculum
             "face_down_prob": 1.0,
             "side_prob": PRONE_SIDE_PROB,
+            "joint_random_prob": PRONE_JOINT_RANDOM_PROB,
+            "joint_range_frac": PRONE_JOINT_RANGE_FRAC,
             "prone_z_min": 0.05,
             "prone_z_max": 0.09,
             "crouch_prob": 0.0,       # ramped by the prone_init_prob curriculum

@@ -357,3 +357,39 @@ def test_load_expert_is_frozen_copy():
     assert exp is not actor and not exp.training
     assert all(not p.requires_grad for p in exp.parameters())
     assert torch.equal(exp[0].weight, torch.ones(2, 3)) and not torch.equal(actor[0].weight, torch.ones(2, 3))
+
+
+# ── Run-4 fix: post-fall-like prone spawns + stall weight ───────────────────
+
+def test_prone_init_randomizes_joints_for_post_fall_like_spawns():
+    cfg = vs.make_microduck_velstand_env_cfg()
+    p = cfg.events["random_prone_init"].params
+    assert 0.5 <= p["joint_random_prob"] < 1.0          # most prone spawns post-fall-like, some keep HOME
+    assert 0.5 <= p["joint_range_frac"] <= 0.9
+    assert cfg.rewards["servo_stall"].weight <= -0.15 * vs.PROTECT_STAGE0_FRAC
+    assert cfg.curriculum["servo_stall_weight"].params["weight_stages"][-1]["weight"] == vs.SERVO_STALL_WEIGHT <= -0.15
+
+
+def test_randomize_servo_joints_uniform_respects_limits(monkeypatch):
+    lo = torch.tensor([-1.0] * 14); hi = torch.tensor([1.0] * 14); hi[7] = 3.0; lo[7] = -3.0
+    written = {}
+
+    class _D:
+        joint_pos_limits = torch.stack([lo, hi], dim=-1).unsqueeze(0).repeat(4, 1, 1)
+        joint_pos = torch.zeros(4, 14)
+
+    class _A:
+        data = _D()
+        def find_joints(self, pattern): return list(range(14)), [f"j{i}" for i in range(14)]
+        def write_joint_position_to_sim(self, pos, joint_ids=None, env_ids=None): assert joint_ids is None and env_ids is not None; written["pos"] = pos.clone()
+        def write_joint_velocity_to_sim(self, vel, joint_ids=None, env_ids=None): assert env_ids is not None; written["vel"] = vel.clone()
+
+    class _E:
+        device = "cpu"; scene = {"robot": _A()}
+
+    torch.manual_seed(0)
+    microduck_mdp.randomize_servo_joints_uniform(_E(), torch.arange(4), range_frac=0.8)
+    pos = written["pos"]
+    assert pos.shape == (4, 14) and (written["vel"] == 0).all()
+    assert (pos[:, :7].abs() <= 0.8 + 1e-6).all() and (pos[:, 7].abs() <= 2.4 + 1e-6).all()
+    assert pos.std() > 0.3  # actually randomized, not HOME
