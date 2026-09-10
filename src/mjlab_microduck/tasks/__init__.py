@@ -31,6 +31,18 @@ from .microduck_standup_env_cfg import (
     make_microduck_standup_env_cfg,
     MicroduckStandUpRlCfg,
 )
+from .microduck_flamingo_env_cfg import (
+    make_microduck_flamingo_env_cfg,
+    MicroduckFlamingoRlCfg,
+)
+from .microduck_flamingo_cycle_env_cfg import (
+    make_microduck_flamingo_cycle_env_cfg,
+    MicroduckFlamingoCycleRlCfg,
+)
+from .microduck_flamingo_ballet_env_cfg import (
+    make_microduck_flamingo_ballet_env_cfg,
+    MicroduckFlamingoBalletRlCfg,
+)
 from .microduck_velstand_env_cfg import (
     make_microduck_velstand_env_cfg,
     MicroduckVelStandRlCfg,
@@ -117,6 +129,54 @@ register_mjlab_task(
     env_cfg=make_microduck_standup_env_cfg(),
     play_env_cfg=make_microduck_standup_env_cfg(play=True),
     rl_cfg=MicroduckStandUpRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Flamingo — balance on the right foot, spawned in the validated one-foot pose
+register_mjlab_task(
+    task_id="Mjlab-Flamingo-Flat-MicroDuck",
+    env_cfg=make_microduck_flamingo_env_cfg(),
+    play_env_cfg=make_microduck_flamingo_env_cfg(play=True),
+    rl_cfg=MicroduckFlamingoRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Flamingo cycle — stand → one foot (either side) → stand, controller-driven flag
+register_mjlab_task(
+    task_id="Mjlab-FlamingoCycle-Flat-MicroDuck",
+    env_cfg=make_microduck_flamingo_cycle_env_cfg(),
+    play_env_cfg=make_microduck_flamingo_cycle_env_cfg(play=True),
+    rl_cfg=MicroduckFlamingoCycleRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+register_mjlab_task(
+    task_id="Mjlab-FlamingoCycleHard-Flat-MicroDuck",
+    env_cfg=make_microduck_flamingo_cycle_env_cfg(hard=True),
+    play_env_cfg=make_microduck_flamingo_cycle_env_cfg(play=True, hard=True),
+    rl_cfg=MicroduckFlamingoCycleRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+register_mjlab_task(
+    task_id="Mjlab-FlamingoCycleGentle-Flat-MicroDuck",
+    env_cfg=make_microduck_flamingo_cycle_env_cfg(hard=True, gentle=True),
+    play_env_cfg=make_microduck_flamingo_cycle_env_cfg(play=True, hard=True, gentle=True),
+    rl_cfg=MicroduckFlamingoCycleRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Flamingo ballet — cycle env + pose choice (arabesque / passé / développé) in the third twist slot
+register_mjlab_task(
+    task_id="Mjlab-FlamingoBallet-Flat-MicroDuck",
+    env_cfg=make_microduck_flamingo_ballet_env_cfg(),
+    play_env_cfg=make_microduck_flamingo_ballet_env_cfg(play=True),
+    rl_cfg=MicroduckFlamingoBalletRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+register_mjlab_task(
+    task_id="Mjlab-FlamingoBalletV2-Flat-MicroDuck",
+    env_cfg=make_microduck_flamingo_ballet_env_cfg(v2=True),
+    play_env_cfg=make_microduck_flamingo_ballet_env_cfg(play=True, v2=True),
+    rl_cfg=MicroduckFlamingoBalletRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
