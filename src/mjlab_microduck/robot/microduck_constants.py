@@ -273,3 +273,21 @@ if __name__ == "__main__":
 
     scene = Scene(SCENE_CFG, device="cuda:0")
     viewer.launch(scene.compile())
+
+
+# ── ApproachInspect target prop ──────────────────────────────────────────────
+# Fixed-base (no freejoint) puck the duck walks up to and inspects. mjlab wraps
+# fixed-base entities in a mocap body automatically, so the target is static
+# for physics but placeable per env: see approach_inspect_mdp.reset_target_around_robot.
+MICRODUCK_TARGET_XML: Path = _ROBOT_DIR / "target.xml"
+assert MICRODUCK_TARGET_XML.exists(), f"XML not found: {MICRODUCK_TARGET_XML}"
+
+
+def get_target_spec() -> mujoco.MjSpec:
+    return mujoco.MjSpec.from_file(str(MICRODUCK_TARGET_XML))
+
+
+MICRODUCK_TARGET_CFG = EntityCfg(
+    spec_fn=get_target_spec,
+    init_state=EntityCfg.InitialStateCfg(pos=(1.0, 0.0, 0.0)),
+)
