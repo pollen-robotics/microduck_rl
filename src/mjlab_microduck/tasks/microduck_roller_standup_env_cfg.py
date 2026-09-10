@@ -42,6 +42,7 @@ from mjlab.managers import (
 )
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg
+from mjlab.sensor import ContactMatch, ContactSensorCfg
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.microduck_velocity_rollers_env_cfg import (
@@ -154,6 +155,37 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
 
     cfg.episode_length_s = EPISODE_LENGTH_S
 
+    # ── Capteurs de contact pour la PORTE D'APPUI ────────────────────────────
+    # L'env roller ne déclare que feet_ground_contact (pneus/terrain) et
+    # self_collision. Il faut savoir en plus si la TÊTE ou le TRONC touchent le
+    # sol : sans ça, « debout à la bonne hauteur » ne distingue pas la station
+    # sur roues du trépied sur la tête mesuré au run fmt83tri (voir
+    # mdp.wheel_support_gate pour les chiffres).
+    #
+    # Définitions portées telles quelles de microduck_roulade_env_cfg.py, et
+    # valides sur le modèle rollers : `jaw_soft` y porte les géoms de collision
+    # de tête (top_head_shell, bottom_head_shell, jaw) et `trunk_base` porte
+    # np_f970 (la batterie), la pièce du tronc qui touche le sol à plat.
+    # mode="body" et non "subtree" pour trunk_base : le sous-arbre contiendrait
+    # les pneus, donc la porte serait fermée en permanence, y compris debout.
+    head_ground_cfg = ContactSensorCfg(
+        name="head_ground_contact",
+        primary=ContactMatch(mode="body", pattern="jaw_soft", entity="robot"),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found",),
+        reduce="none",
+        num_slots=1,
+    )
+    trunk_ground_cfg = ContactSensorCfg(
+        name="trunk_ground_contact",
+        primary=ContactMatch(mode="body", pattern="trunk_base", entity="robot"),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found",),
+        reduce="none",
+        num_slots=1,
+    )
+    cfg.scene.sensors = tuple(cfg.scene.sensors) + (head_ground_cfg, trunk_ground_cfg)
+
     # ── Récompenses de patinage retirées ─────────────────────────────────────
     for name in _SKATING_REWARDS:
         cfg.rewards.pop(name, None)
@@ -198,8 +230,14 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
     # aucune raison d'être doux. Diviser la tâche plutôt que monter les amortisseurs
     # évite d'en transformer un en bloqueur de mouvement. Les ratios INTERNES au bloc
     # sont inchangés, ainsi que tous les std.
+    # ⚠️ GATÉE SUR L'APPUI (correctif du run fmt83tri). La version non gatée
+    # lisait 1.991/2.000 de l'itération 250 à 3625 sans jamais bouger — les
+    # jambes sont près de HOME dans TOUTES les postures que la policy visite,
+    # donc c'était +2.0/pas inconditionnels, sans gradient, et 40 % de ce que le
+    # trépied conservait. Le gate garde le rôle du terme (tenir les jambes près
+    # de HOME une fois debout) et supprime le plancher gratuit.
     cfg.rewards["pose_stand_legs"] = RewardTermCfg(
-        func=microduck_mdp.pose_target_match,
+        func=microduck_mdp.pose_target_match_on_wheels,
         weight=2.0,
         params={
             "std": 0.5,
@@ -343,8 +381,19 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
     # compromis « penché à la bonne hauteur » que les récompenses additives
     # laissent passer. Stds volontairement LARGES pour rester visible pendant la
     # montée (des stds serrées donnaient un score ~5e-5, donc zéro gradient).
+    # ⚠️ GATÉE SUR L'APPUI, elle aussi. Le composite multiplicatif faisait son
+    # travail (0.915/3.75, soit 24 % — il s'effondrait bien sur le facteur de
+    # verticalité), mais il ne pèse que 3.75 d'une masse positive de 10.75 : un
+    # compromis qui garde 48 % du stack gagne quand même. Un score multiplicatif
+    # ne peut pas casser un compromis que le RESTE de la pile finance.
+    #
+    # Le POIDS EST INCHANGÉ, volontairement : la porte à elle seule fait passer
+    # le trépied de 5.16 à 2.245 sur 10.75 (48 % -> 21 %), donc le différentiel
+    # debout/vautré passe de 2.1x à 4.8x. Monter le poids en même temps rendrait
+    # le résultat non attribuable — la leçon de méthode que cet env a déjà payée
+    # une fois (trois correctifs d'un coup, gel inexplicable).
     cfg.rewards["standing_composite"] = RewardTermCfg(
-        func=microduck_mdp.standing_composite_score,
+        func=microduck_mdp.standing_composite_score_on_wheels,
         weight=3.75,
         params={
             "target_height": ROLLER_STAND_Z,

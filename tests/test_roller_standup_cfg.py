@@ -698,3 +698,108 @@ def test_backlash_variant_wheel_friction_targets_only_wheels():
     # Et la valeur de départ reste le palier 0 du curriculum inversé.
     stage0 = bl.curriculum["wheel_friction"].params["ranges_stages"][0]["ranges"]
     assert bl.events["randomize_wheel_friction"].params["ranges"] == stage0
+
+
+# ── Porte d'appui : « debout » veut dire debout SUR LES ROUES ────────────────
+# Correctif du run fmt83tri, où la policy a convergé vers un trépied sur la tête
+# (tête au sol, tronc levé à la bonne hauteur avec 55° d'inclinaison) qui
+# encaissait 48 % du stack de tâche maximal sans jamais se relever.
+
+
+def test_support_gate_sensors_are_declared():
+    cfg = make_microduck_roller_standup_env_cfg()
+    names = {s.name for s in cfg.scene.sensors}
+    # Hérités de l'env roller.
+    assert "feet_ground_contact" in names
+    assert "self_collision" in names
+    # Ajoutés pour la porte d'appui.
+    assert "head_ground_contact" in names
+    assert "trunk_ground_contact" in names
+
+
+def test_trunk_ground_sensor_is_body_not_subtree():
+    """Le sous-arbre de trunk_base contient les PNEUS.
+
+    Avec mode="subtree", trunk_ground_contact serait vrai en permanence — y
+    compris debout sur les roues — donc la porte resterait fermée et TOUTES les
+    récompenses gatées vaudraient zéro pour toujours. C'est un mode d'échec
+    silencieux : rien ne planterait, la policy n'apprendrait simplement jamais.
+    """
+    cfg = make_microduck_roller_standup_env_cfg()
+    trunk = next(s for s in cfg.scene.sensors if s.name == "trunk_ground_contact")
+    assert trunk.primary.mode == "body"
+    assert trunk.primary.pattern == "trunk_base"
+
+
+def test_gated_sensor_bodies_exist_on_both_roller_models():
+    """Les corps visés doivent exister sur le modèle rollers ET rollers+backlash.
+
+    Même raison que le test des indices de joints : un capteur qui ne résout
+    aucun corps ne se signale pas dans une cfg, seulement à l'exécution.
+    """
+    import mujoco
+
+    from mjlab_microduck.robot.microduck_constants import (
+        get_rollers_backlash_spec,
+        get_walk_rollers_spec,
+    )
+
+    for spec_fn in (get_walk_rollers_spec, get_rollers_backlash_spec):
+        model = spec_fn().compile()
+        bodies = {
+            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, i)
+            for i in range(model.nbody)
+        }
+        assert "jaw_soft" in bodies, f"{spec_fn.__name__}: {sorted(bodies)}"
+        assert "trunk_base" in bodies, f"{spec_fn.__name__}: {sorted(bodies)}"
+
+
+def test_goal_state_rewards_are_gated_on_wheel_support():
+    from mjlab_microduck.tasks import mdp as microduck_mdp
+
+    cfg = make_microduck_roller_standup_env_cfg()
+    assert (
+        cfg.rewards["pose_stand_legs"].func
+        is microduck_mdp.pose_target_match_on_wheels
+    )
+    assert (
+        cfg.rewards["standing_composite"].func
+        is microduck_mdp.standing_composite_score_on_wheels
+    )
+
+
+def test_climb_shaping_stays_ungated():
+    """Seul le PAIEMENT à l'état-but est gaté, pas la mise en forme de la montée.
+
+    Si height_stand / height_stand_l1 / upright_linear étaient gatés eux aussi,
+    plus rien ne tirerait le robot hors du sol : depuis une pose au sol la porte
+    est fermée, donc tout le gradient disparaîtrait. C'est le mode d'échec
+    « bloqueur de mouvement » sous un autre nom.
+    """
+    from mjlab_microduck.tasks import mdp as microduck_mdp
+
+    cfg = make_microduck_roller_standup_env_cfg()
+    assert cfg.rewards["height_stand"].func is microduck_mdp.height_target_gaussian
+    assert cfg.rewards["height_stand_sharp"].func is microduck_mdp.height_target_gaussian
+    assert cfg.rewards["height_stand_l1"].func is microduck_mdp.height_l1_penalty
+    assert cfg.rewards["upright_linear"].func is microduck_mdp.body_upright_linear
+
+
+def test_composite_weight_unchanged_by_the_gate():
+    """Une seule correction à la fois : la porte, pas la porte ET le poids."""
+    cfg = make_microduck_roller_standup_env_cfg()
+    assert cfg.rewards["standing_composite"].weight == 3.75
+    assert cfg.rewards["pose_stand_legs"].weight == 2.0
+
+
+def test_backlash_variant_keeps_the_support_gate():
+    from mjlab_microduck.tasks import mdp as microduck_mdp
+
+    bl = _load("Mjlab-RollerStandUp-Flat-Backlash-MicroDuck")
+    names = {s.name for s in bl.scene.sensors}
+    assert "head_ground_contact" in names
+    assert "trunk_ground_contact" in names
+    assert (
+        bl.rewards["standing_composite"].func
+        is microduck_mdp.standing_composite_score_on_wheels
+    )

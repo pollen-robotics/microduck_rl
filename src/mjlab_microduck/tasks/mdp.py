@@ -853,6 +853,116 @@ def standing_composite_score(
     return height_score * upright_score * pose_score
 
 
+# ── Support gate: "standing" means standing ON THE WHEELS ─────────────────────
+# Defaults name the sensors the roller-standup env declares. An env that
+# declares none of them gets an all-ones gate (see wheel_support_gate), so
+# these variants are safe to call anywhere.
+_WHEEL_SUPPORT_FEET_SENSOR = "feet_ground_contact"
+_WHEEL_SUPPORT_FORBIDDEN_SENSORS = ("head_ground_contact", "trunk_ground_contact")
+
+
+def wheel_support_gate(
+    env: ManagerBasedRlEnv,
+    feet_sensor_name: str = _WHEEL_SUPPORT_FEET_SENSOR,
+    forbidden_sensor_names: tuple = _WHEEL_SUPPORT_FORBIDDEN_SENSORS,
+) -> torch.Tensor:
+    """1.0 where the robot is carried by its WHEELS ALONE, else 0.0.
+
+    MEASURED FAILURE THIS EXISTS FOR (run fmt83tri, 4096 envs, 6000 iters):
+    the policy converged to a HEAD TRIPOD — head planted on the floor, trunk
+    levered up to standing HEIGHT at ~55 deg of tilt, legs left at HOME. The
+    photos show it; the numbers explain why it pays:
+
+        pose_stand_legs     1.991 / 2.00   (99.5 %, flat since iter 250)
+        height_stand_sharp  0.505 / 1.00
+        upright_linear      0.852 / 1.50   -> cos(tilt) 0.57 -> 55 deg
+        standing_composite  0.915 / 3.75
+        total positive      5.16  / 10.75  = 48 % of the maximum task stack
+
+    Keeping 48 % of the stack while never standing is exactly the audit
+    AGENTS.md prescribes for rest tasks failing ("if flopping keeps most of
+    the stack, the policy will flop"). The composite alone could not break it:
+    multiplicative or not, it is 3.75 of a 10.75 positive mass.
+
+    So this is a HARD STATE GATE, not another penalty — AGENTS.md: what counts
+    as the maneuver goes into gates (support contact, orientation checks,
+    latches), because a small penalty just gets priced into the hack.
+
+    ANY foot in contact counts, not both: requiring both would make the gate a
+    knife edge that flickers off during a legitimate single-wheel moment.
+
+    A missing sensor reads as "no contact" (``_sensor_any_contact`` returns
+    None), so the gate degrades to all-ones rather than silently zeroing every
+    reward in an env that never declared the sensors.
+    """
+    gate = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    feet = _sensor_any_contact(env, feet_sensor_name)
+    if feet is not None:
+        gate = feet
+    for name in forbidden_sensor_names:
+        touching = _sensor_any_contact(env, name)
+        if touching is not None:
+            gate = gate & ~touching
+    return gate.to(torch.float32)
+
+
+def pose_target_match_on_wheels(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    std: float = 0.3,
+    joint_indices: Optional[list] = None,
+    target_overrides: Optional[dict] = None,
+    feet_sensor_name: str = _WHEEL_SUPPORT_FEET_SENSOR,
+    forbidden_sensor_names: tuple = _WHEEL_SUPPORT_FORBIDDEN_SENSORS,
+) -> torch.Tensor:
+    """``pose_target_match`` gated by ``wheel_support_gate``.
+
+    The ungated term was 40 % of what the tripod kept, and it carried NO
+    gradient while doing so: the legs sit near HOME in every posture the
+    policy visits, so it read 1.99/2.00 from iter 250 to 3625 without moving.
+    Gating keeps its stated purpose (hold the legs near HOME once up) and
+    deletes the unconditional floor.
+    """
+    return pose_target_match(
+        env,
+        target_overrides=target_overrides,
+        asset_cfg=asset_cfg,
+        std=std,
+        joint_indices=joint_indices,
+    ) * wheel_support_gate(env, feet_sensor_name, forbidden_sensor_names)
+
+
+def standing_composite_score_on_wheels(
+    env: ManagerBasedRlEnv,
+    target_height: float,
+    height_std: float,
+    upright_std: float,
+    pose_std: float,
+    joint_indices: list,
+    target_overrides: Optional[dict] = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    feet_sensor_name: str = _WHEEL_SUPPORT_FEET_SENSOR,
+    forbidden_sensor_names: tuple = _WHEEL_SUPPORT_FORBIDDEN_SENSORS,
+) -> torch.Tensor:
+    """``standing_composite_score`` gated by ``wheel_support_gate``.
+
+    The goal-state payout is what gets gated; the CLIMB shaping (height_stand,
+    height_stand_l1, upright_linear) stays ungated on purpose, so the gradient
+    out of a ground pose survives. Gate the shaping too and there is nothing
+    left pulling the robot off the floor.
+    """
+    return standing_composite_score(
+        env,
+        target_height=target_height,
+        height_std=height_std,
+        upright_std=upright_std,
+        pose_std=pose_std,
+        joint_indices=joint_indices,
+        target_overrides=target_overrides,
+        asset_cfg=asset_cfg,
+    ) * wheel_support_gate(env, feet_sensor_name, forbidden_sensor_names)
+
+
 def standing_success_bonus(
     env: ManagerBasedRlEnv,
     target_height: float,
