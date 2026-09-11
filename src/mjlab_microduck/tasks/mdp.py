@@ -5824,6 +5824,400 @@ def single_foot_grounded_reward(
     return torch.clamp(found, 0.0, 1.0)
 
 
+class SingleLegStandCommand(UniformVelocityCommand):
+    """Command one support side in twist-y: -1 left, +1 right.
+
+    The actor sees the final side immediately. Reward targets move from double
+    support to single support over ``ramp_s`` so reaching the goal early is not
+    worth a violent leg snap.
+    """
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        self._left_prob = float(cfg.left_prob)
+        self._ramp_s = float(cfg.ramp_s)
+        self._alpha = torch.zeros(self.num_envs, device=self.device)
+        self._support_side_gui = None
+
+    @property
+    def command(self) -> torch.Tensor:
+        return self.vel_command_b
+
+    @property
+    def alpha(self) -> torch.Tensor:
+        """Target blend: 0 = double support, 1 = commanded single support."""
+        return self._alpha
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        count = len(env_ids)
+        if count == 0:
+            return
+        if self.cfg.fixed_side in (-1, 1):
+            side = torch.full(
+                (count,),
+                float(self.cfg.fixed_side),
+                device=self.device,
+            )
+        else:
+            side = torch.where(
+                torch.rand(count, device=self.device) < self._left_prob,
+                -1.0,
+                1.0,
+            )
+        self.vel_command_b[env_ids] = 0.0
+        self.vel_command_b[env_ids, 1] = side
+        self._alpha[env_ids] = 0.0
+
+    def compute(self, dt: float) -> None:
+        super().compute(dt)
+        if self._support_side_gui is not None:
+            side = -1.0 if self._support_side_gui.value == "Left support" else 1.0
+            changed = self.vel_command_b[:, 1] != side
+            self.vel_command_b[:] = 0.0
+            self.vel_command_b[:, 1] = side
+            self._alpha[changed] = 0.0
+        self._alpha = torch.clamp(self._alpha + dt / max(self._ramp_s, 1e-6), max=1.0)
+
+    def _update_command(self) -> None:
+        pass
+
+    def _update_metrics(self) -> None:
+        pass
+
+    def create_gui(self, name, server, *args, **kwargs) -> None:
+        """Create a support-side selector instead of velocity sliders."""
+        del args, kwargs
+        initial = "Right support" if self.cfg.fixed_side == 1 else "Left support"
+        with server.gui.add_folder(name.capitalize()):
+            self._support_side_gui = server.gui.add_dropdown(
+                "Support side",
+                ("Left support", "Right support"),
+                initial_value=initial,
+            )
+
+
+@_dataclass(kw_only=True)
+class SingleLegStandCommandCfg(UniformVelocityCommandCfg):
+    left_prob: float = 0.5
+    ramp_s: float = 1.5
+    fixed_side: int = 0
+
+    def build(self, env: ManagerBasedRlEnv) -> "SingleLegStandCommand":
+        return SingleLegStandCommand(self, env)
+
+
+def _single_leg_command_state(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    command = env.command_manager.get_command(command_name)
+    side = torch.where(command[:, 1] < 0.0, -1.0, 1.0)
+    support = (side > 0.0).long()  # left=0, right=1
+    swing = 1 - support
+    term = env.command_manager.get_term(command_name)
+    alpha = getattr(term, "alpha", torch.ones(env.num_envs, device=env.device))
+    return side, support, swing, alpha
+
+
+def _single_leg_contacts(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
+    found = env.scene.sensors[sensor_name].data.found
+    assert found is not None
+    return (found.reshape(env.num_envs, -1)[:, :2] > 0.0).float()
+
+
+def _single_leg_sites(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg,
+    support: torch.Tensor,
+    swing: torch.Tensor,
+) -> tuple[Entity, torch.Tensor, torch.Tensor]:
+    asset: Entity = env.scene[asset_cfg.name]
+    sites = asset.data.site_pos_w[:, asset_cfg.site_ids]
+    batch = torch.arange(env.num_envs, device=env.device)
+    return asset, sites[batch, support], sites[batch, swing]
+
+
+def single_leg_com_tracking(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    asset_cfg: SceneEntityCfg,
+    std_x: float = 0.04,
+    std_y: float = 0.025,
+) -> torch.Tensor:
+    """Track a slewed CoM target from the feet midpoint to the support foot."""
+    _, support, swing, alpha = _single_leg_command_state(env, command_name)
+    asset, support_pos, swing_pos = _single_leg_sites(env, asset_cfg, support, swing)
+    midpoint = 0.5 * (support_pos + swing_pos)
+    target = midpoint + alpha.unsqueeze(-1) * (support_pos - midpoint)
+    delta_w = asset.data.root_com_pos_w - target
+    root_mat = matrix_from_quat(asset.data.root_link_quat_w)
+    delta_b = torch.bmm(root_mat.transpose(1, 2), delta_w.unsqueeze(-1)).squeeze(-1)
+    return torch.exp(-torch.square(delta_b[:, 0] / std_x) - torch.square(delta_b[:, 1] / std_y))
+
+
+def single_leg_swing_height_tracking(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    asset_cfg: SceneEntityCfg,
+    target_height: float = 0.012,
+    std: float = 0.008,
+) -> torch.Tensor:
+    """Track swing-foot height relative to the support foot."""
+    _, support, swing, alpha = _single_leg_command_state(env, command_name)
+    _, support_pos, swing_pos = _single_leg_sites(env, asset_cfg, support, swing)
+    height = swing_pos[:, 2] - support_pos[:, 2]
+    target = alpha * target_height
+    return torch.exp(-torch.square((height - target) / std))
+
+
+def single_leg_support_contact(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+) -> torch.Tensor:
+    """Binary reward for keeping the commanded support foot grounded."""
+    _, support, _, _ = _single_leg_command_state(env, command_name)
+    contacts = _single_leg_contacts(env, sensor_name)
+    batch = torch.arange(env.num_envs, device=env.device)
+    return contacts[batch, support]
+
+
+def single_leg_swing_contact_cost(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+) -> torch.Tensor:
+    """Swing-foot contact cost, slewed in with the single-support target."""
+    _, _, swing, alpha = _single_leg_command_state(env, command_name)
+    contacts = _single_leg_contacts(env, sensor_name)
+    batch = torch.arange(env.num_envs, device=env.device)
+    return alpha * contacts[batch, swing]
+
+
+def single_leg_touchdown_cost(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+) -> torch.Tensor:
+    """Return one reward-unit per touchdown, independent of control frequency."""
+    _, _, swing, alpha = _single_leg_command_state(env, command_name)
+    contacts = _single_leg_contacts(env, sensor_name).bool()
+    batch = torch.arange(env.num_envs, device=env.device)
+    contact = contacts[batch, swing]
+    if not hasattr(env, "_single_leg_previous_swing_contact"):
+        env._single_leg_previous_swing_contact = contact.clone()
+    fresh = env.episode_length_buf <= 1
+    env._single_leg_previous_swing_contact[fresh] = contact[fresh]
+    touchdown = (
+        (alpha >= 0.99)
+        & contact
+        & ~env._single_leg_previous_swing_contact
+    )
+    env._single_leg_previous_swing_contact = contact.clone()
+    return touchdown.float() / env.step_dt
+
+
+def single_leg_support_slip_cost(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Squared horizontal velocity of the grounded support foot."""
+    _, support, _, _ = _single_leg_command_state(env, command_name)
+    contacts = _single_leg_contacts(env, sensor_name)
+    asset: Entity = env.scene[asset_cfg.name]
+    velocities = asset.data.site_lin_vel_w[:, asset_cfg.site_ids, :2]
+    batch = torch.arange(env.num_envs, device=env.device)
+    return torch.sum(torch.square(velocities[batch, support]), dim=-1) * contacts[batch, support]
+
+
+def single_leg_excess_tilt_cost(
+    env: ManagerBasedRlEnv,
+    max_tilt_deg: float = 32.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize only tilt beyond the lean the geometry needs for one-leg support."""
+    asset: Entity = env.scene[asset_cfg.name]
+    quat = asset.data.root_link_quat_w
+    cos_tilt = torch.clamp(1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2), -1.0, 1.0)
+    tilt = torch.acos(cos_tilt)
+    return torch.square(torch.clamp(tilt - math.radians(max_tilt_deg), min=0.0))
+
+
+def any_contact_cost(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
+    """Binary cost when any contact represented by the sensor is active."""
+    found = env.scene.sensors[sensor_name].data.found
+    assert found is not None
+    return (found.reshape(env.num_envs, -1).sum(dim=-1) > 0.0).float()
+
+
+def single_leg_success_state(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    nonfoot_sensor_name: str | None = None,
+    min_clearance: float = 0.008,
+    max_tilt_deg: float = 35.0,
+    max_lin_vel: float = 0.08,
+    max_ang_vel: float = 0.8,
+    support_radius_x: float = 0.025,
+    support_radius_y: float = 0.018,
+    require_com_inside: bool = True,
+) -> torch.Tensor:
+    """Binary metric for a valid, quiet commanded single-leg stance."""
+    _, support, swing, alpha = _single_leg_command_state(env, command_name)
+    contacts = _single_leg_contacts(env, sensor_name)
+    asset, support_pos, swing_pos = _single_leg_sites(env, asset_cfg, support, swing)
+    batch = torch.arange(env.num_envs, device=env.device)
+
+    delta_w = asset.data.root_com_pos_w - support_pos
+    root_mat = matrix_from_quat(asset.data.root_link_quat_w)
+    delta_b = torch.bmm(root_mat.transpose(1, 2), delta_w.unsqueeze(-1)).squeeze(-1)
+    inside = (
+        torch.square(delta_b[:, 0] / support_radius_x)
+        + torch.square(delta_b[:, 1] / support_radius_y)
+    ) <= 1.0
+    if not require_com_inside:
+        inside = torch.ones_like(inside)
+
+    quat = asset.data.root_link_quat_w
+    cos_tilt = torch.clamp(1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2), -1.0, 1.0)
+    quiet = (
+        torch.linalg.vector_norm(asset.data.root_link_lin_vel_w, dim=-1) < max_lin_vel
+    ) & (
+        torch.linalg.vector_norm(asset.data.root_link_ang_vel_w, dim=-1) < max_ang_vel
+    )
+    no_other_contact = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    if nonfoot_sensor_name is not None:
+        no_other_contact = any_contact_cost(env, nonfoot_sensor_name) == 0.0
+    return (
+        (alpha >= 0.99)
+        & (contacts[batch, support] > 0.0)
+        & (contacts[batch, swing] == 0.0)
+        & ((swing_pos[:, 2] - support_pos[:, 2]) >= min_clearance)
+        & inside
+        & (cos_tilt >= math.cos(math.radians(max_tilt_deg)))
+        & quiet
+        & no_other_contact
+    ).float()
+
+
+def single_leg_hold_progress_reward(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    nonfoot_sensor_name: str | None = None,
+    target_s: float = 1.0,
+    min_clearance: float = 0.008,
+    max_tilt_deg: float = 35.0,
+    max_lin_vel: float = 0.08,
+    max_ang_vel: float = 0.8,
+    require_com_inside: bool = True,
+) -> torch.Tensor:
+    """Reward only uninterrupted progress toward a valid single-leg hold."""
+    valid = single_leg_success_state(
+        env,
+        command_name=command_name,
+        sensor_name=sensor_name,
+        asset_cfg=asset_cfg,
+        nonfoot_sensor_name=nonfoot_sensor_name,
+        min_clearance=min_clearance,
+        max_tilt_deg=max_tilt_deg,
+        max_lin_vel=max_lin_vel,
+        max_ang_vel=max_ang_vel,
+        require_com_inside=require_com_inside,
+    ).bool()
+    if not hasattr(env, "_single_leg_reward_hold_s"):
+        env._single_leg_reward_hold_s = torch.zeros(env.num_envs, device=env.device)
+    env._single_leg_reward_hold_s[env.episode_length_buf <= 1] = 0.0
+    env._single_leg_reward_hold_s = torch.where(
+        valid,
+        torch.clamp(env._single_leg_reward_hold_s + env.step_dt, max=target_s),
+        torch.zeros_like(env._single_leg_reward_hold_s),
+    )
+    return env._single_leg_reward_hold_s / max(target_s, 1e-6)
+
+
+def single_leg_hold_success(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    nonfoot_sensor_name: str | None = None,
+    hold_s: float = 1.0,
+    min_clearance: float = 0.008,
+    max_tilt_deg: float = 35.0,
+    max_lin_vel: float = 0.08,
+    max_ang_vel: float = 0.8,
+    require_com_inside: bool = True,
+) -> torch.Tensor:
+    """Success only after the valid stance has held continuously for ``hold_s``."""
+    step = int(env.common_step_counter)
+    if getattr(env, "_single_leg_hold_step", None) != step:
+        valid = single_leg_success_state(
+            env,
+            command_name=command_name,
+            sensor_name=sensor_name,
+            asset_cfg=asset_cfg,
+            nonfoot_sensor_name=nonfoot_sensor_name,
+            min_clearance=min_clearance,
+            max_tilt_deg=max_tilt_deg,
+            max_lin_vel=max_lin_vel,
+            max_ang_vel=max_ang_vel,
+            require_com_inside=require_com_inside,
+        ).bool()
+        if not hasattr(env, "_single_leg_hold_s"):
+            env._single_leg_hold_s = torch.zeros(env.num_envs, device=env.device)
+        env._single_leg_hold_s[env.episode_length_buf <= 1] = 0.0
+        env._single_leg_hold_s = torch.where(
+            valid,
+            env._single_leg_hold_s + env.step_dt,
+            torch.zeros_like(env._single_leg_hold_s),
+        )
+        env._single_leg_hold_success = env._single_leg_hold_s >= hold_s
+        env._single_leg_hold_step = step
+    return env._single_leg_hold_success.float()
+
+
+def single_leg_success_rate_for_side(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    support_side: int,
+    nonfoot_sensor_name: str | None = None,
+    hold_s: float = 1.0,
+    min_clearance: float = 0.008,
+    max_tilt_deg: float = 35.0,
+    max_lin_vel: float = 0.08,
+    max_ang_vel: float = 0.8,
+    require_com_inside: bool = True,
+) -> torch.Tensor:
+    """Per-step success rate for one commanded side, broadcast for metric logging."""
+    if support_side not in (-1, 1):
+        raise ValueError("support_side must be -1 (left) or +1 (right)")
+    side, _, _, _ = _single_leg_command_state(env, command_name)
+    selected = side == float(support_side)
+    success = single_leg_hold_success(
+        env,
+        command_name=command_name,
+        sensor_name=sensor_name,
+        asset_cfg=asset_cfg,
+        nonfoot_sensor_name=nonfoot_sensor_name,
+        hold_s=hold_s,
+        min_clearance=min_clearance,
+        max_tilt_deg=max_tilt_deg,
+        max_lin_vel=max_lin_vel,
+        max_ang_vel=max_ang_vel,
+        require_com_inside=require_com_inside,
+    )
+    rate = torch.sum(success * selected) / torch.clamp(torch.sum(selected), min=1)
+    return rate.expand(env.num_envs)
+
+
 def ball_pos_in_base(
     env: ManagerBasedRlEnv,
     asset_name: str = "ball",

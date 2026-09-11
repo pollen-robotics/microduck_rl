@@ -75,6 +75,11 @@ from .microduck_roulade_env_cfg import (
     make_microduck_roulade_env_cfg,
     MicroduckRouladeRlCfg,
 )
+from .microduck_single_leg_stand_env_cfg import (
+    make_microduck_single_leg_stand_env_cfg,
+    make_microduck_single_leg_stand_strict_env_cfg,
+    MicroduckSingleLegStandRlCfg,
+)
 from .backlash import make_backlash_variant
 
 # Standard velocity task
@@ -233,6 +238,23 @@ register_mjlab_task(
     runner_cls=MicroduckOnPolicyRunner,
 )
 
+# Commanded left/right single-leg standing in one symmetric policy.
+register_mjlab_task(
+    task_id="Mjlab-SingleLegStand-Flat-MicroDuck",
+    env_cfg=make_microduck_single_leg_stand_env_cfg(),
+    play_env_cfg=make_microduck_single_leg_stand_env_cfg(play=True),
+    rl_cfg=MicroduckSingleLegStandRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-SingleLegStand-Strict-Flat-MicroDuck",
+    env_cfg=make_microduck_single_leg_stand_strict_env_cfg(),
+    play_env_cfg=make_microduck_single_leg_stand_strict_env_cfg(play=True),
+    rl_cfg=MicroduckSingleLegStandRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
 # Backlash variants — ±1° serial gear play per servo + encoder-through-backlash
 # actuator feedback and joint obs (see tasks/backlash.py). Each family keeps its
 # base task's collision model: Velocity → robot_walk_backlash.xml,
@@ -267,6 +289,7 @@ _BACKLASH_TASKS = (
     ("Mjlab-Velocity-Swizzle-Backlash-MicroDuck", make_microduck_velocity_swizzle_env_cfg, {}, MicroduckSwizzleRlCfg, _BL_ROLLERS),
     ("Mjlab-RollerCrouch-Flat-Backlash-MicroDuck", make_microduck_roller_crouch_env_cfg, {}, MicroduckRollerCrouchRlCfg, _BL_ROLLERS),
     ("Mjlab-RollerSlope-Flat-Backlash-MicroDuck", make_microduck_roller_slope_env_cfg, {}, MicroduckRollerSlopeRlCfg, _BL_ROLLERS),
+    ("Mjlab-SingleLegStand-Flat-Backlash-MicroDuck", make_microduck_single_leg_stand_env_cfg, {}, MicroduckSingleLegStandRlCfg, _BL_GROUNDCONTACT),
 )
 for _task_id, _make_cfg, _kw, _rl_cfg, _robot_cfg in _BACKLASH_TASKS:
     register_mjlab_task(
