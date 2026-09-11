@@ -1,0 +1,15 @@
+<mujoco model="microduck_target">
+    <compiler angle="radian" autolimits="true"/>
+
+    <worldbody>
+        <!-- Small static "thing to inspect" for the ApproachInspect task: a 60 mm
+             diameter, 80 mm tall puck standing on the floor. It has NO freejoint on
+             purpose — mjlab auto-wraps a fixed-base entity in a mocap body, which is
+             what lets the reset_target_around_robot event place it per env each
+             episode (radius 0.4–1.5 m from the robot) while it stays immovable. -->
+        <body name="target" pos="0 0 0">
+            <geom type="cylinder" name="target_geom" size="0.03 0.04" pos="0 0 0.04"
+                  rgba="0.2 0.6 1.0 1" mass="0.2"/>
+        </body>
+    </worldbody>
+</mujoco>
