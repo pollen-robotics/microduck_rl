@@ -944,6 +944,6 @@ MicroduckRlCfg = RslRlOnPolicyRunnerCfg(
     experiment_name="velocity",  # Directory name
     run_name="velocity",  # Appended to datetime in wandb: <datetime>_velocity
     save_interval=250,
-    num_steps_per_env=24,
+    num_steps_per_env=NUM_STEPS_PER_ENV,
     max_iterations=50_000,
 )
