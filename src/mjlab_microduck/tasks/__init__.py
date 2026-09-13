@@ -75,6 +75,10 @@ from .microduck_roulade_env_cfg import (
     make_microduck_roulade_env_cfg,
     MicroduckRouladeRlCfg,
 )
+from .microduck_approach_inspect_env_cfg import (
+    make_microduck_approach_inspect_env_cfg,
+    MicroduckApproachInspectRlCfg,
+)
 from .backlash import make_backlash_variant
 
 # Standard velocity task
@@ -233,6 +237,24 @@ register_mjlab_task(
     runner_cls=MicroduckOnPolicyRunner,
 )
 
+# ApproachInspect — walk to a target, stop on a standoff ring, aim the head,
+# hold the look, turn away. Velocity recipe + target entity; hot-swaps with walking.
+register_mjlab_task(
+    task_id="Mjlab-ApproachInspect-Flat-MicroDuck",
+    env_cfg=make_microduck_approach_inspect_env_cfg(),
+    play_env_cfg=make_microduck_approach_inspect_env_cfg(play=True),
+    rl_cfg=MicroduckApproachInspectRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-ApproachInspect-Rough-MicroDuck",
+    env_cfg=make_microduck_approach_inspect_env_cfg(rough=True),
+    play_env_cfg=make_microduck_approach_inspect_env_cfg(play=True, rough=True),
+    rl_cfg=MicroduckApproachInspectRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
 # Backlash variants — ±1° serial gear play per servo + encoder-through-backlash
 # actuator feedback and joint obs (see tasks/backlash.py). Each family keeps its
 # base task's collision model: Velocity → robot_walk_backlash.xml,
@@ -254,6 +276,7 @@ _BL_ROLLERS = MICRODUCK_ROLLERS_BACKLASH_ROBOT_CFG
 _BACKLASH_TASKS = (
     ("Mjlab-Velocity-Flat-Backlash-MicroDuck", make_microduck_velocity_env_cfg, {}, MicroduckRlCfg, _BL_WALK),
     ("Mjlab-Velocity-Rough-Backlash-MicroDuck", make_microduck_velocity_env_cfg, {"rough": True}, MicroduckRlCfg, _BL_WALK),
+    ("Mjlab-ApproachInspect-Flat-Backlash-MicroDuck", make_microduck_approach_inspect_env_cfg, {}, MicroduckApproachInspectRlCfg, _BL_WALK),
     ("Mjlab-VelStand-Flat-Backlash-MicroDuck", make_microduck_velstand_env_cfg, {}, MicroduckVelStandRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-VelStand-Rough-Backlash-MicroDuck", make_microduck_velstand_env_cfg, {"rough": True}, MicroduckVelStandRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-StandUp-Flat-Backlash-MicroDuck", make_microduck_standup_env_cfg, {}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
