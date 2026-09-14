@@ -832,6 +832,11 @@ dependencies = [
     { name = "warp-lang" },
 ]
 
+[package.optional-dependencies]
+visualization = [
+    { name = "pillow" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "better-actuator-models", git = "https://github.com/Rhoban/bam.git?branch=mjlab_frictionloss" },
@@ -839,12 +844,14 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.10.9" },
     { name = "mjlab", specifier = "==1.3.0" },
     { name = "onnxruntime", specifier = ">=1.24.4" },
+    { name = "pillow", marker = "extra == 'visualization'", specifier = ">=11,<13" },
     { name = "rustypot", specifier = ">=1.4.2" },
     { name = "scipy", specifier = ">=1.16" },
     { name = "torch", marker = "platform_machine != 'aarch64' or sys_platform != 'linux'", specifier = "==2.9.1" },
     { name = "torch", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'", specifier = "==2.9.1", index = "https://download.pytorch.org/whl/cu129" },
     { name = "warp-lang", specifier = "==1.12.0" },
 ]
+provides-extras = ["visualization"]
 
 [[package]]
 name = "mjviser"
