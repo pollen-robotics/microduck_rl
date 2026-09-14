@@ -1,0 +1,129 @@
+<mujoco model="scene_follow_me">
+    <!-- Follow-me behavior demo scene.
+
+         The official Velocity task uses robot_walk.xml: non-foot trunk/head
+         contacts are stripped so ordinary walking does not self-collide. This
+         demo drives a stock walking policy, so it must use the same collision
+         model the policy was trained on.
+
+         IMPORTANT — asset resolution. MuJoCo resolves `meshdir` relative to the
+         TOP-LEVEL file, not the included one, so robot_walk.xml's own
+         `meshdir="assets"` would resolve against this directory and fail. The
+         <compiler> below restates the robot's compiler settings with a meshdir
+         pointing back at the robot assets. It MUST stay AFTER the include:
+         MuJoCo applies the last <compiler> it parses, so placing it before the
+         include lets robot_walk.xml's own meshdir win and the meshes go
+         missing. Keeping angle/autolimits identical to robot_walk.xml is what
+         makes this scene compile byte-identically to scene_walk.xml (locked by
+         tests/test_follow_me_demo.py). -->
+    <include file="../../../src/mjlab_microduck/robot/microduck/robot_walk.xml" />
+    <compiler angle="radian" autolimits="true"
+              meshdir="../../../src/mjlab_microduck/robot/microduck/assets" />
+
+    <visual>
+        <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0" />
+        <rgba haze="0.15 0.25 0.35 1" />
+        <!-- offwidth/offheight size the offscreen buffer for the 960x640 main
+             view; the head-camera PiP renders from the same buffer. -->
+        <global azimuth="160" elevation="-20" offwidth="1280" offheight="960" />
+    </visual>
+
+    <asset>
+        <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0"
+                 width="512" height="3072" />
+        <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+                 rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8"
+                 width="300" height="300" />
+        <material name="groundplane" texture="groundplane" texuniform="true"
+                  texrepeat="5 5" reflectance="0.2" />
+        <material name="skinmat" rgba="0.85 0.65 0.5 1" />
+        <material name="shirtmat" rgba="0.15 0.38 0.78 1" />
+        <material name="trousermat" rgba="0.08 0.12 0.22 1" />
+        <material name="shoemat" rgba="0.04 0.04 0.05 1" />
+        <material name="accentmat" rgba="0.95 0.75 0.12 1" />
+        <material name="trailmat" rgba="0.15 1.0 0.35 0.65" />
+    </asset>
+
+    <worldbody>
+        <light pos="0 0 3.5" dir="0 0 -1" directional="true" />
+        <geom name="floor" size="0 0 0.05" pos="0 0 0" type="plane"
+              material="groundplane" />
+
+        <!-- Green disc: the exact queued world-space footprint the duck
+             pursues. It visibly stays on the old leg while the leader turns,
+             which is the whole point of the trail-following behavior. -->
+        <body name="trail_target" mocap="true" pos="0 0 0.012">
+            <geom name="trail_target_disc" type="cylinder" size="0.027 0.004"
+                  material="trailmat" contype="0" conaffinity="0" />
+        </body>
+
+        <!-- Rendering-only stabilized viewpoint. Its position is copied from
+             the physical head camera each step, but its optical up axis is
+             held to world-up. It exists purely so the PiP is watchable; it is
+             never read by the policy. -->
+        <body name="follow_camera_rig" mocap="true" pos="0 0 0.2">
+            <camera name="follow_camera" fovy="45" />
+        </body>
+
+        <!-- Kinematic leader. The root is a mocap body driven by a scripted
+             planar trajectory; four hinge children animate a readable walk
+             cycle. Local +X is the leader's forward direction. Every geom is
+             contype=0/conaffinity=0: the leader is a visual/semantic target,
+             it never collides with the robot. -->
+        <body name="person" mocap="true" pos="0.65 0 0.36">
+            <geom name="person_torso" type="capsule" fromto="0 0 -0.10 0 0 0.16"
+                  size="0.075" material="shirtmat" contype="0" conaffinity="0" />
+            <geom name="person_head" type="sphere" pos="0 0 0.25" size="0.062"
+                  material="skinmat" contype="0" conaffinity="0" />
+            <geom name="person_nose" type="sphere" pos="0.058 0 0.25" size="0.018"
+                  material="accentmat" contype="0" conaffinity="0" />
+
+            <body name="person_leg_l" pos="0 0.035 -0.10">
+                <joint name="person_hip_l" type="hinge" axis="0 1 0"
+                       range="-35 35" damping="1" />
+                <geom type="capsule" fromto="0 0 0 0 0 -0.26" size="0.032"
+                      material="trousermat" contype="0" conaffinity="0" />
+                <geom type="capsule" fromto="0 0 -0.26 0.07 0 -0.27" size="0.034"
+                      material="shoemat" contype="0" conaffinity="0" />
+            </body>
+            <body name="person_leg_r" pos="0 -0.035 -0.10">
+                <joint name="person_hip_r" type="hinge" axis="0 1 0"
+                       range="-35 35" damping="1" />
+                <geom type="capsule" fromto="0 0 0 0 0 -0.26" size="0.032"
+                      material="trousermat" contype="0" conaffinity="0" />
+                <geom type="capsule" fromto="0 0 -0.26 0.07 0 -0.27" size="0.034"
+                      material="shoemat" contype="0" conaffinity="0" />
+            </body>
+            <body name="person_arm_l" pos="0 0.075 0.11">
+                <joint name="person_shoulder_l" type="hinge" axis="0 1 0"
+                       range="-30 30" damping="1" />
+                <geom type="capsule" fromto="0 0 0 0 0 -0.20" size="0.025"
+                      material="skinmat" contype="0" conaffinity="0" />
+            </body>
+            <body name="person_arm_r" pos="0 -0.075 0.11">
+                <joint name="person_shoulder_r" type="hinge" axis="0 1 0"
+                       range="-30 30" damping="1" />
+                <geom type="capsule" fromto="0 0 0 0 0 -0.20" size="0.025"
+                      material="skinmat" contype="0" conaffinity="0" />
+            </body>
+        </body>
+    </worldbody>
+
+    <keyframe>
+        <!-- 21 robot qpos (7 free + 14 servos) + 4 leader hinges = 25. -->
+        <key name="INIT" qpos="0 0 0.12 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+             ctrl="0 0 0 0 0 0 0 0 0 0 0 0 0 0" />
+        <!-- STAND matches the walking policy's DEFAULT_POSE (see
+             scripts/infer_policy.py): actions are offsets from this pose. -->
+        <key name="STAND" qpos="
+        0 0 0.12 1 0 0 0
+        0 -0.08726646259971647 -0.457924 -0.004940 0.452984
+        0.3490658503988659 0.3490658503988659 0 0
+        0 0.08726646259971647 0.457924 0.004940 -0.452984
+        0 0 0 0"
+        ctrl="
+        0 -0.08726646259971647 -0.457924 -0.004940 0.452984
+        0.3490658503988659 0.3490658503988659 0 0
+        0 0.08726646259971647 0.457924 0.004940 -0.452984" />
+    </keyframe>
+</mujoco>
