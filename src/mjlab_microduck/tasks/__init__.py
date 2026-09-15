@@ -71,6 +71,10 @@ from .microduck_spin_env_cfg import (
     make_microduck_spin_env_cfg,
     MicroduckSpinRlCfg,
 )
+from .microduck_jump_env_cfg import (
+    make_microduck_jump_env_cfg,
+    MicroduckJumpRlCfg,
+)
 from .microduck_roulade_env_cfg import (
     make_microduck_roulade_env_cfg,
     MicroduckRouladeRlCfg,
@@ -221,6 +225,16 @@ register_mjlab_task(
     env_cfg=make_microduck_spin_env_cfg(),
     play_env_cfg=make_microduck_spin_env_cfg(play=True),
     rl_cfg=MicroduckSpinRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Jump task — saut vertical sur place (legs), piloté par la phase (voir
+# microduck_jump_env_cfg.py pour la définition des récompenses en escalier).
+register_mjlab_task(
+    task_id="Mjlab-Jump-Flat-MicroDuck",
+    env_cfg=make_microduck_jump_env_cfg(),
+    play_env_cfg=make_microduck_jump_env_cfg(play=True),
+    rl_cfg=MicroduckJumpRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
