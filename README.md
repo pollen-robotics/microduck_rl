@@ -42,7 +42,9 @@ uv run scripts/export.py Mjlab-Velocity-Flat-MicroDuck --wandb-run-path <...>
 uv run publish --onnx output.onnx --repo <user>/microduck-<name> --kind episodic --duration-s 4.0   # share it (see "Publishing a policy")
 
 # drive the exported policy in CPU MuJoCo with the keyboard
+# NOTE: add argument --new-cmd-obs if the model input is not matching
 uv run scripts/infer_policy.py --walking output.onnx
+uv run scripts/infer_policy.py --walking output.onnx  --joystick
 ```
 
 Resume from a checkpoint:
