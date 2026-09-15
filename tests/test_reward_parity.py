@@ -185,25 +185,24 @@ def test_the_divergence_is_confined_to_terms_that_assume_a_frame():
         "feet_flat_penalty no longer reads its reference from the model"
     )
 
-    # Any OTHER function that normalizes gravity into a site/geom frame is a
-    # candidate for the same mistake. Whitelisted: the two helpers that ARE the
-    # sanctioned self-calibrating form — they read the reference off the model,
-    # so finding them here is the check working, not failing.
-    _SANCTIONED = {"_foot_rest_gravity_ref"}
-    offenders = []
-    for node in ast.walk(ast.parse(src)):
-        if not isinstance(node, ast.FunctionDef):
-            continue
-        if node.name in _SANCTIONED or node.name == "feet_flat_penalty":
-            continue
-        seg = ast.get_source_segment(src, node) or ""
-        if "gravity_vec_w" in seg and "quat_apply_inverse" in seg:
-            offenders.append(node.name)
+    # Single source of truth: the gate module owns the whitelist (REWARD_TERMS
+    # + FRAME_HELPERS), so this test and the gate cannot drift apart. The gate
+    # is imported by path so it runs even where the mjlab package is not pip-
+    # installed (it only needs the stdlib).
+    import importlib.util
+    import sys
+
+    gate_path = MDP_PATH.parent / "reward_parity_gate.py"
+    spec = importlib.util.spec_from_file_location("reward_parity_gate", gate_path)
+    gate = importlib.util.module_from_spec(spec)
+    sys.modules["reward_parity_gate"] = gate
+    spec.loader.exec_module(gate)
+    offenders = gate.scan_uncovered_frame_terms(src)
     assert offenders == [], (
         f"frame-assuming terms needing review: {offenders}. Each must either "
-        f"self-calibrate or document why the literal axis is right for this "
-        f"asset. Add them to REWARD_PARITY.md. If one of these IS the fix, add "
-        f"it to _SANCTIONED above."
+        f"self-calibrate (add to FRAME_HELPERS in reward_parity_gate.py) or "
+        f"register a parity check (add to REWARD_TERMS, covered=True). See "
+        f"REWARD_PARITY.md."
     )
 
 
