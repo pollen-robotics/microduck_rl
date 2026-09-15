@@ -1460,6 +1460,47 @@ _HIP_PITCH_KNEE_CFG = SceneEntityCfg("robot", joint_names=(r"^(?!passive_).*(hip
 _ROLLER_FEET_SITE_CFG = SceneEntityCfg("robot", site_names=("left_foot", "right_foot"))
 
 
+def _foot_rest_gravity_ref(env: ManagerBasedRlEnv, site_ids) -> torch.Tensor:
+    """The foot-site reading of world gravity AT THE REST POSE, per site.
+
+    This is the term's zero. It CANNOT be assumed to be ``[0, 0, -1]``:
+
+    ``robot_allcollisions.xml`` gives the foot sites
+    ``quat="0 0 0.707107 0.707107"`` (left) / ``"0.707107 -0.707107 0 0"``
+    (right), i.e. their local Z axis points along world +Y at rest. Projecting
+    gravity into that frame gives ``|xy|^2 = 1.0`` — the exact MAXIMUM of the
+    penalty — for a foot that is sitting perfectly on the ground. Charging it
+    inverts the term: the cheapest way to earn 0 is to tilt the blade edge-on,
+    which is what this term exists to prevent. Confirmed against the asset by
+    ``tests/test_reward_parity.py`` and written up in ``REWARD_PARITY.md``.
+
+    Read from the model rather than hardcoded, so it survives an asset edit —
+    the same self-calibrating choice ``microduck_local``'s ``foot_flat_ref``
+    makes, and the reason the two stacks disagreed in the first place.
+
+    Cached on the env: it is a property of the asset, not of the step.
+    """
+    cache = getattr(env, "_feet_flat_rest_ref", None)
+    if cache is not None:
+        return cache
+
+    from mjlab.utils.lab_api.math import quat_apply_inverse
+    import torch.nn.functional as F
+
+    asset: Entity = env.scene["robot"]
+    gravity_w_n = F.normalize(asset.data.gravity_vec_w, dim=-1)
+    # Read the site orientation as authored. ``site_quat_w`` at the first call
+    # (before any action has been taken) is the reference pose; MuJoCo Warp
+    # renders it at the scene's default state.
+    quats = asset.data.site_quat_w[:, site_ids, :]
+    ref = torch.stack(
+        [quat_apply_inverse(quats[:, i, :], gravity_w_n) for i in range(quats.shape[1])],
+        dim=1,
+    )  # (B, N_feet, 3)
+    env._feet_flat_rest_ref = ref
+    return ref
+
+
 def feet_flat_penalty(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _ROLLER_FEET_SITE_CFG,
@@ -1467,12 +1508,22 @@ def feet_flat_penalty(
 ) -> torch.Tensor:
     """Penalize foot sites not being parallel to the ground.
 
-    The foot site frame has Z+ pointing up when flat. We project a unit gravity
-    vector (pointing down) into each foot site's local frame. When flat, gravity
-    maps to [0,0,-1] in site frame (xy=0, penalty=0). Any tilt rotates Z away
-    from world-up, giving nonzero xy components.
+    The foot site frame has a Z axis that, at rest, is NOT world-up: the asset
+    authors the foot sites with a 90-degree roll (see
+    ``_foot_rest_gravity_ref``), so the frame's local Z points along world +Y
+    when the duck is standing. We therefore measure the reference from the model
+    instead of assuming ``[0, 0, -1]``.
 
-    Max value ≈ 2.0 per foot (foot fully sideways), total ≈ 4.0.
+    We project a unit gravity vector (pointing down) into each foot site's local
+    frame and charge the squared distance from that reference. When the foot is
+    where the rest pose puts it the penalty is 0; any tilt rotates the frame
+    away from the reference, giving a nonzero reading.
+
+    History (do not regress): this used ``sum(proj[:, :2] ** 2)``, which is the
+    same quantity only if the foot's Z is world-up. On this asset that scored a
+    resting foot at 1.0 — the maximum — so the term paid the policy to stand on
+    the blade edges. ``tests/test_reward_parity.py`` guards the cross-stack
+    agreement; ``REWARD_PARITY.md`` has the full account.
 
     When ``sensor_name`` is given, each foot's penalty is GATED by that foot's own
     ground contact: the airborne (swing) foot is free to tilt, only the stance
@@ -1492,11 +1543,12 @@ def feet_flat_penalty(
     asset: Entity = env.scene[asset_cfg.name]
     gravity_w_n = F.normalize(asset.data.gravity_vec_w, dim=-1)  # (B, 3), unit vector per env
 
+    ref = _foot_rest_gravity_ref(env, asset_cfg.site_ids)        # (B, N_feet, 3)
     foot_quats = asset.data.site_quat_w[:, asset_cfg.site_ids, :]  # (B, N_feet, 4)
     per_foot = torch.zeros(env.num_envs, foot_quats.shape[1], device=env.device)
     for i in range(foot_quats.shape[1]):
         proj = quat_apply_inverse(foot_quats[:, i, :], gravity_w_n)  # (B, 3)
-        per_foot[:, i] = torch.sum(torch.square(proj[:, :2]), dim=1)  # xy² only
+        per_foot[:, i] = torch.sum(torch.square(proj - ref[:, i, :]), dim=1)
 
     if sensor_name is not None:
         from mjlab.sensor import ContactSensor
@@ -2982,6 +3034,178 @@ def phase_rise_gate(
 def _gp_phase(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
     cmd = env.command_manager.get_command(command_name)
     return (torch.atan2(cmd[:, 1], cmd[:, 0]) / (2 * torch.pi)) % 1.0
+
+
+# --------------------------------------------------------------------------- #
+# Jump (hop) task                                                             #
+# --------------------------------------------------------------------------- #
+#
+# WHY THIS IS NOT A HEIGHT TRACK. The obvious way to teach a hop is to track a
+# trunk-height curve through the cycle. That fails, and it fails in a way worth
+# writing down: in free flight the ONLY achievable z(t) is a parabola, so any
+# prescribed non-ballistic curve (a sinusoid, a trapezoid) is unreachable for
+# the whole airborne window. A tracking reward there is not "a bit wrong", it
+# is unsatisfiable, and the policy's cheapest escape is to never leave the
+# ground. So the flight phase pays for RESULTS — feet actually off the ground,
+# trunk actually raised, landing actually soft — and the shaping lives in the
+# two windows where the robot IS actuated: the wind-up and the push-off.
+#
+# Windows over the cycle (phase φ ∈ [0, 1), period from the command):
+#   [0.00, 0.30)  crouch   — settle to the crouch depth
+#   [0.30, 0.45)  launch   — explosive extension; upward velocity is paid here
+#   [0.45, 0.75)  flight   — UNACTUATED: pay apex height + feet-off-ground only
+#   [0.75, 1.00)  recover  — soft touchdown, back to standing
+JUMP_STAND_Z = 0.117      # full-stand trunk z (matches height_progress' ceiling)
+JUMP_CROUCH_Z = 0.083     # ~3.4 cm wind-up dip: reachable, well above sit height
+JUMP_CROUCH_END = 0.30
+JUMP_LAUNCH_END = 0.45
+JUMP_FLIGHT_END = 0.75
+
+
+def _phase_window(phase: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
+    """Hard gate: 1.0 inside [lo, hi), else 0.0.
+
+    Deliberately hard, not smoothstep. These windows are where the robot is
+    actuated; feathering the edges would let the policy smear the wind-up into
+    the flight window and collect shaping reward while airborne, which is
+    exactly the failure the design is trying to avoid.
+    """
+    return ((phase >= lo) & (phase < hi)).float()
+
+
+def jump_crouch_depth(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    stand_z: float = JUMP_STAND_Z,
+    crouch_z: float = JUMP_CROUCH_Z,
+    std: float = 0.02,
+    crouch_end: float = JUMP_CROUCH_END,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward the trunk sitting at the wind-up depth during the crouch window.
+
+    Gaussian on trunk z, centred on a REACHABLE crouch (not on the deepest
+    squat the joints allow): an unreachable target is the same unsatisfiable-
+    reward trap as the flight-phase curve, just at the other end of the cycle.
+    """
+    phase = _gp_phase(env, command_name)
+    gate = _phase_window(phase, 0.0, crouch_end)
+    asset = env.scene[asset_cfg.name]
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    return gate * torch.exp(-((z - crouch_z) / std) ** 2)
+
+
+def jump_launch(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    max_vz: float = 1.5,
+    launch_start: float = JUMP_CROUCH_END,
+    launch_end: float = JUMP_LAUNCH_END,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Capped upward trunk velocity during the push-off window.
+
+    Capped for the same reason ``com_upward_velocity`` caps: uncapped, the
+    reward is linear in vz, so a violent launch out-earns a controlled one and
+    the optimum drifts toward slamming the joint limits. With ``max_vz`` any
+    launch at least that fast pays the same, and the action-rate / torque
+    penalties then pick the smooth one.
+    """
+    phase = _gp_phase(env, command_name)
+    gate = _phase_window(phase, launch_start, launch_end)
+    asset = env.scene[asset_cfg.name]
+    vz = torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0)
+    return gate * torch.clamp(vz, min=0.0, max=max_vz)
+
+
+def jump_apex(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    stand_z: float = JUMP_STAND_Z,
+    min_rise: float = 0.0,
+    flight_start: float = JUMP_LAUNCH_END,
+    flight_end: float = JUMP_FLIGHT_END,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Trunk rise above standing height, during the flight window.
+
+    Pays the RESULT (how high the body actually got), never a trajectory. A
+    failed launch simply scores ~0 for the window — no penalty, no gradient
+    fighting gravity — and the pressure to improve comes from the crouch and
+    launch windows that precede it.
+    """
+    phase = _gp_phase(env, command_name)
+    gate = _phase_window(phase, flight_start, flight_end)
+    asset = env.scene[asset_cfg.name]
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    return gate * torch.clamp(z - stand_z - min_rise, min=0.0)
+
+
+def jump_airborne(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str,
+    flight_start: float = JUMP_LAUNCH_END,
+    flight_end: float = JUMP_FLIGHT_END,
+) -> torch.Tensor:
+    """1.0 while BOTH feet are off the ground, inside the flight window.
+
+    This is the term that makes "a hop" mean a hop rather than "crouch and
+    stand back up": without it, crouch-depth + launch-velocity are both paid
+    from ground contact and the policy can bank them without ever leaving the
+    floor.
+    """
+    if sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+    sensor = env.scene.sensors[sensor_name]
+    found = sensor.data.found  # (num_envs, num_feet)
+    if found.dim() > 1:
+        found = found.sum(dim=-1)
+    off_ground = (found <= 0).float()
+    phase = _gp_phase(env, command_name)
+    return _phase_window(phase, flight_start, flight_end) * off_ground
+
+
+def jump_impact_speed(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str,
+    recover_start: float = JUMP_FLIGHT_END,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Downward trunk speed AT the touchdown edge — a COST (use a negative weight).
+
+    Charged only on the single step the feet first re-contact, not for the
+    whole contact duration: a per-step charge would make "land and stay down"
+    cheaper than "land and keep standing", i.e. it would pay the robot to
+    collapse. Edge detection carries per-env memory, with the same
+    fresh-episode reset the other stateful terms use so a reset can't be read
+    as a touchdown.
+    """
+    if sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+    sensor = env.scene.sensors[sensor_name]
+    found = sensor.data.found
+    if found.dim() > 1:
+        found = found.sum(dim=-1)
+    contact = found > 0
+
+    if not hasattr(env, "_jump_prev_contact"):
+        env._jump_prev_contact = contact.clone()
+    fresh = env.episode_length_buf <= 1
+    env._jump_prev_contact[fresh] = contact[fresh]
+    touchdown = contact & (~env._jump_prev_contact)
+    env._jump_prev_contact = contact.clone()
+
+    asset = env.scene[asset_cfg.name]
+    vz = torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0)
+    phase = _gp_phase(env, command_name)
+    in_recover = (phase >= recover_start).float()
+    return touchdown.float() * in_recover * torch.clamp(-vz, min=0.0)
 
 
 def mouth_ground_proximity_phased(
