@@ -35,6 +35,11 @@ dependencies = [
     # floating `>=` lets the CUDA index (which carries newer builds than the
     # PyPI pin) drag torch 2.9.1 -> 2.13.0, an unvetted bump for mjlab/rsl_rl.
     "torch==2.9.1",
+    # Jetson only: the SBSA torch wheel links these without declaring them
+    # (pre-loaded by _torch_libs.py). `-tegra` is the Jetson kernel; GB10 never matches.
+    "nvpl-blas ; sys_platform == 'linux' and platform_machine == 'aarch64' and 'tegra' in platform_release",
+    "nvpl-lapack ; sys_platform == 'linux' and platform_machine == 'aarch64' and 'tegra' in platform_release",
+    "nvidia-cudss-cu13 ; sys_platform == 'linux' and platform_machine == 'aarch64' and 'tegra' in platform_release",
 ]
 
 [project.entry-points."mjlab.tasks"]
@@ -89,6 +94,9 @@ override-dependencies = [
 better-actuator-models = { git = "https://github.com/Rhoban/bam.git", branch = "mjlab_frictionloss" }
 # For local BAM development, comment the line above and use:
 # better-actuator-models = { path = "/home/antoine/Rhoban/bam", editable = true }
+# Jetson (kernel `-tegra`; Thor is sm_110, which the cu129 wheels predate) takes
+# torch 2.9.1 — the same pinned version — from NVIDIA's SBSA index instead.
+# Everything else on aarch64 (DGX Spark / GB10) is unchanged:
 # On linux-aarch64 (DGX Spark / GB10) PyPI's torch wheel is CPU-ONLY:
 # torch.__version__ == "2.9.1+cpu", torch.version.cuda is None, so
 # torch.cuda.device_count() == 0 and mjlab's select_gpus() indexes an empty
@@ -99,11 +107,18 @@ better-actuator-models = { git = "https://github.com/Rhoban/bam.git", branch = "
 # The marker keeps x86_64 (HF Jobs) on PyPI, where the wheel already bundles
 # CUDA via its nvidia-*-cu12 deps — that resolution is unchanged.
 torch = [
-  { index = "pytorch-cu129", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+  { index = "jetson-sbsa-cu130", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and 'tegra' in platform_release" },
+  { index = "pytorch-cu129", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and 'tegra' not in platform_release" },
 ]
 
 [[tool.uv.index]]
 name = "pytorch-cu129"
 url = "https://download.pytorch.org/whl/cu129"
 # explicit: only packages that name this index resolve from it.
+explicit = true
+
+# JetPack 7 uses the SBSA userspace (the "jp7" index is empty). explicit: only torch names it.
+[[tool.uv.index]]
+name = "jetson-sbsa-cu130"
+url = "https://pypi.jetson-ai-lab.io/sbsa/cu130"
 explicit = true
