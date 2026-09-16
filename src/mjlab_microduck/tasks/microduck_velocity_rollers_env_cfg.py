@@ -24,6 +24,13 @@ Task design (unchanged — the roller recipe):
   Sole positive task reward is wheel_speed — the robot must actually spin its
   wheels; braking/skating_air_time/forward_lean/heading_tracking shape the
   skating style.
+
+Standing height on this model, measured (AGENTS.md rule 2): trunk_base world z
+settles at 0.1386 m at HOME ctrl, and reset_base spawns in [0.1335, 0.1435].
+``com_height_target``'s band must contain both — it did not until 2026-09, and
+the term paid the policy to crouch instead. See its comment below. Variants that
+build on this factory inherit the band, so re-measure on THEIR model before
+assuming it still fits.
 """
 
 import math
@@ -186,10 +193,23 @@ def make_microduck_velocity_rollers_env_cfg(
     cfg.rewards["angular_momentum"].weight = -0.02
     cfg.rewards["action_rate_l2"].weight = -1.0
 
+    # Height band, MEASURED on this model (AGENTS.md rule 2), not carried over:
+    # trunk_base world z at HOME ctrl, settled on scene_rollers.xml, is 0.1386 m.
+    # The band this replaces ([0.0935, 0.1235]) came from the FOOTED recipe
+    # (stand z ~0.115) and was never re-measured when the roller model arrived.
+    # Its ceiling sat 15 mm BELOW the roller stance, so the term paid +2/step for
+    # a 2-4 cm crouch and -0.0005 for standing normally — it was rewarding a
+    # flexed posture nobody asked for, and the whole reset_base spawn range
+    # [0.1335, 0.1435] started out-of-band too.
+    # The floor leaves ~13.5 mm of flexion (a skating crouch stays paid,
+    # collapsing does not) and the ceiling clears the spawn max.
+    # Note the penalty side is negligible at this scale (squared metres): the
+    # term is in practice a binary +2 gate, not a gradient — do not rely on it
+    # to punish a fall. Locked by tests/test_com_height_band.py.
     cfg.rewards["com_height_target"] = RewardTermCfg(
         func=microduck_mdp.com_height_target,
         weight=2.0,
-        params={"target_height_min": 0.0935, "target_height_max": 0.1235},
+        params={"target_height_min": 0.125, "target_height_max": 0.145},
     )
     cfg.rewards["self_collisions"] = RewardTermCfg(
         func=mdp.self_collision_cost,
