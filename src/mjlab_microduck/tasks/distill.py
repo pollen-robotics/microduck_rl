@@ -79,6 +79,11 @@ def default_bc_cfg() -> dict:
         "anchor_checkpoint_path": None,
         "anchor_coef": 1.0,
         "anchor_tilt_deg": 25.0,
+        # Dynamic tumbles belong to PPO; the expert resumes once rotation settles.
+        # Flat actor layout is [base_ang_vel(3), projected_gravity(3), ...].
+        "ang_vel_slice": (0, 3),
+        "dynamic_fall_ppo_authority": True,
+        "dynamic_fall_ang_vel_rad_s": 3.0,
     }
 
 
@@ -159,8 +164,17 @@ class PpoWithExpertBc(PPO):
         flat = torch.cat([obs_td[g] for g in groups], dim=-1)
         gsl = tuple(cfg["gravity_slice"])
         fallen = fallen_mask_from_obs(flat, gsl, cfg["gate_tilt_deg"])
+        dynamic = torch.zeros_like(fallen)
+        if cfg.get("dynamic_fall_ppo_authority", False):
+            avs = tuple(cfg["ang_vel_slice"])
+            dynamic = flat[:, avs[0]:avs[1]].norm(dim=1) > cfg["dynamic_fall_ang_vel_rad_s"]
+            fallen = fallen & ~dynamic
         upright = ~fallen_mask_from_obs(flat, gsl, cfg["anchor_tilt_deg"]) if self.anchor is not None else torch.zeros_like(fallen)
-        stats = {"expert_bc_fallen_frac": fallen.float().mean().item(), "expert_bc_anchor_frac": upright.float().mean().item()}
+        stats = {
+            "expert_bc_fallen_frac": fallen.float().mean().item(),
+            "expert_bc_anchor_frac": upright.float().mean().item(),
+            "expert_bc_dynamic_ppo_frac": dynamic.float().mean().item(),
+        }
         if fallen.sum().item() < cfg["min_samples"]:
             fallen = torch.zeros_like(fallen)  # too few fallen frames: anchor-only pass (or nothing)
         use = fallen | upright
