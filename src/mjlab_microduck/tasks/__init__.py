@@ -75,6 +75,18 @@ from .microduck_roulade_env_cfg import (
     make_microduck_roulade_env_cfg,
     MicroduckRouladeRlCfg,
 )
+from .microduck_headstand_env_cfg import (
+    make_microduck_headstand_env_cfg,
+    MicroduckHeadstandKickupRlCfg,
+    MicroduckHeadstandKickupLegsTogetherRlCfg,
+    MicroduckHeadstandFoldRlCfg,
+    MicroduckHeadstandSplitSwitchRlCfg,
+)
+from .microduck_backroll_env_cfg import (
+    make_microduck_backroll_env_cfg,
+    MicroduckBackrollLegsTogetherRlCfg,
+    MicroduckSplitOverRlCfg,
+)
 from .backlash import make_backlash_variant
 
 # Standard velocity task
@@ -230,6 +242,52 @@ register_mjlab_task(
     env_cfg=make_microduck_roulade_env_cfg(),
     play_env_cfg=make_microduck_roulade_env_cfg(play=True),
     rl_cfg=MicroduckRouladeRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Headstand routine: fold to the pike, kick up to a headstand, switch the
+# split, roll or split over back to standing. Chained at deployment on held
+# state conditions, like sit → stand → walk.
+register_mjlab_task(
+    task_id="Mjlab-HeadstandFold-Flat-MicroDuck",
+    env_cfg=make_microduck_headstand_env_cfg(style="fold"),
+    play_env_cfg=make_microduck_headstand_env_cfg(play=True, style="fold"),
+    rl_cfg=MicroduckHeadstandFoldRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+register_mjlab_task(
+    task_id="Mjlab-HeadstandKickupLegsTogether-Flat-MicroDuck",
+    env_cfg=make_microduck_headstand_env_cfg(style="legs_together"),
+    play_env_cfg=make_microduck_headstand_env_cfg(play=True, style="legs_together"),
+    rl_cfg=MicroduckHeadstandKickupLegsTogetherRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+register_mjlab_task(
+    task_id="Mjlab-HeadstandKickup-Flat-MicroDuck",
+    env_cfg=make_microduck_headstand_env_cfg(style="split"),
+    play_env_cfg=make_microduck_headstand_env_cfg(play=True, style="split"),
+    rl_cfg=MicroduckHeadstandKickupRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+register_mjlab_task(
+    task_id="Mjlab-HeadstandSplitSwitch-Flat-MicroDuck",
+    env_cfg=make_microduck_headstand_env_cfg(style="split", switch=True),
+    play_env_cfg=make_microduck_headstand_env_cfg(play=True, style="split", switch=True),
+    rl_cfg=MicroduckHeadstandSplitSwitchRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+register_mjlab_task(
+    task_id="Mjlab-HeadstandBackrollLegsTogether-Flat-MicroDuck",
+    env_cfg=make_microduck_backroll_env_cfg(style="legs_together"),
+    play_env_cfg=make_microduck_backroll_env_cfg(play=True, style="legs_together"),
+    rl_cfg=MicroduckBackrollLegsTogetherRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+register_mjlab_task(
+    task_id="Mjlab-HeadstandSplitOver-Flat-MicroDuck",
+    env_cfg=make_microduck_backroll_env_cfg(style="splitover"),
+    play_env_cfg=make_microduck_backroll_env_cfg(play=True, style="splitover"),
+    rl_cfg=MicroduckSplitOverRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
