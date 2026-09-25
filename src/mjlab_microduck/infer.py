@@ -6,6 +6,7 @@ import csv
 import json
 import math
 import os
+from pathlib import Path
 import pickle
 import queue
 import select
@@ -19,12 +20,14 @@ import mujoco
 import mujoco.viewer
 import onnxruntime as ort
 
-MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene.xml"
-# MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene_ramps.xml"
-# MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene_floor_objects.xml"
-# MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene_robot_walk.xml"
-MICRODUCK_ROLLERS_XML = "src/mjlab_microduck/robot/microduck/scene_rollers.xml"
-MICRODUCK_BALL_XML = "src/mjlab_microduck/robot/microduck/scene_ball.xml"
+# From this file, not the working directory: `infer` also runs from a challenges checkout.
+_ROBOT_DIR = Path(__file__).resolve().parent / "robot" / "microduck"
+MICRODUCK_XML = str(_ROBOT_DIR / "scene.xml")
+# MICRODUCK_XML = str(_ROBOT_DIR / "scene_ramps.xml")
+# MICRODUCK_XML = str(_ROBOT_DIR / "scene_floor_objects.xml")
+# MICRODUCK_XML = str(_ROBOT_DIR / "scene_robot_walk.xml")
+MICRODUCK_ROLLERS_XML = str(_ROBOT_DIR / "scene_rollers.xml")
+MICRODUCK_BALL_XML = str(_ROBOT_DIR / "scene_ball.xml")
 
 # BAM M6 defaults — MUST mirror `_BAM_ACTUATOR_KWARGS` in
 # src/mjlab_microduck/robot/microduck_constants.py (the actuator every policy is
