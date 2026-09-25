@@ -22,6 +22,7 @@ Three things must hold, none of which fails loudly on its own:
    decide.
 """
 
+import os
 import shutil
 import subprocess
 import sys
@@ -203,3 +204,43 @@ def test_both_train_shims_reach_the_hook_before_parsing_argv(shim):
     assert proc.returncode == 0, f"probe failed:\n{proc.stderr[-2000:]}"
     assert f"SUBMIT ['{_TASK}', '--env.scene.num-envs', '4096']" in proc.stdout
     assert "EXIT 7" in proc.stdout
+
+
+def test_the_bootstrap_runs_modules_not_repo_scripts():
+    """The job extracts a tarball of WHATEVER repo `train --hf-jobs` ran in — a challenges
+    checkout has no scripts/ of ours — so the bootstrap must reach our code as modules."""
+    from mjlab_microduck import hf_jobs
+
+    assert "scripts/" not in hf_jobs.BOOTSTRAP
+    assert "python -m mjlab_microduck.hf_uploader" in hf_jobs.BOOTSTRAP
+    assert "python -m mjlab_microduck.export" in hf_jobs.BOOTSTRAP
+
+
+def test_the_uploader_is_a_module_and_the_script_delegates():
+    from mjlab_microduck import hf_uploader
+
+    assert callable(hf_uploader.main)
+    shim = (_ROOT / "scripts" / "hf" / "uploader.py").read_text()
+    assert "from mjlab_microduck.hf_uploader import main" in shim
+
+
+def test_the_uploader_module_refuses_to_run_without_a_repo():
+    env = {k: v for k, v in os.environ.items() if k != "CKPT_REPO"}
+    proc = subprocess.run(
+        [sys.executable, "-m", "mjlab_microduck.hf_uploader"], capture_output=True, text=True, env=env
+    )
+    assert proc.returncode == 1 and "CKPT_REPO" in proc.stdout
+
+
+def test_submit_hands_the_job_its_checkout(tmp_path):
+    """Inside the job there is no .git; provenance.json must still name the commit that trained."""
+    import json
+
+    from mjlab_microduck import hf_jobs, provenance
+
+    assert hf_jobs.job_provenance(tmp_path) == {}, "outside git there is nothing to hand over"
+    env = hf_jobs.job_provenance(_ROOT)
+    record = json.loads(env[provenance.JOB_ENV])
+    assert record["commit"] and "dirty" in record
+    source = (_ROOT / "src" / "mjlab_microduck" / "hf_jobs.py").read_text()
+    assert "**job_provenance(repo_root)" in source, "submit() must merge job_provenance(repo_root) into the job's env"
