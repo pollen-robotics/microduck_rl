@@ -53,7 +53,7 @@ same code, which lives in `src/mjlab_microduck/hf_jobs.py`.)
    run cold, subsequent runs fast).
 5. `HfApi.run_job` launches a container that:
    - installs `uv`, extracts the tarball, runs `uv sync` (warm-cached),
-   - starts `scripts/hf/uploader.py` in background (watches `logs/rsl_rl/**/model_*.pt`, pushes every 60s),
+   - starts the checkpoint uploader (`python -m mjlab_microduck.hf_uploader`) in background (watches `logs/rsl_rl/**/model_*.pt`, pushes every 60s),
    - runs `uv run train <task> <args>`,
    - does a final one-shot upload on exit.
 6. wandb credentials are forwarded as a secret — runs show up live in your

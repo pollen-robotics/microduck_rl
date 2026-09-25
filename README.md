@@ -43,7 +43,12 @@ uv run publish --onnx output.onnx --repo <user>/microduck-<name> --kind episodic
 
 # drive the exported policy in CPU MuJoCo with the keyboard
 uv run scripts/infer_policy.py --walking output.onnx
+# or: uv run infer --walking output.onnx
 ```
+
+The same tools answer to one name, `microduck train`, `microduck play`, `microduck list-envs`,
+`microduck export`, `microduck publish`, `microduck infer` — and `microduck check --onnx out.onnx`
+runs the checks `publish` applies, without uploading. Both spellings stay.
 
 Resume from a checkpoint:
 
@@ -191,6 +196,11 @@ and a README saying how to run it. Anyone with a microduck can then install it
 with one command, no daemon release needed.
 
 ```bash
+# From a local run — kind and Arena event from the challenge's challenge.toml, the recipe
+# (commit, command, seed) from the run's provenance.json, the latest checkpoint exported and
+# uploaded next to policy.onnx. A library task (no challenge) still takes --kind.
+uv run publish --run logs/rsl_rl/sprint/2026-09-25_10-00-00_first --repo <user>/microduck-sprint
+
 # From a wandb run — exports through the one safe path, then uploads
 uv run publish --task Mjlab-PoliteBow-Flat-MicroDuck \
     --wandb-run-path <entity/project/run_id> --checkpoint 3000 \
@@ -236,9 +246,51 @@ wandb (task, commit, branch, dirty flag, run, checkpoint), and refuses to
 overwrite an existing `.onnx` in the repo without `--force`. Repos are created
 private; `--no-private` for public, `--tag v1` to tag the revision.
 
+Every `uv run train` writes `provenance.json` into its log directory: the command, the seed,
+the commit, branch and dirty flag of the checkout it ran in, and this package's version.
+`publish --run` puts that in the manifest's `training` block and ends the model card with a
+*Reproduce* section. A run started on a dirty tree is refused (`--allow-dirty` to override):
+the published recipe should be the code that trained. `robot.accessories` says what the
+robot wore (`["rollers"]` for the roller tasks), read from the task's model; give
+`--accessories rollers` with `--onnx`.
+
 Only constant-command policies are publishable this way. Phase-driven moves
 (the ground pick) and the posture-flag sit↔stand are driven by the daemon
 itself and live in the official set, `pollen-robotics/microduck-policies`.
+
+## Using this package from another repo
+
+`microduck-challenges` (and any repo that trains a microduck) depends on this one as a git
+dependency and gets every tool above. Four things a dependent repo has to do, because uv
+applies `[tool.uv]` tables only to the project it reads them in:
+
+1. **Depend on it**, and copy this repo's `[tool.uv.sources]` and
+   `[tool.uv] override-dependencies` tables verbatim into your `pyproject.toml`. They pin
+   BAM's git branch, keep protobuf and onnx on versions with wheels, and bind torch to the
+   CUDA index on ARM; none of that reaches you transitively.
+
+   ```toml
+   dependencies = ["mjlab-microduck @ git+https://github.com/pollen-robotics/microduck_rl"]
+   ```
+
+2. **Register your tasks** the way `src/mjlab_microduck/tasks/__init__.py` does, with
+   `runner_cls=MicroduckOnPolicyRunner` (that runner is what writes `provenance.json`), and
+   declare your package under `[project.entry-points."mjlab.tasks"]` so `microduck train
+   <your task>` finds it.
+
+3. **Describe a challenge** in a `challenge.toml` beside its `tasks.py` and `env.py`
+   (`event`, `task`, `kind`, `[recipe]`, `[params.<name>]`); `tasks.py` calls
+   `mjlab_microduck.challenge.register(__file__)` and `env.py` reads its knobs with
+   `mjlab_microduck.challenge.params(__file__)`. `microduck publish --run <dir> --repo …`
+   then needs nothing else: kind, Arena event and accessories come from the task.
+
+4. **Import the robot, never copy it.** `MICRODUCK_WALK_ROBOT_CFG` and its roller and
+   backlash variants, the BAM actuators and `tasks/mdp.py` are the library; a challenge's
+   `env.py` builds its own observations, rewards, terminations and randomisation on top of
+   them, the way `microduck_velocity_env_cfg.py` does here.
+
+`train … --hf-jobs` works from such a checkout too: the tarball is your repo, and the job
+resolves your lock file.
 
 ## Tests
 

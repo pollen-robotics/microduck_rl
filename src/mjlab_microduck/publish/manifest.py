@@ -13,6 +13,7 @@ CLI can validate an ONNX file without a GPU.
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -26,6 +27,20 @@ MODEL_API = 1
 OBS_LEN = 61
 ACTION_LEN = 14
 ROBOT: dict[str, Any] = {"model": "microduck", "hw_rev": 1, "servos": "xl330", "control_hz": 50}
+
+# What the robot can wear, as the manifest's `robot.accessories` says it. Read from the robot
+# model itself (`accessories_of`), so a challenge that builds its own config from the roller
+# model is described right without declaring anything.
+ACCESSORIES: tuple[str, ...] = ("rollers",)
+
+
+def accessories_of(spec) -> tuple[str, ...]:
+    """`("rollers",)` when the MjSpec carries the passive wheels' mesh, else `()`."""
+    # An uncompiled spec names a `<mesh file="roller_blade.stl"/>` only by its file.
+    if any((mesh.name or Path(mesh.file).stem).startswith("roller") for mesh in spec.meshes):
+        return ("rollers",)
+    return ()
+
 
 # The one `.onnx` a repo carries. The daemon takes the sole `.onnx` in a repo and refuses several.
 POLICY_FILE = "policy.onnx"
@@ -101,6 +116,8 @@ def build_manifest(
     command_help: dict[str, Any] | None = None,
     training: dict[str, Any] | None = None,
     eval: dict[str, Any] | None = None,
+    accessories: tuple[str, ...] = (),
+    arena: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """A single-policy manifest the daemon loads without surprises.
 
@@ -152,12 +169,14 @@ def build_manifest(
     if command_help:
         command.update(command_help)
 
+    robot = dict(ROBOT)
+    robot["accessories"] = list(accessories)
     manifest: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "model_api": MODEL_API,
         "obs_len": OBS_LEN,
         "action_len": ACTION_LEN,
-        "robot": dict(ROBOT),
+        "robot": robot,
         "name": name,
         "kind": kind,
         "entry_pose": entry_pose,
@@ -179,6 +198,8 @@ def build_manifest(
         manifest["training"] = training
     if eval:
         manifest["eval"] = eval
+    if arena:
+        manifest["arena"] = dict(arena)
     return manifest
 
 
@@ -203,6 +224,11 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     model = (manifest.get("robot") or {}).get("model")
     if model is not None and model.lower() != ROBOT["model"]:
         raise ManifestError(f"robot.model {model!r}: this is a {ROBOT['model']} policy repo")
+    worn = (manifest.get("robot") or {}).get("accessories")
+    if worn is not None:
+        unknown = [a for a in worn if a not in ACCESSORIES]
+        if unknown:
+            raise ManifestError(f"robot.accessories {unknown}: this robot wears only {list(ACCESSORIES)}")
     kind = manifest.get("kind")
     if kind is not None and kind not in (*KINDS, "scripted"):
         raise ManifestError(f"kind {kind!r} is not one of episodic, perpetual, scripted")
@@ -345,6 +371,8 @@ def render_readme(manifest: dict[str, Any], repo_id: str) -> str:
         timing = "Runs until told otherwise" + (
             f" — a gait for the `{slot}` slot." if slot else " — a gait, loaded into a policy slot."
         )
+    worn = (manifest.get("robot") or {}).get("accessories") or []
+    wearing = f", on {' and '.join(worn)}" if worn else ""
     lines = [
         "---",
         "tags:",
@@ -360,7 +388,7 @@ def render_readme(manifest: dict[str, Any], repo_id: str) -> str:
         description,
         "",
         f"A **{kind}** policy for the [microduck](https://github.com/pollen-robotics/microduck) "
-        f"({OBS_LEN}-D observation, {ACTION_LEN} actions, {ROBOT['control_hz']} Hz). {timing}",
+        f"({OBS_LEN}-D observation, {ACTION_LEN} actions, {ROBOT['control_hz']} Hz{wearing}). {timing}",
         "",
         "## Run it on a robot",
         "",
@@ -374,11 +402,31 @@ def render_readme(manifest: dict[str, Any], repo_id: str) -> str:
     ]
     if training:
         lines += ["", "## Training", ""]
-        for key in ("task_id", "repo", "branch", "commit", "run", "checkpoint", "exported"):
+        for key in ("task_id", "repo", "branch", "commit", "run", "checkpoint", "seed", "base", "started", "exported"):
             if key in training:
                 lines.append(f"- **{key}**: `{training[key]}`")
         if training.get("dirty"):
             lines.append("- exported from a checkout with uncommitted changes")
+    if training.get("command") and training.get("repo") and training.get("commit"):
+        # Same code, same lock file, same command, same seed: the recipe in full. What it does
+        # not promise is the same weights — GPU RL is not bit-reproducible across machines.
+        clone_dir = Path(training["repo"].rstrip("/")).name.removesuffix(".git")
+        lines += [
+            "",
+            "## Reproduce",
+            "",
+            "Same code, same `uv.lock`, same command, same seed. Training it again yields a "
+            "comparable policy, not the same weights: GPU reinforcement learning is not "
+            "bit-reproducible across machines.",
+            "",
+            "```bash",
+            f"git clone {training['repo']}",
+            f"cd {clone_dir}",
+            f"git checkout {training['commit']}",
+            "uv sync",
+            "uv run " + " ".join(shlex.quote(str(a)) for a in training["command"]),
+            "```",
+        ]
     return "\n".join(lines) + "\n"
 
 
