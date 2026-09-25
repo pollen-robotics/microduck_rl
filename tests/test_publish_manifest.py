@@ -401,6 +401,7 @@ def fake_mjlab(monkeypatch, tmp_path):
         calls.append((task, Path(checkpoint).name))
         return _tiny_policy(out)
 
+    monkeypatch.setattr(cli, "_load_registry", lambda: None)
     monkeypatch.setattr(cli, "_export_checkpoint", _export)
     monkeypatch.setattr(cli, "_accessories_of_task", lambda task: ("rollers",) if "Roller" in task else ())
     return calls
@@ -455,6 +456,7 @@ def test_publish_run_of_a_library_task_needs_kind_and_reads_accessories(tmp_path
     with pytest.raises(SystemExit):
         run(PublishConfig(repo="alice/microduck-glide", run=str(run_dir), dry_run=True))
     assert "--kind" in capsys.readouterr().err
+    assert fake_mjlab == [], "refused before any export"
     assert run(PublishConfig(repo="alice/microduck-glide", run=str(run_dir), kind="perpetual", slot="walk",
                              dry_run=True)) == 0
     manifest = json.loads((tmp_path / "publish-glide" / "manifest.json").read_text())
@@ -493,6 +495,19 @@ def test_publish_run_names_the_fork_that_holds_the_commit(tmp_path, monkeypatch,
     training = json.loads((tmp_path / "fork" / "publish-sprint" / "manifest.json").read_text())["training"]
     owner = "alice" if contained else "pollen-robotics"
     assert training["repo"] == f"https://github.com/{owner}/microduck-challenges"
+
+
+def test_publish_task_of_a_library_task_needs_kind_before_the_export(tmp_path, monkeypatch, fake_mjlab, capsys):
+    from mjlab_microduck.publish import cli
+
+    exports = []
+    monkeypatch.setattr(cli, "_resolve_weights", lambda cfg, workdir: exports.append(cfg.task))
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        cli.run(cli.PublishConfig(repo="alice/microduck-glide", task="Mjlab-Velocity-Flat-MicroDuck",
+                                  checkpoint_file=str(tmp_path / "model_1.pt"), dry_run=True))
+    assert "--kind is required" in capsys.readouterr().err
+    assert exports == [], "refused before any export"
 
 
 def test_publish_run_picks_the_asked_checkpoint(tmp_path, monkeypatch, fake_mjlab, sprint_challenge):

@@ -130,6 +130,20 @@ def _pick_checkpoint(run_dir: Path, iteration: int | None) -> Path:
     return found[-1]
 
 
+def _load_registry() -> None:
+    """Import mjlab's tasks, which registers ours and the challenges they belong to; tests stand it in."""
+    import mjlab.tasks  # noqa: F401
+
+
+def _kind(cfg: PublishConfig, task: str | None) -> str:
+    """--kind, else the kind of the registered challenge `task` belongs to."""
+    found = ch.for_task(task) if task else None
+    kind = cfg.kind or (found.kind if found else None)
+    if kind is None:
+        _fail("--kind is required (episodic or perpetual) unless the task belongs to a registered challenge")
+    return kind
+
+
 def _export_checkpoint(task: str, checkpoint: Path, out: Path, device: str | None) -> Path:
     """The one call that needs mjlab and torch; tests stand it in."""
     import mjlab.tasks  # noqa: F401  (populates the registry, and the challenge registry with it)
@@ -173,6 +187,8 @@ def _resolve_run(cfg: PublishConfig, workdir: Path) -> tuple[Path, dict, Path]:
     task = cfg.task or record.get("task")
     if not task:
         _fail("provenance.json names no task; pass --task <id>")
+    _load_registry()
+    _kind(cfg, task)  # refuse before the export, not after it
     checkpoint = _pick_checkpoint(run_dir, cfg.checkpoint)
     onnx_path = _export_checkpoint(task, checkpoint, workdir / m.POLICY_FILE, cfg.device)
     training: dict = {k: record[k] for k in _RECIPE_KEYS if k in record}
@@ -241,15 +257,16 @@ def run(cfg: PublishConfig) -> int:
         if cfg.run is not None:
             onnx_path, training, checkpoint = _resolve_run(cfg, workdir)
         else:
+            if cfg.task is not None and cfg.onnx is None:
+                _load_registry()
+                _kind(cfg, cfg.task)  # refuse before the export, not after it
             onnx_path, training = _resolve_weights(cfg, workdir)
 
         # The task's contract, when it is a challenge's: kind and event come from its
         # challenge.toml (registered when mjlab imported the task), not from flags.
         task_id = training.get("task_id")
         found = ch.for_task(task_id) if task_id else None
-        kind = cfg.kind or (found.kind if found else None)
-        if kind is None:
-            _fail("--kind is required (episodic or perpetual) unless the task belongs to a registered challenge")
+        kind = _kind(cfg, task_id)
         accessories = tuple(cfg.accessories) if cfg.onnx is not None else _accessories_of_task(task_id)
 
         shape = m.check_onnx(onnx_path)
