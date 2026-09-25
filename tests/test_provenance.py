@@ -50,6 +50,16 @@ def test_a_modified_tracked_file_is_dirty(repo):
     assert provenance.checkout(repo)["dirty"] is True
 
 
+def test_credentials_in_the_origin_are_not_recorded(repo):
+    _git(repo, "remote", "set-url", "origin", "https://alice:ghp_x@github.com/alice/microduck-challenges")
+    assert provenance.checkout(repo)["repo"] == "https://github.com/alice/microduck-challenges"
+
+
+def test_an_ssh_origin_is_recorded_as_is(repo):
+    _git(repo, "remote", "set-url", "origin", "git@example.com:alice/microduck-challenges.git")
+    assert provenance.checkout(repo)["repo"] == "git@example.com:alice/microduck-challenges.git"
+
+
 def test_no_origin_records_no_repo(repo):
     _git(repo, "remote", "remove", "origin")
     got = provenance.checkout(repo)

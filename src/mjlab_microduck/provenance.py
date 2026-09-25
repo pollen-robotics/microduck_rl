@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 FILE = "provenance.json"
 JOB_ENV = "MICRODUCK_PROVENANCE"
@@ -37,6 +38,14 @@ def _git(root: Path, *args: str) -> str | None:
     return out.stdout.strip()
 
 
+def _public(remote: str) -> str:
+    """`remote` without the credentials an `https://user:token@host/…` URL carries."""
+    parts = urlsplit(remote)
+    if parts.scheme in ("http", "https") and "@" in parts.netloc:
+        return urlunsplit(parts._replace(netloc=parts.netloc.rpartition("@")[2]))
+    return remote  # `git@host:path` and the like name a key, not a secret
+
+
 def checkout(cwd: Path | None = None) -> dict[str, Any]:
     """`repo`, `commit`, `branch`, `dirty` of the checkout at `cwd`; `{}` outside git."""
     root = Path(cwd or Path.cwd())
@@ -50,7 +59,7 @@ def checkout(cwd: Path | None = None) -> dict[str, Any]:
     }
     remote = _git(root, "remote", "get-url", "origin")
     if remote:
-        record["repo"] = remote
+        record["repo"] = _public(remote)
     return record
 
 
