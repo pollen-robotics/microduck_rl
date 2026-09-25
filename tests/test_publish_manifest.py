@@ -264,3 +264,48 @@ def test_the_cli_dry_run_writes_a_repo(tmp_path, monkeypatch):
     assert manifest["training"]["source_file"] == "out.onnx"
     assert "commit" in manifest["training"], "git provenance is filled from the checkout"
     assert "robotctl policy add bow someone/microduck-bow" in (out / "README.md").read_text()
+
+
+def _manifest_with_training(training: dict) -> dict:
+    return m.build_manifest(
+        name="sprint", kind="perpetual", description="Walks fast.", slot="walk", training=training
+    )
+
+
+def test_the_readme_reproduces_a_recorded_run():
+    readme = m.render_readme(_manifest_with_training({
+        "task_id": "Mjlab-Sprint2m-MicroDuck",
+        "repo": "https://github.com/alice/microduck-challenges",
+        "commit": "3f9c2d1ab",
+        "branch": "main",
+        "dirty": False,
+        "command": ["train", "Mjlab-Sprint2m-MicroDuck", "--env.scene.num-envs", "4096", "--agent.seed", "7"],
+        "seed": 7,
+        "base": "mjlab-microduck 0.1.0 @ 8a1b2c3d4",
+        "started": "2026-09-25T10:00:00Z",
+    }), "alice/microduck-sprint")
+    assert "## Reproduce" in readme
+    assert "git clone https://github.com/alice/microduck-challenges" in readme
+    assert "cd microduck-challenges" in readme
+    assert "git checkout 3f9c2d1ab" in readme
+    assert "uv run train Mjlab-Sprint2m-MicroDuck --env.scene.num-envs 4096 --agent.seed 7" in readme
+    assert "comparable policy, not the same weights" in readme
+    assert "- **seed**: `7`" in readme
+    assert "- **base**: `mjlab-microduck 0.1.0 @ 8a1b2c3d4`" in readme
+
+
+def test_no_reproduce_block_without_a_commit():
+    """A run trained outside git (an HF Jobs tarball) has a command but nothing to check out."""
+    readme = m.render_readme(_manifest_with_training({
+        "task_id": "T", "command": ["train", "T"], "seed": 1,
+    }), "alice/microduck-sprint")
+    assert "## Reproduce" not in readme
+    assert "- **seed**: `1`" in readme
+
+
+def test_a_readme_without_a_command_is_unchanged():
+    """The existing publish paths never set `command`; their README must not grow a block."""
+    readme = m.render_readme(_manifest_with_training({
+        "task_id": "T", "repo": "pollen-robotics/microduck_rl", "commit": "abc", "branch": "develop", "dirty": False,
+    }), "alice/microduck-sprint")
+    assert "## Reproduce" not in readme
