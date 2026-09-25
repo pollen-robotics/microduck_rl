@@ -7116,6 +7116,11 @@ def reset_roulade_state(
     # never had the chance to earn would keep their landing gate shut forever).
     # Standing spawns must earn it by actually rolling over the head.
     env._roulade_head_latch[env_ids] = is_mid
+    # Spawn heading — the roulade sprint pays progress along it (the Arena's
+    # lane runs along the robot's starting heading).
+    if not hasattr(env, "_roulade_spawn_yaw"):
+        env._roulade_spawn_yaw = torch.zeros(env.num_envs, device=env.device)
+    env._roulade_spawn_yaw[env_ids] = yaw
 
 
 def roulade_progress(
@@ -7389,3 +7394,93 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# ==============================================================================
+# Roulade sprint — roll forward endlessly, as fast as the Arena allows
+# ==============================================================================
+#
+# The microduck-arena `sprint-2m` event only times trunk displacement along the
+# lane, and calls a run a fall once the trunk has been tipped past 60°
+# (projected gravity z > -0.5) for 0.3 s straight — 15 control steps at 50 Hz.
+# One step back inside 60° resets that count. So a roll is legal as long as
+# every inverted phase (60° → 300°, i.e. 240° of pitch) is crossed in under
+# 0.3 s: ≥ ~14 rad/s while tipped. These terms copy that rule into training.
+#
+# Per-env state (created lazily, reset by reset_tipped_run):
+#   env._sprint_tipped — consecutive control steps spent tipped past the limit
+
+ARENA_FALL_GRAVITY_Z = -0.5   # arena/events/sprint-2m.toml [termination]
+ARENA_FALL_HOLD_STEPS = 15    # fall_hold_s 0.3 s at 50 Hz
+
+
+def _tipped_run(env: ManagerBasedRlEnv, asset: Entity, gravity_z_max: float) -> torch.Tensor:
+    """Consecutive tipped steps per env, updated once per control step."""
+    if not hasattr(env, "_sprint_tipped"):
+        env._sprint_tipped = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+        env._sprint_tipped_step = -1
+    step = int(env.common_step_counter)
+    if step != env._sprint_tipped_step:
+        g_z = torch.nan_to_num(asset.data.projected_gravity_b[:, 2], nan=0.0)
+        tipped = g_z > gravity_z_max
+        env._sprint_tipped = (env._sprint_tipped + 1) * tipped.long()
+        env._sprint_tipped_step = step
+    return env._sprint_tipped
+
+
+def reset_tipped_run(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+):
+    """Zero the tipped-run count of the envs being reset."""
+    if env_ids is None or len(env_ids) == 0:
+        return
+    asset: Entity = env.scene[asset_cfg.name]
+    _tipped_run(env, asset, ARENA_FALL_GRAVITY_Z)
+    env._sprint_tipped[env_ids.to(env.device, dtype=torch.long)] = 0
+
+
+def tipped_run_exceeded(
+    env: ManagerBasedRlEnv,
+    max_steps: int = ARENA_FALL_HOLD_STEPS,
+    gravity_z_max: float = ARENA_FALL_GRAVITY_Z,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Termination: tipped for max_steps in a row — the Arena's fall."""
+    asset: Entity = env.scene[asset_cfg.name]
+    return _tipped_run(env, asset, gravity_z_max) >= max_steps
+
+
+def tipped_run_penalty(
+    env: ManagerBasedRlEnv,
+    grace_steps: int = 5,
+    max_steps: int = ARENA_FALL_HOLD_STEPS,
+    gravity_z_max: float = ARENA_FALL_GRAVITY_Z,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """((run − grace) / (max − grace))² clipped to [0, 1] — positive, use a
+    negative weight. Free for a quick inversion, rising toward the fall."""
+    asset: Entity = env.scene[asset_cfg.name]
+    run = _tipped_run(env, asset, gravity_z_max).float()
+    x = torch.clamp((run - grace_steps) / max(max_steps - grace_steps, 1), 0.0, 1.0)
+    return x.pow(2)
+
+
+def heading_progress_velocity(
+    env: ManagerBasedRlEnv,
+    max_vel: float = 1.5,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """World trunk velocity along the spawn heading, clipped to ±max_vel.
+
+    Reads env._roulade_spawn_yaw (written by reset_roulade_state): the Arena
+    measures progress along the lane, which is the robot's starting heading.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    yaw = getattr(env, "_roulade_spawn_yaw", None)
+    if yaw is None:
+        yaw = torch.zeros(env.num_envs, device=env.device)
+    v = asset.data.root_link_lin_vel_w
+    along = v[:, 0] * torch.cos(yaw) + v[:, 1] * torch.sin(yaw)
+    return torch.clamp(torch.nan_to_num(along, nan=0.0), -max_vel, max_vel)

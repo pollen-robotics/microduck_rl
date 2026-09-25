@@ -75,6 +75,10 @@ from .microduck_roulade_env_cfg import (
     make_microduck_roulade_env_cfg,
     MicroduckRouladeRlCfg,
 )
+from .microduck_roulade_sprint_env_cfg import (
+    make_microduck_roulade_sprint_env_cfg,
+    MicroduckRouladeSprintRlCfg,
+)
 from .backlash import make_backlash_variant
 
 # Standard velocity task
@@ -230,6 +234,15 @@ register_mjlab_task(
     env_cfg=make_microduck_roulade_env_cfg(),
     play_env_cfg=make_microduck_roulade_env_cfg(play=True),
     rl_cfg=MicroduckRouladeRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Roulade sprint — roll forward endlessly for the Arena's 2 m sprint.
+register_mjlab_task(
+    task_id="Mjlab-RouladeSprint-Flat-MicroDuck",
+    env_cfg=make_microduck_roulade_sprint_env_cfg(),
+    play_env_cfg=make_microduck_roulade_sprint_env_cfg(play=True),
+    rl_cfg=MicroduckRouladeSprintRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
