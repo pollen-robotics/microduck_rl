@@ -81,6 +81,16 @@ def test_no_origin_records_no_repo(repo):
     assert "repo" not in got and got["commit"]
 
 
+def test_remote_names_a_remote_without_its_credentials(repo, tmp_path):
+    _git(repo, "remote", "add", "upstream", "https://bot:ghp_x@github.com/pollen-robotics/microduck-challenges")
+    assert provenance.remote(repo, "upstream") == "https://github.com/pollen-robotics/microduck-challenges"
+    assert provenance.remote(repo, "origin") == "https://github.com/alice/microduck-challenges"
+    assert provenance.remote(repo, "missing") is None
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    assert provenance.remote(outside, "origin") is None
+
+
 def test_contains_knows_the_commits_in_the_history(repo, tmp_path):
     first = _git(repo, "rev-parse", "HEAD")
     (repo / "env.py").write_text("")

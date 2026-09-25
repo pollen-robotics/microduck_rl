@@ -178,12 +178,18 @@ def _resolve_run(cfg: PublishConfig, workdir: Path) -> tuple[Path, dict, Path]:
             f"{record.get('commit')} is not the code that trained it. Commit and train again, "
             "or --allow-dirty to publish it as is."
         )
-    # Forked after training: the checkout publishing still holds the commit, so the recipe names
-    # the fork the owner can point people at, not the upstream it was cloned from.
-    if record.get("commit") and provenance.contains(Path.cwd(), record["commit"]):
-        origin = provenance.checkout(Path.cwd()).get("repo")
-        if origin:
-            record["repo"] = origin
+    # Forked after training (`gh repo fork --remote`: origin = the fork, upstream = the repo the
+    # run recorded): the recipe names the fork the owner can point people at. Only then — a run
+    # recorded on a fork whose PR was merged upstream is in upstream's history too, and must
+    # never be re-attributed to whichever checkout publishes it.
+    origin = provenance.remote(Path.cwd(), "origin")
+    if (
+        record.get("repo")
+        and record["repo"] == provenance.remote(Path.cwd(), "upstream")
+        and origin and origin != record["repo"]
+        and record.get("commit") and provenance.contains(Path.cwd(), record["commit"])
+    ):
+        record["repo"] = origin
     task = cfg.task or record.get("task")
     if not task:
         _fail("provenance.json names no task; pass --task <id>")

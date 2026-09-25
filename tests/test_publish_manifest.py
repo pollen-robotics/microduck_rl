@@ -463,8 +463,12 @@ def test_publish_run_of_a_library_task_needs_kind_and_reads_accessories(tmp_path
     assert manifest["robot"]["accessories"] == ["rollers"] and "arena" not in manifest
 
 
-def _fork(root: Path) -> str:
-    """A git checkout whose origin is alice's fork; returns its HEAD commit."""
+_ALICE = "https://github.com/alice/microduck-challenges"
+_POLLEN = "https://github.com/pollen-robotics/microduck-challenges"
+
+
+def _checkout(root: Path, **remotes: str) -> str:
+    """A one-commit git checkout with the given remotes; returns its HEAD commit."""
     import subprocess
 
     def git(*args):
@@ -474,27 +478,34 @@ def _fork(root: Path) -> str:
     root.mkdir()
     git("init", "-q", "-b", "main")
     git("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "first")
-    git("remote", "add", "origin", "https://github.com/alice/microduck-challenges")
+    for name, url in remotes.items():
+        git("remote", "add", name, url)
     return git("rev-parse", "--short=9", "HEAD")
 
 
-@pytest.mark.parametrize("contained", [True, False])
-def test_publish_run_names_the_fork_that_holds_the_commit(tmp_path, monkeypatch, fake_mjlab, sprint_challenge,
-                                                          contained):
-    """Trained on a clone of Pollen's repo, forked afterwards: the recipe points at the fork."""
+@pytest.mark.parametrize("remotes, recorded, contained, published", [
+    # Trained on a clone of Pollen's repo, forked afterwards with `gh repo fork --remote`.
+    ({"origin": _ALICE, "upstream": _POLLEN}, _POLLEN, True, _ALICE),
+    # ... but the checkout does not hold the recorded commit.
+    ({"origin": _ALICE, "upstream": _POLLEN}, _POLLEN, False, _POLLEN),
+    # Trained on Alice's fork, her PR merged upstream, published from a plain upstream checkout.
+    ({"origin": _POLLEN}, _ALICE, True, _ALICE),
+    # No upstream remote: nothing says the recorded repo is what this checkout was forked from.
+    ({"origin": _ALICE}, _POLLEN, True, _POLLEN),
+])
+def test_publish_run_names_the_fork_only_when_forked_after_training(
+        tmp_path, monkeypatch, fake_mjlab, sprint_challenge, remotes, recorded, contained, published):
     from mjlab_microduck.publish.cli import PublishConfig, run
 
-    head = _fork(tmp_path / "fork")
+    head = _checkout(tmp_path / "work", **remotes)
     run_dir = _run_dir(tmp_path)
     record = json.loads((run_dir / "provenance.json").read_text())
-    record |= {"repo": "https://github.com/pollen-robotics/microduck-challenges",
-               "commit": head if contained else "3f9c2d1ab"}
+    record |= {"repo": recorded, "commit": head if contained else "3f9c2d1ab"}
     (run_dir / "provenance.json").write_text(json.dumps(record))
-    monkeypatch.chdir(tmp_path / "fork")
+    monkeypatch.chdir(tmp_path / "work")
     assert run(PublishConfig(repo="alice/microduck-sprint", run=str(run_dir), dry_run=True)) == 0
-    training = json.loads((tmp_path / "fork" / "publish-sprint" / "manifest.json").read_text())["training"]
-    owner = "alice" if contained else "pollen-robotics"
-    assert training["repo"] == f"https://github.com/{owner}/microduck-challenges"
+    training = json.loads((tmp_path / "work" / "publish-sprint" / "manifest.json").read_text())["training"]
+    assert training["repo"] == published
 
 
 def test_publish_task_of_a_library_task_needs_kind_before_the_export(tmp_path, monkeypatch, fake_mjlab, capsys):

@@ -38,6 +38,12 @@ def _git(root: Path, *args: str) -> str | None:
     return out.stdout.strip()
 
 
+def remote(cwd: Path | None, name: str) -> str | None:
+    """The URL of the checkout's `name` remote, credentials stripped; None without one."""
+    url = _git(Path(cwd or Path.cwd()), "remote", "get-url", name)
+    return _public(url) if url else None
+
+
 def _public(remote: str) -> str:
     """`remote` without the credentials an `https://user:token@host/…` URL carries."""
     parts = urlsplit(remote)
@@ -57,9 +63,9 @@ def checkout(cwd: Path | None = None) -> dict[str, Any]:
         "branch": _git(root, "rev-parse", "--abbrev-ref", "HEAD"),
         "dirty": bool(_git(root, "status", "--porcelain")),
     }
-    remote = _git(root, "remote", "get-url", "origin")
-    if remote:
-        record["repo"] = _public(remote)
+    origin = remote(root, "origin")
+    if origin:
+        record["repo"] = origin
     return record
 
 
