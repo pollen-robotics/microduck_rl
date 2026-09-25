@@ -111,3 +111,31 @@ def test_read_names_the_missing_file(tmp_path):
         provenance.read(tmp_path / "run")
     provenance.record_run_start(tmp_path / "run", argv=["train", "T"], seed=3, cwd=tmp_path)
     assert provenance.read(tmp_path / "run")["seed"] == 3
+
+
+def test_runner_records_only_when_invoked_as_train(tmp_path, monkeypatch):
+    """The hook is a one-liner in the runner; check it by calling the same helper the runner does."""
+    import sys
+
+    from mjlab_microduck.tasks import _record_if_training
+
+    log_dir = tmp_path / "run"
+    monkeypatch.setattr(sys, "argv", ["/v/bin/play", "Mjlab-Velocity-Flat-MicroDuck"])
+    _record_if_training(str(log_dir), {"seed": 4})
+    assert not (log_dir / provenance.FILE).exists(), "play must not write a run's provenance"
+
+    monkeypatch.setattr(sys, "argv", ["/v/bin/train", "Mjlab-Velocity-Flat-MicroDuck"])
+    _record_if_training(None, {"seed": 4})
+    assert not (log_dir / provenance.FILE).exists(), "export builds the runner with no log_dir"
+
+    _record_if_training(str(log_dir), {"seed": 4})
+    assert provenance.read(log_dir)["seed"] == 4
+
+
+def test_the_runner_calls_the_hook():
+    """`MicroduckOnPolicyRunner.__init__` is what every task registers; the hook must sit there."""
+    import inspect
+
+    from mjlab_microduck.tasks import MicroduckOnPolicyRunner
+
+    assert "_record_if_training(log_dir, train_cfg)" in inspect.getsource(MicroduckOnPolicyRunner.__init__)
