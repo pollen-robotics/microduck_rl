@@ -144,7 +144,7 @@ def test_an_episodic_manifest_is_a_loadable_skill():
     m.validate_manifest(built)
     assert built["schema_version"] == 2
     assert (built["obs_len"], built["action_len"], built["model_api"]) == (61, 14, 1)
-    assert built["robot"] == m.ROBOT
+    assert built["robot"] == {**m.ROBOT, "accessories": []}
     assert built["command"]["encoding"] == "constant"
     assert built["command"]["idle"] == [0.0, 0.0, 0.0]
     assert built["duration_s"] == 4.0 and built["chain"] is False
@@ -309,3 +309,39 @@ def test_a_readme_without_a_command_is_unchanged():
         "task_id": "T", "repo": "pollen-robotics/microduck_rl", "commit": "abc", "branch": "develop", "dirty": False,
     }), "alice/microduck-sprint")
     assert "## Reproduce" not in readme
+
+
+def test_accessories_are_read_from_the_robot_model():
+    import mujoco
+
+    bare = mujoco.MjSpec()
+    bare.add_mesh().name = "left_shell"
+    assert m.accessories_of(bare) == ()
+    wheeled = mujoco.MjSpec()
+    wheeled.add_mesh().name = "left_shell"
+    wheeled.add_mesh().name = "roller_blade"
+    assert m.accessories_of(wheeled) == ("rollers",)
+
+
+def test_the_manifest_says_what_the_robot_wears():
+    manifest = m.build_manifest(name="glide", kind="perpetual", description="Glides.", slot="walk",
+                                accessories=("rollers",), arena={"event": "roller-sprint-2m"})
+    assert manifest["robot"]["accessories"] == ["rollers"]
+    assert manifest["robot"]["model"] == "microduck", "the daemon refuses any other model name"
+    assert manifest["arena"] == {"event": "roller-sprint-2m"}
+    m.validate_manifest(manifest)
+    plain = m.build_manifest(name="walk", kind="perpetual", description="Walks.", slot="walk")
+    assert plain["robot"]["accessories"] == [] and "arena" not in plain
+    assert "on rollers" in m.render_readme(manifest, "alice/microduck-glide")
+    assert "on rollers" not in m.render_readme(plain, "alice/microduck-walk")
+
+
+def test_an_unknown_accessory_is_refused():
+    manifest = m.build_manifest(name="ski", kind="perpetual", description="Skis.", slot="walk")
+    manifest["robot"]["accessories"] = ["skis"]
+    with pytest.raises(m.ManifestError, match="skis"):
+        m.validate_manifest(manifest)
+
+
+def test_absence_of_accessories_is_not_evidence():
+    m.validate_manifest(FLAMINGO)  # the community manifest predates the field
