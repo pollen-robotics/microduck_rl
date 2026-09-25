@@ -331,6 +331,13 @@ def test_accessories_are_read_from_the_robot_model():
     assert m.accessories_of(wheeled) == ("rollers",)
 
 
+def test_accessories_are_read_from_the_real_robot_specs():
+    from mjlab_microduck.robot.microduck_constants import get_walk_rollers_spec, get_walk_spec
+
+    assert m.accessories_of(get_walk_spec()) == ()
+    assert m.accessories_of(get_walk_rollers_spec()) == ("rollers",)
+
+
 def test_the_manifest_says_what_the_robot_wears():
     manifest = m.build_manifest(name="glide", kind="perpetual", description="Glides.", slot="walk",
                                 accessories=("rollers",), arena={"event": "roller-sprint-2m"})

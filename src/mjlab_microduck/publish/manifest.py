@@ -36,7 +36,8 @@ ACCESSORIES: tuple[str, ...] = ("rollers",)
 
 def accessories_of(spec) -> tuple[str, ...]:
     """`("rollers",)` when the MjSpec carries the passive wheels' mesh, else `()`."""
-    if any(mesh.name.startswith("roller") for mesh in spec.meshes):
+    # An uncompiled spec names a `<mesh file="roller_blade.stl"/>` only by its file.
+    if any((mesh.name or Path(mesh.file).stem).startswith("roller") for mesh in spec.meshes):
         return ("rollers",)
     return ()
 
