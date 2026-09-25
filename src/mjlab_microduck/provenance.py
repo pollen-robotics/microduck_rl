@@ -55,7 +55,7 @@ def checkout(cwd: Path | None = None) -> dict[str, Any]:
     record: dict[str, Any] = {
         "commit": commit,
         "branch": _git(root, "rev-parse", "--abbrev-ref", "HEAD"),
-        "dirty": bool(_git(root, "status", "--porcelain", "--untracked-files=no")),
+        "dirty": bool(_git(root, "status", "--porcelain")),
     }
     remote = _git(root, "remote", "get-url", "origin")
     if remote:

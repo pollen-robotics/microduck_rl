@@ -50,6 +50,21 @@ def test_a_modified_tracked_file_is_dirty(repo):
     assert provenance.checkout(repo)["dirty"] is True
 
 
+def test_an_untracked_file_is_dirty(repo):
+    """A new env.py nobody committed trains too; the commit alone would not reproduce it."""
+    (repo / "env.py").write_text("")
+    assert provenance.checkout(repo)["dirty"] is True
+
+
+def test_an_ignored_file_is_not_dirty(repo):
+    (repo / ".gitignore").write_text("logs/\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-q", "-m", "ignore logs")
+    (repo / "logs").mkdir()
+    (repo / "logs" / "model_1.pt").write_text("")
+    assert provenance.checkout(repo)["dirty"] is False
+
+
 def test_credentials_in_the_origin_are_not_recorded(repo):
     _git(repo, "remote", "set-url", "origin", "https://alice:ghp_x@github.com/alice/microduck-challenges")
     assert provenance.checkout(repo)["repo"] == "https://github.com/alice/microduck-challenges"
