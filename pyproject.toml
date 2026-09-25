@@ -55,6 +55,7 @@ train = "mjlab_microduck.train_cli:main"
 duck-body = "mjlab_microduck.sim.body_server:main"
 publish = "mjlab_microduck.publish.cli:main"
 infer = "mjlab_microduck.infer:main"
+microduck = "mjlab_microduck.cli:main"
 [tool.ruff]
 src = ["src"]  # Helpful for recognizing first-party imports.
 indent-width = 4

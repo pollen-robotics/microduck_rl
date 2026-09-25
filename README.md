@@ -46,6 +46,10 @@ uv run scripts/infer_policy.py --walking output.onnx
 # or: uv run infer --walking output.onnx
 ```
 
+The same tools answer to one name, `microduck train`, `microduck play`, `microduck list-envs`,
+`microduck export`, `microduck publish`, `microduck infer` — and `microduck check --onnx out.onnx`
+runs the checks `publish` applies, without uploading. Both spellings stay.
+
 Resume from a checkpoint:
 
 ```bash
