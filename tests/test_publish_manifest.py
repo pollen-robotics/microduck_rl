@@ -254,7 +254,7 @@ def test_a_constant_network_fails_the_smoke_run(tmp_path):
         m.smoke_run_onnx(path)
 
 
-def test_the_cli_dry_run_writes_a_repo(tmp_path, monkeypatch):
+def test_the_cli_dry_run_writes_a_repo(tmp_path, monkeypatch, capsys):
     """End to end without the Hub or a GPU: an ONNX in, the three repo files out."""
     from mjlab_microduck.publish.cli import PublishConfig, run
 
@@ -272,6 +272,7 @@ def test_the_cli_dry_run_writes_a_repo(tmp_path, monkeypatch):
     assert manifest["training"]["source_file"] == "out.onnx"
     assert "commit" in manifest["training"], "git provenance is filled from the checkout"
     assert "robotctl policy add bow someone/microduck-bow" in (out / "README.md").read_text()
+    assert f"dry run: wrote {out}/ (policy.onnx, manifest.json, README.md)\n" in capsys.readouterr().out
 
 
 def _manifest_with_training(training: dict) -> dict:
@@ -419,7 +420,8 @@ def sprint_challenge(tmp_path, monkeypatch):
     return ch.register(folder / "tasks.py")
 
 
-def test_publish_run_needs_only_the_repo_for_a_challenge(tmp_path, monkeypatch, fake_mjlab, sprint_challenge):
+def test_publish_run_needs_only_the_repo_for_a_challenge(tmp_path, monkeypatch, fake_mjlab, sprint_challenge,
+                                                        capsys):
     from mjlab_microduck.publish.cli import PublishConfig, run
 
     run_dir = _run_dir(tmp_path)
@@ -442,6 +444,7 @@ def test_publish_run_needs_only_the_repo_for_a_challenge(tmp_path, monkeypatch, 
     assert training["checkpoint"] == 250 and training["source_file"] == "model_250.pt"
     readme = (out / "README.md").read_text()
     assert "## Reproduce" in readme and "git checkout 3f9c2d1ab" in readme
+    assert "(policy.onnx, manifest.json, README.md, checkpoint.pt)" in capsys.readouterr().out
 
 
 def test_publish_run_of_a_library_task_needs_kind_and_reads_accessories(tmp_path, monkeypatch, fake_mjlab, capsys):

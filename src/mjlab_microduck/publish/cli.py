@@ -290,7 +290,8 @@ def run(cfg: PublishConfig) -> int:
             if dest.exists():
                 shutil.rmtree(dest)
             shutil.copytree(staged, dest)
-            print(f"[publish] dry run: wrote {dest}/ ({', '.join(sorted(p.name for p in dest.iterdir()))})")
+            extra = ", checkpoint.pt" if checkpoint is not None else ""
+            print(f"[publish] dry run: wrote {dest}/ (policy.onnx, manifest.json, README.md{extra})")
             return 0
 
         from huggingface_hub import HfApi
