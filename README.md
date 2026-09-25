@@ -258,6 +258,40 @@ Only constant-command policies are publishable this way. Phase-driven moves
 (the ground pick) and the posture-flag sit↔stand are driven by the daemon
 itself and live in the official set, `pollen-robotics/microduck-policies`.
 
+## Using this package from another repo
+
+`microduck-challenges` (and any repo that trains a microduck) depends on this one as a git
+dependency and gets every tool above. Four things a dependent repo has to do, because uv
+applies `[tool.uv]` tables only to the project it reads them in:
+
+1. **Depend on it**, and copy this repo's `[tool.uv.sources]` and
+   `[tool.uv] override-dependencies` tables verbatim into your `pyproject.toml`. They pin
+   BAM's git branch, keep protobuf and onnx on versions with wheels, and bind torch to the
+   CUDA index on ARM; none of that reaches you transitively.
+
+   ```toml
+   dependencies = ["mjlab-microduck @ git+https://github.com/pollen-robotics/microduck_rl"]
+   ```
+
+2. **Register your tasks** the way `src/mjlab_microduck/tasks/__init__.py` does, with
+   `runner_cls=MicroduckOnPolicyRunner` (that runner is what writes `provenance.json`), and
+   declare your package under `[project.entry-points."mjlab.tasks"]` so `microduck train
+   <your task>` finds it.
+
+3. **Describe a challenge** in a `challenge.toml` beside its `tasks.py` and `env.py`
+   (`event`, `task`, `kind`, `[recipe]`, `[params.<name>]`); `tasks.py` calls
+   `mjlab_microduck.challenge.register(__file__)` and `env.py` reads its knobs with
+   `mjlab_microduck.challenge.params(__file__)`. `microduck publish --run <dir> --repo …`
+   then needs nothing else: kind, Arena event and accessories come from the task.
+
+4. **Import the robot, never copy it.** `MICRODUCK_WALK_ROBOT_CFG` and its roller and
+   backlash variants, the BAM actuators and `tasks/mdp.py` are the library; a challenge's
+   `env.py` builds its own observations, rewards, terminations and randomisation on top of
+   them, the way `microduck_velocity_env_cfg.py` does here.
+
+`train … --hf-jobs` works from such a checkout too: the tarball is your repo, and the job
+resolves your lock file.
+
 ## Tests
 
 ```bash
