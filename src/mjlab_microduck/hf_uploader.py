@@ -1,6 +1,6 @@
 """Checkpoint uploader run inside an HF Job.
 
-Watches `logs/rsl_rl/**/model_*.pt` and uploads new/updated files to the
+Watches `logs/rsl_rl/**/model_*.pt` (with the run's params and `provenance.json`) and uploads new/updated files to the
 target HF Model repo. Run as `python -m mjlab_microduck.hf_uploader` from the job bootstrap
 (a module, because the job's tarball may be a dependent repo with no scripts/ of ours), with
 auth coming from the HF_TOKEN secret injected by `hf jobs run`. `scripts/hf/uploader.py` still
@@ -15,6 +15,15 @@ import time
 from pathlib import Path
 
 from huggingface_hub import HfApi, CommitOperationAdd
+
+
+def _watched(root: Path) -> list[Path]:
+    """The checkpoints, the dumped configs and the provenance `publish --run` needs."""
+    files = list(root.glob("**/model_*.pt"))
+    files += root.glob("**/params/*.yaml")
+    files += root.glob("**/params/*.json")
+    files += root.glob("**/provenance.json")
+    return files
 
 
 def main() -> int:
@@ -36,10 +45,7 @@ def main() -> int:
     sent: dict[Path, float] = {}
     while True:
         try:
-            files = list(root.glob("**/model_*.pt"))
-            # also pick up the dumped configs once
-            files += [p for p in root.glob("**/params/*.yaml")]
-            files += [p for p in root.glob("**/params/*.json")]
+            files = _watched(root)
 
             to_upload: list[CommitOperationAdd] = []
             for f in files:

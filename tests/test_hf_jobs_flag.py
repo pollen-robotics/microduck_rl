@@ -224,6 +224,17 @@ def test_the_uploader_is_a_module_and_the_script_delegates():
     assert "from mjlab_microduck.hf_uploader import main" in shim
 
 
+def test_the_uploader_pushes_what_publish_run_reads(tmp_path):
+    """A cloud run pulled back into logs/ must carry its provenance, or `publish --run` refuses it."""
+    from mjlab_microduck.hf_uploader import _watched
+
+    for name in ("run/model_10.pt", "run/params/env.yaml", "run/provenance.json", "run/other.txt"):
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text("x")
+    watched = {p.relative_to(tmp_path).as_posix() for p in _watched(tmp_path)}
+    assert watched == {"run/model_10.pt", "run/params/env.yaml", "run/provenance.json"}
+
+
 def test_the_uploader_module_refuses_to_run_without_a_repo():
     env = {k: v for k, v in os.environ.items() if k != "CKPT_REPO"}
     proc = subprocess.run(
