@@ -191,6 +191,11 @@ and a README saying how to run it. Anyone with a microduck can then install it
 with one command, no daemon release needed.
 
 ```bash
+# From a local run — kind and Arena event from the challenge's challenge.toml, the recipe
+# (commit, command, seed) from the run's provenance.json, the latest checkpoint exported and
+# uploaded next to policy.onnx. A library task (no challenge) still takes --kind.
+uv run publish --run logs/rsl_rl/sprint/2026-09-25_10-00-00_first --repo <user>/microduck-sprint
+
 # From a wandb run — exports through the one safe path, then uploads
 uv run publish --task Mjlab-PoliteBow-Flat-MicroDuck \
     --wandb-run-path <entity/project/run_id> --checkpoint 3000 \
@@ -235,6 +240,14 @@ and refuses NaNs or a constant output, fills the `training` block from git and
 wandb (task, commit, branch, dirty flag, run, checkpoint), and refuses to
 overwrite an existing `.onnx` in the repo without `--force`. Repos are created
 private; `--no-private` for public, `--tag v1` to tag the revision.
+
+Every `uv run train` writes `provenance.json` into its log directory: the command, the seed,
+the commit, branch and dirty flag of the checkout it ran in, and this package's version.
+`publish --run` puts that in the manifest's `training` block and ends the model card with a
+*Reproduce* section. A run started on a dirty tree is refused (`--allow-dirty` to override):
+the published recipe should be the code that trained. `robot.accessories` says what the
+robot wore (`["rollers"]` for the roller tasks), read from the task's model; give
+`--accessories rollers` with `--onnx`.
 
 Only constant-command policies are publishable this way. Phase-driven moves
 (the ground pick) and the posture-flag sit↔stand are driven by the daemon

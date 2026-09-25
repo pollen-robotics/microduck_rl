@@ -345,3 +345,175 @@ def test_an_unknown_accessory_is_refused():
 
 def test_absence_of_accessories_is_not_evidence():
     m.validate_manifest(FLAMINGO)  # the community manifest predates the field
+
+
+# -- publish --run ------------------------------------------------------------------------------
+
+
+def _run_dir(tmp_path: Path, *, dirty: bool = False, iterations=(100, 250), with_checkout: bool = True,
+             task: str = "Mjlab-Sprint2m-MicroDuck") -> Path:
+    """A finished local run: provenance from `train`, two checkpoints."""
+    run = tmp_path / "logs" / "rsl_rl" / "sprint" / "2026-09-25_10-00-00_first"
+    run.mkdir(parents=True)
+    record = {
+        "command": ["train", task, "--agent.seed", "7"],
+        "task": task,
+        "seed": 7,
+        "base": "mjlab-microduck 0.1.0",
+        "started": "2026-09-25T10:00:00Z",
+    }
+    if with_checkout:
+        record |= {
+            "repo": "https://github.com/alice/microduck-challenges",
+            "commit": "3f9c2d1ab", "branch": "main", "dirty": dirty,
+        }
+    (run / "provenance.json").write_text(json.dumps(record))
+    for n in iterations:
+        (run / f"model_{n}.pt").write_bytes(b"checkpoint %d" % n)
+    return run
+
+
+@pytest.fixture
+def fake_mjlab(monkeypatch, tmp_path):
+    """Stand in for the GPU export and the registry: records what was asked, writes a tiny policy,
+    says the sprint task's robot wears nothing and the roller task's wears rollers."""
+    from mjlab_microduck.publish import cli
+
+    calls = []
+
+    def _export(task, checkpoint, out, device):
+        calls.append((task, Path(checkpoint).name))
+        return _tiny_policy(out)
+
+    monkeypatch.setattr(cli, "_export_checkpoint", _export)
+    monkeypatch.setattr(cli, "_accessories_of_task", lambda task: ("rollers",) if "Roller" in task else ())
+    return calls
+
+
+@pytest.fixture
+def sprint_challenge(tmp_path, monkeypatch):
+    from mjlab_microduck import challenge as ch
+
+    monkeypatch.setattr(ch, "_REGISTRY", {})
+    folder = tmp_path / "sprint_2m"
+    folder.mkdir()
+    (folder / "challenge.toml").write_text(
+        'event = "sprint-2m"\ntask = "Mjlab-Sprint2m-MicroDuck"\nkind = "perpetual"\n'
+    )
+    (folder / "tasks.py").write_text("")
+    return ch.register(folder / "tasks.py")
+
+
+def test_publish_run_needs_only_the_repo_for_a_challenge(tmp_path, monkeypatch, fake_mjlab, sprint_challenge):
+    from mjlab_microduck.publish.cli import PublishConfig, run
+
+    run_dir = _run_dir(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert run(PublishConfig(repo="alice/microduck-sprint", run=str(run_dir), dry_run=True)) == 0
+    assert fake_mjlab == [("Mjlab-Sprint2m-MicroDuck", "model_250.pt")], "latest checkpoint by default"
+    out = tmp_path / "publish-sprint"
+    assert (out / "policy.onnx").exists()
+    assert (out / "checkpoint.pt").read_bytes() == b"checkpoint 250"
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["kind"] == "perpetual", "from the challenge, not a flag"
+    assert manifest["arena"] == {"event": "sprint-2m"}
+    assert manifest["robot"]["accessories"] == []
+    training = manifest["training"]
+    assert training["repo"] == "https://github.com/alice/microduck-challenges"
+    assert training["commit"] == "3f9c2d1ab"
+    assert training["command"] == ["train", "Mjlab-Sprint2m-MicroDuck", "--agent.seed", "7"]
+    assert training["seed"] == 7 and training["base"] == "mjlab-microduck 0.1.0"
+    assert training["task_id"] == "Mjlab-Sprint2m-MicroDuck"
+    assert training["checkpoint"] == 250 and training["source_file"] == "model_250.pt"
+    readme = (out / "README.md").read_text()
+    assert "## Reproduce" in readme and "git checkout 3f9c2d1ab" in readme
+
+
+def test_publish_run_of_a_library_task_needs_kind_and_reads_accessories(tmp_path, monkeypatch, fake_mjlab, capsys):
+    from mjlab_microduck.publish.cli import PublishConfig, run
+
+    run_dir = _run_dir(tmp_path, task="Mjlab-Velocity-Flat-MicroDuck-Rollers")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        run(PublishConfig(repo="alice/microduck-glide", run=str(run_dir), dry_run=True))
+    assert "--kind" in capsys.readouterr().err
+    assert run(PublishConfig(repo="alice/microduck-glide", run=str(run_dir), kind="perpetual", slot="walk",
+                             dry_run=True)) == 0
+    manifest = json.loads((tmp_path / "publish-glide" / "manifest.json").read_text())
+    assert manifest["robot"]["accessories"] == ["rollers"] and "arena" not in manifest
+
+
+def test_publish_run_picks_the_asked_checkpoint(tmp_path, monkeypatch, fake_mjlab, sprint_challenge):
+    from mjlab_microduck.publish.cli import PublishConfig, run
+
+    run_dir = _run_dir(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert run(PublishConfig(repo="alice/microduck-sprint", run=str(run_dir), checkpoint=100, dry_run=True)) == 0
+    assert fake_mjlab == [("Mjlab-Sprint2m-MicroDuck", "model_100.pt")]
+    assert (tmp_path / "publish-sprint" / "checkpoint.pt").read_bytes() == b"checkpoint 100"
+
+
+def test_a_dirty_run_is_refused_unless_allowed(tmp_path, monkeypatch, fake_mjlab, sprint_challenge, capsys):
+    from mjlab_microduck.publish.cli import PublishConfig, run
+
+    run_dir = _run_dir(tmp_path, dirty=True)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        run(PublishConfig(repo="alice/microduck-sprint", run=str(run_dir), dry_run=True))
+    assert "uncommitted changes" in capsys.readouterr().err
+    assert fake_mjlab == [], "refused before any export"
+    assert run(PublishConfig(repo="alice/microduck-sprint", run=str(run_dir), dry_run=True, allow_dirty=True)) == 0
+    assert json.loads((tmp_path / "publish-sprint" / "manifest.json").read_text())["training"]["dirty"] is True
+
+
+def test_missing_checkpoint_is_named(tmp_path, monkeypatch, fake_mjlab, sprint_challenge, capsys):
+    from mjlab_microduck.publish.cli import PublishConfig, run
+
+    run_dir = _run_dir(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        run(PublishConfig(repo="alice/microduck-sprint", run=str(run_dir), checkpoint=999, dry_run=True))
+    assert "model_999.pt" in capsys.readouterr().err
+    assert fake_mjlab == []
+
+
+def test_a_run_without_checkpoints_is_refused(tmp_path, monkeypatch, fake_mjlab, sprint_challenge, capsys):
+    from mjlab_microduck.publish.cli import PublishConfig, run
+
+    run_dir = _run_dir(tmp_path, iterations=())
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        run(PublishConfig(repo="alice/microduck-sprint", run=str(run_dir), dry_run=True))
+    assert "no model_<N>.pt" in capsys.readouterr().err
+
+
+def test_a_run_trained_outside_git_publishes_without_a_recipe(tmp_path, monkeypatch, fake_mjlab, sprint_challenge):
+    from mjlab_microduck.publish.cli import PublishConfig, run
+
+    run_dir = _run_dir(tmp_path, with_checkout=False)
+    monkeypatch.chdir(tmp_path)
+    assert run(PublishConfig(repo="alice/microduck-sprint", run=str(run_dir), dry_run=True)) == 0
+    training = json.loads((tmp_path / "publish-sprint" / "manifest.json").read_text())["training"]
+    assert "commit" not in training and training["command"][0] == "train"
+    assert "## Reproduce" not in (tmp_path / "publish-sprint" / "README.md").read_text()
+
+
+def test_run_is_a_source_of_its_own(tmp_path, monkeypatch, fake_mjlab, sprint_challenge, capsys):
+    from mjlab_microduck.publish.cli import PublishConfig, run
+
+    run_dir = _run_dir(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        run(PublishConfig(repo="alice/microduck-sprint", run=str(run_dir), onnx="x.onnx", dry_run=True))
+    assert "--run" in capsys.readouterr().err
+
+
+def test_an_onnx_publish_takes_accessories_from_the_flag(tmp_path, monkeypatch):
+    from mjlab_microduck.publish.cli import PublishConfig, run
+
+    policy = _tiny_policy(tmp_path / "out.onnx")
+    monkeypatch.chdir(tmp_path)
+    assert run(PublishConfig(repo="someone/microduck-glide", kind="perpetual", slot="walk", onnx=str(policy),
+                             accessories=("rollers",), dry_run=True)) == 0
+    manifest = json.loads((tmp_path / "publish-glide" / "manifest.json").read_text())
+    assert manifest["robot"]["accessories"] == ["rollers"]
