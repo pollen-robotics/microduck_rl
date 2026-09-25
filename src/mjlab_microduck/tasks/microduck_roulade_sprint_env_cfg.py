@@ -16,6 +16,13 @@ TIPPED_TERMINATION_STEPS, a margin under the Arena's 15.
 The Arena feeds the sweep's forward command (0.20–1.20 m/s) into the twist
 slot, so the command is sampled over that range to keep the obs in
 distribution. The policy is free to ignore it.
+
+Run 1 (checkpoints 250/500, scored in the Arena) learned a forward-leaning
+run, not a roll, and failed two ways: a flip attempt tipped 16 steps (a
+fall), and a slow left turn walked it into the lane wall (two timeouts —
+training has no walls, and at 35° off course the progress reward still paid
+82%). Run 2: heading-error and lateral-offset penalties keep it on the lane's
+centre line, and the tipped cutoff tightens 12 → 8 steps.
 """
 
 from dataclasses import replace
@@ -34,8 +41,8 @@ from mjlab_microduck.tasks.microduck_roulade_env_cfg import (
 EPISODE_LENGTH_S = 8.0
 
 # Tipped-run shaping against the Arena's 15-step fall.
-GRACE_STEPS = 5
-TIPPED_TERMINATION_STEPS = 12
+GRACE_STEPS = 3
+TIPPED_TERMINATION_STEPS = 8
 
 # Arena sprint-2m sweep: [sweep] lo / hi.
 ARENA_COMMAND_RANGE = (0.20, 1.20)
@@ -76,6 +83,15 @@ def make_microduck_roulade_sprint_env_cfg(play: bool = False) -> ManagerBasedRlE
         weight=-2.0,
         params={"grace_steps": GRACE_STEPS, "max_steps": TIPPED_TERMINATION_STEPS},
     )
+    # Stay on the lane: the Arena's walls are 0.4 m either side of the start.
+    cfg.rewards["heading_error"] = RewardTermCfg(
+        func=microduck_mdp.heading_error_penalty,
+        weight=-4.0,
+    )
+    cfg.rewards["lateral_offset"] = RewardTermCfg(
+        func=microduck_mdp.lateral_offset_penalty,
+        weight=-10.0,
+    )
     cfg.rewards["terminated"] = RewardTermCfg(
         func=is_terminated,
         weight=-20.0,
@@ -92,6 +108,11 @@ def make_microduck_roulade_sprint_env_cfg(play: bool = False) -> ManagerBasedRlE
     cfg.events["set_roulade_state"].params["midroll_omega_range"] = MIDROLL_OMEGA_RANGE
     cfg.events["reset_tipped_run"] = EventTermCfg(
         func=microduck_mdp.reset_tipped_run,
+        mode="reset",
+    )
+    # After reset_base and set_roulade_state, which place the root.
+    cfg.events["record_spawn_position"] = EventTermCfg(
+        func=microduck_mdp.record_spawn_position,
         mode="reset",
     )
 

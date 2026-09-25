@@ -1,3 +1,4 @@
+import math
 from types import SimpleNamespace
 
 import torch
@@ -16,6 +17,14 @@ def test_cfg_drops_the_single_roll_task():
     assert cfg.rewards["heading_progress"].weight > 0.0
     assert cfg.rewards["tipped_run"].weight < 0.0
     assert cfg.rewards["terminated"].weight < 0.0
+    assert cfg.rewards["heading_error"].weight < 0.0
+    assert cfg.rewards["lateral_offset"].weight < 0.0
+
+
+def test_spawn_position_is_recorded_after_the_root_is_placed():
+    events = list(make_microduck_roulade_sprint_env_cfg().events)
+    assert events.index("record_spawn_position") > events.index("reset_base")
+    assert events.index("record_spawn_position") > events.index("set_roulade_state")
 
 
 def test_termination_keeps_a_margin_under_the_arena_fall():
@@ -66,3 +75,33 @@ def test_reset_clears_the_run():
         _step(env, asset, [1.0, 1.0])
     microduck_mdp.reset_tipped_run(env, torch.tensor([1]))
     assert env._sprint_tipped.tolist() == [10, 0]
+
+
+def _pose_env(yaw, spawn_yaw, pos, spawn_xy):
+    q = torch.tensor([[math.cos(a / 2), 0.0, 0.0, math.sin(a / 2)] for a in yaw])
+    data = SimpleNamespace(root_link_quat_w=q, root_link_pos_w=torch.tensor(pos))
+    env = SimpleNamespace(
+        num_envs=len(yaw),
+        device="cpu",
+        scene={"robot": SimpleNamespace(data=data)},
+        _roulade_spawn_yaw=torch.tensor(spawn_yaw),
+        _roulade_spawn_xy=torch.tensor(spawn_xy),
+    )
+    return env
+
+
+def test_heading_error_is_relative_to_the_spawn_heading():
+    half = math.pi / 2
+    env = _pose_env([half, half + half, -math.pi + 0.01], [half, half, math.pi - 0.01],
+                    [[0.0, 0.0, 0.1]] * 3, [[0.0, 0.0]] * 3)
+    err = microduck_mdp.heading_error_penalty(env)
+    assert torch.allclose(err, torch.tensor([0.0, 1.0, 0.0002]), atol=1e-3)
+
+
+def test_lateral_offset_ignores_progress_along_the_heading():
+    # Spawn facing +y at (1, 1): moving along y is progress, along x is drift.
+    half = math.pi / 2
+    env = _pose_env([half, half], [half, half],
+                    [[1.0, 3.0, 0.1], [1.3, 1.0, 0.1]], [[1.0, 1.0], [1.0, 1.0]])
+    off = microduck_mdp.lateral_offset_penalty(env)
+    assert torch.allclose(off, torch.tensor([0.0, 0.09]), atol=1e-6)

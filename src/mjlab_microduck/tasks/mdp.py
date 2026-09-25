@@ -7484,3 +7484,51 @@ def heading_progress_velocity(
     v = asset.data.root_link_lin_vel_w
     along = v[:, 0] * torch.cos(yaw) + v[:, 1] * torch.sin(yaw)
     return torch.clamp(torch.nan_to_num(along, nan=0.0), -max_vel, max_vel)
+
+
+def record_spawn_position(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+):
+    """Record the trunk's spawn xy — the start of the Arena lane's centre line.
+
+    Must run after the events that place the root (dict insertion order).
+    """
+    if env_ids is None or len(env_ids) == 0:
+        return
+    if not hasattr(env, "_roulade_spawn_xy"):
+        env._roulade_spawn_xy = torch.zeros(env.num_envs, 2, device=env.device)
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    env._roulade_spawn_xy[env_ids] = env.sim.data.qpos[env_ids, 0:2]
+
+
+def heading_error_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """1 − cos(yaw − spawn yaw): 0 on course, 1 at 90°. Positive, use a
+    negative weight. The body-frame lateral-velocity penalty cannot see a
+    robot that turned and runs straight in its new direction; this can."""
+    asset: Entity = env.scene[asset_cfg.name]
+    q = asset.data.root_link_quat_w
+    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+    yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    spawn = getattr(env, "_roulade_spawn_yaw", torch.zeros_like(yaw))
+    return torch.nan_to_num(1.0 - torch.cos(yaw - spawn), nan=0.0)
+
+
+def lateral_offset_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """(world distance from the spawn heading line)² in m². Positive, use a
+    negative weight. The Arena's lane walls sit 0.4 m either side of it."""
+    asset: Entity = env.scene[asset_cfg.name]
+    pos = asset.data.root_link_pos_w[:, 0:2]
+    spawn_xy = getattr(env, "_roulade_spawn_xy", None)
+    if spawn_xy is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    yaw = getattr(env, "_roulade_spawn_yaw", torch.zeros(env.num_envs, device=env.device))
+    d = pos - spawn_xy
+    lateral = -d[:, 0] * torch.sin(yaw) + d[:, 1] * torch.cos(yaw)
+    return torch.nan_to_num(lateral.pow(2), nan=0.0)
