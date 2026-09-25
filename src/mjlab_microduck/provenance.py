@@ -54,6 +54,11 @@ def checkout(cwd: Path | None = None) -> dict[str, Any]:
     return record
 
 
+def contains(cwd: Path | None, commit: str) -> bool:
+    """Whether the checkout at `cwd` has `commit` in its history (its HEAD descends from it)."""
+    return _git(Path(cwd or Path.cwd()), "merge-base", "--is-ancestor", commit, "HEAD") is not None
+
+
 def _from_job() -> dict[str, Any]:
     raw = os.environ.get(JOB_ENV)
     return json.loads(raw) if raw else {}

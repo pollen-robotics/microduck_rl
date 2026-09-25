@@ -458,6 +458,40 @@ def test_publish_run_of_a_library_task_needs_kind_and_reads_accessories(tmp_path
     assert manifest["robot"]["accessories"] == ["rollers"] and "arena" not in manifest
 
 
+def _fork(root: Path) -> str:
+    """A git checkout whose origin is alice's fork; returns its HEAD commit."""
+    import subprocess
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                              check=True).stdout.strip()
+
+    root.mkdir()
+    git("init", "-q", "-b", "main")
+    git("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "first")
+    git("remote", "add", "origin", "https://github.com/alice/microduck-challenges")
+    return git("rev-parse", "--short=9", "HEAD")
+
+
+@pytest.mark.parametrize("contained", [True, False])
+def test_publish_run_names_the_fork_that_holds_the_commit(tmp_path, monkeypatch, fake_mjlab, sprint_challenge,
+                                                          contained):
+    """Trained on a clone of Pollen's repo, forked afterwards: the recipe points at the fork."""
+    from mjlab_microduck.publish.cli import PublishConfig, run
+
+    head = _fork(tmp_path / "fork")
+    run_dir = _run_dir(tmp_path)
+    record = json.loads((run_dir / "provenance.json").read_text())
+    record |= {"repo": "https://github.com/pollen-robotics/microduck-challenges",
+               "commit": head if contained else "3f9c2d1ab"}
+    (run_dir / "provenance.json").write_text(json.dumps(record))
+    monkeypatch.chdir(tmp_path / "fork")
+    assert run(PublishConfig(repo="alice/microduck-sprint", run=str(run_dir), dry_run=True)) == 0
+    training = json.loads((tmp_path / "fork" / "publish-sprint" / "manifest.json").read_text())["training"]
+    owner = "alice" if contained else "pollen-robotics"
+    assert training["repo"] == f"https://github.com/{owner}/microduck-challenges"
+
+
 def test_publish_run_picks_the_asked_checkpoint(tmp_path, monkeypatch, fake_mjlab, sprint_challenge):
     from mjlab_microduck.publish.cli import PublishConfig, run
 

@@ -56,6 +56,19 @@ def test_no_origin_records_no_repo(repo):
     assert "repo" not in got and got["commit"]
 
 
+def test_contains_knows_the_commits_in_the_history(repo, tmp_path):
+    first = _git(repo, "rev-parse", "HEAD")
+    (repo / "env.py").write_text("")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "second")
+    assert provenance.contains(repo, first)
+    assert provenance.contains(repo, first[:9])
+    assert not provenance.contains(repo, "0123456789abcdef0123456789abcdef01234567")
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    assert not provenance.contains(outside, first)
+
+
 def test_outside_git_records_no_checkout(tmp_path, monkeypatch):
     monkeypatch.delenv(provenance.JOB_ENV, raising=False)
     assert provenance.checkout(tmp_path) == {}

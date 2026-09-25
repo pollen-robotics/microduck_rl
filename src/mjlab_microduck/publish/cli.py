@@ -164,6 +164,12 @@ def _resolve_run(cfg: PublishConfig, workdir: Path) -> tuple[Path, dict, Path]:
             f"{record.get('commit')} is not the code that trained it. Commit and train again, "
             "or --allow-dirty to publish it as is."
         )
+    # Forked after training: the checkout publishing still holds the commit, so the recipe names
+    # the fork the owner can point people at, not the upstream it was cloned from.
+    if record.get("commit") and provenance.contains(Path.cwd(), record["commit"]):
+        origin = provenance.checkout(Path.cwd()).get("repo")
+        if origin:
+            record["repo"] = origin
     task = cfg.task or record.get("task")
     if not task:
         _fail("provenance.json names no task; pass --task <id>")
