@@ -9,7 +9,6 @@ motor-converted model). These tests lock the two halves together:
   stiff friction constraint) and a step loop runs with a live friction budget.
 """
 
-import importlib.util
 from pathlib import Path
 
 import mujoco
@@ -21,11 +20,9 @@ REPO = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(scope="module")
 def ip():
-    spec = importlib.util.spec_from_file_location(
-        "infer_policy", REPO / "scripts" / "infer_policy.py"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    import importlib
+
+    mod = importlib.import_module("mjlab_microduck.infer")
     return mod
 
 

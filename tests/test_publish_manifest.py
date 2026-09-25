@@ -97,6 +97,14 @@ def test_publish_is_a_declared_script():
     assert scripts["publish"] == "mjlab_microduck.publish.cli:main"
 
 
+def test_infer_is_a_declared_script():
+    """A challenges checkout has no scripts/ of ours; the rehearsal must be reachable as `uv run infer`."""
+    pyproject = tomllib.loads((_ROOT / "pyproject.toml").read_text())
+    assert pyproject["project"]["scripts"].get("infer") == "mjlab_microduck.infer:main"
+    shim = (_ROOT / "scripts" / "infer_policy.py").read_text()
+    assert "from mjlab_microduck.infer import main" in shim
+
+
 # -- both shapes validate ----------------------------------------------------------------------
 
 

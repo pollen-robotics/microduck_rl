@@ -43,6 +43,7 @@ uv run publish --onnx output.onnx --repo <user>/microduck-<name> --kind episodic
 
 # drive the exported policy in CPU MuJoCo with the keyboard
 uv run scripts/infer_policy.py --walking output.onnx
+# or: uv run infer --walking output.onnx
 ```
 
 Resume from a checkpoint:

@@ -18,7 +18,7 @@ model instead of a hand-typed bbox:
 frame and keep the lowest triangle hit. Left and right soles are mirror images
 so each foot gets its own points.
 
-Writes scripts/odom_anchor_sets.json (consumed by infer_policy.py) and, with
+Writes src/mjlab_microduck/odom_anchor_sets.json (consumed by infer.py) and, with
 --rust, the `anchors.rs` module of the microduck odometry crate.
 """
 import argparse
@@ -31,7 +31,7 @@ import numpy as np
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SCENE = os.path.join(REPO, "src/mjlab_microduck/robot/microduck/scene.xml")
-DEFAULT_JSON = os.path.join(REPO, "scripts/odom_anchor_sets.json")
+DEFAULT_JSON = os.path.join(REPO, "src/mjlab_microduck/odom_anchor_sets.json")
 
 V15_HALF_LEN = 0.0270
 V15_HALF_WIDTH = 0.0206
