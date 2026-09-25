@@ -12,8 +12,6 @@ import sys
 import tomllib
 from pathlib import Path
 
-import pytest
-
 from mjlab_microduck import cli
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +49,7 @@ def test_the_hooks_see_train(monkeypatch):
 
     verdict = []
     monkeypatch.setattr(mjlab.scripts.train, "main", lambda: verdict.append(_invoked_as_train()) or 0)
+    monkeypatch.setattr(sys, "argv", ["/v/bin/microduck", "train", "T"])
     cli.main(["train", "T"])
     assert verdict == [True]
 
@@ -109,6 +108,17 @@ def test_check_validates_a_manifest(tmp_path, capsys):
     bad.write_text(json.dumps({"obs_len": 51}))
     assert run(CheckConfig(manifest=str(bad))) == 2
     assert "obs_len" in capsys.readouterr().err
+
+
+def test_check_names_an_unreadable_manifest(tmp_path, capsys):
+    from mjlab_microduck.publish.check import CheckConfig, run
+
+    broken = tmp_path / "manifest.json"
+    broken.write_text("{not json")
+    assert run(CheckConfig(manifest=str(broken))) == 2
+    assert "[check] error:" in capsys.readouterr().err
+    assert run(CheckConfig(manifest=str(tmp_path))) == 2
+    assert "[check] error:" in capsys.readouterr().err
 
 
 def test_check_with_nothing_to_check_says_so(capsys):

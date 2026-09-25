@@ -18,6 +18,7 @@ import tyro
 
 from mjlab_microduck import provenance
 from mjlab_microduck.publish import manifest as m
+from mjlab_microduck.publish.cli import _pick_checkpoint
 
 
 @dataclass(frozen=True)
@@ -48,9 +49,6 @@ def run(cfg: CheckConfig) -> int:
                 m.smoke_run_onnx(Path(cfg.onnx))
                 print("[check] smoke run: finite, non-constant output")
         if cfg.run:
-            # Imported here: cli.py pulls tyro's PublishConfig, which check need not pay for.
-            from mjlab_microduck.publish.cli import _pick_checkpoint
-
             run_dir = Path(cfg.run)
             record = provenance.read(run_dir)
             checkpoint = _pick_checkpoint(run_dir, None)
@@ -61,7 +59,7 @@ def run(cfg: CheckConfig) -> int:
         if cfg.manifest:
             m.validate_manifest(json.loads(Path(cfg.manifest).read_text()))
             print(f"[check] {Path(cfg.manifest).name}: the daemon would load it")
-    except (m.ManifestError, FileNotFoundError) as e:
+    except (m.ManifestError, FileNotFoundError, IsADirectoryError, json.JSONDecodeError) as e:
         return _fail(str(e))
     except SystemExit as e:  # _pick_checkpoint fails through publish's _fail
         return int(e.code or 2)
