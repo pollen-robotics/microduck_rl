@@ -1,7 +1,7 @@
 # The policy export contract
 
-A microduck policy is one `.onnx` file produced by `mjlab_microduck.export.run_export`, the path
-both `scripts/export.py` and `uv run publish` take. The robot's daemon
+A microduck policy is one `.onnx` file produced by `run_export`, behind `uv run
+scripts/export.py <TASK_ID>`. The robot's daemon
 ([`pollen-robotics/microduck`](https://github.com/pollen-robotics/microduck)) runs it against the
 facts below, and reads the `microduck` metadata key to check them.
 
