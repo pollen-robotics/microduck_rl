@@ -12,7 +12,7 @@ policy that worked in the viewer and failed on hardware.
 
 ```bash
 uv run list-envs                                    # live task registry
-uv run train <TASK_ID> --env.scene.num-envs 4096    # train (add --hf-jobs for Hugging Face Jobs)
+uv run train <TASK_ID> --env.scene.num-envs 4096    # train (add --modal for Modal, --hf-jobs for HF Jobs)
 uv run train <TASK_ID> --env.scene.num-envs 64 --agent.max_iterations 5   # SMOKE TEST — always run first
 uv run play <TASK_ID> --wandb-run-path <entity/project/run_id>
 uv run scripts/export.py <TASK_ID> --wandb-run-path <...>   # → ONNX (bakes obs normalizer — mandatory path)

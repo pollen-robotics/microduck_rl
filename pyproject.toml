@@ -107,3 +107,8 @@ name = "pytorch-cu129"
 url = "https://download.pytorch.org/whl/cu129"
 # explicit: only packages that name this index resolve from it.
 explicit = true
+
+[dependency-groups]
+dev = [
+    "modal>=1.0",
+]

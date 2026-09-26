@@ -52,8 +52,9 @@ uv run train Mjlab-Velocity-Flat-MicroDuck --env.scene.num-envs 4096 \
     --agent.run-name resume --agent.load-checkpoint model_29999.pt --agent.resume True
 ```
 
-No GPU? Add `--hf-jobs` to any train command to run it on Hugging Face Jobs
-instead of locally (see [scripts/hf/README.md](scripts/hf/README.md)).
+No GPU? Add `--modal` to any train command to run it on
+[Modal](https://modal.com) (see [scripts/modal/README.md](scripts/modal/README.md)),
+or `--hf-jobs` for Hugging Face Jobs (see [scripts/hf/README.md](scripts/hf/README.md)).
 
 ## Tasks
 
@@ -155,8 +156,9 @@ src/mjlab_microduck/
 │   ├── backlash.py                   # make_backlash_variant() env-cfg wrapper
 │   └── microduck_*_env_cfg.py        # one cfg module per task family
 ├── train_cli.py                      # `train` script (identical to mjlab's)
-├── train_hook.py                     # intercepts `train ... --hf-jobs`
-└── hf_jobs.py                        # Hugging Face Jobs submission
+├── train_hook.py                     # intercepts `train ... --hf-jobs` / `--modal`
+├── hf_jobs.py                        # Hugging Face Jobs submission
+└── modal_jobs.py                     # Modal submission
 ```
 
 Conventions worth knowing:
