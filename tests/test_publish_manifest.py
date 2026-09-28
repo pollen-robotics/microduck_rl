@@ -188,6 +188,60 @@ def test_a_name_is_a_bare_word():
         m.build_manifest(name="user/thing", kind="episodic", description="d", duration_s=1.0)
 
 
+def test_servos_default_to_the_xl330_robot():
+    """Every policy published so far is an XL330 one; the default must not move."""
+    built = m.build_manifest(name="bow", kind="episodic", description="d", duration_s=4.0)
+    assert built["robot"] == m.ROBOT
+    assert built["robot"]["servos"] == m.SERVOS_XL330
+
+
+def test_an_hd1910_policy_says_which_servo_it_was_fitted_to():
+    """The HD-1910 tasks swap the actuator model, so the weights belong to that servo.
+
+    `servos` is the only field in the manifest that names the hardware the policy is valid on;
+    if it stays `xl330` the repo uploads clean, validates, and is wrong on the robot.
+    """
+    built = m.build_manifest(
+        name="walk", kind="perpetual", description="d", slot="walk", servos=m.SERVOS_HD1910
+    )
+    m.validate_manifest(built)
+    assert built["robot"]["servos"] == "hd1910"
+    # Only the servo claim moves: the rest of the robot block is shared.
+    assert {k: v for k, v in built["robot"].items() if k != "servos"} == {
+        k: v for k, v in m.ROBOT.items() if k != "servos"
+    }
+
+
+@pytest.mark.parametrize("bad", ["HD-1910", " hd1910", "hd1910 ", "HD1910"])
+def test_servos_must_be_a_bare_lowercase_word(bad):
+    with pytest.raises(m.ManifestError, match="servos"):
+        m.build_manifest(
+            name="x", kind="episodic", description="d", duration_s=1.0, servos=bad
+        )
+    # And a manifest that arrives from elsewhere with one is refused too.
+    manifest = m.build_manifest(name="x", kind="episodic", description="d", duration_s=1.0)
+    manifest["robot"] = {**manifest["robot"], "servos": bad}
+    with pytest.raises(m.ManifestError, match="servos"):
+        m.validate_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    "task_id, expected",
+    [
+        ("Mjlab-Velocity-Flat-MicroDuck-HD1910", m.SERVOS_HD1910),
+        ("Mjlab-Velocity-Rough-MicroDuck-HD1910", m.SERVOS_HD1910),
+        ("Mjlab-Velocity-Flat-MicroDuck", m.SERVOS_XL330),
+        ("Mjlab-Velocity-Flat-Backlash-MicroDuck", m.SERVOS_XL330),
+        (None, m.SERVOS_XL330),
+    ],
+)
+def test_the_publish_cli_reads_the_servos_off_the_task_id(task_id, expected):
+    """Publishing an HD-1910 run with no extra flag must still name the right hardware."""
+    from mjlab_microduck.publish import cli
+
+    assert cli._default_servos(task_id) == expected
+
+
 def test_a_gait_is_perpetual_with_nothing_to_unwind():
     """A walking policy is perpetual too, and goes in a slot — no hold, no unwind, no skill."""
     gait = m.build_manifest(name="my-walk", kind="perpetual", description="Walks.", slot="walk")

@@ -25,7 +25,13 @@ SCHEMA_VERSION = 2
 MODEL_API = 1
 OBS_LEN = 61
 ACTION_LEN = 14
+# `servos` is the DEFAULT hardware, not the only one: a policy trained on the Feetech HD-1910
+# swap says so (see `build_manifest(servos=...)` / `publish --servos`). It is a claim about the
+# robot the weights were fitted to, so it has to be true — a mislabelled repo is loaded onto the
+# wrong hardware and only fails later, on the bench.
 ROBOT: dict[str, Any] = {"model": "microduck", "hw_rev": 1, "servos": "xl330", "control_hz": 50}
+SERVOS_XL330 = "xl330"
+SERVOS_HD1910 = "hd1910"
 
 # The one `.onnx` a repo carries. The daemon takes the sole `.onnx` in a repo and refuses several.
 POLICY_FILE = "policy.onnx"
@@ -99,6 +105,7 @@ def build_manifest(
     entry_pose: str = "standing",
     slot: str | None = None,
     command_help: dict[str, Any] | None = None,
+    servos: str | None = None,
     training: dict[str, Any] | None = None,
     eval: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -141,6 +148,10 @@ def build_manifest(
         raise ManifestError(f"action_scale {action_scale} is outside (0, 2]")
     if len(idle) != 3:
         raise ManifestError("idle is a 3-vector twist")
+    if servos is not None and servos != servos.strip().lower():
+        raise ManifestError(
+            f"servos {servos!r}: a bare lowercase word, e.g. {SERVOS_XL330!r} or {SERVOS_HD1910!r}"
+        )
 
     command: dict[str, Any] = {
         "encoding": "constant",
@@ -157,7 +168,7 @@ def build_manifest(
         "model_api": MODEL_API,
         "obs_len": OBS_LEN,
         "action_len": ACTION_LEN,
-        "robot": dict(ROBOT),
+        "robot": {**ROBOT, "servos": servos or ROBOT["servos"]},
         "name": name,
         "kind": kind,
         "entry_pose": entry_pose,
@@ -203,6 +214,12 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     model = (manifest.get("robot") or {}).get("model")
     if model is not None and model.lower() != ROBOT["model"]:
         raise ManifestError(f"robot.model {model!r}: this is a {ROBOT['model']} policy repo")
+    servos = (manifest.get("robot") or {}).get("servos")
+    if servos is not None and servos != servos.strip().lower():
+        raise ManifestError(
+            f"robot.servos {servos!r}: a bare lowercase word, e.g. {SERVOS_XL330!r} or "
+            f"{SERVOS_HD1910!r}"
+        )
     kind = manifest.get("kind")
     if kind is not None and kind not in (*KINDS, "scripted"):
         raise ManifestError(f"kind {kind!r} is not one of episodic, perpetual, scripted")

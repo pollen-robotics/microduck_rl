@@ -69,6 +69,9 @@ class PublishConfig:
     """The policy's own output scale, if it wants one. Default: the gait's."""
     entry_pose: str = "standing"
     """The pose the policy expects to start from."""
+    servos: str | None = None
+    """What the weights were fitted to: `xl330` (default) or `hd1910`. Inferred from the task id
+    when the task is an HD-1910 one, so the usual publish command needs no extra flag."""
     twist_help: str | None = None
     """Prose for `command.twist` when the slots mean something (flamingo: '[flag, side, 0]')."""
 
@@ -140,6 +143,17 @@ def _default_name(repo: str) -> str:
     return stem.removeprefix("microduck-").removeprefix("microduck_") or stem
 
 
+def _default_servos(task_id: str | None) -> str:
+    """Which servos the weights were fitted to, read off the task id.
+
+    The HD-1910 tasks swap the actuator model (`microduck_hd1910_env_cfg`), so the policy is
+    fitted to that servo's dynamics and the manifest must say so. Inferred rather than required
+    because forgetting the flag is exactly the failure this guards against: the repo would carry
+    a plausible manifest that names the wrong hardware.
+    """
+    return m.SERVOS_HD1910 if task_id and "hd1910" in task_id.lower() else m.SERVOS_XL330
+
+
 def run(cfg: PublishConfig) -> int:
     if "/" not in cfg.repo:
         _fail("--repo must be `<user-or-org>/<name>`")
@@ -167,6 +181,7 @@ def run(cfg: PublishConfig) -> int:
             entry_pose=cfg.entry_pose,
             slot=cfg.slot,
             command_help=command_help,
+            servos=cfg.servos or _default_servos(training.get("task_id")),
             training=training,
         )
         m.validate_manifest(manifest)

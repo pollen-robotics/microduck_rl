@@ -26,17 +26,40 @@ MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene.xml"
 MICRODUCK_ROLLERS_XML = "src/mjlab_microduck/robot/microduck/scene_rollers.xml"
 MICRODUCK_BALL_XML = "src/mjlab_microduck/robot/microduck/scene_ball.xml"
 
-# BAM M6 defaults — MUST mirror `_BAM_ACTUATOR_KWARGS` in
-# src/mjlab_microduck/robot/microduck_constants.py (the actuator every policy is
-# trained against in warp). Not imported from there: that module drags in
+# BAM actuator presets — each MUST mirror the actuator its own policies were
+# trained against in warp. Not imported from those modules: they drag in
 # mjlab/torch/warp (~16 s import) for a CPU rehearsal script. Locked by
 # tests/test_infer_policy_bam.py.
-BAM_MOTOR_NAME = "xl330"
-BAM_MODEL = "m6"
-BAM_KP_FW = 200.0                 # microduck's preserved firmware stiffness
-BAM_VIN_RANGE = (6.5, 8.2)        # per-env battery voltage DR in training
-BAM_VIN_DROP_GAIN_RANGE = (0.0, 0.2)  # load-dependent sag V_drop = gain * sum|tau|
-BAM_VIN_MIN = 6.0                 # floor on effective voltage after sag
+#
+#   xl330  -> `_BAM_ACTUATOR_KWARGS` in src/mjlab_microduck/robot/microduck_constants.py
+#   hd1910 -> the FeetechBamActuatorCfg in tasks/microduck_hd1910_env_cfg.py
+#
+# An HD-1910 policy rehearsed with the xl330 preset is compared against the
+# WRONG actuator model and looks fine — that is the silent failure --motor
+# exists to prevent. The HD-1910 servo dynamics live in its JSON (provenance:
+# robot/hd1910/README.md); kp_fw and the voltage window are TRAINING settings
+# that are not in the JSON, so they are mirrored here.
+HD1910_MOTOR_JSON = "src/mjlab_microduck/robot/hd1910/1910_m6.json"
+
+BAM_PRESETS = {
+    "xl330": {
+        "motor_name": "xl330",
+        "model": "m6",
+        "kp_fw": 200.0,          # microduck's preserved firmware stiffness
+        "vin_range": (6.5, 8.2),  # per-env battery voltage DR in training
+        "vin_min": 6.0,          # floor on effective voltage after sag
+    },
+    "hd1910": {
+        # json_file and motor_name/model are mutually exclusive in BAM; the JSON
+        # carries its own `model`/`actuator` fields.
+        "json_path": HD1910_MOTOR_JSON,
+        "kp_fw": 5.0,            # upstream LuwuDynamics training gain (xl330: 200)
+        "vin_range": (7.4, 8.0),
+        "vin_min": 7.0,
+    },
+}
+# Shared by both presets: load-dependent sag V_drop = gain * sum|tau|.
+BAM_VIN_DROP_GAIN_RANGE = (0.0, 0.2)
 BAM_MAX_CURRENT = None            # training runs WITHOUT the firmware current limiter
 # Stiff joint-friction constraint, copied from bam.mjlab.BamActuator
 # (stiff_frictionloss=True in training): warp has no noslip solver, so BAM
@@ -45,14 +68,29 @@ BAM_MAX_CURRENT = None            # training runs WITHOUT the firmware current l
 BAM_STIFF_SOLREF_FRICTION = (-5.0e4, -2.0e2)
 BAM_STIFF_SOLIMP_FRICTION = (0.99, 0.9999, 0.001, 0.5, 2.0)
 
+# Default-preset aliases, kept for readability at the call sites below.
+BAM_MOTOR_NAME = BAM_PRESETS["xl330"]["motor_name"]
+BAM_MODEL = BAM_PRESETS["xl330"]["model"]
+BAM_KP_FW = BAM_PRESETS["xl330"]["kp_fw"]
+BAM_VIN_RANGE = BAM_PRESETS["xl330"]["vin_range"]
+BAM_VIN_MIN = BAM_PRESETS["xl330"]["vin_min"]
 
-def load_bam_model(kp_fw: float, vin: float, max_current):
-    """Build the BAM M6 model + XL330 voltage-controlled actuator."""
+
+def load_bam_model(kp_fw: float, vin: float, max_current, preset: dict = BAM_PRESETS["xl330"]):
+    """Build the BAM model + voltage-controlled actuator for `preset`."""
     from bam.model import load_model
-    bam_model = load_model(motor_name=BAM_MOTOR_NAME, model=BAM_MODEL)
+    if preset.get("json_path"):
+        bam_model = load_model(json_file=preset["json_path"])
+        source = preset["json_path"]
+    else:
+        bam_model = load_model(motor_name=preset["motor_name"], model=preset["model"])
+        source = f"{preset['motor_name']}/{preset['model']}"
     bam_model.actuator.kp = kp_fw
     bam_model.actuator.vin = vin
     bam_model.actuator.max_current = max_current if (max_current and max_current > 0) else None
+    # Name the parameter source in the log: rehearsing against the wrong servo
+    # model otherwise produces plausible-looking output with no indication.
+    print(f"BAM params: {source} (kp_fw={kp_fw}, vin={vin})")
     return bam_model
 
 
@@ -103,6 +141,37 @@ def load_mujoco_with_bam(xml_path: str, bam_model, timestep: float, vin_drop_gai
           f"max_current={bam_model.actuator.max_current} forcerange=+/-{force_limit:.3f}Nm "
           f"armature={bam_model.actuator.get_extra_inertia():.2e}")
     return model, data, bam_ctrl, names
+
+
+def seed_feetech_goal_history(bam_model, bam_ctrl) -> bool:
+    """Give BAM's Feetech goal rate-limiter a starting point (no-op otherwise).
+
+    ``STS3215Actuator.q_target_smooth`` — the history ``compute_control`` clamps
+    each new target against — is created only in ``load_log()``, which this CPU
+    path never calls. That is the same gap ``actuator/feetech_bam.py`` fills for
+    the training path; ``bam.mujoco.MujocoController.reset()`` seeds ``q_target``
+    but not this one, so the first ``update()`` raises AttributeError. Only the
+    Feetech actuator has this state, which is why the XL330 rehearsal never hit
+    it.
+
+    Detect by actuator TYPE, not by ``hasattr``: the attribute being absent is
+    the bug itself, so testing for it would skip exactly the case that needs the
+    seed.
+
+    Seed from the controller's freshly reset target (= the current joint
+    positions). Zeros are wrong: the limiter allows at most max_velocity*dt of
+    goal motion per step, so starting at 0 rad would slew every joint up from
+    zero instead of holding the initial pose.
+
+    Call after every ``bam_ctrl.reset(...)``. Returns True if it seeded anything.
+    """
+    from bam.feetech.actuator import STS3215Actuator
+
+    actuator = bam_model.actuator
+    if not isinstance(actuator, STS3215Actuator):
+        return False
+    actuator.q_target_smooth = np.array(bam_ctrl.q_target, dtype=float)
+    return True
 
 
 # Body pose command constants (must match training constants)
@@ -1200,19 +1269,30 @@ def main():
     parser.add_argument("--no-bam", action="store_true",
                         help="Use the XML MuJoCo position actuators instead of the BAM M6 "
                              "voltage/friction model the policies are trained against.")
+    parser.add_argument("--motor", choices=sorted(BAM_PRESETS), default="xl330",
+                        help="Actuator preset the policy was TRAINED against. Sets the servo "
+                             "parameter source (bundled xl330 model vs the HD-1910 JSON), the "
+                             "firmware P-gain and the voltage floor. Rehearsing an HD-1910 policy "
+                             "with the default xl330 preset silently compares the wrong model. "
+                             "(default: %(default)s)")
     parser.add_argument("--vin", type=float, default=7.4,
-                        help="BAM battery voltage [V]. Training samples per-env in "
-                             f"{BAM_VIN_RANGE}; 7.4 = nominal 2S LiPo.")
+                        help="BAM battery voltage [V]. Training samples per-env in the preset's "
+                             "vin_range (xl330: 6.5-8.2, hd1910: 7.4-8.0); 7.4 = nominal 2S LiPo.")
     parser.add_argument("--vin-drop-gain", type=float, default=0.1,
                         help="BAM load-dependent voltage sag gain [V/Nm], V = vin - gain*sum|tau|. "
                              f"Training samples per-env in {BAM_VIN_DROP_GAIN_RANGE}. 0 disables.")
-    parser.add_argument("--kp-fw", type=float, default=BAM_KP_FW,
-                        help="BAM firmware P-gain (training uses %(default)s).")
+    parser.add_argument("--vin-min", type=float, default=None,
+                        help="Floor on the effective voltage after sag [V] (default: the "
+                             "preset's value — xl330 6.0, hd1910 7.0).")
+    parser.add_argument("--kp-fw", type=float, default=None,
+                        help="BAM firmware P-gain (default: the preset's value — "
+                             "xl330 200.0, hd1910 5.0).")
     parser.add_argument("--current-limit", type=float, default=0.0,
-                        help="XL330 firmware current limit [A]. With BAM this is the duty-cycle "
-                             "limiter of the voltage model (as bam models it); with --no-bam the "
-                             "actuator force is clipped to +/- current_limit * kt. Training runs "
-                             "WITHOUT a current limit, so the default is off (<=0).")
+                        help="Firmware current limit [A] for the --motor preset's servo. With BAM "
+                             "this is the duty-cycle limiter of the voltage model (as bam models "
+                             "it); with --no-bam the actuator force is clipped to +/- "
+                             "current_limit * kt. Training runs WITHOUT a current limit, so the "
+                             "default is off (<=0).")
     parser.add_argument("--foot-friction", type=float, default=None,
                         help="Override the foot sliding friction (mu) to emulate the real grippy "
                              "PU sole. Training used mu~1.0 (range 0.7-1.3); real PU is likely "
@@ -1231,6 +1311,16 @@ def main():
                              "true trunk pose every second and at exit. Drives the robot around to "
                              "compare drift; combine with --odom-anchor-points to see each anchor.")
     args = parser.parse_args()
+
+    # Resolve the actuator preset. --motor picks the servo model; --kp-fw and
+    # --vin-min then default to that preset's TRAINING values rather than to a
+    # single hardcoded default (xl330's kp_fw=200 would grossly over-stiffen an
+    # HD-1910 rehearsal, and its 6.0 V floor sits below the HD-1910 range).
+    bam_preset = BAM_PRESETS[args.motor]
+    if args.kp_fw is None:
+        args.kp_fw = bam_preset["kp_fw"]
+    if args.vin_min is None:
+        args.vin_min = bam_preset["vin_min"]
 
     if not args.walking and not args.standing and not args.sitstand:
         parser.error("At least one of --walking, --standing or --sitstand must be provided")
@@ -1272,14 +1362,14 @@ def main():
     print(f"Loading MuJoCo model from: {xml_path}")
     bam_ctrl = None
     if not args.no_bam:
-        # Same actuator the policies are trained against in warp (BAM M6 XL330,
-        # voltage control + load-dependent friction budget), driven on CPU by
+        # Same actuator the policies are trained against in warp (BAM M6, voltage
+        # control + load-dependent friction budget), driven on CPU by
         # bam.mujoco.MujocoController. Voltage DR collapses to fixed --vin /
         # --vin-drop-gain (training samples them per env).
-        bam_model = load_bam_model(args.kp_fw, args.vin, args.current_limit)
+        bam_model = load_bam_model(args.kp_fw, args.vin, args.current_limit, bam_preset)
         vin_drop_gain = args.vin_drop_gain if args.vin_drop_gain > 0 else None
         model, data, bam_ctrl, _bam_names = load_mujoco_with_bam(
-            xml_path, bam_model, 0.005, vin_drop_gain, BAM_VIN_MIN)
+            xml_path, bam_model, 0.005, vin_drop_gain, args.vin_min)
     else:
         model = mujoco.MjModel.from_xml_path(xml_path)
         model.opt.timestep = 0.005
@@ -1291,8 +1381,7 @@ def main():
     # +/- kt * I_max. With BAM the limiter is modelled inside the voltage
     # controller instead (see load_bam_model). kt comes from the bam package.
     if args.no_bam and args.current_limit and args.current_limit > 0:
-        from bam.model import load_model
-        kt = load_model(motor_name="xl330", model="m6").kt.value
+        kt = load_bam_model(args.kp_fw, args.vin, args.current_limit, bam_preset).kt.value
         torque_limit = kt * args.current_limit
         model.actuator_forcerange[:, 0] = -torque_limit
         model.actuator_forcerange[:, 1] = torque_limit
@@ -1383,6 +1472,9 @@ def main():
         data.qpos[qpos_idx] = policy.default_pose[i]
     if bam_ctrl is not None:
         bam_ctrl.reset(data.qpos)   # clears voltage-drop state, q_target = current qpos
+        if seed_feetech_goal_history(bam_ctrl.model, bam_ctrl):
+            print("BAM Feetech goal limiter seeded from the current joint positions "
+                  "(see seed_feetech_goal_history)")
     policy.set_position_targets(policy.default_pose)
     mujoco.mj_forward(model, data)
 

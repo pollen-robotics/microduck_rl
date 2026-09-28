@@ -76,6 +76,10 @@ from .microduck_roulade_env_cfg import (
     MicroduckRouladeRlCfg,
 )
 from .backlash import make_backlash_variant
+from .microduck_hd1910_env_cfg import (
+    MicroduckHD1910RlCfg,
+    make_microduck_hd1910_velocity_env_cfg,
+)
 
 # Standard velocity task
 register_mjlab_task(
@@ -93,6 +97,18 @@ register_mjlab_task(
     rl_cfg=MicroduckRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
+
+# Feetech HD-1910 baseline — same recipe, BAM actuator swapped for the publicly
+# identified 1910 M6 parameters (see robot/hd1910/README.md for provenance).
+# Separate task ids keep the upstream XL330 tasks untouched.
+for _terrain, _rough in (("Flat", False), ("Rough", True)):
+    register_mjlab_task(
+        task_id=f"Mjlab-Velocity-{_terrain}-MicroDuck-HD1910",
+        env_cfg=make_microduck_hd1910_velocity_env_cfg(rough=_rough),
+        play_env_cfg=make_microduck_hd1910_velocity_env_cfg(play=True, rough=_rough),
+        rl_cfg=MicroduckHD1910RlCfg,
+        runner_cls=MicroduckOnPolicyRunner,
+    )
 
 # VelStand — walking + fall recovery + body pose control in one policy.
 register_mjlab_task(

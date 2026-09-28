@@ -95,3 +95,74 @@ def test_bam_step_loop_runs_with_live_friction(bam_sim):
     assert (np.abs(data.ctrl) <= limit + 1e-9).all()  # ctrl IS the motor torque
     assert (model.dof_frictionloss[dofs] > 0).all()  # BAM budget written every step
     assert np.allclose(model.dof_damping[dofs], bam_model.friction_viscous.value)
+
+
+def test_cpu_hd1910_preset_mirrors_training_cfg(ip):
+    """The `--motor hd1910` preset must match the HD-1910 task's actuator.
+
+    A rehearsal run with a drifted preset reports plausible numbers while
+    comparing against the wrong servo, which is exactly the failure --motor
+    exists to prevent — so lock every mirrored field to the real cfg.
+    """
+    from mjlab_microduck.tasks.microduck_hd1910_env_cfg import (
+        make_microduck_hd1910_velocity_env_cfg,
+    )
+
+    cfg = make_microduck_hd1910_velocity_env_cfg()
+    (act,) = cfg.scene.entities["robot"].articulation.actuators
+    preset = ip.BAM_PRESETS["hd1910"]
+    # The cfg resolves the path, the script keeps it repo-relative.
+    assert Path(act.json_path).resolve() == (REPO / preset["json_path"]).resolve()
+    assert preset["kp_fw"] == act.kp_fw
+    assert preset["vin_range"] == act.vin_range
+    assert preset["vin_min"] == act.vin_min
+    assert ip.BAM_VIN_DROP_GAIN_RANGE == act.vin_drop_gain_range
+
+
+def test_cpu_hd1910_preset_selects_the_feetech_actuator(ip):
+    """The JSON's `actuator: sts3215` picks BAM's Feetech controller, not XL330's."""
+    bam_model = ip.load_bam_model(5.0, 7.4, None, ip.BAM_PRESETS["hd1910"])
+    assert bam_model.actuator_name == "sts3215"
+    assert bam_model.kt.value == pytest.approx(0.6237611235393989)
+    assert bam_model.R.value == pytest.approx(4.910191564179625)
+    # The xl330 preset still loads the bundled Dynamixel model.
+    xl330 = ip.load_bam_model(ip.BAM_KP_FW, 7.4, None)
+    assert xl330.actuator_name == "xl330"
+
+
+def test_seed_feetech_goal_history_unblocks_the_cpu_rehearsal(ip):
+    """Regression: the Feetech goal limiter does not exist on the CPU path.
+
+    ``STS3215Actuator.q_target_smooth`` is created only in ``load_log()``, which
+    the rehearsal never calls (the gap ``actuator/feetech_bam.py`` fills for
+    training). Without seeding it, the first ``ctrl.update()`` raised
+    AttributeError and no HD-1910 rehearsal could run at all. Only the Feetech
+    actuator has this history, so the XL330 path was never affected.
+    """
+    bam_model = ip.load_bam_model(5.0, 7.4, None, ip.BAM_PRESETS["hd1910"])
+    model, data, ctrl, names = ip.load_mujoco_with_bam(
+        str(REPO / ip.MICRODUCK_XML), bam_model, 0.005, 0.1, 7.0
+    )
+    fj = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "trunk_base_freejoint")
+    qa = model.jnt_qposadr[fj]
+    mujoco.mj_resetData(model, data)
+    data.qpos[qa + 2] = 0.125
+    data.qpos[qa + 3 : qa + 7] = [1, 0, 0, 0]
+    data.qpos[ctrl.qpos_indexes] = ip.DEFAULT_POSE
+    ctrl.reset(data.qpos)
+    assert ip.seed_feetech_goal_history(bam_model, ctrl) is True
+    # Seeded from where the robot IS, not from 0 rad: the limiter moves a target
+    # by at most max_velocity*dt per step, so zeros would slew every joint up
+    # from zero instead of holding this pose.
+    assert np.allclose(bam_model.actuator.q_target_smooth, ip.DEFAULT_POSE)
+    mujoco.mj_forward(model, data)
+    for _ in range(20):
+        ctrl.update()  # raised AttributeError before the seed
+        mujoco.mj_step(model, data)
+    assert not np.isnan(data.qpos).any()
+    # Non-Feetech presets have no goal history, so the seed is an explicit no-op.
+    xl330 = ip.load_bam_model(ip.BAM_KP_FW, 7.4, None)
+    _, _, xl330_ctrl, _ = ip.load_mujoco_with_bam(
+        str(REPO / ip.MICRODUCK_XML), xl330, 0.005, 0.1, ip.BAM_VIN_MIN
+    )
+    assert ip.seed_feetech_goal_history(xl330, xl330_ctrl) is False
