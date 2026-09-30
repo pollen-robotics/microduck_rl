@@ -7389,3 +7389,229 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# ── PoliteBow (episodic tip-forward bow: stand → bow → stand) ─────────────────
+#
+# Constant-command episodic trick (same family as BallKick / Roulade). Progress
+# is potential-based on forward trunk lean; standing rewards open only after a
+# bow-depth latch; feet-grounded + head-contact cost block the head-tripod cheat.
+
+
+def _bow_state(env: ManagerBasedRlEnv) -> tuple[torch.Tensor, torch.Tensor]:
+    """Lazy per-env bow latch: (lean_max in [0,1], completed bool)."""
+    n = env.num_envs
+    device = env.device
+    lean_max = getattr(env, "_bow_lean_max", None)
+    completed = getattr(env, "_bow_completed", None)
+    if lean_max is None or lean_max.shape[0] != n:
+        env._bow_lean_max = torch.zeros(n, device=device)
+        env._bow_completed = torch.zeros(n, dtype=torch.bool, device=device)
+    return env._bow_lean_max, env._bow_completed
+
+
+def bow_lean_progress(
+    env: ManagerBasedRlEnv,
+    target_lean: float = 0.40,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Potential-based progress toward a forward trunk lean (polite bow).
+
+    ``projected_gravity_b[:, 0]`` is positive when the trunk tips forward
+    (verified in ``crouch_forward_lean``). Pays only positive increments of
+    ``clamp(lean, 0, target) / target`` (max-so-far), so camping pays zero.
+    """
+    lean_max, completed = _bow_state(env)
+    # Clear latch on freshly reset envs (reward may run before the reset event
+    # on the terminal step; also covers play loops that skip custom resets).
+    if hasattr(env, "episode_length_buf"):
+        fresh = env.episode_length_buf <= 1
+        if fresh.any():
+            lean_max[fresh] = 0.0
+            completed[fresh] = False
+
+    asset: Entity = env.scene[asset_cfg.name]
+    lean = torch.nan_to_num(asset.data.projected_gravity_b[:, 0], nan=0.0)
+    progress = lean.clamp(min=0.0, max=target_lean) / max(float(target_lean), 1e-6)
+    gain = (progress - lean_max).clamp(min=0.0)
+    lean_max.copy_(torch.maximum(lean_max, progress))
+    completed.copy_(completed | (lean_max >= 0.85))
+    return gain
+
+
+def bow_hold(
+    env: ManagerBasedRlEnv,
+    target_lean: float = 0.40,
+    lean_std: float = 0.12,
+    feet_sensor_name: str = "feet_ground_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """At bow depth with both feet planted (anti-head-tripod)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    lean = torch.nan_to_num(asset.data.projected_gravity_b[:, 0], nan=0.0)
+    lean_score = torch.exp(-((lean - target_lean) / lean_std) ** 2)
+    feet = feet_grounded_reward(env, feet_sensor_name)
+    return lean_score * feet
+
+
+def bow_stand_after(
+    env: ManagerBasedRlEnv,
+    target_height: float = 0.115,
+    height_std: float = 0.04,
+    upright_std: float = 0.40,
+    pose_std: float = 0.40,
+    joint_indices: Optional[list] = None,
+    feet_sensor_name: str = "feet_ground_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Standing composite gated on bow completion (multiplicative, anti-tripod)."""
+    _, completed = _bow_state(env)
+    gate = completed.float()
+    asset: Entity = env.scene[asset_cfg.name]
+
+    grav = torch.nan_to_num(asset.data.projected_gravity_b, nan=0.0)
+    tilt = torch.sqrt(grav[:, 0] ** 2 + grav[:, 1] ** 2).clamp(min=0.0)
+    upright = torch.exp(-(tilt / upright_std) ** 2)
+
+    height = height_target_gaussian(
+        env, target_height=target_height, std=height_std, asset_cfg=asset_cfg
+    )
+    pose = pose_target_match(
+        env,
+        asset_cfg=asset_cfg,
+        std=pose_std,
+        joint_indices=joint_indices,
+        target_overrides=None,
+    )
+    feet = feet_grounded_reward(env, feet_sensor_name)
+    return gate * upright * height * pose * feet
+
+
+def bow_upright_after(
+    env: ManagerBasedRlEnv,
+    upright_std: float = 0.40,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Bootstrap upright after bow completion."""
+    _, completed = _bow_state(env)
+    asset: Entity = env.scene[asset_cfg.name]
+    grav = torch.nan_to_num(asset.data.projected_gravity_b, nan=0.0)
+    tilt = torch.sqrt(grav[:, 0] ** 2 + grav[:, 1] ** 2).clamp(min=0.0)
+    return completed.float() * torch.exp(-(tilt / upright_std) ** 2)
+
+
+def bow_height_after(
+    env: ManagerBasedRlEnv,
+    target_height: float = 0.115,
+    std: float = 0.04,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Bootstrap height after bow completion."""
+    _, completed = _bow_state(env)
+    return completed.float() * height_target_gaussian(
+        env, target_height=target_height, std=std, asset_cfg=asset_cfg
+    )
+
+
+def bow_head_tripod_penalty(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "head_ground_contact",
+) -> torch.Tensor:
+    """Positive cost for any head/neck terrain contact (use a negative weight)."""
+    if sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+    found = env.scene.sensors[sensor_name].data.found
+    if found.dim() > 1:
+        found = found.float().amax(dim=-1)
+    else:
+        found = found.float()
+    return found
+
+
+def reset_polite_bow_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    standing_prob: float = 0.7,
+    midbow_prob: float = 0.3,
+    standing_z_min: float = 0.11,
+    standing_z_max: float = 0.12,
+    standing_tilt_max: float = math.radians(5.0),
+    midbow_pitch_min: float = math.radians(15.0),
+    midbow_pitch_max: float = math.radians(35.0),
+    midbow_z_min: float = 0.085,
+    midbow_z_max: float = 0.110,
+    bow_overrides: Optional[dict] = None,
+    tuck_factor_range: tuple = (0.5, 1.0),
+    joint_noise_std: float = 0.05,
+):
+    """Standing + mid-bow reverse-curriculum spawns; clears the bow latch.
+
+    Mid-bow: pitched partway into the tip with joints lerped HOME→bow so the
+    rise gets on-policy data (same lesson as roulade mid-roll / standup face-up).
+    """
+    if env_ids is None or len(env_ids) == 0:
+        return
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    num = len(env_ids)
+    asset: Entity = env.scene[asset_cfg.name]
+    lean_max, completed = _bow_state(env)
+    lean_max[env_ids] = 0.0
+    completed[env_ids] = False
+
+    total = standing_prob + midbow_prob
+    is_mid = torch.rand(num, device=env.device) < (midbow_prob / max(total, 1e-6))
+
+    yaw = torch.rand(num, device=env.device) * 2 * np.pi - np.pi
+    cy = torch.cos(yaw * 0.5)
+    sy = torch.sin(yaw * 0.5)
+
+    pitch = (torch.rand(num, device=env.device) * 2 - 1) * standing_tilt_max
+    mid_pitch = (
+        torch.rand(num, device=env.device) * (midbow_pitch_max - midbow_pitch_min)
+        + midbow_pitch_min
+    )
+    pitch = torch.where(is_mid, mid_pitch, pitch)
+    roll = (torch.rand(num, device=env.device) * 2 - 1) * standing_tilt_max
+
+    cp = torch.cos(pitch * 0.5)
+    sp = torch.sin(pitch * 0.5)
+    cr = torch.cos(roll * 0.5)
+    sr = torch.sin(roll * 0.5)
+    qw = cr * cp * cy + sr * sp * sy
+    qx = sr * cp * cy - cr * sp * sy
+    qy = cr * sp * cy + sr * cp * sy
+    qz = cr * cp * sy - sr * sp * cy
+    quat = torch.stack([qw, qx, qy, qz], dim=1)
+
+    z_stand = (
+        torch.rand(num, device=env.device) * (standing_z_max - standing_z_min) + standing_z_min
+    )
+    z_mid = torch.rand(num, device=env.device) * (midbow_z_max - midbow_z_min) + midbow_z_min
+    new_z = torch.where(is_mid, z_mid, z_stand)
+
+    env.sim.data.qpos[env_ids, 2] = new_z + _env_origin_z(env, env_ids)
+    env.sim.data.qpos[env_ids, 3:7] = quat
+    env.sim.data.qvel[env_ids, :6] = 0.0
+
+    servo_ids = _servo_joint_ids(env, asset)
+    mid_env_ids = env_ids[is_mid]
+    if len(mid_env_ids) > 0 and bow_overrides:
+        u = (
+            torch.rand(len(mid_env_ids), device=env.device)
+            * (tuck_factor_range[1] - tuck_factor_range[0])
+            + tuck_factor_range[0]
+        )
+        for jnt_idx, angle in bow_overrides.items():
+            col = 7 + servo_ids[jnt_idx]
+            home = env.sim.data.qpos[mid_env_ids, col]
+            env.sim.data.qpos[mid_env_ids, col] = home + u * (angle - home)
+        # Pre-seed lean progress from spawn pitch (sin(pitch) ≈ lean proxy).
+        seed = torch.sin(mid_pitch[is_mid]).clamp(0.0, 1.0) / 0.40
+        lean_max[mid_env_ids] = seed.clamp(0.0, 1.0)
+        completed[mid_env_ids] = lean_max[mid_env_ids] >= 0.85
+
+    if len(mid_env_ids) > 0 and joint_noise_std > 0.0:
+        cols = torch.tensor([7 + j for j in servo_ids], device=env.device, dtype=torch.long)
+        noise = torch.randn(len(mid_env_ids), len(cols), device=env.device) * joint_noise_std
+        env.sim.data.qpos[mid_env_ids.unsqueeze(1), cols.unsqueeze(0)] += noise
