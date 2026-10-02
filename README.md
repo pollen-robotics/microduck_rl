@@ -26,6 +26,11 @@ Requires a CUDA GPU (training runs through MuJoCo Warp) and [uv](https://docs.as
 > **On ARM boxes (DGX Spark / GB10, Jetson):** `uv sync` pulls ~2 GB of CUDA
 > wheels on first run and uv's default 30 s HTTP timeout can abort mid-download.
 > Export `UV_HTTP_TIMEOUT=600` for the first sync. 
+>
+> **Jetson AGX Thor (JetPack 7):** `uv sync` routes torch to NVIDIA's SBSA index
+> (kernel `-tegra`; Spark stays on cu129) and `import mjlab` pre-loads the two
+> libraries that wheel does not declare — import it before torch. **AGX Orin**
+> (`sm_87`) has no compatible `torch==2.9.1` wheel: GPU training is unavailable there.
 
 ```bash
 git clone https://github.com/pollen-robotics/microduck_rl

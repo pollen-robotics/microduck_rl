@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
+import mjlab  # noqa: F401  # before torch: its tasks hook pre-loads undeclared libs (Jetson)
 import torch
 import tyro
 from rsl_rl.runners import OnPolicyRunner
