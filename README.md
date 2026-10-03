@@ -45,6 +45,28 @@ uv run publish --onnx output.onnx --repo <user>/microduck-<name> --kind episodic
 uv run scripts/infer_policy.py --walking output.onnx
 ```
 
+### Optional MuJoCo visualization
+
+`duck-body` can optionally expose the exact MuJoCo world it simulates as cached
+JPEG or PNG frames for read-only developer tools. It does not change physics,
+training, policy inference, or the simulator wire state. Install the optional
+image encoder before enabling it:
+
+```bash
+uv sync --extra visualization
+uv run mjpython -m mjlab_microduck.sim.body_server \
+    --keyframe HOME --port 7801 --headless --render \
+    --render-width 1280 --render-height 720 --render-fps 24 --render-quality 95
+```
+
+The generic implementation lives under `sim/visualization`. It copies `MjData`
+while holding the world lock, then performs OpenGL rendering and image encoding
+after releasing it. Keeping the expensive work outside the lock preserves the
+50 Hz physics/control loop even when software rendering is slower than the
+requested frame rate. The optional `camera` and `render_config` operations only
+affect this read-only stream; they never mutate the authoritative simulation
+state.
+
 Resume from a checkpoint:
 
 ```bash
