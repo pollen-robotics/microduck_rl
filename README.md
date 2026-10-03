@@ -55,6 +55,8 @@ uv run train Mjlab-Velocity-Flat-MicroDuck --env.scene.num-envs 4096 \
 No GPU? Add `--hf-jobs` to any train command to run it on Hugging Face Jobs
 instead of locally (see [scripts/hf/README.md](scripts/hf/README.md)).
 
+**Intel GPU?** See [mjlab-sycl](https://github.com/guang384/mjlab-sycl) — train any task here on Intel Arc/iGPUs (SYCL), no NVIDIA required.
+
 ## Tasks
 
 `uv run list-envs` prints the live registry. Flat/Rough variants exist where noted.
