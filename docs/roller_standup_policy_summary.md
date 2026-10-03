@@ -24,7 +24,15 @@ Les hauteurs de repos au sol sont identiques aux deux modèles : c'est la coque 
 0-4   jambe gauche      5-6   roues gauches
 7-10  cou / tête       11-15  jambe droite      16-17  roues droites
 ```
-`_LEG_JOINTS = [0-4, 11-15]`. Les indices du `standup` (`[0-4, 9-13]`) valent pour le modèle **sans** roues et pointeraient sur des roues ici. Verrouillé par `tests/test_roller_standup_cfg.py::test_joint_indices_match_actual_roller_model`.
+Cet ordre est celui du tableau de joints d'**entité**. Mais les récompenses de pose ne l'indexent pas : `pose_target_match` / `pose_l1_penalty` passent par `_servo_joint_pos()`, qui applique déjà `find_joints("^(?!passive_).*")` et rend une vue à **14 colonnes sans les roues**. Dans cette vue le décalage disparaît et la disposition redevient celle du modèle sans roues :
+
+```
+0-4  jambe gauche      5-8  cou / tête      9-13  jambe droite
+```
+
+D'où `_LEG_JOINTS = [0-4, 9-13]` et `_NECK_JOINTS = [5-8]` — les mêmes que `standup` et `sitstand`. Écrire ici les indices d'entité (`[0-4, 11-15]`) déborde la vue servo : 14 et 15 sont hors bornes et l'env meurt au premier calcul de récompense (`IndexError` sur CPU, device-side assert CUDA sur GPU). C'est ce qui est arrivé entre le 11/08 et le correctif : la migration vers la vue servo (`fa1b2ac`) et cet env ont été développés sur des branches parallèles, et leur fusion a laissé le cfg en indices d'entité.
+
+Verrouillé par `tests/test_roller_standup_cfg.py::test_joint_indices_are_servo_space` (les noms, pour cet env) et `tests/test_joint_index_bounds.py` (les bornes, pour tous les envs).
 
 ## Reset — départ au sol
 
