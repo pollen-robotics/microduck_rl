@@ -22,6 +22,7 @@ Three things must hold, none of which fails loudly on its own:
    decide.
 """
 
+import os
 import shutil
 import subprocess
 import sys
@@ -203,3 +204,96 @@ def test_both_train_shims_reach_the_hook_before_parsing_argv(shim):
     assert proc.returncode == 0, f"probe failed:\n{proc.stderr[-2000:]}"
     assert f"SUBMIT ['{_TASK}', '--env.scene.num-envs', '4096']" in proc.stdout
     assert "EXIT 7" in proc.stdout
+
+
+def test_the_bootstrap_runs_modules_not_repo_scripts():
+    """The job extracts a tarball of WHATEVER repo `train --hf-jobs` ran in — a challenges
+    checkout has no scripts/ of ours — so the bootstrap must reach our code as modules."""
+    from mjlab_microduck import hf_jobs
+
+    assert "scripts/" not in hf_jobs.BOOTSTRAP
+    assert "python -m mjlab_microduck.hf_uploader" in hf_jobs.BOOTSTRAP
+    assert "python -m mjlab_microduck.export" in hf_jobs.BOOTSTRAP
+
+
+def test_the_uploader_is_a_module_and_the_script_delegates():
+    from mjlab_microduck import hf_uploader
+
+    assert callable(hf_uploader.main)
+    shim = (_ROOT / "scripts" / "hf" / "uploader.py").read_text()
+    assert "from mjlab_microduck.hf_uploader import main" in shim
+
+
+def test_the_uploader_pushes_what_publish_run_reads(tmp_path):
+    """A cloud run pulled back into logs/ must carry its provenance, or `publish --run` refuses
+    it, and its TensorBoard file, or the workshop has no curve to draw for it."""
+    from mjlab_microduck.hf_uploader import _watched
+
+    names = (
+        "run/model_10.pt",
+        "run/params/env.yaml",
+        "run/provenance.json",
+        "run/events.out.tfevents.1790586250.host.3263.0",
+        "run/other.txt",
+    )
+    for name in names:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text("x")
+    watched = {p.relative_to(tmp_path).as_posix() for p in _watched(tmp_path)}
+    assert watched == set(names) - {"run/other.txt"}
+
+
+def test_auto_export_finds_the_checkpoint_in_the_run_directory(tmp_path):
+    """Runs are logs/rsl_rl/<experiment>/<stamp>_<name>/model_<N>.pt. The glob one level up
+    found nothing ("no checkpoint found" on every job), and export opens --checkpoint-file as a
+    path, so it must get the path, not the file's bare name."""
+    from mjlab_microduck import hf_jobs
+
+    assert hf_jobs.EXPORT_STEP in hf_jobs.BOOTSTRAP
+    run = tmp_path / "logs" / "rsl_rl" / "sprint_2m" / "2026-09-28_10-00-00_first"
+    run.mkdir(parents=True)
+    for n in (0, 50, 100):
+        checkpoint = run / f"model_{n}.pt"
+        checkpoint.write_text("x")
+        os.utime(checkpoint, (1_000 + n, 1_000 + n))  # the last one saved is the newest
+    fakes = tmp_path / "bin"
+    fakes.mkdir()
+    calls = tmp_path / "uv-calls"
+    # Fails, so the upload after the export is never reached.
+    (fakes / "uv").write_text(f'#!/bin/sh\necho "$@" >> {calls}\nexit 1\n')
+    (fakes / "uv").chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fakes}{os.pathsep}{os.environ['PATH']}",
+        "TRAIN_RC": "0",
+        "TRAIN_ARGS": "Mjlab-Sprint2m-MicroDuck --agent.seed 1",
+    }
+    proc = subprocess.run(
+        ["bash", "-c", hf_jobs.EXPORT_STEP], cwd=tmp_path, env=env, capture_output=True, text=True
+    )
+    assert "no checkpoint found" not in proc.stdout, proc.stdout + proc.stderr
+    first = calls.read_text().splitlines()[0]
+    assert first.startswith("run python -m mjlab_microduck.export Mjlab-Sprint2m-MicroDuck")
+    assert "--checkpoint-file logs/rsl_rl/sprint_2m/2026-09-28_10-00-00_first/model_100.pt" in first
+
+
+def test_the_uploader_module_refuses_to_run_without_a_repo():
+    env = {k: v for k, v in os.environ.items() if k != "CKPT_REPO"}
+    proc = subprocess.run(
+        [sys.executable, "-m", "mjlab_microduck.hf_uploader"], capture_output=True, text=True, env=env
+    )
+    assert proc.returncode == 1 and "CKPT_REPO" in proc.stdout
+
+
+def test_submit_hands_the_job_its_checkout(tmp_path):
+    """Inside the job there is no .git; provenance.json must still name the commit that trained."""
+    import json
+
+    from mjlab_microduck import hf_jobs, provenance
+
+    assert hf_jobs.job_provenance(tmp_path) == {}, "outside git there is nothing to hand over"
+    env = hf_jobs.job_provenance(_ROOT)
+    record = json.loads(env[provenance.JOB_ENV])
+    assert record["commit"] and "dirty" in record
+    source = (_ROOT / "src" / "mjlab_microduck" / "hf_jobs.py").read_text()
+    assert "**job_provenance(repo_root)" in source, "submit() must merge job_provenance(repo_root) into the job's env"
