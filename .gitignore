@@ -38,3 +38,6 @@ backup_onnx/
 logdir/.claude/
 logdir/
 logdir/.claude/worktrees/
+
+# The fold-to-kick-up handover bank ships with the task (84 KB).
+!src/mjlab_microduck/tasks/handover_pike_from_fold.npz
