@@ -75,6 +75,10 @@ from .microduck_roulade_env_cfg import (
     make_microduck_roulade_env_cfg,
     MicroduckRouladeRlCfg,
 )
+from .microduck_run_env_cfg import (
+    make_microduck_run_env_cfg,
+    MicroduckRunRlCfg,
+)
 from .backlash import make_backlash_variant
 
 # Standard velocity task
@@ -91,6 +95,23 @@ register_mjlab_task(
     env_cfg=make_microduck_velocity_env_cfg(rough=True),
     play_env_cfg=make_microduck_velocity_env_cfg(play=True, rough=True),
     rl_cfg=MicroduckRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Run — fast alternating-leg running with a flight phase (velocity recipe + run rewards).
+register_mjlab_task(
+    task_id="Mjlab-Run-Flat-MicroDuck",
+    env_cfg=make_microduck_run_env_cfg(),
+    play_env_cfg=make_microduck_run_env_cfg(play=True),
+    rl_cfg=MicroduckRunRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Run-Rough-MicroDuck",
+    env_cfg=make_microduck_run_env_cfg(rough=True),
+    play_env_cfg=make_microduck_run_env_cfg(play=True, rough=True),
+    rl_cfg=MicroduckRunRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
@@ -256,6 +277,8 @@ _BL_ALLCOLLISIONS = MICRODUCK_ALLCOLLISIONS_BACKLASH_ROBOT_CFG
 _BACKLASH_TASKS = (
     ("Mjlab-Velocity-Flat-Backlash-MicroDuck", make_microduck_velocity_env_cfg, {}, MicroduckRlCfg, _BL_WALK),
     ("Mjlab-Velocity-Rough-Backlash-MicroDuck", make_microduck_velocity_env_cfg, {"rough": True}, MicroduckRlCfg, _BL_WALK),
+    ("Mjlab-Run-Flat-Backlash-MicroDuck", make_microduck_run_env_cfg, {}, MicroduckRunRlCfg, _BL_WALK),
+    ("Mjlab-Run-Rough-Backlash-MicroDuck", make_microduck_run_env_cfg, {"rough": True}, MicroduckRunRlCfg, _BL_WALK),
     ("Mjlab-VelStand-Flat-Backlash-MicroDuck", make_microduck_velstand_env_cfg, {}, MicroduckVelStandRlCfg, _BL_ALLCOLLISIONS),
     ("Mjlab-VelStand-Rough-Backlash-MicroDuck", make_microduck_velstand_env_cfg, {"rough": True}, MicroduckVelStandRlCfg, _BL_ALLCOLLISIONS),
     ("Mjlab-StandUp-Flat-Backlash-MicroDuck", make_microduck_standup_env_cfg, {}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),

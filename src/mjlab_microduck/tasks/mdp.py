@@ -7669,3 +7669,245 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run — fast alternating-leg running with a flight phase (microduck_run_env_cfg).
+#
+# Every function below is a POSITIVE-weight reward (≥ 0) except
+# run_double_support_penalty, which is self-negating (≤ 0, POSITIVE weight).
+# All of them are gated on forward SPEED (not just the command), so hopping or
+# kicking on the spot earns nothing: the form of the stride only pays when the
+# stride actually propels the body.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _run_cmd_ramp(env: ManagerBasedRlEnv, command_name: str, cmd_lo: float, cmd_hi: float) -> torch.Tensor:
+    """0→1 ramp in the forward COMMAND between cmd_lo and cmd_hi (0 at standing/walking)."""
+    cmd_x = env.command_manager.get_command(command_name)[:, 0]
+    return ((cmd_x - cmd_lo) / max(cmd_hi - cmd_lo, 1e-6)).clamp(0.0, 1.0)
+
+
+def _yaw_forward_xy(env: ManagerBasedRlEnv, vec_w: torch.Tensor, asset: Entity) -> torch.Tensor:
+    """Forward (heading-frame x) component of world-frame vectors (N, ...,3)."""
+    q = asset.data.root_link_quat_w
+    qw, qx, qy, qz = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+    yaw = torch.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+    shape = (-1,) + (1,) * (vec_w.dim() - 2)
+    return torch.cos(yaw).view(shape) * vec_w[..., 0] + torch.sin(yaw).view(shape) * vec_w[..., 1]
+
+
+def run_speed_curriculum(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    command_name: str,
+    stages: list[dict],
+) -> torch.Tensor:
+    """Widen ONLY the forward command range: stages = [{"step", "lin_vel_x": (lo, hi)}].
+
+    velocity_command_ranges_curriculum is symmetric in x and y; running needs an
+    asymmetric, forward-heavy x range with lateral/yaw left alone."""
+    del env_ids
+    cfg = env.command_manager.get_term(command_name).cfg
+    cur = stages[0]["lin_vel_x"]
+    for stage in stages:
+        if env.common_step_counter > stage["step"]:
+            cur = stage["lin_vel_x"]
+    cfg.ranges.lin_vel_x = tuple(cur)
+    return torch.tensor([cur[1]])
+
+
+def run_flight_reward(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str = "twist",
+    vel_gate_ref: float = 0.4,
+    max_flight_s: float = 0.12,
+    cmd_lo: float = 0.3,
+    cmd_hi: float = 0.6,
+) -> torch.Tensor:
+    """Pay for the FLIGHT phase: both feet off the ground at once.
+
+    Gated by forward speed (hopping in place pays 0) and ramped in by the forward
+    command (walking commands never ask for flight). Rate-limited: only the first
+    ``max_flight_s`` of each flight pays (``min`` of the two feet's air time = how
+    long BOTH have been up), so the optimum is many short flights — a run — not
+    one big leap (no jackpot)."""
+    from mjlab.sensor import ContactSensor
+    sensor: ContactSensor = env.scene[sensor_name]
+    contact_time = sensor.data.current_contact_time
+    air_time = sensor.data.current_air_time
+    assert contact_time is not None and air_time is not None
+    flight = (contact_time <= 0.0).all(dim=1) & (air_time.min(dim=1).values < max_flight_s)
+    gate = _forward_progress_gate(env, vel_gate_ref)
+    ramp = _run_cmd_ramp(env, command_name, cmd_lo, cmd_hi)
+    return flight.float() * gate * ramp
+
+
+def run_alternating_step_reward(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str = "twist",
+    vel_gate_ref: float = 0.4,
+    min_swing_s: float = 0.06,
+    cmd_lo: float = 0.3,
+    cmd_hi: float = 0.6,
+) -> torch.Tensor:
+    """+1 per touchdown by the foot that did NOT make the previous touchdown.
+
+    Forces LEFT-RIGHT alternation: a bunny hop (both feet land together) lands both
+    feet on the same step, which is ambiguous and pays nothing and resets the
+    memory; a same-foot double touchdown pays nothing either. The swing before the
+    touchdown must have lasted ≥ ``min_swing_s`` (a shuffle that barely lifts the
+    foot does not count)."""
+    from mjlab.sensor import ContactSensor
+    sensor: ContactSensor = env.scene[sensor_name]
+    contact_time = sensor.data.current_contact_time
+    last_air = sensor.data.last_air_time
+    assert contact_time is not None and last_air is not None
+
+    if not hasattr(env, "_run_last_td") or env._run_last_td.shape[0] != env.num_envs:
+        env._run_last_td = torch.full((env.num_envs,), -1, device=env.device, dtype=torch.long)
+    env._run_last_td[env.episode_length_buf <= 1] = -1
+
+    # A touchdown = this foot's contact clock started within the last control step.
+    td = (contact_time > 0.0) & (contact_time <= 1.5 * env.step_dt) & (last_air > min_swing_s)
+    n_td = td.sum(dim=1)
+    foot = td.float().argmax(dim=1)  # valid only where n_td == 1
+    single = n_td == 1
+    alternated = single & (foot != env._run_last_td)
+    env._run_last_td = torch.where(single, foot, torch.where(n_td > 1, torch.full_like(foot, -1), env._run_last_td))
+
+    gate = _forward_progress_gate(env, vel_gate_ref)
+    ramp = _run_cmd_ramp(env, command_name, cmd_lo, cmd_hi)
+    return alternated.float() * gate * ramp
+
+
+def run_foot_reach_reward(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
+    reach_cap: float = 0.08,
+    vel_gate_ref: float = 0.4,
+    cmd_lo: float = 0.3,
+    cmd_hi: float = 0.6,
+) -> torch.Tensor:
+    """Swing foot REACHES FORWARD: a foot in the air, ahead of the other foot.
+
+    reward = Σ_feet in air · clamp((x_foot − x_other) / reach_cap, 0, 1), x measured
+    along the trunk heading. Measuring against the other foot (not a fixed home
+    offset) is robust to pose DR and to which foot is the stance foot. Capped at
+    ``reach_cap`` (~1/3 of body height) so over-striding is not paid further."""
+    from mjlab.sensor import ContactSensor
+    asset: Entity = env.scene[asset_cfg.name]
+    sensor: ContactSensor = env.scene[sensor_name]
+    air_time = sensor.data.current_air_time
+    assert air_time is not None
+    in_air = (air_time > 0.0).float()  # (N, 2)
+
+    foot_pos = asset.data.site_pos_w[:, asset_cfg.site_ids]  # (N, 2, 3)
+    x = _yaw_forward_xy(env, foot_pos, asset)  # (N, 2)
+    ahead = torch.stack([x[:, 0] - x[:, 1], x[:, 1] - x[:, 0]], dim=1)
+    reach = (ahead / reach_cap).clamp(0.0, 1.0) * in_air
+
+    gate = _forward_progress_gate(env, vel_gate_ref)
+    ramp = _run_cmd_ramp(env, command_name, cmd_lo, cmd_hi)
+    return reach.sum(dim=1) * gate * ramp
+
+
+def run_pushoff_reward(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str = "twist",
+    max_ratio: float = 1.0,
+    vel_gate_ref: float = 0.4,
+    cmd_lo: float = 0.3,
+    cmd_hi: float = 0.6,
+) -> torch.Tensor:
+    """Pay the stance foot for pushing the ground HARDER than body weight.
+
+    A flight phase needs ground-reaction force > weight, i.e. a crouched (flexed)
+    support leg that drives down and extends. reward = max over feet of
+    clamp(|F_foot| / (m·g) − 1, 0, max_ratio): standing/walking at ≈1 W pays 0,
+    a 2 W push-off pays 1. Capped so a stomp is not worth more than a clean push.
+    Body weight is read from the compiled model (not hard-coded)."""
+    from mjlab.sensor import ContactSensor
+    sensor: ContactSensor = env.scene[sensor_name]
+    force = sensor.data.force  # (N, num_feet, 3), global frame (netforce)
+    assert force is not None
+    if not hasattr(env, "_run_weight_n"):
+        env._run_weight_n = float(env.sim.mj_model.body_subtreemass[0]) * 9.81
+    ratio = torch.norm(force, dim=-1) / env._run_weight_n
+    push = (ratio - 1.0).clamp(0.0, max_ratio).max(dim=1).values
+    gate = _forward_progress_gate(env, vel_gate_ref)
+    ramp = _run_cmd_ramp(env, command_name, cmd_lo, cmd_hi)
+    return push * gate * ramp
+
+
+def run_head_sway_reward(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str = "twist",
+    head_body_names: tuple = ("(bottom_head_shell|jaw_soft)",),
+    amp: float = 0.012,
+    tau_s: float = 1.0,
+    vel_gate_ref: float = 0.4,
+    cmd_lo: float = 0.3,
+    cmd_hi: float = 0.6,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Head thrusts FORWARD during flight and returns BACK during support.
+
+    The head is ~38% of the robot's mass, so swaying it in step with the gait is a
+    real counterbalance. x_head is the head body's forward position in the TRUNK
+    frame (geometric, so independent of the neck joint sign conventions), minus its
+    own ``tau_s`` EMA — only the oscillation counts, a static head offset cancels.
+    reward = clamp(x_osc / amp, −1, 1) · (+1 in flight, −1 otherwise): a head that
+    sways in phase with the stride earns up to +1, a frozen head earns ~0, an
+    anti-phase sway is punished (so this term is not a one-sided jackpot)."""
+    from mjlab.sensor import ContactSensor
+    asset: Entity = env.scene[asset_cfg.name]
+    sensor: ContactSensor = env.scene[sensor_name]
+    contact_time = sensor.data.current_contact_time
+    assert contact_time is not None
+
+    if not hasattr(env, "_run_head_ids"):
+        ids, _ = asset.find_bodies(head_body_names)
+        env._run_head_ids = torch.tensor(ids, device=env.device, dtype=torch.long)
+    head_w = asset.data.body_link_pos_w[:, env._run_head_ids].mean(dim=1)  # (N, 3)
+    x_head = quat_apply_inverse(
+        asset.data.root_link_quat_w, head_w - asset.data.root_link_pos_w
+    )[:, 0]
+
+    if not hasattr(env, "_run_head_ema") or env._run_head_ema.shape[0] != env.num_envs:
+        env._run_head_ema = x_head.clone()
+    fresh = env.episode_length_buf <= 1
+    env._run_head_ema[fresh] = x_head[fresh]
+    osc = x_head - env._run_head_ema
+    alpha = min(env.step_dt / tau_s, 1.0)
+    env._run_head_ema += alpha * (x_head - env._run_head_ema)
+
+    flight = (contact_time <= 0.0).all(dim=1).float()
+    phase = 2.0 * flight - 1.0
+    gate = _forward_progress_gate(env, vel_gate_ref)
+    ramp = _run_cmd_ramp(env, command_name, cmd_lo, cmd_hi)
+    return (osc / amp).clamp(-1.0, 1.0) * phase * gate * ramp
+
+
+def run_double_support_penalty(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str = "twist",
+    cmd_lo: float = 0.5,
+    cmd_hi: float = 0.8,
+) -> torch.Tensor:
+    """Self-negating (≤ 0 → POSITIVE weight): both feet planted while a RUN is
+    commanded. Walking is double-support-heavy; a run is not, so this only bites
+    at high forward commands. Introduce after the gait exists (curriculum)."""
+    from mjlab.sensor import ContactSensor
+    sensor: ContactSensor = env.scene[sensor_name]
+    contact_time = sensor.data.current_contact_time
+    assert contact_time is not None
+    double = (contact_time > 0.0).all(dim=1).float()
+    return -double * _run_cmd_ramp(env, command_name, cmd_lo, cmd_hi)
