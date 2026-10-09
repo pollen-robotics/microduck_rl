@@ -37,6 +37,9 @@ dependencies = [
     "torch==2.9.1",
 ]
 
+[project.optional-dependencies]
+visualization = ["pillow>=11,<13"]
+
 [project.entry-points."mjlab.tasks"]
 mjlab_microduck = "mjlab_microduck.tasks"
 
