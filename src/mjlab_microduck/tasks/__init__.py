@@ -9,6 +9,19 @@ maybe_submit_to_hf_jobs()
 from mjlab.tasks.registry import register_mjlab_task
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
+import sys
+from pathlib import Path
+
+from mjlab_microduck import provenance
+from mjlab_microduck.train_hook import _invoked_as_train
+
+
+def _record_if_training(log_dir, train_cfg: dict) -> None:
+    """`train` gives the runner a log_dir; play and export do not, or are not `train`."""
+    if log_dir is None or not _invoked_as_train():
+        return
+    provenance.record_run_start(Path(log_dir), argv=sys.argv, seed=train_cfg.get("seed"))
+
 
 class MicroduckOnPolicyRunner(VelocityOnPolicyRunner):
     def __init__(self, env, train_cfg: dict, log_dir=None, device="cpu", **kwargs):
@@ -21,6 +34,7 @@ class MicroduckOnPolicyRunner(VelocityOnPolicyRunner):
         sym = alg.get("symmetry_cfg") if isinstance(alg, dict) else None
         if isinstance(sym, dict) and "_env" in sym:
             alg["symmetry_cfg"] = {k: v for k, v in sym.items() if k != "_env"}
+        _record_if_training(log_dir, train_cfg)
 
 
 from .microduck_velocity_env_cfg import (

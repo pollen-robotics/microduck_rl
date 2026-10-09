@@ -1,5 +1,12 @@
 """`uv run publish` — put a policy on the Hub in the shape the microduck daemon loads.
 
+    # From a local run (the workshop's path): the challenge's kind and event, the latest
+    # checkpoint exported and uploaded too, the recipe in the model card
+    uv run publish --run logs/rsl_rl/sprint/2026-09-25_10-00-00_first --repo <user>/microduck-sprint
+
+    # Published and entered on the Arena in one go (a challenge's run knows its event)
+    uv run publish --run logs/rsl_rl/sprint/2026-09-25_10-00-00_first --repo <user>/microduck-sprint --no-private --enter
+
     # From a wandb run (exports with the normalizer baked in — the only safe path from a checkpoint)
     uv run publish --task Mjlab-PoliteBow-Flat-MicroDuck --wandb-run-path ent/proj/run --checkpoint 3000 \\
         --repo <user>/microduck-polite-bow --kind episodic --duration-s 4.0
@@ -19,6 +26,8 @@ local directory and stops.
 
 from __future__ import annotations
 
+import json
+import re
 import shutil
 import sys
 import tempfile
@@ -28,7 +37,9 @@ from typing import Literal, NoReturn
 
 import tyro
 
+from mjlab_microduck import challenge as ch, provenance
 from mjlab_microduck.publish import manifest as m
+from mjlab_microduck.publish.arena import ARENA, EnterError, check_arena, enter, entered_line
 
 
 @dataclass(frozen=True)
@@ -36,10 +47,11 @@ class PublishConfig:
     # -- where it goes
     repo: str
     """Hub repo id, `<user-or-org>/microduck-<name>`. Created (private) if it does not exist."""
-    kind: Literal["episodic", "perpetual"]
-    """episodic: runs `duration_s` and comes back on its own. perpetual: holds until told."""
+    kind: Literal["episodic", "perpetual"] | None = None
+    """episodic: runs `duration_s` and comes back on its own. perpetual: holds until told.
+    Required, unless the task belongs to a registered challenge (its challenge.toml says)."""
 
-    # -- where the weights come from: exactly one of (--task + checkpoint) or --onnx
+    # -- where the weights come from: exactly one of (--task + checkpoint), --onnx or --run
     task: str | None = None
     """Task id to export from, e.g. Mjlab-PoliteBow-Flat-MicroDuck. Needs a checkpoint."""
     wandb_run_path: str | None = None
@@ -50,6 +62,12 @@ class PublishConfig:
     """A local model_<N>.pt instead of wandb."""
     onnx: str | None = None
     """An already-exported ONNX. Validated, not re-exported."""
+    run: str | None = None
+    """A local training run's log directory (`logs/rsl_rl/<experiment>/<stamp>_<name>/`). Reads
+    its provenance.json, exports its latest checkpoint (or --checkpoint N) and uploads that
+    checkpoint next to policy.onnx. A source of its own: not with --onnx or --wandb-run-path."""
+    accessories: tuple[str, ...] = ()
+    """--onnx only: what the robot wears, e.g. rollers. With a task it is read from the model."""
     video: str | None = None
     """An MP4 of the policy running (e.g. from scripts/render_policy.py). Uploaded as replay.mp4."""
 
@@ -77,19 +95,40 @@ class PublishConfig:
     entry_pose: str = "standing"
     """The pose the policy expects to start from."""
     twist_help: str | None = None
-    """Prose for `command.twist` when the slots mean something (flamingo: '[flag, side, 0]')."""
+    """Prose for `command.twist` when the slots mean something (flamingo: '[flag, side, 0]').
+    Default: the challenge's."""
+    timeline: str | None = None
+    """A stage event's performance (timeline.json): uploaded at the repo root beside policy.onnx.
+    The Arena checks its format; publish refuses only a file that is not JSON."""
+
+    # -- entering it on the Arena
+    enter: bool = False
+    """After the upload, enter the policy on the Arena, at the revision just made."""
+    arena: str = ARENA
+    """--enter: the Arena. https, or http on 127.0.0.1 for a local `arena serve`."""
+    event: str | None = None
+    """The Arena event, for a policy that is not a challenge's (--onnx, a library task). Also
+    written as the manifest's `arena.event`."""
+    livery: str = "classic"
+    """--enter: its colour on the Arena's board."""
+    speed: float | None = None
+    """--enter: a forward speed to be timed at, in m/s. Left out, the Arena sweeps the event's range."""
+    code_url: str | None = None
+    """--enter: a link to the code that trained it, shown on its row."""
 
     # -- how
     private: bool = True
     """Create the repo private (--no-private for public). Existing repos keep their visibility."""
     force: bool = False
     """Overwrite an existing policy.onnx in the repo."""
+    allow_dirty: bool = False
+    """--run only: publish a run started from a checkout with uncommitted changes anyway."""
     tag: str | None = None
     """Tag the resulting revision, e.g. v1."""
     smoke: bool = True
     """Run the network on plausible inputs and refuse NaNs before uploading."""
     dry_run: bool = False
-    """Write policy.onnx, manifest.json and README.md to ./publish-<name>/ and stop."""
+    """Write policy.onnx, manifest.json and README.md (and checkpoint.pt, timeline.json when given) to ./publish-<name>/ and stop."""
     device: str | None = None
     """Export device. Default: cuda:0 if available, else cpu."""
 
@@ -97,6 +136,103 @@ class PublishConfig:
 def _fail(msg: str) -> NoReturn:
     print(f"[publish] error: {msg}", file=sys.stderr)
     sys.exit(2)
+
+
+_CHECKPOINT = re.compile(r"model_(\d+)\.pt$")
+
+# Kept for the manifest, in this order; `command`, `seed`, `base` and `started` are the recipe.
+_RECIPE_KEYS = ("repo", "commit", "branch", "dirty", "command", "seed", "base", "started")
+
+
+def _iteration(path: Path) -> int:
+    match = _CHECKPOINT.search(path.name)
+    return int(match.group(1)) if match else -1
+
+
+def _pick_checkpoint(run_dir: Path, iteration: int | None) -> Path:
+    if iteration is not None:
+        path = run_dir / f"model_{iteration}.pt"
+        if not path.exists():
+            _fail(f"{path}: no such checkpoint in this run")
+        return path
+    found = sorted(run_dir.glob("model_*.pt"), key=_iteration)
+    if not found:
+        _fail(f"{run_dir}: no model_<N>.pt yet; the run has not saved a checkpoint")
+    return found[-1]
+
+
+def _load_registry() -> None:
+    """Import mjlab's tasks, which registers ours and the challenges they belong to; tests stand it in."""
+    import mjlab.tasks  # noqa: F401
+
+
+def _kind(cfg: PublishConfig, task: str | None) -> str:
+    """--kind, else the kind of the registered challenge `task` belongs to."""
+    found = ch.for_task(task) if task else None
+    kind = cfg.kind or (found.kind if found else None)
+    if kind is None:
+        _fail("--kind is required (episodic or perpetual) unless the task belongs to a registered challenge")
+    return kind
+
+
+def _export_checkpoint(task: str, checkpoint: Path, out: Path, device: str | None) -> Path:
+    """The one call that needs mjlab and torch; tests stand it in."""
+    import mjlab.tasks  # noqa: F401  (populates the registry, and the challenge registry with it)
+    from mjlab_microduck.export import ExportConfig, run_export
+
+    return run_export(
+        task,
+        ExportConfig(onnx_file=str(out), checkpoint_file=str(checkpoint), num_envs=1, device=device),
+    ).onnx_path
+
+
+def _accessories_of_task(task: str) -> tuple[str, ...]:
+    """What the task's robot model wears, from its MjSpec; needs mjlab's registry."""
+    import mjlab.tasks  # noqa: F401
+    from mjlab.tasks.registry import load_env_cfg
+
+    return m.accessories_of(load_env_cfg(task, play=True).scene.entities["robot"].spec_fn())
+
+
+def _resolve_run(cfg: PublishConfig, workdir: Path) -> tuple[Path, dict, Path]:
+    """The ONNX exported from a local run, its recipe, and the checkpoint it came from."""
+    if cfg.onnx or cfg.wandb_run_path or cfg.checkpoint_file:
+        _fail("--run is a source of its own; drop --onnx, --wandb-run-path and --checkpoint-file")
+    run_dir = Path(cfg.run)  # type: ignore[arg-type]
+    try:
+        record = provenance.read(run_dir)
+    except FileNotFoundError as e:
+        _fail(str(e))
+    if record.get("dirty") and not cfg.allow_dirty:
+        _fail(
+            f"{run_dir.name} was started from a checkout with uncommitted changes, so commit "
+            f"{record.get('commit')} is not the code that trained it. Commit and train again, "
+            "or --allow-dirty to publish it as is."
+        )
+    # Forked after training (`gh repo fork --remote`: origin = the fork, upstream = the repo the
+    # run recorded): the recipe names the fork the owner can point people at. Only then — a run
+    # recorded on a fork whose PR was merged upstream is in upstream's history too, and must
+    # never be re-attributed to whichever checkout publishes it.
+    origin = provenance.remote(Path.cwd(), "origin")
+    if (
+        record.get("repo")
+        and record["repo"] == provenance.remote(Path.cwd(), "upstream")
+        and origin and origin != record["repo"]
+        and record.get("commit") and provenance.contains(Path.cwd(), record["commit"])
+    ):
+        record["repo"] = origin
+    task = cfg.task or record.get("task")
+    if not task:
+        _fail("provenance.json names no task; pass --task <id>")
+    _load_registry()
+    _kind(cfg, task)  # refuse before the export, not after it
+    checkpoint = _pick_checkpoint(run_dir, cfg.checkpoint)
+    onnx_path = _export_checkpoint(task, checkpoint, workdir / m.POLICY_FILE, cfg.device)
+    training: dict = {k: record[k] for k in _RECIPE_KEYS if k in record}
+    training["task_id"] = task
+    training["checkpoint"] = _iteration(checkpoint)
+    training["source_file"] = checkpoint.name
+    return onnx_path, training, checkpoint
 
 
 def _resolve_weights(cfg: PublishConfig, workdir: Path) -> tuple[Path, dict]:
@@ -147,6 +283,18 @@ def _default_name(repo: str) -> str:
     return stem.removeprefix("microduck-").removeprefix("microduck_") or stem
 
 
+def _read_timeline(path: str) -> bytes:
+    """The --timeline file's bytes, refused unless they parse as JSON the way
+    the Arena reads them: strict UTF-8, not json.loads' own encoding sniffing
+    (which would accept a UTF-16 file the Arena refuses)."""
+    try:
+        data = Path(path).read_bytes()
+        json.loads(data.decode("utf-8"))
+    except (OSError, ValueError, RecursionError) as e:
+        _fail(f"--timeline {path}: not a readable JSON file ({e})")
+    return data
+
+
 def run(cfg: PublishConfig) -> int:
     if "/" not in cfg.repo:
         _fail("--repo must be `<user-or-org>/<name>`")
@@ -154,20 +302,49 @@ def run(cfg: PublishConfig) -> int:
     video = Path(cfg.video) if cfg.video is not None else None
     if video is not None and (not video.is_file() or video.suffix.lower() != ".mp4"):
         _fail(f"--video {cfg.video}: expected an existing .mp4 file")
+    arena = None
+    if cfg.enter:  # before anything is exported: a token must not go where this points
+        try:
+            arena = check_arena(cfg.arena)
+        except ValueError as e:
+            _fail(str(e))
+    timeline = _read_timeline(cfg.timeline) if cfg.timeline else None  # refuse before the export
 
     workdir = Path(tempfile.mkdtemp(prefix="microduck-publish-"))
     try:
-        onnx_path, training = _resolve_weights(cfg, workdir)
+        checkpoint: Path | None = None
+        if cfg.run is not None:
+            onnx_path, training, checkpoint = _resolve_run(cfg, workdir)
+        else:
+            if cfg.task is not None and cfg.onnx is None:
+                _load_registry()
+                _kind(cfg, cfg.task)  # refuse before the export, not after it
+            onnx_path, training = _resolve_weights(cfg, workdir)
+
+        # The task's contract, when it is a challenge's: kind and event come from its
+        # challenge.toml (registered when mjlab imported the task), not from flags.
+        task_id = training.get("task_id")
+        found = ch.for_task(task_id) if task_id else None
+        if found and cfg.event:
+            _fail(f"{task_id} is the {found.event} challenge's task: --event is for a policy that is not a challenge's")
+        event = found.event if found else cfg.event
+        if cfg.enter and not event:
+            _fail("--enter needs the event to enter: this policy is not a challenge's, so pass --event <id>")
+        kind = _kind(cfg, task_id)
+        accessories = tuple(cfg.accessories) if cfg.onnx is not None else _accessories_of_task(task_id)
+
         shape = m.check_onnx(onnx_path)
         print(f"[publish] {onnx_path.name}: {shape.obs_len} -> {shape.action_len}, ok")
         if cfg.smoke:
             m.smoke_run_onnx(onnx_path)
             print("[publish] smoke run: finite, non-constant output")
 
-        command_help = {"twist": cfg.twist_help} if cfg.twist_help else None
+        # What each command group means: the challenge's challenge.toml says it once for every publish
+        # of its task; --twist-help overrides the twist's for one.
+        command_help = {**(found.command if found else {}), **({"twist": cfg.twist_help} if cfg.twist_help else {})} or None
         manifest = m.build_manifest(
             name=name,
-            kind=cfg.kind,
+            kind=kind,
             description=cfg.description or training.get("task_id") or name,
             duration_s=cfg.duration_s,
             chain=cfg.chain,
@@ -178,31 +355,48 @@ def run(cfg: PublishConfig) -> int:
             slot=cfg.slot,
             command_help=command_help,
             training=training,
+            accessories=accessories,
+            arena={"event": event} if event else None,
         )
         m.validate_manifest(manifest)
 
         staged = workdir / "repo"
         staged.mkdir()
         shutil.copyfile(onnx_path, staged / m.POLICY_FILE)
+        if checkpoint is not None:
+            shutil.copyfile(checkpoint, staged / "checkpoint.pt")
         (staged / "manifest.json").write_text(m.dump_manifest(manifest))
         (staged / "README.md").write_text(m.render_readme(manifest, cfg.repo, cfg.base_model))
         if video is not None:
             shutil.copyfile(video, staged / m.REPLAY_FILE)
+        if timeline is not None:
+            (staged / "timeline.json").write_bytes(timeline)
 
         if cfg.dry_run:
             dest = Path.cwd() / f"publish-{name}"
             if dest.exists():
                 shutil.rmtree(dest)
             shutil.copytree(staged, dest)
-            print(f"[publish] dry run: wrote {dest}/ ({', '.join(sorted(p.name for p in dest.iterdir()))})")
+            extra = ", checkpoint.pt" if checkpoint is not None else ""
+            extra += f", {m.REPLAY_FILE}" if video is not None else ""
+            extra += ", timeline.json" if timeline is not None else ""
+            print(f"[publish] dry run: wrote {dest}/ (policy.onnx, manifest.json, README.md{extra})")
             return 0
 
-        from huggingface_hub import HfApi
+        from huggingface_hub import HfApi, get_token
 
+        token = get_token() if cfg.enter else None
+        if cfg.enter and not token:
+            _fail("--enter needs your Hugging Face token: `hf auth login`, or HF_TOKEN")
         api = HfApi()
         if cfg.base_model is not None and not api.repo_exists(cfg.base_model, repo_type="model"):
             _fail(f"--base-model {cfg.base_model}: no such model repo on the Hub (or no access)")
+        # Not created at all: a repo created private stays private on every retry (exist_ok keeps it).
+        if cfg.enter and cfg.private and not api.repo_exists(cfg.repo):
+            _fail("--enter needs a public repo: pass --no-private (a new repo is created private by default)")
         api.create_repo(cfg.repo, repo_type="model", private=cfg.private, exist_ok=True)
+        if cfg.enter and api.repo_info(cfg.repo).private:
+            _fail(f"{cfg.repo} is private and the Arena reads public repos only: make it public on the Hub")
         existing = set(api.list_repo_files(cfg.repo))
         onnx_files = {f for f in existing if f.endswith(".onnx")}
         if onnx_files and not cfg.force:
@@ -214,7 +408,7 @@ def run(cfg: PublishConfig) -> int:
         commit = api.upload_folder(
             repo_id=cfg.repo,
             folder_path=str(staged),
-            commit_message=f"publish {name}: {cfg.kind}, {training.get('task_id', onnx_path.name)}",
+            commit_message=f"publish {name}: {kind}, {training.get('task_id', onnx_path.name)}",
             delete_patterns=sorted(stale) or None,
         )
         url = getattr(commit, "commit_url", None) or f"https://huggingface.co/{cfg.repo}"
@@ -224,6 +418,14 @@ def run(cfg: PublishConfig) -> int:
             print(f"[publish] tagged {cfg.tag}")
         first = m.install_commands(manifest, cfg.repo).splitlines()[0]
         print(f"[publish] on a robot: {first}")
+        if cfg.enter:
+            try:
+                entry = enter(arena, event, token, repo=cfg.repo, revision=commit.oid, name=name,
+                              livery=cfg.livery, speed=cfg.speed, code_url=cfg.code_url)
+            except EnterError as e:
+                print(f"[publish] uploaded {url}, but the Arena did not enter it: {e}", file=sys.stderr)
+                return 3
+            print(entered_line(event, entry))
         return 0
     except m.ManifestError as e:
         _fail(str(e))
