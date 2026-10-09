@@ -8,12 +8,28 @@ import math
 import os
 import pickle
 import queue
-import select
 import sys
-import termios
 import threading
 import time
-import tty
+
+# Windows shim: termios/tty/select are POSIX-only. Keyboard control is only
+# wired up when stdin is a TTY (see _KeyReader), which never happens on
+# Windows/background runs, so stubbing them is safe there.
+if sys.platform == "win32":
+    class _TermiosStub:
+        TCSADRAIN = 0
+        def tcgetattr(self, fd):
+            raise NotImplementedError("termios unavailable on Windows")
+        def tcsetattr(self, fd, when, attrs):
+            pass
+    termios = _TermiosStub()
+    tty = None
+    select = None
+else:
+    import select
+    import termios
+    import tty
+
 import numpy as np
 import mujoco
 import mujoco.viewer
@@ -153,6 +169,8 @@ class TerminalInput:
     """
 
     _ARROWS = {"A": "up", "B": "down", "C": "right", "D": "left"}
+    # Windows console: arrows arrive as ('\x00'|'\xe0') + code, not ESC sequences.
+    _WIN_ARROW_KEYS = {"H": "up", "P": "down", "K": "left", "M": "right"}
 
     def __init__(self):
         self._queue = queue.Queue()
@@ -165,8 +183,9 @@ class TerminalInput:
         if not self.enabled:
             print("WARNING: stdin is not a TTY — keyboard control disabled")
             return self
-        self._old_attrs = termios.tcgetattr(self._fd)
-        tty.setcbreak(self._fd)
+        if sys.platform != "win32":
+            self._old_attrs = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
         threading.Thread(target=self._reader, daemon=True).start()
         return self
 
@@ -179,6 +198,15 @@ class TerminalInput:
         """Read one byte from stdin, or None on timeout. os.read (unbuffered):
         buffered sys.stdin.read would swallow escape-sequence bytes past what
         select reported ready."""
+        if sys.platform == "win32":
+            import msvcrt
+            if not msvcrt.kbhit():
+                return None
+            ch = msvcrt.getwch()
+            if ch in ("\x00", "\xe0"):  # Windows arrow/function-key prefix
+                code = msvcrt.getwch()
+                return _WIN_ARROW_KEYS.get(code, None)
+            return ch
         r, _, _ = select.select([self._fd], [], [], timeout)
         if not r:
             return None
@@ -1203,6 +1231,8 @@ def main():
     parser.add_argument("--vin", type=float, default=7.4,
                         help="BAM battery voltage [V]. Training samples per-env in "
                              f"{BAM_VIN_RANGE}; 7.4 = nominal 2S LiPo.")
+    parser.add_argument("--max-seconds", type=float, default=None,
+                        help="Auto-exit after N wall-clock seconds (unattended rehearsals); CSV/recordings still saved")
     parser.add_argument("--vin-drop-gain", type=float, default=0.1,
                         help="BAM load-dependent voltage sag gain [V/Nm], V = vin - gain*sum|tau|. "
                              f"Training samples per-env in {BAM_VIN_DROP_GAIN_RANGE}. 0 disables.")
@@ -1658,9 +1688,15 @@ def main():
 
         try:
             prev_step_time = time.time()
+            run_t0 = time.time()
 
             while viewer.is_running() and not quit_requested:
                 step_start = time.time()
+
+                if args.max_seconds is not None and step_start - run_t0 >= args.max_seconds:
+                    print(f"--max-seconds {args.max_seconds} reached — exiting (CSV still saved)")
+                    quit_requested = True
+                    break
 
                 for key in term.get_keys():
                     handle_key(key)
