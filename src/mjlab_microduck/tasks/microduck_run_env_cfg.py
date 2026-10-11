@@ -30,12 +30,14 @@ by curriculum AFTER the skill exists — see the stages below.
 
 import dataclasses
 import math
+import os
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers import CurriculumTermCfg, RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
+from mjlab_microduck.tasks.microduck_velstand_env_cfg import _collapse_curricula_to_final
 from mjlab_microduck.tasks.microduck_velocity_env_cfg import (
     MicroduckRlCfg,
     NUM_STEPS_PER_ENV,
@@ -48,7 +50,11 @@ ENABLE_DOUBLE_SUPPORT_PENALTY = True  # late tax on planted-both-feet while a ru
 
 RUN_FOOT_TARGET_HEIGHT = 0.035  # m, swing peak (velocity: 0.02)
 RUN_AIR_TIME_WINDOW = (0.08, 0.30)  # s per foot (velocity: 0.125–0.30)
-RUN_REACH_CAP = 0.08  # m the swing foot may lead the other foot before no extra pay
+# 2026-10 eval of the first run (model_49999): flight 40% and alternation were fine, but
+# step frequency sat at ~5 touchdowns/s for every command and step length at 0.12–0.13 m,
+# so speed plateaued at ~0.7 (alive-only) / ≤1.1 m/s. Cap was 0.08 → raised so a longer
+# stride keeps paying.
+RUN_REACH_CAP = 0.14  # m the swing foot may lead the other foot before no extra pay
 RUN_MAX_FLIGHT_S = 0.12  # s of each flight that pays (rate limit, no leap jackpot)
 RUN_VEL_GATE_REF = 0.4  # m/s forward speed at which the stride-form rewards reach full pay
 RUN_TURN_IN_PLACE_FRACTION = 0.05  # velocity: 0.15 — a run task spends its budget running
@@ -61,7 +67,12 @@ RUN_SPEED_STAGES = (
     {"step": 500 * NUM_STEPS_PER_ENV, "lin_vel_x": (-0.3, 0.8)},
     {"step": 1000 * NUM_STEPS_PER_ENV, "lin_vel_x": (-0.3, 1.0)},
     {"step": 1750 * NUM_STEPS_PER_ENV, "lin_vel_x": (-0.3, 1.2)},
+    {"step": 2500 * NUM_STEPS_PER_ENV, "lin_vel_x": (-0.3, 1.5)},
 )
+
+# MICRODUCK_WARM_START=1: restart from a run checkpoint with the step counter at 0,
+# so every inherited curriculum is pinned at its final stage (see AGENTS.md).
+WARM_START = os.environ.get("MICRODUCK_WARM_START", "") not in ("", "0")
 
 
 def make_microduck_run_env_cfg(play: bool = False, rough: bool = False) -> ManagerBasedRlEnvCfg:
@@ -104,7 +115,7 @@ def make_microduck_run_env_cfg(play: bool = False, rough: bool = False) -> Manag
 
     # Speed matters here: heavier, slightly tighter linear tracking.
     cfg.rewards["track_linear_velocity"].weight = 3.0
-    cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.09)
+    cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.0625)  # 0.25 m/s (was 0.3)
 
     # Motion-blockers LOW (a run physically needs trunk pitch/roll swing and angular
     # momentum); upright softened from the walk's 2.0 / std²=0.05 (a running trunk
@@ -191,6 +202,9 @@ def make_microduck_run_env_cfg(play: bool = False, rough: bool = False) -> Manag
                 ],
             },
         )
+
+    if WARM_START and not play:
+        _collapse_curricula_to_final(cfg)
 
     return cfg
 

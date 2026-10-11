@@ -49,7 +49,7 @@ def test_command_is_forward_heavy_and_slots_alive():
     assert cfg.commands["head_pose"].ranges[0][1] > 0
     assert cfg.commands["body_pose"].ranges[0][1] > 0
     stages = [s["lin_vel_x"][1] for s in run.RUN_SPEED_STAGES]
-    assert stages == sorted(stages) and stages[-1] > 1.0
+    assert stages == sorted(stages) and stages[-1] > 1.2
 
 
 def test_gait_targets_more_aggressive_than_walk():
@@ -64,3 +64,18 @@ def test_gait_targets_more_aggressive_than_walk():
 def test_foot_reach_resolves_both_feet():
     cfg = run.make_microduck_run_env_cfg()
     assert tuple(cfg.rewards["run_foot_reach"].params["asset_cfg"].site_names) == ("left_foot", "right_foot")
+
+
+def test_reach_cap_and_top_speed_raised():
+    assert run.RUN_REACH_CAP >= 0.14
+    assert run.RUN_SPEED_STAGES[-1]["lin_vel_x"][1] == 1.5
+    cfg = run.make_microduck_run_env_cfg()
+    assert cfg.rewards["run_foot_reach"].params["reach_cap"] == run.RUN_REACH_CAP
+
+
+def test_warm_start_pins_curricula_at_final(monkeypatch):
+    monkeypatch.setattr(run, "WARM_START", True)
+    cfg = run.make_microduck_run_env_cfg()
+    assert [s["lin_vel_x"][1] for s in cfg.curriculum["run_speed"].params["stages"]] == [1.5]
+    st = cfg.curriculum["run_head_sway_weight"].params["weight_stages"]
+    assert len(st) == 1 and st[0]["step"] == 0 and cfg.rewards["run_head_sway"].weight == st[0]["weight"] > 0
