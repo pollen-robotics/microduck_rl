@@ -55,6 +55,10 @@ import numpy as np
 from mjlab_microduck.sim.camera import FPS as CAMERA_FPS
 from mjlab_microduck.sim.camera import Camera, FrameHandler, FrameServer
 from mjlab_microduck.sim.tof import COLS, ROWS, Tof
+from mjlab_microduck.sim.visualization.service import (
+    VisualizationService,
+    add_visualization_arguments,
+)
 
 PROTOCOL = 1
 
@@ -395,14 +399,24 @@ class Handler(socketserver.StreamRequestHandler):
         self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         body: Body = self.server.body
         print(f"== duck {body.index}: daemon connected from {self.client_address}", flush=True)
-        for raw in self.rfile:
-            try:
-                answer = self.dispatch(body, json.loads(raw))
-            except Exception as error:  # a bad frame must not take the simulator down with it
-                answer = {"error": str(error)}
-            self.wfile.write((json.dumps(answer) + "\n").encode())
-            self.wfile.flush()
-        print(f"== duck {body.index}: daemon disconnected", flush=True)
+        visualization: VisualizationService = self.server.visualization
+        visualization_client = False
+        try:
+            for raw in self.rfile:
+                try:
+                    request = json.loads(raw)
+                    if request.get("op") == "render" and not visualization_client:
+                        visualization.client_connected()
+                        visualization_client = True
+                    answer = self.dispatch(body, request)
+                except Exception as error:  # noqa: BLE001 - isolate malformed client frames
+                    answer = {"error": str(error)}
+                self.wfile.write((json.dumps(answer) + "\n").encode())
+                self.wfile.flush()
+        finally:
+            if visualization_client:
+                visualization.client_disconnected()
+            print(f"== duck {body.index}: daemon disconnected", flush=True)
 
     def dispatch(self, body: Body, request: dict) -> dict:
         op = request.get("op")
@@ -428,6 +442,9 @@ class Handler(socketserver.StreamRequestHandler):
             return body.slow_sensors()
         if op == "tof":
             return body.depth()
+        visualization: VisualizationService = self.server.visualization
+        if visualization.handles(op):
+            return visualization.dispatch(request)
         raise ValueError(f"unknown op {op!r}")
 
 
@@ -436,7 +453,7 @@ class Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
-def run(world: World, headless: bool) -> None:
+def run(world: World, headless: bool, stop_event: threading.Event | None = None) -> None:
     """Step in real time.
 
     **Real time, not as fast as possible.** The daemon's loop is wall-clock and its health gate
@@ -453,7 +470,7 @@ def run(world: World, headless: bool) -> None:
             viewer = mujoco.viewer.launch_passive(
                 world.model, world.data, show_left_ui=False, show_right_ui=False
             )
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - viewer fallback must include GL failures
             print(f"== no viewer ({error}); running headless", flush=True)
 
     dt = world.model.opt.timestep
@@ -472,7 +489,7 @@ def run(world: World, headless: bool) -> None:
     next_step = time.perf_counter()
     behind = 0
     try:
-        while True:
+        while stop_event is None or not stop_event.is_set():
             world.step(batch)
             if viewer is not None and not viewer.is_running():
                 break
@@ -510,6 +527,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7801, help="the first duck's port; +1 each")
     parser.add_argument("--headless", action="store_true", help="no viewer window")
+    add_visualization_arguments(parser)
     parser.add_argument(
         "--cameras",
         default="",
@@ -550,6 +568,7 @@ def main() -> None:
     elif args.cameras.strip():
         wanted = {ord(c.strip()) - ord("a") for c in args.cameras.split(",") if c.strip()}
     servers = []
+    body_servers = []
     for index in range(args.ducks):
         body = Body(world, index, limp=args.limp)
         body.place(pose, trunk_z, offset_y=index * SPACING)
@@ -561,23 +580,39 @@ def main() -> None:
         mujoco.mj_forward(world.model, world.data)
         server = Server((args.host, args.port + index), Handler)
         server.body = body
-        threading.Thread(target=server.serve_forever, daemon=True).start()
         servers.append(server)
+        body_servers.append(server)
 
         if index in wanted:
             body.camera = Camera(world.model, f"{body.prefix}head_camera")
             frames = FrameServer((args.host, args.frame_port + index), FrameHandler)
             frames.camera = body.camera
             frames.fps = args.camera_fps
-            threading.Thread(target=frames.serve_forever, daemon=True).start()
             servers.append(frames)
+
+    mujoco.mj_forward(world.model, world.data)
+    try:
+        visualization = VisualizationService.from_arguments(args, world)
+    except (RuntimeError, ValueError) as error:
+        raise SystemExit(str(error)) from error
+    visualization.start()
+    for server in body_servers:
+        server.visualization = visualization
+    for server in servers:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
 
     print(f"== {args.scene.name}: {args.ducks} duck(s), starting at {args.keyframe}", flush=True)
     for index in range(args.ducks):
         eye = f" · camera on {args.host}:{args.frame_port + index}" if index in wanted else ""
         print(f"==   duck {index}: robotd --sim {args.host}:{args.port + index}{eye}", flush=True)
 
-    run(world, headless=args.headless)
+    try:
+        run(world, headless=args.headless, stop_event=visualization.exit_requested)
+    finally:
+        visualization.close()
+        for server in servers:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":
