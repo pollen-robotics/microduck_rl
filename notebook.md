@@ -14,6 +14,7 @@
   - [键盘操作速查](#键盘操作速查)
 - [3. 训练曲线 —— TensorBoard / wandb](#3-训练曲线--tensorboard--wandb)
 - [4. 两个辅助可视化脚本](#4-两个辅助可视化脚本)
+- [5. 训练 episodic 任务（ground-pick / kick）](#5-训练-episodic-任务ground-pick--kick)
 - [小结 / 注意事项](#小结--注意事项)
 
 ---
@@ -172,6 +173,66 @@ uv run python scripts/crouch_pose_editor.py
 # 查看坡道地形（验证几何）
 uv run python scripts/view_slope_terrain.py
 ```
+
+---
+
+## 5. 训练 episodic 任务（ground-pick / kick）
+
+> 训练入口都是 `uv run train <TASK_ID>`。**任何长训练前必须先跑冒烟测试**（64 envs、5 iters，抓 95% 的配置错误）。
+> 步数换算：steps = iter × 24（`num_steps_per_env = 24`）。
+
+### 5.1 ground-pick（弯腰碰地再站起）
+
+任务 ID：`Mjlab-GroundPick-Flat-MicroDuck`（粗糙地形变体：`Mjlab-GroundPick-Rough-MicroDuck`）
+
+```powershell
+# ① 冒烟测试
+uv run train Mjlab-GroundPick-Flat-MicroDuck --env.scene.num-envs 64 --agent.max_iterations 5
+
+# ② 正式训练
+uv run train Mjlab-GroundPick-Flat-MicroDuck --env.scene.num-envs 4096
+```
+
+- wandb project `mjlab_microduck`，experiment/run 名 = `ground_pick`
+- `max_iterations = 20_000`；这类 episodic 动作实际收敛约 1000–2000 iters，不必跑满
+
+### 5.2 kick（踢球，左/右脚分开训）
+
+任务 ID：`Mjlab-BallKick-Flat-MicroDuck`（**唯一一个 ID，踢球脚由模块顶部 `KICK_FOOT` 常量决定，默认 `"right"`**）
+
+**左/右脚是两次独立训练，不能镜像复用**。训左脚前改一行：
+
+```python
+# src/mjlab_microduck/tasks/microduck_ball_kick_env_cfg.py  第 41 行
+KICK_FOOT = "left"   # 默认是 "right"；训右脚时改回来
+```
+
+```powershell
+# ① 冒烟测试
+uv run train Mjlab-BallKick-Flat-MicroDuck --env.scene.num-envs 64 --agent.max_iterations 5
+
+# ② 正式训练
+uv run train Mjlab-BallKick-Flat-MicroDuck --env.scene.num-envs 4096
+```
+
+- experiment/run 名自动跟随 flag：`ball_kick_left` / `ball_kick_right`
+- `max_iterations = 10_000`
+
+### 5.3 训练完的收尾（两个任务通用）
+
+```powershell
+# 导出 ONNX（bake obs normalizer，必经此路径，别手搓）
+uv run scripts/export.py <TASK_ID> --wandb-run-path <entity/project/run_id>
+
+# 或发布到 HF Hub
+uv run publish --task <TASK_ID> --wandb-run-path <...> --checkpoint N --repo <user>/microduck-<name> --kind episodic --duration-s 4.0
+```
+
+### 5.4 训练时盯日志（AGENTS.md 强制项）
+
+- mean reward 上升，且主任务项真的在涨（不是靠 regularizer 撑起来）
+- 每个 `Episode_Reward/<penalty>` 必须 ≤ 0（>0 说明 weight 符号反了，policy 在刷违规项）
+- 看视频 + 确认哪个 geom/轴触地，不要只看 sim 指标
 
 ---
 
