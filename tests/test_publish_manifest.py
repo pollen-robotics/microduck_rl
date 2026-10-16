@@ -93,7 +93,7 @@ def test_constants_are_the_daemons():
 
 
 def test_publish_is_a_declared_script():
-    scripts = tomllib.loads((_ROOT / "pyproject.toml").read_text())["project"]["scripts"]
+    scripts = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["scripts"]
     assert scripts["publish"] == "mjlab_microduck.publish.cli:main"
 
 
@@ -290,11 +290,11 @@ def test_the_cli_dry_run_writes_a_repo(tmp_path, monkeypatch):
     assert code == 0
     out = tmp_path / "publish-bow"
     assert (out / "policy.onnx").exists()
-    manifest = json.loads((out / "manifest.json").read_text())
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["name"] == "bow" and manifest["kind"] == "episodic"
     assert manifest["training"]["source_file"] == "out.onnx"
     assert "commit" in manifest["training"], "git provenance is filled from the checkout"
-    assert "robotctl policy add bow someone/microduck-bow" in (out / "README.md").read_text()
+    assert "robotctl policy add bow someone/microduck-bow" in (out / "README.md").read_text(encoding="utf-8")
 
 
 def test_the_cli_ships_a_video_as_replay_mp4_and_nowhere_else(tmp_path, monkeypatch):
@@ -312,7 +312,7 @@ def test_the_cli_ships_a_video_as_replay_mp4_and_nowhere_else(tmp_path, monkeypa
     assert code == 0
     out = tmp_path / "publish-bow"
     assert (out / m.REPLAY_FILE).read_bytes() == clip.read_bytes()
-    for text in ((out / "manifest.json").read_text(), (out / "README.md").read_text()):
+    for text in ((out / "manifest.json").read_text(encoding="utf-8"), (out / "README.md").read_text(encoding="utf-8")):
         assert "mp4" not in text and "bow_take3" not in text
 
 

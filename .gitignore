@@ -34,7 +34,7 @@ claude_experiments/
 
 backup_onnx/
 
-
+.idea
 logdir/.claude/
 logdir/
 logdir/.claude/worktrees/

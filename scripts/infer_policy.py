@@ -10,10 +10,21 @@ import pickle
 import queue
 import select
 import sys
-import termios
 import threading
 import time
-import tty
+
+try:
+    import termios
+    import tty
+
+except ImportError:  # Windows: no termios/tty; use msvcrt for keypresses.
+    termios = None
+    tty = None
+
+try:
+    import msvcrt  # Windows only.
+except ImportError:
+    msvcrt = None
 import numpy as np
 import mujoco
 import mujoco.viewer
@@ -165,30 +176,48 @@ class TerminalInput:
         if not self.enabled:
             print("WARNING: stdin is not a TTY — keyboard control disabled")
             return self
-        self._old_attrs = termios.tcgetattr(self._fd)
-        tty.setcbreak(self._fd)
+        if termios is not None:
+            self._old_attrs = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
         threading.Thread(target=self._reader, daemon=True).start()
         return self
 
     def __exit__(self, *exc):
         self._stop.set()
-        if self._old_attrs is not None:
+        if self._old_attrs is not None and termios is not None:
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_attrs)
 
     def _read1(self, timeout):
         """Read one byte from stdin, or None on timeout. os.read (unbuffered):
         buffered sys.stdin.read would swallow escape-sequence bytes past what
         select reported ready."""
+        if msvcrt is not None:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if msvcrt.kbhit():
+                    return msvcrt.getwch()
+                time.sleep(0.005)
+            return None
         r, _, _ = select.select([self._fd], [], [], timeout)
         if not r:
             return None
         data = os.read(self._fd, 1)
         return data.decode(errors="ignore") if data else None
 
+    # Windows arrow/function keys arrive as a NUL or 0xE0 prefix byte followed
+    # by a scan code (H/P/M/K for up/down/right/left), not ESC [ A..D.
+    _WIN_ARROWS = {"H": "up", "P": "down", "M": "right", "K": "left"}
+
     def _reader(self):
         while not self._stop.is_set():
             ch = self._read1(0.1)
             if not ch:
+                continue
+            if ch in ("\x00", "\xe0"):  # Windows special-key prefix
+                final = self._read1(0.05)
+                name = self._WIN_ARROWS.get(final) if final else None
+                if name:
+                    self._queue.put(name)
                 continue
             if ch == "\x1b":  # possible arrow-key escape sequence
                 if self._read1(0.05) == "[":
