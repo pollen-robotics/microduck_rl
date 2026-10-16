@@ -278,3 +278,47 @@ for _task_id, _make_cfg, _kw, _rl_cfg, _robot_cfg in _BACKLASH_TASKS:
         rl_cfg=_rl_cfg,
         runner_cls=MicroduckOnPolicyRunner,
     )
+
+
+def _apply_pre_volta_sim_workaround() -> None:
+    """Fall back to a sparse Jacobian + CG solver on pre-Volta GPUs.
+
+    MuJoCo Warp's dense/Newton path factorizes the inertia and constraint
+    matrices with ``wp.tile_cholesky``, which dispatches to NVIDIA MathDx
+    (cuSolverDx) LTO kernels. MathDx only supports compute capability 7.0+
+    (Volta and newer); on Pascal (sm_61) the LTO build fails with
+    ``Failed to compile LTO 'potrf_...'`` before training starts.
+
+    The sparse Jacobian uses a hand-written sparse L'DL factorization and the
+    CG solver avoids the Newton-only Cholesky gradient, so neither calls
+    ``tile_cholesky``. This is a no-op on sm_70+ (where the default dense +
+    Newton path is kept) and on CPU-only machines.
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return
+        major, minor = torch.cuda.get_device_capability(0)
+    except Exception:  # noqa: BLE001 - never let a probe break task loading
+        return
+    if major >= 7:
+        return
+
+    # mjlab stores the registered cfg objects; mutate them in place. Only
+    # MicroDuck tasks are touched (mjlab also registers Unitree etc.).
+    from mjlab.tasks import registry as _registry
+
+    for task_id, task in _registry._REGISTRY.items():  # noqa: SLF001
+        if "MicroDuck" not in task_id:
+            continue
+        for env_cfg in (task.env_cfg, task.play_env_cfg):
+            env_cfg.sim.mujoco.jacobian = "sparse"
+            env_cfg.sim.mujoco.solver = "cg"
+    print(
+        f"[microduck] pre-Volta GPU detected (sm_{major}{minor}): "
+        "using sparse Jacobian + CG solver (MathDx tile_cholesky unavailable)"
+    )
+
+
+_apply_pre_volta_sim_workaround()

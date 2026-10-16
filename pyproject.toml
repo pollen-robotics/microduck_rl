@@ -100,10 +100,20 @@ better-actuator-models = { git = "https://github.com/Rhoban/bam.git", branch = "
 # CUDA via its nvidia-*-cu12 deps — that resolution is unchanged.
 torch = [
   { index = "pytorch-cu129", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+  # On Windows, PyPI's torch wheel is CPU-only (torch.version.cuda is None),
+  # so training finds no GPU. Route torch to the CUDA 12.6 index there to match
+  # the local NVIDIA driver (560.x / CUDA 12.6) and the Pascal sm_61 GPU.
+  { index = "pytorch-cu126", marker = "sys_platform == 'win32'" },
 ]
 
 [[tool.uv.index]]
 name = "pytorch-cu129"
 url = "https://download.pytorch.org/whl/cu129"
+# explicit: only packages that name this index resolve from it.
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
 # explicit: only packages that name this index resolve from it.
 explicit = true
