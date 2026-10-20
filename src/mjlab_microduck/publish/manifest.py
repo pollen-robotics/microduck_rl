@@ -20,15 +20,23 @@ from pathlib import Path
 from typing import Any, Literal
 
 SCHEMA_VERSION = 2
+# Schema 3 adds the free-sentence (VLA) shape: the policy ONNX takes proprio
+# `obs` plus a `text_emb` input, and the repo ships a separate `encoder.onnx`.
+VLA_SCHEMA_VERSION = 3
 # `duck_ipc_proto`: the daemon refuses a policy whose manifest disagrees with these, and refuses
 # at load a network whose graph does. 61 = 48 proprioception + 13 command; 14 = the servos.
+# VLA policies drop the 13D numeric command from the actor, so their ONNX `obs`
+# is the 48D proprio half; the instruction arrives as `text_emb`.
 MODEL_API = 1
 OBS_LEN = 61
+VLA_OBS_LEN = 48
 ACTION_LEN = 14
+TEXT_INPUT = "text_emb"
 ROBOT: dict[str, Any] = {"model": "microduck", "hw_rev": 1, "servos": "xl330", "control_hz": 50}
 
-# The one `.onnx` a repo carries. The daemon takes the sole `.onnx` in a repo and refuses several.
+# The one `.onnx` a repo carries. VLA repos carry a second one (`encoder.onnx`).
 POLICY_FILE = "policy.onnx"
+ENCODER_FILE = "encoder.onnx"
 
 # A rollout video, if the repo carries one. The Hub's replay widget picks up a file of exactly
 # this name, so it is shown there and neither the manifest nor the README points at it.
@@ -105,12 +113,18 @@ def build_manifest(
     command_help: dict[str, Any] | None = None,
     training: dict[str, Any] | None = None,
     eval: dict[str, Any] | None = None,
+    vla: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """A single-policy manifest the daemon loads without surprises.
 
     Only the constant-command family is publishable from here — a skill's network is fed a fixed
     twist. Phase and posture-flag encodings are the official set's own arms and are not something
     a community policy can be.
+
+    ``vla`` switches to schema 3: a free-sentence policy whose ONNX takes proprio
+    ``obs`` + ``text_emb`` and whose repo also carries ``encoder.onnx``. The
+    dict carries ``embedding_dim`` and an ``encoder`` block (file/model/version/
+    sha256/tokenizer/max_length) recorded in the manifest for the runtime.
     """
     if kind not in KINDS:
         raise ManifestError(f"kind must be one of {KINDS}, not {kind!r}")
@@ -147,19 +161,20 @@ def build_manifest(
         raise ManifestError("idle is a 3-vector twist")
 
     command: dict[str, Any] = {
-        "encoding": "constant",
+        "encoding": "text" if vla is not None else "constant",
         "idle": [float(v) for v in idle],
-        "twist": "unused (zeros)",
+        "twist": "unused (zeros)" if vla is None else "unused (text instruction)",
         "head": "unused (zeros)",
         "body": "unused (zeros)",
     }
     if command_help:
         command.update(command_help)
 
+    is_vla = vla is not None
     manifest: dict[str, Any] = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": VLA_SCHEMA_VERSION if is_vla else SCHEMA_VERSION,
         "model_api": MODEL_API,
-        "obs_len": OBS_LEN,
+        "obs_len": VLA_OBS_LEN if is_vla else OBS_LEN,
         "action_len": ACTION_LEN,
         "robot": dict(ROBOT),
         "name": name,
@@ -168,6 +183,19 @@ def build_manifest(
         "description": description,
         "command": command,
     }
+    if is_vla:
+        # Copy so the caller's dict is not mutated, and make the file pairing
+        # explicit: the daemon must load policy + encoder together.
+        text = dict(vla)
+        text.setdefault("input", TEXT_INPUT)
+        encoder = dict(text.get("encoder") or {})
+        encoder.setdefault("file", ENCODER_FILE)
+        text["encoder"] = encoder
+        manifest["text"] = text
+        manifest["artifacts"] = {
+            "policy": POLICY_FILE,
+            "encoder": encoder["file"],
+        }
     if kind == "episodic":
         manifest["duration_s"] = float(duration_s)  # type: ignore[arg-type]
         manifest["chain"] = bool(chain)
@@ -198,8 +226,16 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
                 raise ManifestError("every set entry needs a `file`")
             validate_manifest({k: v for k, v in entry.items() if k != "file"})
         return
-    if (obs := manifest.get("obs_len")) is not None and obs != OBS_LEN:
-        raise ManifestError(f"obs_len {obs}: this robot builds {OBS_LEN}")
+    if (obs := manifest.get("obs_len")) is not None:
+        is_vla = (
+            manifest.get("schema_version", SCHEMA_VERSION) >= VLA_SCHEMA_VERSION
+            or "text" in manifest
+        )
+        expected = VLA_OBS_LEN if is_vla else OBS_LEN
+        if obs != expected:
+            raise ManifestError(
+                f"obs_len {obs}: this {'VLA' if is_vla else 'standard'} policy builds {expected}"
+            )
     if (act := manifest.get("action_len")) is not None and act != ACTION_LEN:
         raise ManifestError(f"action_len {act}: this robot has {ACTION_LEN}")
     if (api := manifest.get("model_api")) is not None and api > MODEL_API:
@@ -210,16 +246,41 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     kind = manifest.get("kind")
     if kind is not None and kind not in (*KINDS, "scripted"):
         raise ManifestError(f"kind {kind!r} is not one of episodic, perpetual, scripted")
+    is_vla = (
+        manifest.get("schema_version", SCHEMA_VERSION) >= VLA_SCHEMA_VERSION
+        or "text" in manifest
+    )
     encoding = (manifest.get("command") or {}).get("encoding")
-    if encoding is not None and encoding not in ("constant", "phase", "posture_flag"):
+    allowed_encodings = ("constant", "phase", "posture_flag") + (("text",) if is_vla else ())
+    if encoding is not None and encoding not in allowed_encodings:
         raise ManifestError(f"command.encoding {encoding!r} is not one the daemon drives")
-    if kind == "episodic" and encoding in (None, "constant"):
+    if is_vla:
+        _validate_vla(manifest)
+    if kind == "episodic" and encoding in (None, "constant", "text"):
         duration = manifest.get("duration_s")
         if duration is None or duration <= 0:
             raise ManifestError("an episodic constant-command policy needs duration_s > 0")
     idle = (manifest.get("command") or {}).get("idle")
     if idle is not None and len(idle) != 3:
         raise ManifestError("command.idle is a 3-vector twist")
+
+
+def _validate_vla(manifest: dict[str, Any]) -> None:
+    """Schema 3 requires a resolvable text block and encoder artifact."""
+    text = manifest.get("text") or {}
+    if text.get("input") != TEXT_INPUT:
+        raise ManifestError(f"text.input must be {TEXT_INPUT!r} for a VLA policy")
+    dim = text.get("embedding_dim")
+    if not isinstance(dim, int) or dim <= 0:
+        raise ManifestError("text.embedding_dim must be a positive integer")
+    encoder = text.get("encoder") or {}
+    if not encoder.get("file"):
+        raise ManifestError("text.encoder.file is required (the repo ships encoder.onnx)")
+    if not encoder.get("model"):
+        raise ManifestError("text.encoder.model is required (train/deploy must match)")
+    artifacts = manifest.get("artifacts") or {}
+    if artifacts and artifacts.get("encoder") != encoder["file"]:
+        raise ManifestError("artifacts.encoder must match text.encoder.file")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -232,19 +293,32 @@ class OnnxShape:
     output_name: str
     obs_len: int
     action_len: int
+    # VLA only: the second input (sentence embedding). ``text_dim == 0`` is a
+    # standard single-input policy.
+    text_input_name: str | None = None
+    text_dim: int = 0
+
+    @property
+    def is_vla(self) -> bool:
+        return self.text_dim > 0
 
 
-def inspect_onnx(path: Path) -> OnnxShape:
-    """The graph's single input and output widths, as the daemon checks them at load."""
+def inspect_onnx(path: str | Path) -> OnnxShape:
+    """The graph's input(s) and output widths.
+
+    Accepts the standard one-input policy and the VLA two-input shape
+    (``obs`` + ``text_emb``). Anything else is refused.
+    """
     import onnx
 
+    path = Path(path)
     model = onnx.load(str(path), load_external_data=False)
     graph = model.graph
     initializers = {i.name for i in graph.initializer}
     inputs = [i for i in graph.input if i.name not in initializers]
-    if len(inputs) != 1 or len(graph.output) != 1:
+    if not 1 <= len(inputs) <= 2 or len(graph.output) != 1:
         raise ManifestError(
-            f"{path.name}: expected one input and one output, found "
+            f"{path.name}: expected one or two inputs and one output, found "
             f"{[i.name for i in inputs]} -> {[o.name for o in graph.output]}"
         )
 
@@ -257,20 +331,111 @@ def inspect_onnx(path: Path) -> OnnxShape:
             raise ManifestError(f"{path.name}: {value.name}'s last dimension is symbolic")
         return int(last.dim_value)
 
+    text_input_name = inputs[1].name if len(inputs) == 2 else None
+    text_dim = last_dim(inputs[1]) if len(inputs) == 2 else 0
     return OnnxShape(
         input_name=inputs[0].name,
         output_name=graph.output[0].name,
         obs_len=last_dim(inputs[0]),
         action_len=last_dim(graph.output[0]),
+        text_input_name=text_input_name,
+        text_dim=text_dim,
     )
 
 
-def check_onnx(path: Path) -> OnnxShape:
-    """Refuse a file the daemon would refuse at load: wrong widths, or one that is not 61 -> 14."""
+@dataclass(frozen=True)
+class EncoderShape:
+    """The separate ``encoder.onnx`` contract: token ids -> sentence embedding."""
+
+    input_names: tuple[str, ...]
+    output_name: str
+    embedding_dim: int
+
+
+def inspect_encoder_onnx(path: str | Path) -> EncoderShape:
+    """Inspect ``encoder.onnx`` (``input_ids`` + ``attention_mask`` -> ``text_emb``).
+
+    The sequence axis is dynamic, so unlike the policy we do not require the
+    last input dimension to be concrete; only the embedding width is checked.
+    """
+    import onnx
+
+    path = Path(path)
+    model = onnx.load(str(path), load_external_data=False)
+    graph = model.graph
+    initializers = {i.name for i in graph.initializer}
+    inputs = [i for i in graph.input if i.name not in initializers]
+    if len(inputs) != 2 or len(graph.output) != 1:
+        raise ManifestError(
+            f"{path.name}: encoder expects two inputs and one output, found "
+            f"{[i.name for i in inputs]} -> {[o.name for o in graph.output]}"
+        )
+    names = tuple(i.name for i in inputs)
+    if set(names) != {"input_ids", "attention_mask"}:
+        raise ManifestError(
+            f"{path.name}: encoder inputs must be 'input_ids' + 'attention_mask', "
+            f"got {names}"
+        )
+    dims = graph.output[0].type.tensor_type.shape.dim
+    if not dims or not dims[-1].HasField("dim_value"):
+        raise ManifestError(f"{path.name}: encoder output's last dimension must be concrete")
+    return EncoderShape(
+        input_names=names,
+        output_name=graph.output[0].name,
+        embedding_dim=int(dims[-1].dim_value),
+    )
+
+
+def check_encoder_onnx(path: str | Path, expected_dim: int | None = None) -> EncoderShape:
+    """Refuse an encoder whose shape cannot feed the policy's ``text_emb`` input."""
+    path = Path(path)
+    if not path.exists():
+        raise ManifestError(f"{path}: no such file")
+    shape = inspect_encoder_onnx(path)
+    if expected_dim is not None and shape.embedding_dim != expected_dim:
+        raise ManifestError(
+            f"{path.name}: embedding width is {shape.embedding_dim}, "
+            f"the policy expects {expected_dim}"
+        )
+    return shape
+
+
+def sha256_file(path: str | Path) -> str:
+    """Content hash recorded in a VLA manifest so encoder/policy cannot drift."""
+    import hashlib
+
+    path = Path(path)
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def check_onnx(path: str | Path) -> OnnxShape:
+    """Refuse a file the daemon would refuse at load.
+
+    Standard: one input, 61 -> 14. VLA: ``obs`` (48) + ``text_emb`` -> 14.
+    """
+    path = Path(path)
     if not path.exists():
         raise ManifestError(f"{path}: no such file")
     shape = inspect_onnx(path)
-    if shape.obs_len != OBS_LEN:
+    if shape.is_vla:
+        if shape.obs_len != VLA_OBS_LEN:
+            raise ManifestError(
+                f"{path.name}: VLA observation width is {shape.obs_len}, expected "
+                f"{VLA_OBS_LEN} (proprio only; the numeric command is not an actor input)"
+            )
+        if shape.input_name != "obs":
+            raise ManifestError(f"{path.name}: proprio input must be named 'obs'")
+        if shape.text_input_name != TEXT_INPUT:
+            raise ManifestError(
+                f"{path.name}: text input must be named {TEXT_INPUT!r}, "
+                f"got {shape.text_input_name!r}"
+            )
+    elif shape.obs_len != OBS_LEN:
         raise ManifestError(
             f"{path.name}: observation width is {shape.obs_len}, the robot builds {OBS_LEN} "
             "(a 51-D policy is the legacy 3-value-command family, which the daemon refuses)"
@@ -294,16 +459,29 @@ def smoke_run_onnx(path: Path, steps: int = 50, seed: int = 0) -> None:
     session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
     rng = np.random.default_rng(seed)
     obs = np.zeros((1, shape.obs_len), dtype=np.float32)
+    fixed: dict[str, np.ndarray] = {}
+    if shape.is_vla:
+        # One instruction for the whole rollout, like the robot. Keep it a
+        # plausible normalized embedding (the encoder L2-normalizes).
+        assert shape.text_input_name is not None
+        text = rng.normal(0.0, 1.0, size=(1, shape.text_dim)).astype(np.float32)
+        text /= np.linalg.norm(text)
+        fixed[shape.text_input_name] = text
     outputs = []
     for _ in range(steps):
-        (out,) = session.run([shape.output_name], {shape.input_name: obs})
+        feeds = {shape.input_name: obs, **fixed}
+        (out,) = session.run([shape.output_name], feeds)
         if not np.all(np.isfinite(out)):
             raise ManifestError(f"{path.name}: the network produced a non-finite action")
         outputs.append(out)
         # Feed the action back into the last-action slots and jitter the rest, the way an
         # observation evolves on the robot; enough to leave the zero point.
         obs = rng.normal(0.0, 0.05, size=obs.shape).astype(np.float32)
-        obs[0, -ACTION_LEN - 13 : -13] = np.clip(out[0], -1, 1)
+        if shape.is_vla:
+            # Proprio layout ends with the 14 last-action slots (no 13D command).
+            obs[0, -ACTION_LEN:] = np.clip(out[0], -1, 1)
+        else:
+            obs[0, -ACTION_LEN - 13 : -13] = np.clip(out[0], -1, 1)
     spread = float(np.std(np.stack(outputs)))
     if spread == 0.0:
         raise ManifestError(f"{path.name}: the network's output never changes; is it a real policy?")
@@ -326,6 +504,16 @@ def install_commands(manifest: dict[str, Any], repo_id: str) -> str:
         return f"sudo robotctl policy add {name} {repo_id} --hold <seconds>\nrobotctl robot do {name}"
     slot = manifest.get("slot", "<slot>")
     return f"sudo robotctl policy load {slot} {repo_id}"
+
+
+def _obs_description(manifest: dict[str, Any]) -> str:
+    """Human-readable observation shape for the model card."""
+    if "text" in manifest:
+        return (
+            f"{VLA_OBS_LEN}-D proprioception + "
+            f"{manifest['text'].get('embedding_dim', '?')}-D text instruction"
+        )
+    return f"{OBS_LEN}-D observation"
 
 
 def render_readme(manifest: dict[str, Any], repo_id: str, base_model: str | None = None) -> str:
@@ -376,7 +564,7 @@ def render_readme(manifest: dict[str, Any], repo_id: str, base_model: str | None
         description,
         "",
         f"A **{kind}** policy for the [microduck](https://github.com/pollen-robotics/microduck) "
-        f"({OBS_LEN}-D observation, {ACTION_LEN} actions, {ROBOT['control_hz']} Hz). {timing}",
+        f"({_obs_description(manifest)}, {ACTION_LEN} actions, {ROBOT['control_hz']} Hz). {timing}",
         "",
         "## Run it on a robot",
         "",
@@ -385,8 +573,25 @@ def render_readme(manifest: dict[str, Any], repo_id: str, base_model: str | None
         "```",
         "",
         "The observation normalizer is baked into `policy.onnx`; feed raw observations.",
-        "`manifest.json` follows schema 2 of the microduck policy manifest "
-        "(`docs/policy-manifest.md` in the daemon repo).",
+    ]
+    if "text" in manifest:
+        text = manifest["text"]
+        encoder = text.get("encoder", {})
+        lines += [
+            "",
+            "## Language conditioning",
+            "",
+            f"This is a **schema-{VLA_SCHEMA_VERSION} VLA** policy: `{POLICY_FILE}` takes "
+            f"proprio `obs` ({VLA_OBS_LEN}D) plus `text_emb` ({text['embedding_dim']}D). "
+            f"Encode the instruction with `{encoder.get('file', ENCODER_FILE)}` "
+            f"(`{encoder.get('model', 'unknown encoder')}`) before calling the policy. "
+            "The encoder version recorded in `manifest.json` must match training.",
+        ]
+    lines += [
+        "",
+        f"`manifest.json` follows schema "
+        f"{VLA_SCHEMA_VERSION if 'text' in manifest else SCHEMA_VERSION} of the "
+        "microduck policy manifest (`docs/policy-manifest.md` in the daemon repo).",
     ]
     if base_model:
         lines += ["", f"A remix of [{base_model}](https://huggingface.co/{base_model})."]

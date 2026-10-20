@@ -30,6 +30,10 @@ from .microduck_velocity_env_cfg import (
     make_microduck_velocity_env_cfg,
     MicroduckRlCfg,
 )
+from .microduck_vla_env_cfg import (
+    make_microduck_vla_env_cfg,
+    MicroduckVlaRlCfg,
+)
 from .microduck_standup_env_cfg import (
     make_microduck_standup_env_cfg,
     MicroduckStandUpRlCfg,
@@ -94,6 +98,17 @@ register_mjlab_task(
     env_cfg=make_microduck_velocity_env_cfg(rough=True),
     play_env_cfg=make_microduck_velocity_env_cfg(play=True, rough=True),
     rl_cfg=MicroduckRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Language-conditioned (free-sentence) velocity task. The actor reads a text
+# embedding instead of the numeric command; the numeric command still drives
+# rewards and is privileged input for the critic. See docs/vla-plan.md.
+register_mjlab_task(
+    task_id="Mjlab-VLA-Flat-MicroDuck",
+    env_cfg=make_microduck_vla_env_cfg(),
+    play_env_cfg=make_microduck_vla_env_cfg(play=True),
+    rl_cfg=MicroduckVlaRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 

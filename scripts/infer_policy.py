@@ -247,7 +247,9 @@ class PolicyInference:
                  sitstand_onnx_path=None,
                  kick_left_onnx_path=None, kick_right_onnx_path=None,
                  roulade_onnx_path=None,
-                 kick_duration=3.0, roulade_duration=2.0):
+                 kick_duration=3.0, roulade_duration=2.0,
+                 text_encoder=None, initial_text=None, text_file=None,
+                 instruction_cycle=None):
         self.bam_ctrl = bam_ctrl  # bam.mujoco.MujocoController (None = legacy position actuators)
         self.model = model
         self.data = data
@@ -260,6 +262,21 @@ class PolicyInference:
         # body_cmd as policy COMMANDS (no add to ctrl, no joint_pos correction).
         # When False: legacy behaviour (3D command, head_offset added to ctrl[5:9]).
         self.new_cmd_obs = new_cmd_obs
+
+        # VLA / free-sentence support. Sessions are inspected after loading:
+        # a two-input graph (obs + text_emb) is a VLA policy, and its actor
+        # observation is proprio only (no numeric command block).
+        self._io_by_session: dict[int, dict] = {}
+        self._ort_session = None
+        self._active_is_vla = False
+        self._active_text_dim = 0
+        self.text_input_name = None
+        self.text_encoder = text_encoder
+        self.text_file = text_file
+        self.text_embedding = None
+        self._current_text = None
+        self._cycle = list(instruction_cycle or [])
+        self._cycle_index = -1
 
         # Load walking policy
         self.walking_session = None
@@ -373,6 +390,21 @@ class PolicyInference:
         if not self.walking_session and not self.standing_session and not self.is_sitstand:
             raise ValueError("At least one of --walking, --standing or --sitstand must be provided")
 
+        # Inspect every loaded graph once. A two-input graph (obs + text_emb)
+        # is a VLA policy; the active session's metadata decides whether the
+        # actor observation includes the numeric command block.
+        for label, session in (
+            ("walking", self.walking_session),
+            ("standing", self.standing_session),
+            ("ground_pick", self.ground_pick_session),
+            ("sit", self.sit_session),
+            ("slope", self.slope_session),
+            *self.behavior_sessions.items(),
+        ):
+            if session is not None:
+                self._register_session(session, label)
+        self._has_vla = any(meta["is_vla"] for meta in self._io_by_session.values())
+
         # Determine initial active session and policy
         if self.walking_session:
             self.current_policy = "walking"
@@ -385,9 +417,20 @@ class PolicyInference:
             self.current_policy = "sit"
             self.ort_session = self.sit_session
 
-        # Get input/output names from active session
-        self.input_name = self.ort_session.get_inputs()[0].name
-        self.output_name = self.ort_session.get_outputs()[0].name
+        # VLA: the actor sees text instead of the numeric command. Build the
+        # encoder lazily (default SentenceTransformer) if none was injected.
+        if self._has_vla:
+            if self.text_encoder is None:
+                try:
+                    from mjlab_microduck.vla.text_encoder import HFTextEncoder
+                    self.text_encoder = HFTextEncoder()
+                except ImportError as exc:
+                    raise ValueError(
+                        "This policy takes a text_emb input: pass --encoder-onnx "
+                        "or --encoder-model, or install the vla extra "
+                        "(`uv sync --extra vla`)."
+                    ) from exc
+            self.set_instruction(initial_text or "站好别动")
 
         # Get sensor IDs and body IDs
         self.imu_ang_vel_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, "imu_ang_vel")
@@ -486,6 +529,111 @@ class PolicyInference:
         else:
             self.action_buffer = None
             self.current_lag = 0
+
+    # -- session IO / VLA text -------------------------------------------
+
+    def _register_session(self, session, label: str) -> None:
+        """Record a session's input/output contract (single- or two-input)."""
+        inputs = session.get_inputs()
+        outputs = session.get_outputs()
+        if not 1 <= len(inputs) <= 2:
+            raise ValueError(
+                f"{label} policy has {len(inputs)} inputs; expected a single "
+                "`obs` input or `obs` + `text_emb`"
+            )
+        is_vla = len(inputs) == 2
+        text_name = None
+        text_dim = 0
+        if is_vla:
+            text_name = inputs[1].name
+            if text_name != "text_emb":
+                raise ValueError(
+                    f"{label} policy's second input is {text_name!r}; expected 'text_emb'"
+                )
+            last = inputs[1].shape[-1]
+            if not isinstance(last, int) or last <= 0:
+                raise ValueError(
+                    f"{label} policy's text_emb last dimension is {last!r}; "
+                    "expected a concrete embedding width"
+                )
+            text_dim = int(last)
+        self._io_by_session[id(session)] = {
+            "label": label,
+            "is_vla": is_vla,
+            "obs_name": inputs[0].name,
+            "out_name": outputs[0].name,
+            "text_name": text_name,
+            "text_dim": text_dim,
+        }
+        if is_vla:
+            print(
+                f"{label}: VLA policy — obs {inputs[0].name}{inputs[0].shape} + "
+                f"text {text_name}{inputs[1].shape}"
+            )
+
+    @property
+    def ort_session(self):
+        return self._ort_session
+
+    @ort_session.setter
+    def ort_session(self, session):
+        self._ort_session = session
+        meta = self._io_by_session.get(id(session)) if session is not None else None
+        if meta is None:
+            self._active_is_vla = False
+            self._active_text_dim = 0
+            self.text_input_name = None
+            self.input_name = None
+            self.output_name = None
+            return
+        self._active_is_vla = meta["is_vla"]
+        self._active_text_dim = meta["text_dim"]
+        self.text_input_name = meta["text_name"]
+        self.input_name = meta["obs_name"]
+        self.output_name = meta["out_name"]
+
+    def set_instruction(self, text: str) -> None:
+        """Encode a free-sentence instruction and cache ``text_embedding``.
+
+        Encoding runs only when the string changes; the 50 Hz loop just reuses
+        the cached vector, matching the deployment plan (encoder.onnx on
+        instruction change, policy.onnx every step).
+        """
+        text = str(text).strip()
+        if not text or text == self._current_text:
+            return
+        if self.text_encoder is None:
+            raise ValueError(
+                "No text encoder: pass --encoder-onnx or --encoder-model "
+                "(or install the vla extra)."
+            )
+        embedding = np.asarray(self.text_encoder.encode([text]), dtype=np.float32)
+        if embedding.ndim != 2 or embedding.shape[0] != 1:
+            raise ValueError(
+                f"text encoder returned shape {embedding.shape}; expected (1, D)"
+            )
+        if not np.isfinite(embedding).all():
+            raise ValueError("text encoder returned a non-finite embedding")
+        if self._active_is_vla and embedding.shape[1] != self._active_text_dim:
+            raise ValueError(
+                f"text encoder produces {embedding.shape[1]}-D embeddings, "
+                f"the active policy expects {self._active_text_dim}"
+            )
+        self.text_embedding = embedding
+        self._current_text = text
+        print(f"Instruction: {text!r}  (text_emb {embedding.shape[1]}D)")
+
+    def set_instruction_cycle(self, texts) -> None:
+        """Install the list the N key cycles through."""
+        self._cycle = [str(t) for t in texts]
+        self._cycle_index = -1
+
+    def next_instruction(self) -> None:
+        if not self._cycle:
+            print("No instruction cycle loaded")
+            return
+        self._cycle_index = (self._cycle_index + 1) % len(self._cycle)
+        self.set_instruction(self._cycle[self._cycle_index])
 
     def _update_command(self):
         """Update self.command (fed into obs) based on current policy and commands.
@@ -706,7 +854,10 @@ class PolicyInference:
         obs.append(self.get_joint_pos_relative())
         obs.append(self.get_joint_vel())
         obs.append(self.last_action)
-        obs.append(self.command)
+        if not self._active_is_vla:
+            # VLA actors see proprio only (48D). The instruction arrives as the
+            # separate `text_emb` input, never as the numeric command block.
+            obs.append(self.command)
 
         return np.concatenate(obs).astype(np.float32)
 
@@ -887,7 +1038,18 @@ class PolicyInference:
         """Run policy inference and return action."""
         obs = self.get_observations()
         obs_batch = obs.reshape(1, -1)
-        action = self.ort_session.run([self.output_name], {self.input_name: obs_batch})[0]
+        if self._active_is_vla:
+            if self.text_embedding is None:
+                raise ValueError(
+                    "VLA policy active but no instruction set — call set_instruction()"
+                )
+            feeds = {
+                self.input_name: obs_batch,
+                self.text_input_name: self.text_embedding,
+            }
+        else:
+            feeds = {self.input_name: obs_batch}
+        action = self.ort_session.run([self.output_name], feeds)[0]
         action = action.squeeze(0).astype(np.float32)
         self.last_action = action.copy()
         return action
@@ -906,7 +1068,7 @@ class PolicyInference:
         # Legacy mode: head_offset is an external perturbation added on top of
         # the policy output. New mode: head_offset is a COMMAND fed into the
         # policy's obs, so the policy itself produces the offset head pose.
-        if not self.new_cmd_obs:
+        if not self.new_cmd_obs and not self._active_is_vla:
             target_positions = target_positions.copy()
             target_positions[5:9] += self.head_offset
         self.set_position_targets(target_positions)
@@ -1196,6 +1358,63 @@ class OdomAnchorOverlay:
             scn.ngeom += 1
 
 
+def build_text_encoder(encoder_onnx=None, encoder_model=None):
+    """Text encoder for VLA rehearsal.
+
+    Prefers ``--encoder-onnx`` (exactly what the robot runs: onnxruntime +
+    tokenizer). Falls back to the frozen SentenceTransformer, which is the
+    training-time encoder and convenient in sim.
+    """
+    from mjlab_microduck.vla.text_encoder import DEFAULT_MODEL, HFTextEncoder
+
+    model_name = encoder_model or DEFAULT_MODEL
+    if encoder_onnx:
+        import onnxruntime as ort
+        from transformers import AutoTokenizer
+
+        session = ort.InferenceSession(encoder_onnx, providers=["CPUExecutionProvider"])
+        names = [i.name for i in session.get_inputs()]
+        if set(names) != {"input_ids", "attention_mask"}:
+            raise ValueError(
+                f"{encoder_onnx}: encoder inputs must be input_ids+attention_mask, got {names}"
+            )
+        out_name = session.get_outputs()[0].name
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+        class _OnnxTextEncoder:
+            def encode(self, texts):
+                # The exported encoder is fixed batch 1 (the runtime encodes one
+                # instruction at a time); loop for callers that pass a list.
+                rows = []
+                for text in texts:
+                    enc = tokenizer(
+                        [text],
+                        return_tensors="np",
+                        padding=True,
+                        truncation=True,
+                        max_length=64,
+                    )
+                    rows.append(
+                        session.run(
+                            [out_name],
+                            {
+                                "input_ids": enc["input_ids"],
+                                "attention_mask": enc["attention_mask"],
+                            },
+                        )[0]
+                    )
+                return np.concatenate(rows, axis=0).astype(np.float32)
+
+        probe = _OnnxTextEncoder().encode(["test"]).shape[1]
+        _OnnxTextEncoder.dim = probe
+        print(f"Text encoder: {encoder_onnx} ({probe}D, onnxruntime)")
+        return _OnnxTextEncoder()
+
+    encoder = HFTextEncoder(model_name=model_name)
+    print(f"Text encoder: {model_name} ({encoder.dim}D, SentenceTransformer)")
+    return encoder
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run ONNX policy in MuJoCo")
     parser.add_argument("--roller", action="store_true", help="Use roller skate robot XML (robot_walk_rollers.xml)")
@@ -1226,6 +1445,16 @@ def main():
                         help="Use the unified 13D command obs layout (twist+head_pose+body_pose). "
                              "Required for policies trained with the new pose-command-tracking setup. "
                              "Old policies (51D obs, head_offset added to ctrl) need this flag OFF.")
+    parser.add_argument("--text", type=str, default=None,
+                        help="Initial free-sentence instruction for a VLA policy "
+                             "(e.g. --text \"往前走\"). Builds the default encoder when "
+                             "--encoder-model / --encoder-onnx are not given.")
+    parser.add_argument("--text-file", type=str, default=None,
+                        help="Poll this file for instruction changes while running (VLA).")
+    parser.add_argument("--encoder-onnx", type=str, default=None,
+                        help="encoder.onnx (input_ids+attention_mask -> text_emb); mirrors deployment.")
+    parser.add_argument("--encoder-model", type=str, default=None,
+                        help="SentenceTransformer id used for tokenization / the HF fallback encoder.")
     parser.add_argument("--no-bam", action="store_true",
                         help="Use the XML MuJoCo position actuators instead of the BAM M6 "
                              "voltage/friction model the policies are trained against.")
@@ -1349,6 +1578,18 @@ def main():
               f"mu={args.foot_friction if args.foot_friction is not None else 'default'}, "
               f"solref={args.foot_solref if args.foot_solref is not None else 'default'}")
 
+    # VLA rehearsal: build the encoder only when the user asked for text (or
+    # supplied an encoder). If a VLA policy is loaded without one, the
+    # PolicyInference constructor builds the default HF encoder itself.
+    text_encoder = None
+    if (
+        args.text is not None
+        or args.text_file is not None
+        or args.encoder_onnx
+        or args.encoder_model
+    ):
+        text_encoder = build_text_encoder(args.encoder_onnx, args.encoder_model)
+
     # Initialize policy
     policy = PolicyInference(
         model, data,
@@ -1371,7 +1612,16 @@ def main():
         roulade_onnx_path=args.roulade,
         kick_duration=args.kick_duration,
         roulade_duration=args.roulade_duration,
+        text_encoder=text_encoder,
+        initial_text=args.text,
+        text_file=args.text_file,
     )
+    if getattr(policy, "_has_vla", False):
+        try:
+            from mjlab_microduck.vla.instructions import InstructionPool
+            policy.set_instruction_cycle(InstructionPool.from_json().sentences)
+        except Exception as exc:
+            print(f"Instruction cycle unavailable: {exc}")
     policy.set_vel_cmd(args.lin_vel_x, args.lin_vel_y, args.ang_vel_z)
 
     # Set realistic wheel bearing friction for roller inference (must be done
@@ -1417,11 +1667,12 @@ def main():
 
     # Verify observation size
     test_obs = policy.get_observations()
-    cmd_dim = 13 if policy.new_cmd_obs else 3
+    cmd_dim = 0 if policy._active_is_vla else (13 if policy.new_cmd_obs else 3)
     expected_obs_size = 3 + 3 + policy.n_joints + policy.n_joints + policy.n_joints + cmd_dim
     breakdown = (
         f"3(ang_vel) + 3(proj_grav) + {policy.n_joints}(joint_pos) + "
-        f"{policy.n_joints}(joint_vel) + {policy.n_joints}(last_action) + {cmd_dim}(command)"
+        f"{policy.n_joints}(joint_vel) + {policy.n_joints}(last_action)"
+        + (f" + {cmd_dim}(command)" if cmd_dim else " (VLA: command omitted)")
     )
 
     if test_obs.size != expected_obs_size:
@@ -1437,6 +1688,9 @@ def main():
     print(f"Control frequency: 50 Hz (decimation: 4)")
     print(f"Simulation timestep: {model.opt.timestep}s")
     print(f"Observation size: {test_obs.size} (expected: {expected_obs_size})")
+    if policy._active_is_vla:
+        print(f"  VLA: obs {test_obs.size}D + text_emb {policy._active_text_dim}D "
+              f"(instruction: {policy._current_text!r})")
     if policy.walking_session:
         print(f"Walking policy: loaded")
     if policy.standing_session:
@@ -1601,6 +1855,8 @@ def main():
                 policy.toggle_body_pose_mode()
             elif key == "p":
                 random_push()
+            elif key == "n":
+                policy.next_instruction()
             elif key == "a":
                 if policy.head_mode:
                     policy.head_offset[3] = np.clip(policy.head_offset[3] + policy.head_step, -policy.head_max, policy.head_max)
@@ -1654,6 +1910,8 @@ def main():
     print("  L:                kick with RIGHT foot (requires --kick-right)")
     print("  R:                roulade / forward roll (requires --roulade)")
     print(f"  P:                random push (trunk vel = {PUSH_MAX:.1f} m/s in random direction)")
+    if getattr(policy, "_has_vla", False):
+        print("  N:                next instruction (cycles the free-sentence table)")
     print("  Q:                quit")
     print("  [ Body pose mode — press B to toggle ]")
     print(f"  UP/DOWN arrow:    Δz ±10mm  (max ±{BODY_CMD_MAX_Z*1000:.0f}mm)")
@@ -1688,8 +1946,23 @@ def main():
         try:
             prev_step_time = time.time()
 
+            last_text_mtime = None
             while viewer.is_running() and not quit_requested:
                 step_start = time.time()
+
+                # VLA: re-encode only when --text-file changes (cheap, non-blocking).
+                if policy.text_file:
+                    try:
+                        mtime = os.path.getmtime(policy.text_file)
+                    except OSError:
+                        mtime = None
+                    if mtime is not None and mtime != last_text_mtime:
+                        last_text_mtime = mtime
+                        try:
+                            with open(policy.text_file, encoding="utf-8") as handle:
+                                policy.set_instruction(handle.read().strip())
+                        except OSError as exc:
+                            print(f"Text file error: {exc}")
 
                 for key in term.get_keys():
                     handle_key(key)
@@ -1783,8 +2056,11 @@ def main():
                         print(f"  Joint pos [6:{6+policy.n_joints}]:     {obs[6:6+policy.n_joints]}")
                         print(f"  Joint vel [{6+policy.n_joints}:{6+2*policy.n_joints}]:    {obs[6+policy.n_joints:6+2*policy.n_joints]}")
                         print(f"  Last action [{6+2*policy.n_joints}:{6+3*policy.n_joints}]:  {obs[6+2*policy.n_joints:6+3*policy.n_joints]}")
-                        cmd_end = 6+3*policy.n_joints+3
-                        print(f"  Command [{6+3*policy.n_joints}:{cmd_end}]:      {obs[6+3*policy.n_joints:cmd_end]}")
+                        if policy._active_is_vla:
+                            print(f"  Instruction: {policy._current_text!r}  (text_emb {policy._active_text_dim}D)")
+                        else:
+                            cmd_end = 6+3*policy.n_joints+3
+                            print(f"  Command [{6+3*policy.n_joints}:{cmd_end}]:      {obs[6+3*policy.n_joints:cmd_end]}")
                         if policy.current_policy == "standing":
                             print(f"  Body cmd (raw): z={policy.body_cmd[0]*1000:.1f}mm  pitch={math.degrees(policy.body_cmd[1]):.1f}°  roll={math.degrees(policy.body_cmd[2]):.1f}°")
                         print(f"\nAction output:")

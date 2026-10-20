@@ -37,6 +37,14 @@ dependencies = [
     "torch==2.9.1",
 ]
 
+# Optional: free-sentence (language-conditioned / VLA) tasks need a frozen
+# sentence encoder. Kept out of the core deps so the locomotion training stack
+# does not pull `transformers`; install with `uv sync --extra vla`.
+[project.optional-dependencies]
+vla = [
+    "sentence-transformers>=3.0",
+]
+
 [project.entry-points."mjlab.tasks"]
 mjlab_microduck = "mjlab_microduck.tasks"
 

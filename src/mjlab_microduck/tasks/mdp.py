@@ -21,6 +21,19 @@ from mjlab.managers.event_manager import requires_model_fields
 from mjlab.utils.lab_api.math import matrix_from_quat, wrap_to_pi, quat_apply, quat_apply_inverse, quat_from_angle_axis
 from rsl_rl.algorithms.ppo import PPO as _PPO
 
+# Language-conditioned (VLA) inputs. text_encoder intentionally has no hard
+# `transformers` import: HFTextEncoder loads sentence-transformers lazily inside
+# __init__, so the core locomotion stack never pulls it.
+from mjlab_microduck.vla import (
+    DEFAULT_DIM,
+    DEFAULT_INSTRUCTIONS_PATH,
+    DEFAULT_MODEL,
+    NUM_COMMANDS,
+    HFTextEncoder,
+    HashTextEncoder,
+    InstructionPool,
+)
+
 # ---------------------------------------------------------------------------
 # Patch 1: RewardManager.compute — sanitize NaN rewards before they enter the
 # PPO buffer.  mjlab computes rewards BEFORE resetting environments, so any
@@ -7704,3 +7717,221 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# --------------------------------------------------------------------------- #
+# Language-conditioned (VLA) commands                                          #
+# --------------------------------------------------------------------------- #
+#
+# The free-sentence policy's actor only sees a text embedding. The numeric 13D
+# command vector is still required — it drives every velocity/head/body reward
+# and is privileged information for the critic — so this section splits the two
+# views of the same sampled intent:
+#
+#   InstructionCommand  samples ONE intent per resample and owns the 13D vector
+#   CommandSlice        read-only 3/4/6-D views, registered as "twist",
+#                       "head_pose", "body_pose" so existing rewards keep working
+#                       unchanged
+#   text_instruction_embedding  observation term: the actor's (B, D) embedding
+#
+# Registration order matters: "instruction" must be inserted before its slice
+# views (CommandManager builds/iterates terms in dict insertion order). The
+# views look the parent up lazily, so construction order is the only constraint.
+
+
+@_dataclass(kw_only=True)
+class InstructionCommandCfg(CommandTermCfg):
+    """Samples a free-sentence intent and exposes its 13D numeric command.
+
+    The embedding table is built once, at env construction. For real training
+    use ``encoder="hf"`` (requires ``uv sync --extra vla``) or point
+    ``embedding_cache`` at a precomputed ``.npz`` so the env does not need the
+    transformer at all. ``encoder="hash"`` is a dependency-free fallback for
+    tests/CI and is never semantically meaningful.
+    """
+
+    instructions_path: str = str(DEFAULT_INSTRUCTIONS_PATH)
+    encoder: str = "hf"  # "hf" | "hash"
+    encoder_model: str = DEFAULT_MODEL
+    encoder_dim: Optional[int] = None  # None -> the table's declared dim
+    embedding_cache: Optional[str] = None  # .npz with an "embeddings" array
+    save_embedding_cache: Optional[str] = None  # write the table here if built
+    hash_dim: int = 64  # only for encoder="hash"
+
+    def build(self, env: ManagerBasedRlEnv) -> "InstructionCommand":
+        return InstructionCommand(self, env)
+
+
+class InstructionCommand(CommandTerm):
+    """Command term backed by :class:`InstructionPool`."""
+
+    cfg: "InstructionCommandCfg"
+
+    def __init__(self, cfg: "InstructionCommandCfg", env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+
+        if cfg.encoder not in ("hf", "hash"):
+            raise ValueError(
+                f"InstructionCommand encoder must be 'hf' or 'hash', got {cfg.encoder!r}"
+            )
+
+        # The hash backend's dim is independent of the deployment encoder; make
+        # the pool declare the dim we are actually going to produce so embed()
+        # performs a meaningful check.
+        override_dim = cfg.encoder_dim
+        if override_dim is None and cfg.encoder == "hash":
+            override_dim = cfg.hash_dim
+        self.pool = InstructionPool.from_json(
+            cfg.instructions_path, encoder_dim=override_dim
+        )
+        embeddings = self._load_or_build_embeddings()
+        self.embeddings = torch.as_tensor(
+            embeddings, dtype=torch.float32, device=self.device
+        )
+
+        self.intent_index = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.sentence_index = torch.zeros_like(self.intent_index)
+        self._command = torch.zeros(
+            self.num_envs, NUM_COMMANDS, dtype=torch.float32, device=self.device
+        )
+
+        # Populate the first instruction set immediately: the first observation
+        # is computed before the first command resample on some code paths.
+        self._sample(torch.arange(self.num_envs, device=self.device))
+
+    # -- setup ------------------------------------------------------------
+
+    def _load_or_build_embeddings(self) -> np.ndarray:
+        cache = self.cfg.embedding_cache
+        if cache and os.path.exists(cache):
+            with np.load(cache) as data:
+                embeddings = np.asarray(data["embeddings"], dtype=np.float32)
+            if embeddings.ndim != 2 or embeddings.shape[0] != self.pool.num_sentences:
+                raise ValueError(
+                    f"{cache}: expected ({self.pool.num_sentences}, dim), "
+                    f"got {embeddings.shape}"
+                )
+            if not np.isfinite(embeddings).all():
+                raise ValueError(f"{cache}: embeddings contain non-finite values")
+            print(
+                f"[vla] loaded {embeddings.shape[0]} sentence embeddings "
+                f"(dim={embeddings.shape[1]}) from {cache}"
+            )
+            return embeddings
+
+        if self.cfg.encoder == "hash":
+            encoder = HashTextEncoder(dim=self.cfg.encoder_dim or self.cfg.hash_dim)
+        else:
+            # Imported lazily so the core training stack never imports
+            # `transformers`; the HF backend is only touched when requested.
+            encoder = HFTextEncoder(
+                model_name=self.cfg.encoder_model,
+                dim=self.cfg.encoder_dim or DEFAULT_DIM,
+            )
+        embeddings = self.pool.embed(encoder)
+        if self.cfg.save_embedding_cache:
+            os.makedirs(
+                os.path.dirname(os.path.abspath(self.cfg.save_embedding_cache)),
+                exist_ok=True,
+            )
+            np.savez_compressed(
+                self.cfg.save_embedding_cache, embeddings=embeddings
+            )
+            print(f"[vla] wrote sentence embeddings to {self.cfg.save_embedding_cache}")
+        return embeddings
+
+    # -- CommandTerm interface -------------------------------------------
+
+    @property
+    def command(self) -> torch.Tensor:
+        """Full 13D command: [twist(3), head_pose(4), body_pose(6)]."""
+        return self._command
+
+    @property
+    def text_embedding(self) -> torch.Tensor:
+        """``(num_envs, dim)`` embedding for each env's current sentence."""
+        return self.embeddings[self.sentence_index]
+
+    def _sample(self, env_ids: torch.Tensor) -> None:
+        n = int(env_ids.numel())
+        if n == 0:
+            return
+        sample = self.pool.sample(n, np.random.default_rng())
+        self.intent_index[env_ids] = torch.as_tensor(
+            sample.intent_index, dtype=torch.long, device=self.device
+        )
+        self.sentence_index[env_ids] = torch.as_tensor(
+            sample.sentence_index, dtype=torch.long, device=self.device
+        )
+        self._command[env_ids] = torch.as_tensor(
+            sample.commands, dtype=torch.float32, device=self.device
+        )
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        self._sample(env_ids)
+
+    def _update_command(self) -> None:
+        pass  # Held between resamples, like every other command term.
+
+    def _update_metrics(self) -> None:
+        pass
+
+
+@_dataclass(kw_only=True)
+class CommandSliceCfg(CommandTermCfg):
+    """Read-only view of ``parent.command[:, start:stop]``.
+
+    Lets the VLA env keep the existing names/shapes ("twist" 3D, "head_pose"
+    4D, "body_pose" 6D) so every reward, observation term and curriculum that
+    references them works unchanged.
+    """
+
+    parent_name: str = "instruction"
+    start: int = 0
+    stop: int = 3
+
+    def build(self, env: ManagerBasedRlEnv) -> "CommandSlice":
+        return CommandSlice(self, env)
+
+
+class CommandSlice(CommandTerm):
+    cfg: "CommandSliceCfg"
+
+    def __init__(self, cfg: "CommandSliceCfg", env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        if cfg.stop <= cfg.start:
+            raise ValueError(
+                f"CommandSlice needs stop > start, got [{cfg.start}, {cfg.stop})"
+            )
+
+    @property
+    def _parent(self) -> CommandTerm:
+        # Lazy: the manager is not attached to the env while terms are built.
+        return self._env.command_manager.get_term(self.cfg.parent_name)
+
+    @property
+    def command(self) -> torch.Tensor:
+        return self._parent.command[:, self.cfg.start : self.cfg.stop]
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        pass  # The parent owns sampling.
+
+    def _update_command(self) -> None:
+        pass
+
+    def _update_metrics(self) -> None:
+        pass
+
+
+def text_instruction_embedding(
+    env: ManagerBasedRlEnv, command_name: str = "instruction"
+) -> torch.Tensor:
+    """Observation term: the sampled sentence embedding for the actor.
+
+    Returns ``(num_envs, dim)``. This is deliberately NOT normalized by the
+    policy's observation normalizer — see ``docs/vla-plan.md``.
+    """
+    term = env.command_manager.get_term(command_name)
+    return term.text_embedding

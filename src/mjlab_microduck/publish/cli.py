@@ -50,6 +50,10 @@ class PublishConfig:
     """A local model_<N>.pt instead of wandb."""
     onnx: str | None = None
     """An already-exported ONNX. Validated, not re-exported."""
+    encoder_onnx: str | None = None
+    """VLA only: `encoder.onnx` (token ids -> text_emb), shipped next to policy.onnx."""
+    encoder_model: str | None = None
+    """VLA only: encoder model id/version recorded in the manifest."""
     video: str | None = None
     """An MP4 of the policy running (e.g. from scripts/render_policy.py). Uploaded as replay.mp4."""
 
@@ -140,6 +144,8 @@ def _resolve_weights(cfg: PublishConfig, workdir: Path) -> tuple[Path, dict]:
             wandb_run_path=cfg.wandb_run_path,
             checkpoint=cfg.checkpoint,
             checkpoint_file=cfg.checkpoint_file,
+            encoder_onnx=cfg.encoder_onnx,
+            encoder_model=cfg.encoder_model,
             num_envs=1,
             device=cfg.device,
         ),
@@ -190,7 +196,33 @@ def run(cfg: PublishConfig) -> int:
     try:
         onnx_path, training = _resolve_weights(cfg, workdir)
         shape = m.check_onnx(onnx_path)
-        print(f"[publish] {onnx_path.name}: {shape.obs_len} -> {shape.action_len}, ok")
+        encoder_path = Path(cfg.encoder_onnx) if cfg.encoder_onnx is not None else None
+        if shape.is_vla:
+            if encoder_path is None:
+                _fail(
+                    "this policy takes a text_emb input: pass --encoder-onnx "
+                    "<encoder.onnx> so the repo ships policy + encoder together"
+                )
+            encoder_shape = m.check_encoder_onnx(encoder_path, expected_dim=shape.text_dim)
+            vla = {
+                "embedding_dim": shape.text_dim,
+                "encoder": {
+                    "file": m.ENCODER_FILE,
+                    "model": cfg.encoder_model or "unknown",
+                    "sha256": m.sha256_file(encoder_path),
+                    "inputs": list(encoder_shape.input_names),
+                },
+            }
+            print(
+                f"[publish] {onnx_path.name}: VLA obs {shape.obs_len} + text "
+                f"{shape.text_dim} -> {shape.action_len}; encoder "
+                f"{encoder_path.name} ({encoder_shape.embedding_dim}D) ok"
+            )
+        else:
+            if encoder_path is not None:
+                _fail("--encoder-onnx is only for VLA policies (a two-input ONNX)")
+            vla = None
+            print(f"[publish] {onnx_path.name}: {shape.obs_len} -> {shape.action_len}, ok")
         if cfg.smoke:
             m.smoke_run_onnx(onnx_path)
             print("[publish] smoke run: finite, non-constant output")
@@ -212,12 +244,15 @@ def run(cfg: PublishConfig) -> int:
             slot=cfg.slot,
             command_help=command_help,
             training=training,
+            vla=vla,
         )
         m.validate_manifest(manifest)
 
         staged = workdir / "repo"
         staged.mkdir()
         shutil.copyfile(onnx_path, staged / m.POLICY_FILE)
+        if encoder_path is not None:
+            shutil.copyfile(encoder_path, staged / m.ENCODER_FILE)
         (staged / "manifest.json").write_text(m.dump_manifest(manifest))
         (staged / "README.md").write_text(m.render_readme(manifest, cfg.repo, cfg.base_model))
         if video is not None:
@@ -239,12 +274,16 @@ def run(cfg: PublishConfig) -> int:
         api.create_repo(cfg.repo, repo_type="model", private=cfg.private, exist_ok=True)
         existing = set(api.list_repo_files(cfg.repo))
         onnx_files = {f for f in existing if f.endswith(".onnx")}
-        if onnx_files and not cfg.force:
+        allowed = {m.POLICY_FILE, m.ENCODER_FILE} if shape.is_vla else {m.POLICY_FILE}
+        if onnx_files - allowed and not cfg.force:
             _fail(
-                f"{cfg.repo} already carries {sorted(onnx_files)}; --force overwrites. "
-                "A repo carries exactly one .onnx, so a second name is a new repo."
+                f"{cfg.repo} already carries unexpected ONNX files "
+                f"{sorted(onnx_files - allowed)}; --force overwrites. "
+                f"A repo carries {sorted(allowed)}."
             )
-        stale = onnx_files - {m.POLICY_FILE}
+        if onnx_files and not cfg.force:
+            _fail(f"{cfg.repo} already carries {sorted(onnx_files)}; --force overwrites")
+        stale = onnx_files - allowed
         commit = api.upload_folder(
             repo_id=cfg.repo,
             folder_path=str(staged),

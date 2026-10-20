@@ -325,3 +325,208 @@ def test_the_cli_refuses_a_missing_video(tmp_path):
             repo="someone/microduck-bow", kind="episodic", onnx=str(policy),
             duration_s=4.0, video=str(tmp_path / "nope.mp4"), dry_run=True,
         ))
+
+
+# ---------------------------------------------------------------------------------------------
+# Schema 3: free-sentence (VLA) policies — proprio `obs` + `text_emb`, plus encoder.onnx.
+
+
+def _tiny_vla_policy(
+    path: Path,
+    proprio_len: int = m.VLA_OBS_LEN,
+    text_dim: int = 8,
+    action_len: int = m.ACTION_LEN,
+    text_name: str = "text_emb",
+) -> Path:
+    """A two-input policy with the VLA shape, hand-built (no torch)."""
+    rng = np.random.default_rng(0)
+    w_obs = numpy_helper.from_array(
+        rng.normal(0, 0.1, (proprio_len, action_len)).astype(np.float32), "W_obs"
+    )
+    w_text = numpy_helper.from_array(
+        rng.normal(0, 0.1, (text_dim, action_len)).astype(np.float32), "W_text"
+    )
+    nodes = [
+        helper.make_node("MatMul", ["obs", "W_obs"], ["a"]),
+        helper.make_node("MatMul", [text_name, "W_text"], ["b"]),
+        helper.make_node("Add", ["a", "b"], ["actions"]),
+    ]
+    graph = helper.make_graph(
+        nodes,
+        "vla",
+        [
+            helper.make_tensor_value_info("obs", TensorProto.FLOAT, [1, proprio_len]),
+            helper.make_tensor_value_info(text_name, TensorProto.FLOAT, [1, text_dim]),
+        ],
+        [helper.make_tensor_value_info("actions", TensorProto.FLOAT, [1, action_len])],
+        initializer=[w_obs, w_text],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model.ir_version = 8
+    onnx.save(model, str(path))
+    return path
+
+
+def _tiny_encoder(path: Path, dim: int = 8, input_names: tuple[str, str] = ("input_ids", "attention_mask")) -> Path:
+    """A two-input encoder with a dynamic sequence axis, hand-built."""
+    w = numpy_helper.from_array(np.ones((4, dim), np.float32), "W")
+    nodes = [
+        helper.make_node("Cast", [input_names[0]], ["ids_f"], to=TensorProto.FLOAT),
+        helper.make_node("MatMul", ["ids_f", "W"], ["text_emb"]),
+    ]
+    graph = helper.make_graph(
+        nodes,
+        "encoder",
+        [
+            helper.make_tensor_value_info(input_names[0], TensorProto.INT64, [1, 4]),
+            helper.make_tensor_value_info(input_names[1], TensorProto.INT64, [1, 4]),
+        ],
+        [helper.make_tensor_value_info("text_emb", TensorProto.FLOAT, [1, dim])],
+        initializer=[w],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model.ir_version = 8
+    onnx.save(model, str(path))
+    return path
+
+
+def test_a_two_input_vla_graph_is_recognized_and_smoke_runs(tmp_path):
+    path = _tiny_vla_policy(tmp_path / "policy.onnx")
+    shape = m.check_onnx(path)
+    assert shape.is_vla
+    assert (shape.obs_len, shape.text_dim, shape.action_len) == (48, 8, 14)
+    assert shape.text_input_name == "text_emb"
+    m.smoke_run_onnx(path)
+
+
+def test_a_vla_graph_with_the_61d_obs_len_is_refused(tmp_path):
+    path = _tiny_vla_policy(tmp_path / "bad.onnx", proprio_len=m.OBS_LEN)
+    with pytest.raises(m.ManifestError, match="48"):
+        m.check_onnx(path)
+
+
+def test_a_vla_graph_with_a_misnamed_text_input_is_refused(tmp_path):
+    path = _tiny_vla_policy(tmp_path / "bad.onnx", text_name="text")
+    with pytest.raises(m.ManifestError, match="text_emb"):
+        m.check_onnx(path)
+
+
+def test_an_encoder_is_checked_against_the_policy_dim(tmp_path):
+    path = _tiny_encoder(tmp_path / "encoder.onnx", dim=8)
+    shape = m.check_encoder_onnx(path, expected_dim=8)
+    assert shape.embedding_dim == 8
+    assert shape.input_names == ("input_ids", "attention_mask")
+    with pytest.raises(m.ManifestError, match="expects 16"):
+        m.check_encoder_onnx(path, expected_dim=16)
+
+
+def test_an_encoder_with_wrong_input_names_is_refused(tmp_path):
+    path = _tiny_encoder(tmp_path / "encoder.onnx", input_names=("tokens", "mask"))
+    with pytest.raises(m.ManifestError, match="input_ids"):
+        m.check_encoder_onnx(path)
+
+
+VLA = {
+    "embedding_dim": 8,
+    "encoder": {
+        "model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        "sha256": "deadbeef",
+        "max_length": 64,
+    },
+}
+
+
+def test_build_manifest_vla_is_schema_3_with_the_encoder_pair():
+    built = m.build_manifest(
+        name="vla-walk", kind="perpetual", description="Walks on free text.",
+        slot="walk", vla=VLA,
+    )
+    m.validate_manifest(built)
+    assert built["schema_version"] == 3
+    assert built["obs_len"] == 48
+    assert built["command"]["encoding"] == "text"
+    assert built["text"]["input"] == "text_emb"
+    assert built["text"]["embedding_dim"] == 8
+    assert built["text"]["encoder"]["file"] == "encoder.onnx"
+    assert built["artifacts"] == {"policy": "policy.onnx", "encoder": "encoder.onnx"}
+
+
+def test_schema_3_refuses_the_standard_61d_obs_len():
+    built = m.build_manifest(
+        name="vla-walk", kind="perpetual", description="d", slot="walk", vla=VLA
+    )
+    built["obs_len"] = m.OBS_LEN
+    with pytest.raises(m.ManifestError, match="VLA"):
+        m.validate_manifest(built)
+
+
+def test_schema_3_requires_a_resolvable_encoder():
+    built = m.build_manifest(
+        name="vla-walk", kind="perpetual", description="d", slot="walk", vla=VLA
+    )
+    built["text"]["encoder"] = {"file": "encoder.onnx"}  # no model
+    with pytest.raises(m.ManifestError, match="encoder.model"):
+        m.validate_manifest(built)
+
+
+def test_schema_3_requires_a_positive_embedding_dim():
+    built = m.build_manifest(
+        name="vla-walk", kind="perpetual", description="d", slot="walk", vla=VLA
+    )
+    built["text"]["embedding_dim"] = 0
+    with pytest.raises(m.ManifestError, match="embedding_dim"):
+        m.validate_manifest(built)
+
+
+def test_the_vla_readme_names_the_encoder_contract():
+    built = m.build_manifest(
+        name="vla-walk", kind="perpetual", description="Walks on free text.",
+        slot="walk", vla=VLA,
+    )
+    readme = m.render_readme(built, "someone/microduck-vla-walk")
+    assert "schema-3 VLA" in readme
+    assert "text_emb" in readme
+    assert "encoder.onnx" in readme
+
+
+def test_the_cli_dry_run_ships_policy_and_encoder_for_a_vla_policy(tmp_path, monkeypatch):
+    from mjlab_microduck.publish.cli import PublishConfig, run
+
+    policy = _tiny_vla_policy(tmp_path / "out.onnx")
+    encoder = _tiny_encoder(tmp_path / "encoder.onnx", dim=8)
+    monkeypatch.chdir(tmp_path)
+    code = run(PublishConfig(
+        repo="someone/microduck-vla-walk",
+        kind="perpetual",
+        onnx=str(policy),
+        encoder_onnx=str(encoder),
+        encoder_model="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        slot="walk",
+        description="Walks on free text.",
+        dry_run=True,
+    ))
+    assert code == 0
+    out = tmp_path / "publish-vla-walk"
+    assert (out / "policy.onnx").exists()
+    assert (out / "encoder.onnx").exists()
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == 3
+    assert manifest["text"]["embedding_dim"] == 8
+    assert manifest["text"]["encoder"]["sha256"] == m.sha256_file(encoder)
+
+
+def test_the_cli_refuses_a_vla_policy_without_its_encoder(tmp_path, monkeypatch):
+    from mjlab_microduck.publish.cli import PublishConfig, run
+
+    policy = _tiny_vla_policy(tmp_path / "out.onnx")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        run(PublishConfig(
+            repo="someone/microduck-vla-walk",
+            kind="perpetual",
+            onnx=str(policy),
+            slot="walk",
+            description="d",
+            dry_run=True,
+        ))
+    assert exc.value.code == 2
