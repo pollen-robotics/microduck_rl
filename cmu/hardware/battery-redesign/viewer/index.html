@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backpack Battery Cradle</title>
+<!--
+  3D viewer for the battery-on-cap redesign against V1.20. It loads the STLs and checks straight from the repository,
+  so it must be served over HTTP from cmu/hardware (browsers block file:// fetches):
+      cd cmu/hardware && python3 -m http.server 8000
+      open http://localhost:8000/battery-redesign/viewer/
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --bg: #f3f1ec; --panel: #fbfaf7; --ink: #1f2226; --muted: #626a73; --rule: #d9d5cc;
+  --print: #e07a1f; --new: #0f9fb8; --new-ink: #0b6f80; --stage: #e9e6df; --warn: #a3561a;
+  --display: "Barlow Semi Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #16181b; --panel: #1d2024; --ink: #e8e6e1; --muted: #9aa1a9; --rule: #33373d;
+  --print: #f08a2c; --new: #36c3d9; --new-ink: #7fdcea; --stage: #202327; --warn: #e39a5c; color-scheme: dark } }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 var(--body); padding: 20px 16px 48px; }
+.wrap { max-width: 1240px; margin: 0 auto; display: grid; gap: 28px; }
+header { display: grid; gap: 6px; }
+.eyebrow { font: 500 12px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+h1 { font: 600 clamp(28px, 4vw, 40px)/1.05 var(--display); margin: 0; text-wrap: balance; }
+h2 { font: 600 22px/1.2 var(--display); margin: 0 0 12px; text-wrap: balance; }
+h3 { font: 600 17px/1.25 var(--display); margin: 0; }
+.lede { max-width: 70ch; color: var(--muted); margin: 0; }
+code { font: 400 0.92em var(--mono); }
+.work { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
+@media (max-width: 860px) { .work { grid-template-columns: minmax(0, 1fr); } }
+.stage { position: relative; background: var(--stage); border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; height: min(72vh, 680px); min-height: 380px; }
+.stage canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.views { position: absolute; top: 10px; left: 10px; display: flex; flex-wrap: wrap; gap: 6px; z-index: 3; }
+.views button, .seg button { font: 500 12px/1.2 var(--mono); padding: 7px 10px; border-radius: 6px; border: 1px solid var(--rule); background: var(--panel); color: var(--ink); cursor: pointer; }
+.views button:hover, .seg button:hover { border-color: var(--muted); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--new); outline-offset: 2px; }
+.hint { position: absolute; right: 10px; bottom: 8px; font: 400 11px/1.3 var(--mono); color: var(--muted); z-index: 3; text-align: right; }
+.status { position: absolute; left: 10px; bottom: 10px; max-width: calc(100% - 180px); font: 500 12px/1.35 var(--mono); color: var(--ink); background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 6px 9px; z-index: 3; font-variant-numeric: tabular-nums; }
+.pins { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+.pin { position: absolute; transform: translate(-50%, -50%); display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.pin b { width: 20px; height: 20px; border-radius: 50%; background: var(--new); color: #fff; font: 600 11px/20px var(--mono); text-align: center; box-shadow: 0 0 0 2px var(--panel); }
+.pin span { font: 500 11.5px/1 var(--body); background: var(--panel); color: var(--ink); padding: 4px 6px; border-radius: 4px; border: 1px solid var(--rule); }
+.rail { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 14px; display: grid; gap: 16px; }
+.group { display: grid; gap: 8px; }
+.label { font: 500 11px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.seg { display: grid; gap: 6px; }
+.seg button { text-align: left; display: grid; gap: 2px; }
+.seg button small { font: 400 11px/1.3 var(--body); color: var(--muted); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--panel); border-color: var(--ink); }
+.seg button[aria-pressed="true"] small { color: var(--panel); opacity: .75; }
+.slider { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; align-items: center; font-size: 13.5px; }
+.slider output { font: 500 12px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.slider input { grid-column: 1 / -1; width: 100%; accent-color: var(--new); }
+.check { display: flex; gap: 8px; align-items: center; font-size: 13.5px; cursor: pointer; }
+.check input { accent-color: var(--new); }
+.legend { display: grid; gap: 6px; font-size: 13px; }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 8px; vertical-align: -1px; }
+.changes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 860px) { .changes { grid-template-columns: minmax(0, 1fr); } }
+.card { border-top: 3px solid var(--new); background: var(--panel); padding: 14px 16px 16px; display: grid; gap: 8px; align-content: start; }
+.card .where { font: 500 11px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--new-ink); }
+.card p { margin: 0; color: var(--muted); font-size: 14px; }
+dl.dims { margin: 4px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font: 400 12.5px/1.4 var(--mono); font-variant-numeric: tabular-nums; }
+dl.dims dt { color: var(--muted); } dl.dims dd { margin: 0; text-align: right; }
+.two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px; }
+@media (max-width: 860px) { .two { grid-template-columns: minmax(0, 1fr); } }
+.tbl { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font: 400 13px/1.4 var(--mono); font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-weight: 500; color: var(--muted); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+.ok { color: var(--new-ink); } .flag { color: var(--warn); }
+ol.todo { margin: 0; padding-left: 22px; display: grid; gap: 8px; max-width: 70ch; }
+ol.todo li::marker { font: 500 13px var(--mono); color: var(--muted); }
+.loading { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; text-align: center; font: 500 13px/1.6 var(--mono); color: var(--muted); z-index: 4; background: var(--stage); }
+footer { font: 400 12px/1.5 var(--mono); color: var(--muted); border-top: 1px solid var(--rule); padding-top: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow">MicroDuck · battery backpack · V1.20 vs battery on the cap</div>
+    <h1>Battery on the cap</h1>
+    <p class="lede">The V1.20 frame has nothing that locates the battery above the step at z −15.2, and nothing stops it lifting into the roof. This redesign carries the battery in a printed cradle on the cap, closed by a screwed bar, so cap and battery come off together. Drag to orbit, scroll to zoom, right-drag to pan.</p>
+  </header>
+
+  <div class="work">
+    <div class="stage" id="stage">
+      <div class="views" role="group" aria-label="Camera views">
+        <button id="v-iso" type="button">Iso</button>
+        <button id="v-back" type="button">Behind</button>
+        <button id="v-side" type="button">Side</button>
+        <button id="v-top" type="button">Top</button>
+        <button id="v-inside" type="button">Cut open</button>
+      </div>
+      <div class="pins" id="pins"></div>
+      <div class="status" id="status">Loading…</div>
+      <div class="hint">mm, robot frame<br>x forward · y left · z up</div>
+      <div class="loading" id="loading">Loading the STLs…</div>
+    </div>
+
+    <aside class="rail" aria-label="Viewer controls">
+      <div class="group">
+        <div class="label">Design</div>
+        <div class="seg" role="group" aria-label="Design">
+          <button id="m-cap" type="button" aria-pressed="true">Battery on the cap<small>cradle and screwed bar on the back panel</small></button>
+          <button id="m-old" type="button" aria-pressed="false">V1.20 as printed<small>for comparison</small></button>
+        </div>
+      </div>
+      <div class="group">
+        <div class="label">Assembly</div>
+        <label class="slider" for="s-cap">Cap pulled back <output id="o-cap">0 mm</output>
+          <input id="s-cap" type="range" min="0" max="60" step="0.5" value="0"></label>
+        <label class="slider" for="s-bat" id="l-bat">Bar off, battery out of the cradle <output id="o-bat">0 mm</output>
+          <input id="s-bat" type="range" min="0" max="70" step="0.5" value="0"></label>
+      </div>
+      <div class="group">
+        <div class="label">Section</div>
+        <label class="check" for="c-cut"><input id="c-cut" type="checkbox"> Cut away the robot-left side</label>
+        <label class="slider" for="s-cut">Cut plane <output id="o-cut">y = 9.0</output>
+          <input id="s-cut" type="range" min="-33" max="33" step="0.5" value="9"></label>
+      </div>
+      <div class="group">
+        <div class="label">Show</div>
+        <label class="check" for="c-robot"><input id="c-robot" type="checkbox" checked> Robot (rear pack, OpenRB)</label>
+        <label class="check" for="c-shell"><input id="c-shell" type="checkbox" checked> Torso shells (ghosted)</label>
+        <label class="check" for="c-parts"><input id="c-parts" type="checkbox" checked> Battery, switch, board, plugs</label>
+        <label class="check" for="c-wires"><input id="c-wires" type="checkbox" checked> Wires</label>
+        <label class="check" for="c-pins"><input id="c-pins" type="checkbox" checked> Labels</label>
+      </div>
+      <div class="group legend">
+        <div class="label">Colour</div>
+        <div><i style="background: var(--print)"></i>Printed, unchanged</div>
+        <div><i style="background: var(--new)"></i>New or changed</div>
+        <div><i style="background:#3a4048"></i>Battery (listing size)</div>
+        <div><i style="background:#2f6fd6"></i>DFR1202 · <i style="background:#e5bf2a; margin-left:4px"></i>plugs</div>
+        <div><i style="background:#c9302c"></i>Battery-voltage wires</div>
+      </div>
+    </aside>
+  </div>
+
+  <section>
+    <h2>What changes</h2>
+    <div class="changes">
+      <article class="card">
+        <div class="where">Cap · pins 1–3</div>
+        <h3>A cradle on the back panel</h3>
+        <p>Side walls, a floor and three roof tabs grow straight off the cap's inner wall, so the cap prints back-face-down exactly as today with every new feature rising off the bed. The battery goes in from the front, and the cap, cradle and battery come off the robot as one unit.</p>
+        <dl class="dims">
+          <dt>pack at</dt><dd>x −74.05 → −62.05</dd>
+          <dt>side walls</dt><dd>|y| 15.8 → 17.0, z −13.7 → 36</dd>
+          <dt>floor</dt><dd>1.2 mm, |y| ≤ 16.2</dd>
+          <dt>roof tabs</dt><dd>y −17→−11, −3→6, 11→17</dd>
+          <dt>play</dt><dd>0.3 mm every side</dd>
+          <dt>added</dt><dd id="c-mass">≈ 2 g</dd>
+        </dl>
+      </article>
+      <article class="card">
+        <div class="where">New part · pins 4–5</div>
+        <h3>Retainer bar, 2 × M2 × 6</h3>
+        <p>A 1.5 mm bar across the battery's front face screws into two bosses at the front ends of the cradle walls. It closes the cradle into a ring, so the battery is fully captured even with the cap in your hand. It sits below plug 1 and clears the switch body by 0.3 mm.</p>
+        <dl class="dims">
+          <dt>bar</dt><dd>42.2 × 5 × 1.5 mm</dd>
+          <dt>at</dt><dd>x −61.75 → −60.25, z −10.5 → −5.5</dd>
+          <dt>screws</dt><dd>M2×6 at (±18.6, −8)</dd>
+          <dt>bosses</dt><dd>⌀5, 5 deep, M2 pilot</dd>
+          <dt>mass</dt><dd>≈ 0.3 g</dd>
+        </dl>
+      </article>
+      <article class="card">
+        <div class="where">Frame · pin 6, plugs</div>
+        <h3>Frame untouched up front, slack for plug 1</h3>
+        <p>The switch and DFR1202 stay exactly as V1.20. The frame only gets 1.1 mm longer at its rim and a 1.5 mm recess in the floor where the cradle floor sits. Plug 1 rides with the cap on a looped lead S, so the cap pulls about 40 mm back before you unplug it. Plug 2 parks in the front bay.</p>
+        <dl class="dims">
+          <dt>box depth</dt><dd>29.45 → 30.55 mm</dd>
+          <dt>floor recess</dt><dd>x −68.15 → −61.75</dd>
+          <dt>lead S (red)</dt><dd id="c-slack">73 mm drawn</dd>
+          <dt>needed at 40 mm</dt><dd id="c-reach">57 mm straight</dd>
+          <dt>cut to</dt><dd>75–80 mm</dd>
+        </dl>
+      </article>
+    </div>
+  </section>
+
+  <section class="two">
+    <div>
+      <h2>Checks run on this geometry</h2>
+      <div class="tbl"><table id="checks"><thead><tr><th>Check</th><th>Result</th></tr></thead><tbody></tbody></table></div>
+    </div>
+    <div>
+      <h2>Wiring and charging</h2>
+      <ol class="todo">
+        <li>Switch up through the floor panel and the DFR1202 clipped in, exactly as V1.20. Plug 2 parks in the front bay beside the board.</li>
+        <li>Cut lead S's battery end to 75–80 mm and leave it looped in the robot-right side space, below plug 1.</li>
+        <li>Battery into the cradle from the front, leads up through the gaps between the roof tabs, then the retainer bar and its two M2 × 6 screws.</li>
+        <li>Plug the battery into plug 1, tuck the loop, offer the cap up and fit the three cap screws.</li>
+        <li>Charging: three cap screws out, pull the cap back about 40 mm, unplug plug 1 beside the box. The battery stays captured in the cap; two bar screws release it.</li>
+      </ol>
+    </div>
+  </section>
+
+  <footer>Loads ../stl, ../checks and ../../battery-backpack directly. Bought parts are envelope boxes, not their real shapes; plug parking spots and lead S, C routes are approximate. Open items are in ../README.md.</footer>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const stage = $('stage');
+  const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const V120 = '../../battery-backpack/';
+  const FILES = {
+    rear_pack: V120 + 'mating/rear_pack.stl', shell_left: V120 + 'mating/shell_left.stl', shell_right: V120 + 'mating/shell_right.stl',
+    openrb: V120 + 'mating/openrb-board-upright.stl',
+    frame_v120: V120 + 'stl/battery_backpack_frame-world.stl', cap_v120: V120 + 'stl/battery_backpack_cap-world.stl',
+    battery: V120 + 'envelopes/battery-world.stl', switch: V120 + 'envelopes/switch_swann-world.stl', dfr1202: V120 + 'envelopes/dfr1202-world.stl',
+    plugs: V120 + 'envelopes/plugs-world.stl', swap_plugs: V120 + 'envelopes/swap_plugs-world.stl',
+    frame_cap: '../stl/battery_backpack_frame-world.stl', cap_cap: '../stl/battery_backpack_cap-world.stl',
+    cap_bar: '../stl/battery_backpack_bar-world.stl', cap_cradle: '../stl/battery_backpack_cradle_added-world.stl',
+  };
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+  renderer.localClippingEnabled = true;
+  stage.appendChild(renderer.domElement);
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(28, 1, 1, 4000);
+  camera.up.set(0, 0, 1);
+  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true; controls.dampingFactor = 0.12;
+  const TARGET = new THREE.Vector3(-59, 0, 2);
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8478, 0.75));
+  const key = new THREE.DirectionalLight(0xffffff, 0.75); camera.add(key); key.position.set(60, 120, 80);
+  scene.add(camera);
+
+  const cutPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 9);
+  let cutOn = false;
+  const mats = [];
+  function mat(color, opts = {}) {
+    const m = new THREE.MeshStandardMaterial(Object.assign({ color, roughness: 0.62, metalness: 0.0, flatShading: true, side: THREE.DoubleSide }, opts));
+    mats.push(m); return m;
+  }
+  function applyClip() { mats.forEach((m) => { m.clippingPlanes = cutOn ? [cutPlane] : []; m.needsUpdate = true; }); }
+  let M = null;
+  function setBg() {
+    scene.background = new THREE.Color(css('--stage') || '#e9e6df');
+    if (M) { M.print.color.set(css('--print')); M.newc.color.set(css('--new')); M.newSolid.color.set(css('--new')); }
+  }
+
+  const G = {};
+  const state = { mode: 'cap', cap: 0, bat: 0, capEff: 0, batEff: 0, barRel: 0 };
+  let C = null;
+
+  const loader = new THREE.STLLoader();
+  const getJSON = (u) => fetch(u).then((r) => { if (!r.ok) throw new Error(u + ': HTTP ' + r.status); return r.json(); });
+  const getSTL = (u) => fetch(u).then((r) => { if (!r.ok) throw new Error(u + ': HTTP ' + r.status); return r.arrayBuffer(); }).then((b) => loader.parse(b));
+  const keys = Object.keys(FILES);
+  Promise.all([Promise.all(keys.map((k) => getSTL(FILES[k]))), getJSON('../checks/checks.json'), getJSON(V120 + 'envelopes/wires.json')])
+    .then(([geoms, checks, wires]) => { const g = {}; keys.forEach((k, i) => { g[k] = geoms[i]; }); build(g, checks, wires); })
+    .catch((e) => {
+      $('loading').textContent = location.protocol === 'file:'
+        ? 'This page loads the repository STLs, which browsers block from file://. Run "python3 -m http.server 8000" in cmu/hardware and open http://localhost:8000/battery-redesign/viewer/'
+        : 'The STLs did not load (' + e.message + '). Serve cmu/hardware as the web root and reload.';
+    });
+
+  function tube(points, r, material) {
+    const pts = points.map((p) => new THREE.Vector3(p[0], p[1], p[2]));
+    const curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal', 0.1);
+    return new THREE.Mesh(new THREE.TubeGeometry(curve, Math.max(24, pts.length * 4), r, 8, false), material);
+  }
+  function boxMesh(lo, hi, material) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]), material);
+    m.position.set((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2); return m;
+  }
+
+  function build(g, checks, wires) {
+    C = checks;
+    M = {
+      print: mat(css('--print')), newc: mat(css('--new'), { polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
+      newSolid: mat(css('--new')),
+      pack: mat(0x9aa0a6), openrb: mat(0x3e8e5a), shell: mat(0xe9e7e1, { transparent: true, opacity: 0.22, depthWrite: false }),
+      bat: mat(0x3a4048), sw: mat(0x5a3d2b), dfr: mat(0x2f6fd6), plug: mat(0xe5bf2a), red: mat(0xc9302c), dark: mat(0x30343a),
+    };
+    const mk = (name, m) => new THREE.Mesh(g[name], m);
+    const edges = (mesh, color) => {
+      const l = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry, 28), new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.35 }));
+      mats.push(l.material); mesh.add(l); return mesh;
+    };
+    const grp = (k) => { G[k] = new THREE.Group(); scene.add(G[k]); return G[k]; };
+    const ORANGE_EDGE = 0x5a2e08, NEW_EDGE = 0x064450;
+    const isPower = (k) => /16 AWG|J1|J2|feed|lead S red|lead C|servo/.test(k);
+
+    grp('robot').add(mk('rear_pack', M.pack), mk('openrb', M.openrb));
+    grp('shell').add(mk('shell_left', M.shell), mk('shell_right', M.shell));
+    grp('partsCommon').add(mk('switch', M.sw), mk('dfr1202', M.dfr), mk('swap_plugs', M.plug));
+    // V1.20
+    grp('frameOld').add(edges(mk('frame_v120', M.print), ORANGE_EDGE));
+    grp('capOld').add(edges(mk('cap_v120', M.print), ORANGE_EDGE));
+    grp('batOld').add(edges(mk('battery', M.bat), 0x111111));
+    grp('partsOld').add(mk('plugs', M.plug));
+    grp('wiresOld');
+    Object.entries(wires).forEach(([k, w]) => G.wiresOld.add(tube(w.points, /16 AWG/.test(k) ? 1.3 : 0.9, isPower(k) ? M.red : M.dark)));
+    // battery on the cap
+    grp('frameCap').add(edges(mk('frame_cap', M.print), ORANGE_EDGE));
+    grp('capCap').add(edges(mk('cap_cap', M.print), ORANGE_EDGE), edges(mk('cap_cradle', M.newc), NEW_EDGE));
+    grp('barCap').add(edges(mk('cap_bar', M.newSolid), NEW_EDGE));
+    grp('batCap');
+    const bc = edges(new THREE.Mesh(g.battery, M.bat), 0x111111); bc.position.x = -1.8; bc.userData.part = true; G.batCap.add(bc);
+    const p1 = C.plugs['plug 1 (rides with the cap)'];
+    const p1top = boxMesh([p1.lo[0], p1.lo[1], 12], p1.hi, M.plug); p1top.userData.part = true; G.batCap.add(p1top);
+    const bal = boxMesh(C.plugs['balance plug'].lo, C.plugs['balance plug'].hi, M.plug); bal.userData.part = true; G.batCap.add(bal);
+    grp('p1low').add(boxMesh(p1.lo, [p1.hi[0], p1.hi[1], 12], M.plug));
+    grp('partsCap').add(boxMesh(C.plugs['plug 2 (front bay)'].lo, C.plugs['plug 2 (front bay)'].hi, M.plug));
+    grp('wiresCap'); grp('slack');
+    G.slackDefs = [];
+    Object.entries(C.routes).forEach(([k, w]) => {
+      const mtl = isPower(k) ? M.red : M.dark;
+      if (/16 AWG/.test(k)) { G.batCap.add(tube(w.points, w.r, mtl)); return; }
+      if (w.slack) { G.slackDefs.push({ pts: w.points, r: w.r, mtl, mesh: null }); return; }
+      G.wiresCap.add(tube(w.points, w.r, mtl));
+    });
+    const ck = C.checks;
+    $('c-mass').textContent = '≈ ' + ck.mass_g_est.cradle + ' g';
+    $('c-slack').textContent = ck.slack.lead_S_red_drawn_mm + ' mm drawn';
+    $('c-reach').textContent = ck.slack.straight_reach_at_40mm_mm + ' mm straight';
+    setBg(); applyClip(); view('inside'); sync();
+    $('loading').remove();
+    loop();
+  }
+
+  function slackTubes(dx) {
+    const t = Math.min(1, dx / 40) * 0.85;
+    G.slackDefs.forEach((s) => {
+      const P = s.pts, n = P.length, E = [P[0][0] - dx, P[0][1], P[0][2]], L = P[n - 1];
+      const pts = P.map((c, i) => {
+        if (i === 0) return E;
+        const f = i / (n - 1), S = [E[0] + (L[0] - E[0]) * f, E[1] + (L[1] - E[1]) * f, E[2] + (L[2] - E[2]) * f];
+        return [c[0] + (S[0] - c[0]) * t, c[1] + (S[1] - c[1]) * t, c[2] + (S[2] - c[2]) * t];
+      });
+      if (s.mesh) { G.slack.remove(s.mesh); s.mesh.geometry.dispose(); }
+      s.mesh = tube(pts, s.r, s.mtl); G.slack.add(s.mesh);
+    });
+  }
+
+  const fmt = (v) => (Math.abs(v) < 0.005 ? '0' : v.toFixed(2)) + ' mm³';
+  function checkRows() {
+    if (state.mode === 'old') return [['V1.20 as printed', 'battery free to lift 7.3 mm; no frame guide above z −15.2; sideways fences on the cap only', null]];
+    const c = C.checks, f = c.fit_mm3, ok0 = (v) => v <= 0.001;
+    const rows = [
+      ['Cap with cradle: one closed solid', c.cap.bodies === 1 ? 'yes' : 'no', c.cap.bodies === 1],
+      ['Bar and frame: one closed solid each', c.bar.bodies === 1 && c.frame.bodies === 1 ? 'yes' : 'no', c.bar.bodies === 1 && c.frame.bodies === 1],
+      ['Battery slid into the cradle from 20 mm in front', fmt(f['battery slid into cradle from 20 mm in front (cap off)']) + ' hit', ok0(f['battery slid into cradle from 20 mm in front (cap off)'])],
+      ['Cap, cradle, bar, battery, plug 1 pulled 45 mm back', fmt(f['cap, battery, bar, plug 1 pulled 45 mm back vs frame']) + ' hit on the frame', ok0(f['cap, battery, bar, plug 1 pulled 45 mm back vs frame'])],
+      ['Same pull vs switch, board, pads, swap plugs', ['dfr1202', 'dfr_pads', 'switch_swann', 'swap_plugs'].every((k) => ok0(f['cap pulled back vs ' + k])) ? '0 mm³' : 'hit', ['dfr1202', 'dfr_pads', 'switch_swann', 'swap_plugs'].every((k) => ok0(f['cap pulled back vs ' + k]))],
+      ['Seated: battery vs bar and frame', fmt(f['battery vs bar'] + f['battery vs frame']), ok0(f['battery vs bar'] + f['battery vs frame'])],
+      ['Seated: battery vs cap', fmt(f['battery vs cap + cradle (seated)']) + ': the sharp-cornered envelope grazes the cap corner radius by 0.2 mm; real pack edges are rounded', null],
+      ['Seated: cap and bar vs frame', fmt(f['cap + cradle vs frame (seated)'] + f['bar vs frame']), ok0(f['cap + cradle vs frame (seated)'] + f['bar vs frame'])],
+    ];
+    const pz = Object.values(c.plugs_mm3).every(ok0);
+    rows.push(['Plugs 1, 2, balance; board, pads, switch vs cradle and bar', pz ? '0 mm³ overlap' : 'overlap', pz]);
+    Object.entries(c.wires_mm3).forEach(([k, v]) => {
+      const pre = /servo lead to J3|5 V lead to J4/.test(k);
+      rows.push(['Wire: ' + k, pre ? fmt(v) + ' at the front window, same in the V1.20 data' : fmt(v), pre ? null : v <= 0.02]);
+    });
+    rows.push(['Lead S slack at 40 mm', c.slack.lead_S_red_drawn_mm + ' mm lead vs ' + c.slack.straight_reach_at_40mm_mm + ' mm straight-line reach', c.slack.lead_S_red_drawn_mm > c.slack.straight_reach_at_40mm_mm + 5]);
+    Object.entries(c.driver_lanes_mm3).forEach(([k, v]) => rows.push(['4 mm driver lane: ' + k, fmt(v), ok0(v)]));
+    rows.push(['Hip sweep', 'not rerun; the outline only grows 1.1 mm at the rim', null]);
+    return rows;
+  }
+  function fillChecks() {
+    const tb = document.querySelector('#checks tbody'); tb.textContent = '';
+    checkRows().forEach(([a, b, ok]) => {
+      const tr = document.createElement('tr');
+      const td1 = document.createElement('td'); td1.textContent = a;
+      const td2 = document.createElement('td'); td2.textContent = b; td2.className = ok === null ? 'flag' : ok ? 'ok' : 'flag';
+      tr.append(td1, td2); tb.append(tr);
+    });
+  }
+
+  const PINS = [
+    { n: 1, t: 'Cradle side walls', p: [-68, -16.4, 20], mode: 'cap', mv: 'cap' },
+    { n: 2, t: 'Roof tabs', p: [-68, -14, 35.6], mode: 'cap', mv: 'cap' },
+    { n: 3, t: 'Cradle floor', p: [-70, -6, -23.1], mode: 'cap', mv: 'cap' },
+    { n: 4, t: 'Retainer bar', p: [-61, 5, -8], mode: 'cap', mv: 'bar' },
+    { n: 5, t: 'M2×6 into wall boss', p: [-60.25, -18.6, -2.5], mode: 'cap', mv: 'bar' },
+    { n: 6, t: 'Floor recess (frame)', p: [-66, 8, -23.2], mode: 'cap' },
+    { n: '', t: 'Plug 1 on slack', p: [-68.9, -21.4, 26], mode: 'cap', mv: 'bat', parts: true },
+    { n: '', t: 'Lead S loop', p: [-72.5, -27, -13.5], mode: 'cap' },
+    { n: '', t: 'Plug 2 (front bay)', p: [-54, 22.5, 29.5], mode: 'cap', parts: true },
+    { n: '', t: 'Battery', p: [-67, -5, 12], mode: 'any', mv: 'bat', parts: true },
+    { n: '', t: 'Switch', p: [-54, 0, -30], mode: 'any', parts: true },
+    { n: '', t: 'DFR1202', p: [-53, 0, 32], mode: 'any', parts: true },
+  ];
+  const pinEls = PINS.map((p) => {
+    const el = document.createElement('div'); el.className = 'pin';
+    el.innerHTML = (p.n ? '<b>' + p.n + '</b>' : '') + '<span></span>';
+    el.querySelector('span').textContent = p.t;
+    $('pins').append(el); return el;
+  });
+  const v3 = new THREE.Vector3();
+  function placePins() {
+    const show = $('c-pins').checked, w = stage.clientWidth, h = stage.clientHeight;
+    PINS.forEach((p, i) => {
+      const el = pinEls[i];
+      const off = state.mode !== 'cap' ? 0 : p.mv === 'cap' ? state.capEff : p.mv === 'bar' ? state.capEff - state.barRel : p.mv === 'bat' ? state.capEff - state.batEff : 0;
+      const visible = show && (p.mode === 'any' || p.mode === state.mode) && !(p.parts && !$('c-parts').checked) && !(cutOn && p.p[1] > cutPlane.constant + 0.5);
+      v3.set(p.p[0] - off, p.p[1], p.p[2]).project(camera);
+      if (!visible || v3.z > 1) { el.hidden = true; return; }
+      el.hidden = false;
+      el.style.left = ((v3.x + 1) / 2 * w) + 'px'; el.style.top = ((1 - v3.y) / 2 * h) + 'px';
+    });
+  }
+
+  function sync() {
+    if (!M) return;
+    const isCap = state.mode === 'cap', isOld = !isCap;
+    const batEff = isCap ? state.bat : 0;
+    const capEff = batEff > 0 ? Math.max(state.cap, 50) : state.cap;
+    const barRel = batEff > 0 ? batEff + 12 : 0;
+    Object.assign(state, { batEff, capEff, barRel });
+    $('s-cap').value = Math.min(60, capEff); $('s-bat').value = Math.min(70, batEff);
+    $('o-cap').textContent = capEff.toFixed(1) + ' mm'; $('o-bat').textContent = batEff.toFixed(1) + ' mm';
+    $('l-bat').hidden = !isCap;
+    const parts = $('c-parts').checked, wires = $('c-wires').checked;
+    G.frameOld.visible = isOld; G.capOld.visible = isOld; G.capOld.position.x = -capEff;
+    G.batOld.visible = isOld && parts; G.partsOld.visible = isOld && parts; G.wiresOld.visible = isOld && wires;
+    G.frameCap.visible = isCap; G.capCap.visible = isCap; G.barCap.visible = isCap;
+    G.capCap.position.x = -capEff; G.barCap.position.x = -capEff + barRel;
+    G.batCap.visible = isCap; G.batCap.position.x = -capEff + batEff;
+    G.batCap.children.forEach((c) => { c.visible = c.userData.part ? parts : wires; });
+    const p1Off = Math.max(-40, -capEff + batEff);
+    G.p1low.visible = isCap && parts; G.p1low.position.x = p1Off;
+    G.partsCap.visible = isCap && parts; G.wiresCap.visible = isCap && wires; G.slack.visible = isCap && wires;
+    if (isCap) slackTubes(-p1Off);
+    G.partsCommon.visible = parts;
+    G.robot.visible = $('c-robot').checked; G.shell.visible = $('c-shell').checked;
+    const pulled = capEff - batEff;
+    $('status').textContent = isCap
+      ? (batEff > 0 ? 'Cap off the robot · bar off · battery sliding out of the cradle' : pulled >= 40 ? 'Cap 40 mm back: plug 1 at the end of its slack, unplug it here' : pulled > 0 ? 'Cap, cradle and battery coming off together · plug 1 following on lead S' : 'Battery captured in the cap cradle · 0.3 mm play · bar on 2 × M2×6')
+      : 'V1.20: battery free to lift 7.3 mm, no frame guides';
+    [['m-cap', 'cap'], ['m-old', 'old']].forEach(([id, k]) => $(id).setAttribute('aria-pressed', String(state.mode === k)));
+    fillChecks();
+  }
+
+  const VIEWS = { iso: [-205, -150, 105], back: [-300, 0, 10], side: [-60, -300, 10], top: [-62, -0.01, 300], inside: [-150, 215, 70] };
+  function view(k) {
+    const p = VIEWS[k]; camera.position.set(p[0], p[1], p[2]); controls.target.copy(TARGET); controls.update();
+    if (k === 'inside') { $('c-cut').checked = true; cutOn = true; applyClip(); $('c-shell').checked = false; sync(); }
+  }
+  ['iso', 'back', 'side', 'top', 'inside'].forEach((k) => $('v-' + k).addEventListener('click', () => view(k)));
+  [['m-cap', 'cap'], ['m-old', 'old']].forEach(([id, k]) => $(id).addEventListener('click', () => { state.mode = k; sync(); }));
+  $('s-cap').addEventListener('input', (e) => { state.cap = +e.target.value; if (state.cap < 50) state.bat = 0; sync(); });
+  $('s-bat').addEventListener('input', (e) => { state.bat = +e.target.value; sync(); });
+  $('c-cut').addEventListener('change', (e) => { cutOn = e.target.checked; applyClip(); });
+  $('s-cut').addEventListener('input', (e) => { cutPlane.constant = +e.target.value; $('o-cut').textContent = 'y = ' + (+e.target.value).toFixed(1); if (!cutOn) { cutOn = true; $('c-cut').checked = true; applyClip(); } });
+  ['c-robot', 'c-shell', 'c-parts', 'c-wires'].forEach((id) => $(id).addEventListener('change', sync));
+
+  function resize() { const w = stage.clientWidth, h = stage.clientHeight; renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); }
+  new ResizeObserver(resize).observe(stage); resize();
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+  if (mq.addEventListener) mq.addEventListener('change', setBg);
+  setBg();
+  function loop() { controls.update(); renderer.render(scene, camera); placePins(); requestAnimationFrame(loop); }
+})();
+</script>
+</body>
+</html>

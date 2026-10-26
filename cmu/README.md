@@ -68,7 +68,7 @@ The physical build (parts list, printed parts, wiring, assembly guide, bring-up 
 ## How this directory is refreshed
 
 `mac/`, `pi/`, `whole/`, `real-logs/`, `model/sole/`, `simulator/` and the copied files under `hardware/` (everything there but
-the three `README.md` pages) are generated copies of the robotics working tree on the robot's MacBook. `sync_from_robotics.py` copies them with a short list of rewrite rules (path hops between the two
+the `README.md` pages and `hardware/battery-redesign/`) are generated copies of the robotics working tree on the robot's MacBook. `sync_from_robotics.py` copies them with a short list of rewrite rules (path hops between the two
 layouts, no private venv re-exec, relative manifest paths, private addresses replaced). Each rule must match or the
 sync stops, so a drifted source is noticed. `simulator/` is the committed content of the microduck-simulator checkout
 (Pollen's Hugging Face Space plus our commits), without its 1.5 GB of September result archives. The workflow on that machine:
@@ -81,7 +81,7 @@ git add -A cmu && git commit && git push origin main
 ```
 
 Do not edit the copied files in this fork: fix the source and resync. `model/`, `simcheck/`, `finetune/`,
-`robot-condition.json`, the three Markdown pages and the `hardware/**/README.md` pages are owned here. Pollen's updates arrive through the `develop`
+`robot-condition.json`, the three Markdown pages and the `hardware/**/README.md` pages and `hardware/battery-redesign/` are owned here. Pollen's updates arrive through the `develop`
 mirror (see the top-level README).
 
 ## Conventions

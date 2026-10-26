@@ -1,6 +1,6 @@
 # cmu/hardware: the parts you can redesign and print
 
-Two things live here, both for teammates who want to change the robot's printed parts rather than only its policies:
+Three things live here, all for teammates who want to change the robot's printed parts rather than only its policies:
 
 - [battery-backpack/](battery-backpack/README.md): the 2S battery backpack as it is on the robot today (V1.20 geometry):
   the design brief and its fixed interfaces, the STL files in robot and print orientation, the bought-part envelopes
@@ -9,8 +9,11 @@ Two things live here, both for teammates who want to change the robot's printed 
 - [printing/](printing/README.md): how we turn an STL into a file the two RoboClub printers accept (Bambu Lab X1 Carbon,
   Elegoo Centauri Carbon): the slicer profiles we use, the exact command lines, the orientation and brim rules, the
   Centauri preview rule, the delivery format, and the ready-to-print V1.20 files of the backpack.
+- [battery-redesign/](battery-redesign/README.md): a proposed backpack change that carries the battery on the cap in a
+  printed cradle closed by a screwed bar, so the battery is held on every side; its STLs, checks and the script that
+  builds them from the V1.20 parts. Owned here, not a copy.
 
-Everything except the three `README.md` pages is a copy of the private robotics working tree, refreshed by
+Everything except the `README.md` pages and `battery-redesign/` is a copy of the private robotics working tree, refreshed by
 `python3 cmu/sync_from_robotics.py` (see [cmu/README.md](../README.md)); do not edit the copies, change the source and
 resync. Several copied scripts import private modules that are not in this repository (the robot's CAD library, the
 interference audit, the bounded CAD runner); they are here as the authoritative record of how the numbers were
