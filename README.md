@@ -27,6 +27,10 @@ Requires a CUDA GPU (training runs through MuJoCo Warp) and [uv](https://docs.as
 > wheels on first run and uv's default 30 s HTTP timeout can abort mid-download.
 > Export `UV_HTTP_TIMEOUT=600` for the first sync. 
 
+> **On macOS:** the viewer commands need `mjpython`, the launcher MuJoCo ships to
+> keep the Cocoa main thread free — `mujoco.viewer.launch_passive` refuses to run
+> without it. Prefix them: `uv run mjpython scripts/infer_policy.py ...`.
+
 ```bash
 git clone https://github.com/pollen-robotics/microduck_rl
 cd microduck_rl
