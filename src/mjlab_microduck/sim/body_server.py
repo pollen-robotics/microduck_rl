@@ -181,6 +181,21 @@ class World:
         self.data = mujoco.MjData(self.model)
         self.lock = threading.Lock()
         self.bodies: list[Body] = []
+        # Loose things in the room — balls, boxes — that are not a duck: every free joint whose
+        # name is not a duck's trunk. A viewer that mirrors the world needs their poses, and the
+        # duck's own `read` deliberately carries only what a robot could sense.
+        self.loose = [
+            (mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, int(self.model.jnt_bodyid[j])),
+             int(self.model.jnt_qposadr[j]))
+            for j in range(self.model.njnt)
+            if self.model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE
+            and not (mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, j) or "").endswith("trunk_base_freejoint")
+        ]
+
+    def objects(self) -> dict:
+        """Where each loose object is: name -> [x, y, z, qw, qx, qy, qz]. Read-only."""
+        with self.lock:
+            return {name: [float(v) for v in self.data.qpos[adr : adr + 7]] for name, adr in self.loose}
 
     def step(self, times: int = 1) -> None:
         """Advance the world, taking the lock once for the whole batch.
@@ -428,6 +443,8 @@ class Handler(socketserver.StreamRequestHandler):
             return body.slow_sensors()
         if op == "tof":
             return body.depth()
+        if op == "objects":
+            return {"objects": body.world.objects()}
         raise ValueError(f"unknown op {op!r}")
 
 
