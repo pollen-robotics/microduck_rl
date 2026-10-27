@@ -32,6 +32,9 @@ data/
 
 claude_experiments/
 
+# `publish --dry-run` folders: untracked files would mark the next training run dirty.
+publish-*/
+
 backup_onnx/
 
 
