@@ -797,7 +797,7 @@ def make_microduck_sitstand_env_cfg(
         cfg.scene.terrain.terrain_generator = None
     else:
         cfg.scene.terrain.terrain_type = "generator"
-        cfg.scene.terrain.terrain_generator = MICRODUCK_ROUGH_TERRAINS_CFG
+        cfg.scene.terrain.terrain_generator = deepcopy(MICRODUCK_ROUGH_TERRAINS_CFG)
         if play:
             cfg.scene.terrain.terrain_generator.curriculum = False
             cfg.scene.terrain.terrain_generator.num_cols = 5
