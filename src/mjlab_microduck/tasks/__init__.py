@@ -380,3 +380,32 @@ register_mjlab_task(
     rl_cfg=MicroduckGroundGraspRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
+
+
+# ── Expressive body motions (2026-10-28): one phase-commanded one-shot per motion, feet planted, grippy feet ──
+from .expressive_motions import MOTIONS as _EXPRESSIVE_MOTIONS
+from .microduck_expressive_env_cfg import make_expressive_rl_cfg, make_microduck_expressive_env_cfg
+
+
+class ExpressiveFromPickRunner(GroundGraspFromPickRunner):
+    """Warm start from alpha_ground_pick.onnx, exactly like the ground grasp: the actor already reads the phase
+    command and balances on planted feet; the critic (reference / error / feet-offset obs) starts fresh."""
+
+
+for _name in _EXPRESSIVE_MOTIONS:
+    register_mjlab_task(
+        task_id=f"Mjlab-Expressive-{_name}-MicroDuck",
+        env_cfg=make_microduck_expressive_env_cfg(_name),
+        play_env_cfg=make_microduck_expressive_env_cfg(_name, play=True),
+        rl_cfg=make_expressive_rl_cfg(_name),
+        runner_cls=ExpressiveFromPickRunner,
+    )
+
+# From-scratch twin of the priority motion (hedge: the inherited crouch could be a hard habit to unlearn).
+register_mjlab_task(
+    task_id="Mjlab-Expressive-Sassy-Scratch-MicroDuck",
+    env_cfg=make_microduck_expressive_env_cfg("Sassy"),
+    play_env_cfg=make_microduck_expressive_env_cfg("Sassy", play=True),
+    rl_cfg=make_expressive_rl_cfg("Sassy"),
+    runner_cls=MicroduckOnPolicyRunner,
+)

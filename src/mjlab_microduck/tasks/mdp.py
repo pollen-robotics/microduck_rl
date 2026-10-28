@@ -8144,3 +8144,140 @@ def action_target_overrun_l1(
     lims = torch.tensor(limits, device=env.device, dtype=target.dtype)
     over = torch.clamp(lims[:, 0].unsqueeze(0) - target, min=0.0) + torch.clamp(target - lims[:, 1].unsqueeze(0), min=0.0)
     return torch.nan_to_num(over, nan=0.0).sum(dim=-1)
+
+
+# --------------------------------------------------------------------------- #
+# Expressive body motions (2026-10-28): phase-indexed reference tracking       #
+# --------------------------------------------------------------------------- #
+# The reference lives in tasks/expressive_motions.py (REF_CHANNELS: trunk roll / pitch / yaw-from-start / height
+# offset + the 4 head joints as offsets from HOME). The start heading and the start foot positions are captured
+# LAZILY in the first EX_CAPTURE_STEPS policy steps of each episode (the robot is dropped from 0.12-0.13 m at reset
+# and lands within ~3 steps), from inside the reward path, once per env step.
+from mjlab_microduck.tasks import expressive_motions as _exm
+
+EX_CAPTURE_STEPS = 6
+
+
+def _ex_trunk_rpy(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """ZYX Euler (roll, pitch, yaw) of the root (trunk_base), (N, 3)."""
+    q = env.scene["robot"].data.root_link_quat_w
+    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+    roll = torch.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+    pitch = torch.asin(torch.clamp(2.0 * (w * y - z * x), -1.0, 1.0))
+    yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    return torch.stack((roll, pitch, yaw), dim=-1)
+
+
+def _ex_feet_pos(env: ManagerBasedRlEnv) -> torch.Tensor:
+    robot: Entity = env.scene["robot"]
+    c = _ex_cache(env)
+    if "feet_ids" not in c:
+        c["feet_ids"] = robot.find_sites(("left_foot", "right_foot"), preserve_order=True)[0]
+    return robot.data.site_pos_w[:, c["feet_ids"], :]
+
+
+def _ex_cache(env: ManagerBasedRlEnv) -> dict:
+    c = getattr(env, "_ex_cache", None)
+    if c is None:
+        c = {"step": -1, "yaw0": torch.zeros(env.num_envs, device=env.device),
+             "feet0": torch.zeros(env.num_envs, 2, 3, device=env.device)}
+        env._ex_cache = c
+    return c
+
+
+def _ex_update(env: ManagerBasedRlEnv) -> dict:
+    """Capture the start heading / foot positions during the first steps of each episode (once per env step)."""
+    c = _ex_cache(env)
+    if c["step"] != env.common_step_counter:
+        c["step"] = env.common_step_counter
+        cap = env.episode_length_buf <= EX_CAPTURE_STEPS
+        if cap.any():
+            c["yaw0"] = torch.where(cap, _ex_trunk_rpy(env)[:, 2], c["yaw0"])
+            c["feet0"] = torch.where(cap[:, None, None], _ex_feet_pos(env), c["feet0"])
+    return c
+
+
+def _ex_ref(env: ManagerBasedRlEnv, motion: str, command_name: str) -> torch.Tensor:
+    return _exm.reference(_exm.MOTIONS[motion], _gp_phase(env, command_name))
+
+
+def _ex_state(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Measured values in REF_CHANNELS order (offsets from the standing pose), (N, 8)."""
+    c = _ex_update(env)
+    robot: Entity = env.scene["robot"]
+    rpy = _ex_trunk_rpy(env)
+    yaw = torch.atan2(torch.sin(rpy[:, 2] - c["yaw0"]), torch.cos(rpy[:, 2] - c["yaw0"]))
+    dz = robot.data.root_link_pos_w[:, 2] - _ex_feet_pos(env)[:, :, 2].mean(dim=1) - _exm.STAND_HEIGHT
+    head = (_servo_joint_pos(env, robot) - _servo_default_joint_pos(env, robot))[:, 5:9]
+    return torch.cat((rpy[:, :2], yaw[:, None], dz[:, None], head), dim=-1)
+
+
+def ex_track(
+    env: ManagerBasedRlEnv,
+    motion: str,
+    channels: tuple,
+    std: float,
+    command_name: str = "twist",
+) -> torch.Tensor:
+    """Mean over `channels` of exp(-((measured - reference) / std)^2). Positive weight."""
+    idx = [_exm.CH[ch] for ch in channels]
+    err = (_ex_state(env) - _ex_ref(env, motion, command_name))[:, idx]
+    return torch.nan_to_num(torch.exp(-(err / std) ** 2).mean(dim=-1), nan=0.0)
+
+
+def ex_feet_drift(env: ManagerBasedRlEnv, max_dist: float = 0.05) -> torch.Tensor:
+    """COST (>= 0, negative weight): summed horizontal displacement of both feet from their start position (m)."""
+    c = _ex_update(env)
+    d = torch.linalg.norm(_ex_feet_pos(env)[:, :, :2] - c["feet0"][:, :, :2], dim=-1)
+    return torch.nan_to_num(torch.clamp(d, max=max_dist).sum(dim=-1), nan=0.0)
+
+
+def ex_feet_lift(env: ManagerBasedRlEnv, tol: float = 0.003, max_h: float = 0.05) -> torch.Tensor:
+    """COST (>= 0, negative weight): summed foot-site height above its start height, beyond `tol` (m)."""
+    c = _ex_update(env)
+    h = _ex_feet_pos(env)[:, :, 2] - c["feet0"][:, :, 2] - tol
+    return torch.nan_to_num(torch.clamp(h, min=0.0, max=max_h).sum(dim=-1), nan=0.0)
+
+
+def ex_foot_slip(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """COST (>= 0, negative weight): summed horizontal foot-site speed (m/s); the feet are meant to stay planted."""
+    robot: Entity = env.scene["robot"]
+    _ex_feet_pos(env)
+    v = robot.data.site_lin_vel_w[:, _ex_cache(env)["feet_ids"], :2]
+    return torch.nan_to_num(torch.linalg.norm(v, dim=-1).sum(dim=-1), nan=0.0)
+
+
+def ex_settle_legs(
+    env: ManagerBasedRlEnv,
+    settle_from: float = 0.88,
+    ramp: float = 0.04,
+    std: float = 0.15,
+    command_name: str = "twist",
+) -> torch.Tensor:
+    """Back to the standing pose at the end: leg joints near HOME, gated (cosine ramp) for φ >= settle_from."""
+    robot: Entity = env.scene["robot"]
+    phi = _gp_phase(env, command_name)
+    gate = 0.5 - 0.5 * torch.cos(torch.pi * torch.clamp((phi - settle_from) / ramp, 0.0, 1.0))
+    dq = (_servo_joint_pos(env, robot) - _servo_default_joint_pos(env, robot))[:, [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]]
+    return torch.nan_to_num(gate * torch.exp(-(dq / std) ** 2).mean(dim=-1), nan=0.0)
+
+
+def ex_reference_obs(env: ManagerBasedRlEnv, motion: str, command_name: str = "twist") -> torch.Tensor:
+    """Critic: the reference (8)."""
+    return torch.nan_to_num(_ex_ref(env, motion, command_name), nan=0.0)
+
+
+def ex_error_obs(env: ManagerBasedRlEnv, motion: str, command_name: str = "twist") -> torch.Tensor:
+    """Critic: measured - reference (8)."""
+    c = _ex_cache(env)
+    if c["step"] < 0:
+        return torch.zeros(env.num_envs, len(_exm.REF_CHANNELS), device=env.device)
+    return torch.nan_to_num(_ex_state(env) - _ex_ref(env, motion, command_name), nan=0.0)
+
+
+def ex_feet_offset_obs(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Critic: both feet's displacement from their start position (6)."""
+    c = _ex_cache(env)
+    if c["step"] < 0:
+        return torch.zeros(env.num_envs, 6, device=env.device)
+    return torch.nan_to_num((_ex_feet_pos(env) - c["feet0"]).reshape(env.num_envs, 6), nan=0.0)
