@@ -136,3 +136,11 @@ def test_safe_variant_makes_falls_expensive():
 
 def test_safe_fine_tune_has_no_entropy_bonus():
     assert nudge.MicroduckNudgeRuntimeSafeRlCfg.algorithm.entropy_coef == 0.0
+
+
+def test_smooth_variant_prices_jitter_from_the_start():
+    cfg = make_microduck_nudge_env_cfg(runtime_layer=True, safe=True, smooth=True)
+    stages = cfg.curriculum["action_rate_weight"].params["weight_stages"]
+    assert stages[0]["step"] == 0 and stages[0]["weight"] <= -1.0
+    assert cfg.rewards["action_rate_l2"].weight <= -1.0
+    assert cfg.rewards["nudge_settle_imitation"].weight == nudge.SMOOTH_SETTLE_IMITATION_WEIGHT

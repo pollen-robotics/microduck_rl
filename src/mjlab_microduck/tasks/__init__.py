@@ -359,6 +359,13 @@ register_mjlab_task(
     runner_cls=NudgeFromVelstandRunner,
 )
 register_mjlab_task(
+    task_id="Mjlab-NudgeSmooth-Flat-Backlash-MicroDuck",
+    env_cfg=make_backlash_variant(make_microduck_nudge_env_cfg(runtime_layer=True, safe=True, smooth=True), _BL_ALLCOLLISIONS),
+    play_env_cfg=make_backlash_variant(make_microduck_nudge_env_cfg(play=True, runtime_layer=True, safe=True, smooth=True), _BL_ALLCOLLISIONS),
+    rl_cfg=MicroduckNudgeRuntimeRlCfg,
+    runner_cls=NudgeFromVelstandRunner,
+)
+register_mjlab_task(
     task_id="Mjlab-Nudge-Flat-Backlash-MicroDuck",
     env_cfg=make_backlash_variant(make_microduck_nudge_env_cfg(), _BL_ALLCOLLISIONS),
     play_env_cfg=make_backlash_variant(make_microduck_nudge_env_cfg(play=True), _BL_ALLCOLLISIONS),
