@@ -79,6 +79,8 @@ def main():
         s0 = sim.stance()
         marks.append(len(frames))
         gz_max = torch.full((sim.n,), -1.0)          # projected gravity z: -1 upright, -0.7 = 45 deg tilt
+        # no resets between reps: a duck already down at the start is not a new fall
+        up0 = sim.robot.data.projected_gravity_b[:, 2] < -0.7
         sim.action_scale = a.scale if a.scale is not None else walk_scale
         for k in range(int(round((a.go + a.unwind) / sim.dt))):
             sim.step(cmd if k * sim.dt < a.go - 1e-6 else [0.0, 0.0, 0.0], policy=nudge, smooth=False)
@@ -87,6 +89,7 @@ def main():
             overrun = torch.maximum(overrun, torch.maximum(tgt - lim[:, 1], lim[:, 0] - tgt).max(dim=0).values)
             if rec: frames.append(sim.qpos(rec))
         sim.action_scale = walk_scale
+        fell_skill = up0 & (gz_max > -0.7)
         s_skill = sim.stance()
         if a.handback_lastact:
             sim.obs[:, 34:48] = stand_act
@@ -103,7 +106,9 @@ def main():
                      "skill_yaw_deg": (dk[:, 2] * 180 / math.pi).tolist(),
                      "handback_mm": (torch.norm(dh[:, :2], dim=1) * 1000).tolist(),
                      "handback_deg": (dh[:, 2].abs() * 180 / math.pi).tolist(), "upright": sim.upright().tolist(),
-                     "max_tilt_deg": torch.rad2deg(torch.acos(torch.clamp(-gz_max, -1, 1))).tolist()})
+                     "max_tilt_deg": torch.rad2deg(torch.acos(torch.clamp(-gz_max, -1, 1))).tolist(),
+                     "up_at_start": up0.tolist(), "new_fall_skill": fell_skill.tolist(),
+                     "new_fall_after": (up0 & ~fell_skill & (gz_max > -0.7)).tolist()})
     f = np.array(sum((r["fwd_mm"] for r in rows), []))
     l = np.array(sum((r["left_mm"] for r in rows), []))
     y = np.array(sum((r["yaw_deg"] for r in rows), []))
@@ -114,12 +119,17 @@ def main():
     up = sum(sum(r["upright"]) for r in rows)
     tilt = np.array(sum((r["max_tilt_deg"] for r in rows), []))
     fell = int((tilt > 45).sum())
+    n_up = sum(sum(r["up_at_start"]) for r in rows)
+    nf_skill = sum(sum(r["new_fall_skill"]) for r in rows)
+    nf_after = sum(sum(r["new_fall_after"]) for r in rows)
     tgt = a.units * UNIT[a.axis]
     print(f"nudge {a.axis} {a.units:+.2f} units (target {tgt:+.1f} {'deg' if a.axis == 'w' else 'mm'}): n={len(f)}  "
           f"fwd {f.mean():+.1f}±{f.std():.1f} mm  left {l.mean():+.1f}±{l.std():.1f} mm  yaw {y.mean():+.1f}±{y.std():.1f}°  "
           f"handback drift {hb.mean():.1f} mm  fell {fell}/{len(f)} (max tilt p95 {np.percentile(tilt, 95):.0f} deg)  upright {up}/{len(f)}  [{time.time() - t0:.0f}s]\n"
           f"   at the skill's end: fwd {kf.mean():+.1f}±{kf.std():.1f} mm  left {kl.mean():+.1f}±{kl.std():.1f} mm  "
-          f"yaw {ky.mean():+.1f}±{ky.std():.1f}°", flush=True)
+          f"yaw {ky.mean():+.1f}±{ky.std():.1f}°\n"
+          f"   new falls {nf_skill + nf_after}/{n_up} nudges started upright (during the skill {nf_skill}, after the hand-back {nf_after})",
+          flush=True)
     j = int(torch.argmax(overrun))
     print(f"   commanded targets: worst {act_term._target_names[j]} {float(overrun[j]):+.2f} rad past its limit", flush=True)
     out = {"args": vars(a), "rows": rows, "target": tgt, "overrun_rad": overrun.tolist(),
