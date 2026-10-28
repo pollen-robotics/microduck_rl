@@ -1,0 +1,13 @@
+<mujoco model="microduck2-reference-scene">
+  <include file="robot.xml"/>
+  <visual><global azimuth="155" elevation="-20"/></visual>
+  <worldbody>
+    <light pos="0 0 3" dir="0 0 -1" directional="true"/>
+    <geom name="floor" type="plane" size="0 0 0.05" rgba="0.18 0.21 0.25 1"/>
+    <!-- 60 mm obstacle: perception/training fixture only, not a claim of step-over ability. -->
+    <geom name="learning_low_obstacle" type="box" pos="0.65 0 0.03" size="0.06 0.20 0.03" rgba="0.95 0.55 0.12 1"/>
+  </worldbody>
+  <keyframe>
+    <key name="STAND" qpos="0 0 0.30 1 0 0 0 0 -0.0873 -0.4579 -0.0049 0.4530 0.3491 0.3491 0 0 0 0.0873 0.4579 0.0049 -0.4530" ctrl="0 -0.0873 -0.4579 -0.0049 0.4530 0.3491 0.3491 0 0 0 0.0873 0.4579 0.0049 -0.4530"/>
+  </keyframe>
+</mujoco>

@@ -47,6 +47,7 @@ import socket
 import socketserver
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import mujoco
@@ -87,13 +88,54 @@ HOME_POSE = (
     0.0, 0.0873, 0.4579, 0.0049, -0.4530,
 )
 
-SCENES = Path(__file__).resolve().parents[1] / "robot" / "microduck"
+ROBOTS = Path(__file__).resolve().parents[1] / "robot"
+SCENES = ROBOTS / "microduck"
 # `scene.xml`, not `scene_walk.xml`: the walking scene includes the model the RL work trains
 # against, whose actuator default classes carry `contype="0" conaffinity="0"`, so the robot collides
 # with nothing and sinks through a floor the scene really does contain.
 DEFAULT_SCENE = SCENES / "scene.xml"
 # The robot with no floor and no scenery — what extra ducks are attached from.
 ROBOT_ONLY = SCENES / "robot_allcollisions.xml"
+
+
+@dataclass(frozen=True)
+class BodyProfile:
+    """A body-server profile, kept explicit so a policy cannot silently cross bodies."""
+
+    scene_dir: Path
+    scene: str
+    robot: str
+    home_trunk_z: float
+    home_pose: tuple[float, ...]
+
+
+PROFILES = {
+    "microduck": BodyProfile(SCENES, "scene.xml", "robot_allcollisions.xml", HOME_TRUNK_Z, HOME_POSE),
+    # A 45 cm / 3.2 kg reference body made of conservative primitive geometry until CAD exports
+    # and measured actuator data exist. It deliberately shares only the *wire* joint names with
+    # the alpha; it must never load an alpha ONNX policy.
+    "microduck2": BodyProfile(
+        ROBOTS / "microduck2",
+        "scene.xml",
+        "robot.xml",
+        0.300,
+        HOME_POSE,
+    ),
+}
+
+
+def select_profile(name: str) -> BodyProfile:
+    try:
+        profile = PROFILES[name]
+    except KeyError as error:
+        raise SystemExit(f"unknown body profile {name!r}; choose one of {', '.join(PROFILES)}") from error
+    global SCENES, DEFAULT_SCENE, ROBOT_ONLY, HOME_TRUNK_Z, HOME_POSE
+    SCENES = profile.scene_dir
+    DEFAULT_SCENE = SCENES / profile.scene
+    ROBOT_ONLY = SCENES / profile.robot
+    HOME_TRUNK_Z = profile.home_trunk_z
+    HOME_POSE = profile.home_pose
+    return profile
 
 # Far enough apart not to touch at rest, close enough to be in one screenful.
 SPACING = 0.5
@@ -505,7 +547,8 @@ def run(world: World, headless: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
-    parser.add_argument("--scene", type=Path, default=DEFAULT_SCENE)
+    parser.add_argument("--profile", choices=tuple(PROFILES), default="microduck")
+    parser.add_argument("--scene", type=Path, help="override the selected body's default scene")
     parser.add_argument("--ducks", type=int, default=1, help="how many, sharing one world")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7801, help="the first duck's port; +1 each")
@@ -533,6 +576,9 @@ def main() -> None:
         "home pose, trunk 0.125 m, upright — and STAND and FOLD are the scene's other poses",
     )
     args = parser.parse_args()
+    profile = select_profile(args.profile)
+    if args.scene is None:
+        args.scene = profile.scene_dir / profile.scene
 
     if not args.scene.exists():
         raise SystemExit(
@@ -572,7 +618,10 @@ def main() -> None:
             threading.Thread(target=frames.serve_forever, daemon=True).start()
             servers.append(frames)
 
-    print(f"== {args.scene.name}: {args.ducks} duck(s), starting at {args.keyframe}", flush=True)
+    print(
+        f"== {args.profile} · {args.scene.name}: {args.ducks} duck(s), starting at {args.keyframe}",
+        flush=True,
+    )
     for index in range(args.ducks):
         eye = f" · camera on {args.host}:{args.frame_port + index}" if index in wanted else ""
         print(f"==   duck {index}: robotd --sim {args.host}:{args.port + index}{eye}", flush=True)

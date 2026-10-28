@@ -1,0 +1,34 @@
+<!--
+  MicroDuck 2.0 reference body — original primitive model, not a CAD export.
+  Envelope: 0.45 m standing height; 3.2 kg nominal mass. Link dimensions, inertia,
+  actuator limits and contact parameters are provisional and MUST be replaced with measured CAD
+  and actuator characterization before any policy is trained for hardware.
+-->
+<mujoco model="microduck2-reference">
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.005" gravity="0 0 -9.81"/>
+  <default>
+    <joint damping="0.35" armature="0.015"/>
+    <geom friction="0.9 0.02 0.001" density="500"/>
+    <position kp="55" kv="3" forcerange="-12 12" ctrlrange="-1.8 1.8"/>
+  </default>
+  <worldbody>
+    <body name="trunk_base" pos="0 0 0.30">
+      <freejoint name="trunk_base_freejoint"/>
+      <inertial pos="0 0 0" mass="1.55" diaginertia="0.030 0.022 0.025"/>
+      <geom name="torso" type="ellipsoid" size="0.12 0.085 0.105" rgba="0.95 0.77 0.12 1"/>
+      <site name="imu" pos="0 0 0" size="0.006"/>
+      <body name="left_hip_yaw_link" pos="0 0.075 -0.04"><joint name="left_hip_yaw" axis="0 0 1" range="-0.45 0.55"/><body name="left_hip_roll_link"><joint name="left_hip_roll" axis="1 0 0" range="-0.40 0.40"/><body name="left_thigh" pos="0 0 -0.02"><joint name="left_hip_pitch" axis="0 1 0" range="-1.30 1.10"/><geom type="capsule" fromto="0 0 0 0 0 -0.15" size="0.030" mass="0.32"/><body name="left_shin" pos="0 0 -0.15"><joint name="left_knee" axis="0 1 0" range="-0.12 1.65"/><geom type="capsule" fromto="0 0 0 0 0 -0.15" size="0.027" mass="0.27"/><body name="left_foot" pos="0 0 -0.15"><joint name="left_ankle" axis="0 1 0" range="-0.70 0.70"/><geom name="left_foot_collision" type="box" size="0.105 0.060 0.022" pos="0.025 0 -0.025" mass="0.18"/><site name="left_foot" pos="0.025 0 -0.047" size="0.008"/></body></body></body></body></body>
+      <body name="right_hip_yaw_link" pos="0 -0.075 -0.04"><joint name="right_hip_yaw" axis="0 0 1" range="-0.55 0.45"/><body name="right_hip_roll_link"><joint name="right_hip_roll" axis="1 0 0" range="-0.40 0.40"/><body name="right_thigh" pos="0 0 -0.02"><joint name="right_hip_pitch" axis="0 1 0" range="-1.10 1.30"/><geom type="capsule" fromto="0 0 0 0 0 -0.15" size="0.030" mass="0.32"/><body name="right_shin" pos="0 0 -0.15"><joint name="right_knee" axis="0 1 0" range="-1.65 0.12"/><geom type="capsule" fromto="0 0 0 0 0 -0.15" size="0.027" mass="0.27"/><body name="right_foot" pos="0 0 -0.15"><joint name="right_ankle" axis="0 1 0" range="-0.70 0.70"/><geom name="right_foot_collision" type="box" size="0.105 0.060 0.022" pos="0.025 0 -0.025" mass="0.18"/><site name="right_foot" pos="0.025 0 -0.047" size="0.008"/></body></body></body></body></body>
+      <body name="neck" pos="0 0 0.09"><joint name="neck_pitch" axis="0 1 0" range="-0.55 0.70"/><geom type="capsule" fromto="0 0 0 0.03 0 0.075" size="0.024" mass="0.12"/><body name="head_pitch_link" pos="0.03 0 0.075"><joint name="head_pitch" axis="0 1 0" range="-0.70 0.70"/><body name="head_yaw_link"><joint name="head_yaw" axis="0 0 1" range="-1.20 1.20"/><body name="head" pos="0.045 0 0.025"><joint name="head_roll" axis="1 0 0" range="-0.35 0.35"/><geom type="ellipsoid" size="0.085 0.070 0.065" mass="0.32" rgba="0.95 0.77 0.12 1"/><site name="tof" pos="0.085 0 0" size="0.006"/></body></body></body></body>
+    </body>
+  </worldbody>
+  <actuator>
+    <position name="left_hip_yaw" joint="left_hip_yaw"/><position name="left_hip_roll" joint="left_hip_roll"/><position name="left_hip_pitch" joint="left_hip_pitch"/><position name="left_knee" joint="left_knee"/><position name="left_ankle" joint="left_ankle"/>
+    <position name="neck_pitch" joint="neck_pitch"/><position name="head_pitch" joint="head_pitch"/><position name="head_yaw" joint="head_yaw"/><position name="head_roll" joint="head_roll"/>
+    <position name="right_hip_yaw" joint="right_hip_yaw"/><position name="right_hip_roll" joint="right_hip_roll"/><position name="right_hip_pitch" joint="right_hip_pitch"/><position name="right_knee" joint="right_knee"/><position name="right_ankle" joint="right_ankle"/>
+  </actuator>
+  <sensor>
+    <framequat name="orientation" objtype="site" objname="imu"/><gyro name="angular-velocity" site="imu"/><gyro name="imu_ang_vel" site="imu"/><velocimeter name="imu_lin_vel" site="imu"/><accelerometer name="imu_accel" site="imu"/><subtreeangmom name="root_angmom" body="trunk_base"/>
+  </sensor>
+</mujoco>

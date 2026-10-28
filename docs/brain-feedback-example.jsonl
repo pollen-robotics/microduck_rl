@@ -1,0 +1,5 @@
+{"stimulus":"idle","affect":"resting"}
+{"stimulus":"person_nearby","affect":"curious"}
+{"stimulus":"gentle_touch","affect":"warm"}
+{"stimulus":"fallen","affect":"recovering"}
+{"stimulus":"human_control","affect":"yielding"}
