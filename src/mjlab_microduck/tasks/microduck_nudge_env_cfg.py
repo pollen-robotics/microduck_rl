@@ -104,6 +104,10 @@ SAFE_OVERRUN_WEIGHT = -10.0           # per rad of commanded target past a joint
 SAFE_CLAMP_MARGIN = 0.05
 # Run 6: the end-pose term fell 2.7 -> 1.7 once the action rate reached -1.0 (iteration 2000); keep -0.5.
 SAFE_ACTION_RATE_STAGES = ((0, -0.2), (1200, -0.5))
+# Run 8 (fine-tune of run 7 @2000, the file on cream-converse): the real duck fell once in 11 nudges, the tilt growing
+# 7 -> 22 deg over 0.6 s of the settle; sim falls ~2 % (6 / 384). Price any lean beyond 8 deg.
+SAFE_TILT_WEIGHT = -20.0
+SAFE_TILT_FREE_DEG = 8.0
 RUNTIME_ENTROPY_COEF = 0.005
 
 DROP_REWARDS = ("track_linear_velocity", "track_angular_velocity", "air_time", "foot_clearance",
@@ -218,6 +222,8 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtim
         if "fell_over" in cfg.terminations:
             cfg.terminations["fell_over"].params["limit_angle"] = SAFE_FALL_ANGLE
         cfg.rewards["nudge_target_overrun"] = RewardTermCfg(func=microduck_mdp.nudge_target_overrun, weight=SAFE_OVERRUN_WEIGHT)
+        cfg.rewards["nudge_tilt"] = RewardTermCfg(
+            func=microduck_mdp.nudge_tilt, weight=SAFE_TILT_WEIGHT, params={"free_deg": SAFE_TILT_FREE_DEG})
         if isinstance(cfg.actions["joint_pos"], microduck_mdp.RuntimeLayerJointPositionActionCfg):
             cfg.actions["joint_pos"].clamp_margin = SAFE_CLAMP_MARGIN
         if "action_rate_weight" in cfg.curriculum:

@@ -8107,6 +8107,17 @@ def nudge_target_overrun(
     return torch.nan_to_num(over.sum(dim=1) * inside.float(), nan=0.0)
 
 
+def nudge_tilt(env: ManagerBasedRlEnv, free_deg: float = 8.0, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG) -> torch.Tensor:
+    """(trunk tilt - free_deg)^2 in rad^2 when the trunk leans more than `free_deg`: a margin from the slow
+    lean-over the real duck showed on 2026-10-28 (tilt 7 -> 11 -> 22 deg over 0.6 s of the settle, then a fall; ~2 % of
+    nudges fall in sim). Positive quantity, negative weight."""
+    asset: Entity = env.scene[asset_cfg.name]
+    g = asset.data.projected_gravity_b
+    tilt = torch.acos(torch.clamp(-g[:, 2], -1.0, 1.0))
+    over = torch.relu(tilt - math.radians(free_deg))
+    return torch.nan_to_num(over * over, nan=0.0)
+
+
 class OnnxMlp(torch.nn.Module):
     """A deployed microduck ONNX (obs normalizer baked: (obs - mean) / div, then Gemm/ELU x3, Gemm) as a frozen torch
     module, batched, on any device. Used to put robotd's walking policy in the training loop."""
