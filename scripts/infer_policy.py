@@ -1167,6 +1167,131 @@ class OdomAnchorOverlay:
             scn.ngeom += 1
 
 
+class FootstepFollower:
+    """--footsteps: drive a footstep-tracking policy (Mjlab-Footsteps-*) with a FootstepNet plan and draw it.
+
+    Same loop as training's FootstepCommand: the support foot follows the robot's odometry rule (alpha16 replica,
+    perfect IMU); at every support switch the planner replans from the support sole to the goal and the swing foot's
+    target becomes the plan's first step. The twist slot carries that target in the current support sole frame. At
+    the goal the planner returns no step and the robot steps in place (neutral). Poses are sole centres (site + 7 mm),
+    from the simulator.
+
+    Drawn: next target = white sole with a red toe edge; the rest of the plan fades out (left cyan, right orange);
+    the goal in green; landed footprints in grey; the obstacle as a red disc."""
+
+    TARGET_RGBA, TOE_RGBA, GOAL_RGBA = (1, 1, 1, 1), (1, 0.15, 0.15, 1), (0.2, 1, 0.3, 1)
+    FOOT_RGB = {"left": (0.2, 0.8, 1.0), "right": (1.0, 0.6, 0.1)}
+    LANDED_RGBA, OBSTACLE_RGBA = (0.6, 0.6, 0.6, 0.8), (1, 0.1, 0.1, 0.35)
+    FEET = ("left", "right")
+
+    def __init__(self, model, planner_path, goal, goal_foot, obstacle):
+        from mjlab_microduck import footsteps as fs
+        from mjlab_microduck.footstep_planner import FootstepPlanner
+
+        self.fs = fs
+        self.planner = FootstepPlanner(planner_path)
+        self.frames = FootFrames(model)
+        anchors = load_odom_anchor_sets(fs.ODOM_ANCHOR_SET)[fs.ODOM_ANCHOR_SET]
+        self.odom = PyOdometry(fs.ODOM_ANCHOR_SET, anchors)
+        self.goal, self.goal_foot, self.obstacle = np.asarray(goal, dtype=np.float64), goal_foot, obstacle
+        self.support = None
+        self.target = None  # world pose of the swing foot's target
+        self.plan, self.reached = [], False
+        self.landed = []  # (pose, foot) of recent touchdowns
+        self.errors = []  # placement error (m, rad) of each touchdown vs its target
+        o = self.planner.options
+        limits = (f"+{o['max_dx_forward'] * 100:.0f}/-{o['max_dx_backward'] * 100:.0f} cm, "
+                  f"±{o['max_dy'] * 100:.0f} cm, ±{math.degrees(o['max_dtheta']):.0f}°")
+        obst = (f", obstacle r={obstacle[2] * 100:.0f} cm at ({obstacle[0]:.2f}, {obstacle[1]:.2f})"
+                if obstacle else "")
+        print(f"\nFootstep planner {planner_path}: steps ≤ {limits}; goal {self._fmt(self.goal)} ({goal_foot} foot)"
+              + obst)
+
+    @staticmethod
+    def _fmt(p):
+        return f"({p[0]:+.2f}, {p[1]:+.2f}, {math.degrees(p[2]):+.0f}°)"
+
+    def soles(self, data):
+        out = []
+        for pos, rot in self.frames.feet_world(data):
+            c = pos + rot @ np.array([*self.fs.SOLE_CENTER_IN_SITE, 0.0])
+            out.append(np.array([c[0], c[1], math.atan2(rot[1, 0], rot[0, 0])]))
+        return out
+
+    def set_goal(self, goal):
+        self.goal = np.asarray(goal, dtype=np.float64)
+        self.support = None  # replan now
+        print(f"New goal {self._fmt(self.goal)} ({self.goal_foot} foot)")
+
+    def update(self, data):
+        """Once per control tick, before inference: odometry, replanning on a switch → the 3-D footstep command."""
+        _, R = self.frames.trunk_world(data)
+        self.odom.update(self.frames.feet_in_trunk(data), R)
+        soles = self.soles(data)
+        sup = soles[self.odom.anchor_foot]
+        support = self.FEET[self.odom.anchor_foot]
+        if support != self.support:
+            if self.support is not None and self.target is not None:  # a touchdown: score it
+                self.errors.append((math.hypot(*(sup[:2] - self.target[:2])),
+                                    abs(math.remainder(sup[2] - self.target[2], 2 * math.pi))))
+                self.landed = (self.landed + [(sup, support)])[-12:]
+            self.support = support
+            self.plan, self.reached = self.planner.plan(sup, support, self.goal, self.goal_foot, self.obstacle)
+            if self.plan:
+                self.target = self.plan[0][0]
+            else:  # at the goal: step in place
+                n = self.planner.neutral(sup, support)
+                self.target = np.array([n[0, 2], n[1, 2], math.atan2(n[1, 0], n[0, 0])])
+        d = self.target[:2] - sup[:2]
+        c, s = math.cos(sup[2]), math.sin(sup[2])
+        dyaw = math.remainder(self.target[2] - sup[2], 2 * math.pi)
+        return np.array([c * d[0] + s * d[1], -s * d[0] + c * d[1], dyaw], dtype=np.float32)
+
+    def status(self):
+        recent = self.errors[-8:]
+        err = (f"last {len(recent)} steps {1000 * np.mean([e[0] for e in recent]):.0f} mm / "
+               f"{math.degrees(np.mean([e[1] for e in recent])):.1f}° off target") if recent else "no step yet"
+        if not self.plan:
+            left = "at goal, stepping in place"
+        else:
+            left = f"{len(self.plan)} steps to goal" + ("" if self.reached else " (planner does not reach it in 50)")
+        return f"[footsteps] support {self.support}, {left}; {err}"
+
+    def draw(self, scn, reset=True):
+        if reset:
+            scn.ngeom = 0
+        L, W = self.fs.SOLE_LENGTH, self.fs.SOLE_WIDTH
+        for pose, _foot in self.landed:
+            self._sole(scn, pose, L, W, self.LANDED_RGBA, 0.0006)
+        n = max(len(self.plan) - 1, 1)
+        for i, (pose, foot) in enumerate(self.plan[1:], start=1):
+            self._sole(scn, pose, L, W, (*self.FOOT_RGB[foot], 0.9 - 0.65 * (i - 1) / n), 0.0007)
+        self._sole(scn, self.goal, L * 1.15, W * 1.15, self.GOAL_RGBA, 0.0012)
+        if self.target is not None:
+            self._sole(scn, self.target, L, W, self.TARGET_RGBA, 0.0012, toe=self.TOE_RGBA)
+        if self.obstacle and self.obstacle[2] > 0 and scn.ngeom < scn.maxgeom:
+            g = scn.geoms[scn.ngeom]
+            mujoco.mjv_initGeom(g, mujoco.mjtGeom.mjGEOM_CYLINDER, np.array([self.obstacle[2], 0.001, 0]),
+                                np.array([self.obstacle[0], self.obstacle[1], 0.001]), np.eye(3).flatten(),
+                                np.array(self.OBSTACLE_RGBA, dtype=np.float32))
+            scn.ngeom += 1
+
+    @staticmethod
+    def _sole(scn, pose, length, width, rgba, line, toe=None):
+        x, y, yaw = pose
+        c, s = math.cos(yaw), math.sin(yaw)
+        corners = [np.array([x + c * a - s * b, y + s * a + c * b, 0.0015])
+                   for a, b in ((length / 2, width / 2), (-length / 2, width / 2),
+                                (-length / 2, -width / 2), (length / 2, -width / 2))]
+        OdomAnchorOverlay._polygon(scn, corners, line, rgba)
+        if toe is not None and scn.ngeom < scn.maxgeom:  # front edge (corners 3 → 0) drawn over the outline
+            g = scn.geoms[scn.ngeom]
+            mujoco.mjv_initGeom(g, mujoco.mjtGeom.mjGEOM_CAPSULE, np.zeros(3), np.zeros(3),
+                                np.eye(3).flatten(), np.array(toe, dtype=np.float32))
+            mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_CAPSULE, line * 1.3, corners[3], corners[0])
+            scn.ngeom += 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run ONNX policy in MuJoCo")
     parser.add_argument("--roller", action="store_true", help="Use roller skate robot XML (robot_walk_rollers.xml)")
@@ -1230,8 +1355,21 @@ def main():
                              "simulated legs (perfect IMU) and print each set's error against the "
                              "true trunk pose every second and at exit. Drives the robot around to "
                              "compare drift; combine with --odom-anchor-points to see each anchor.")
+    parser.add_argument("--footsteps", type=str, default=None, metavar="PLANNER_ONNX",
+                        help="FootstepNet planner ONNX (footstepnet/export_onnx.py): --walking is a footstep-tracking "
+                             "policy (Mjlab-Footsteps-*), driven step by step to --goal; the plan is drawn. "
+                             "Requires --new-cmd-obs; use --scene .../scene_walk_backlash.xml for -Backlash- policies. "
+                             "N = new random goal")
+    parser.add_argument("--goal", type=float, nargs=3, default=(0.6, 0.3, 90.0), metavar=("X", "Y", "YAW_DEG"),
+                        help="footstep goal: sole-centre pose in the world (robot starts at the origin facing +x)")
+    parser.add_argument("--goal-foot", choices=("left", "right"), default="right",
+                        help="which foot must land on the goal")
+    parser.add_argument("--obstacle", type=float, nargs=3, default=None, metavar=("X", "Y", "R"),
+                        help="disc obstacle the planner avoids (world, m; trained radius ≤ 0.12)")
     args = parser.parse_args()
 
+    if args.footsteps and not (args.walking and args.new_cmd_obs):
+        parser.error("--footsteps drives the --walking policy (a footstep-tracking ONNX) and needs --new-cmd-obs")
     if not args.walking and not args.standing and not args.sitstand:
         parser.error("At least one of --walking, --standing or --sitstand must be provided")
     if args.sitstand and not args.new_cmd_obs:
@@ -1487,10 +1625,23 @@ def main():
     # a lowercase letter.
     quit_requested = False
 
+    footsteps = None
+    if args.footsteps:
+        gx, gy, gyaw = args.goal
+        footsteps = FootstepFollower(model, args.footsteps, (gx, gy, math.radians(gyaw)), args.goal_foot,
+                                     tuple(args.obstacle) if args.obstacle else None)
+
+    def new_random_goal():
+        rng = np.random.default_rng()
+        x, y = data.qpos[qpos_adr:qpos_adr + 2] + rng.uniform(-0.8, 0.8, 2)
+        footsteps.set_goal((x, y, rng.uniform(-math.pi, math.pi)))
+
     def handle_key(key):
         nonlocal policy_enabled, quit_requested
         try:
-            if key == "up":
+            if footsteps is not None and key == "n":
+                new_random_goal()
+            elif key == "up":
                 if policy.head_mode:
                     policy.head_offset[1] = np.clip(policy.head_offset[1] + policy.head_step, -policy.head_max, policy.head_max)
                     policy._update_command()
@@ -1626,6 +1777,8 @@ def main():
     print("  R:                roulade / forward roll (requires --roulade)")
     print(f"  P:                random push (trunk vel = {PUSH_MAX:.1f} m/s in random direction)")
     print("  Q:                quit")
+    if footsteps is not None:
+        print("  N:                new random footstep goal (within ±0.8 m)")
     print("  [ Body pose mode — press B to toggle ]")
     print(f"  UP/DOWN arrow:    Δz ±10mm  (max ±{BODY_CMD_MAX_Z*1000:.0f}mm)")
     print(f"  LEFT/RIGHT arrow: Δpitch ±10°  (max ±{math.degrees(BODY_CMD_MAX_ANGLE):.0f}°)")
@@ -1647,6 +1800,9 @@ def main():
         odom_compare = OdomCompare(model, load_odom_anchor_sets()) if args.odom_compare else None
         if odom_overlay is not None:
             odom_overlay.draw(data, viewer.user_scn, odom_compare)
+        if footsteps is not None:
+            footsteps.update(data)
+            footsteps.draw(viewer.user_scn, reset=odom_overlay is None)
         viewer.sync()
         start_time = time.time()
 
@@ -1679,6 +1835,10 @@ def main():
                 policy.update_ground_pick_phase(actual_dt)
                 policy.update_behavior(actual_dt)
 
+                if footsteps is not None:  # footstep target → twist slot (before inference, like training)
+                    policy.vel_cmd[:] = footsteps.update(data)
+                    policy._update_command()
+
                 if policy_enabled:
                     action = policy.infer()
                     policy.apply_action(action)
@@ -1704,7 +1864,10 @@ def main():
                 v_body = policy.quat_rotate_inverse(quat, v_world)
                 yaw_rate = float(data.qvel[_trunk_qvel_adr + 5])  # body-frame wz
                 vel_history.append((float(v_body[0]), float(v_body[1]), yaw_rate))
-                if control_step_count % _vel_window_steps == 0 and len(vel_history) > 0:
+                if footsteps is not None:
+                    if control_step_count % _vel_window_steps == 0:
+                        print(footsteps.status())
+                elif control_step_count % _vel_window_steps == 0 and len(vel_history) > 0:
                     n = len(vel_history)
                     avg_fwd = sum(v[0] for v in vel_history) / n
                     avg_lat = sum(v[1] for v in vel_history) / n
@@ -1782,6 +1945,8 @@ def main():
                         odom_compare.print_status(data)
                 if odom_overlay is not None:
                     odom_overlay.draw(data, viewer.user_scn, odom_compare)
+                if footsteps is not None:
+                    footsteps.draw(viewer.user_scn, reset=odom_overlay is None)
                 viewer.sync()
 
                 elapsed = time.time() - step_start

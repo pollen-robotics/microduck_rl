@@ -8,6 +8,8 @@ dependencies = [
     # unpinned upstream; jax >= 0.7 removed APIs tensorflow_probability (sbx dep) still uses
     "jax[cuda12]==0.6.2",
     "flax<0.11",
+    "onnx>=1.23.2",
+    "onnxruntime>=1.31.1",
 ]
 
 [tool.uv]

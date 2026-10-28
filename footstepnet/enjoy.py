@@ -11,10 +11,7 @@ only (no display needed).
 import argparse
 import math
 import os
-import re
-import sys
 import time
-from pathlib import Path
 
 import numpy as np
 
@@ -31,29 +28,11 @@ if A.headless:
     os.environ["SDL_VIDEODRIVER"] = "dummy"
 
 import microduck_env  # noqa: E402
+from models import find_model  # noqa: E402
 from sbx import CrossQ  # noqa: E402
 
 if A.provisional_limits:
     microduck_env.set_limits(*A.provisional_limits)
-
-
-def find_model(arg):
-    p = Path(arg) if arg else None
-    if p is not None and p.is_file():
-        return p
-    if p is None:
-        runs = sorted(Path("logs/crossq").glob(f"{microduck_env.ENV_ID}_*"), key=lambda d: d.stat().st_mtime)
-        if not runs:
-            sys.exit("no run in logs/crossq/ — pass a model .zip")
-        p = runs[-1]
-    if (p / "best_model.zip").exists():
-        return p / "best_model.zip"
-    ckpts = sorted(p.glob("rl_model_*_steps.zip"), key=lambda f: int(re.search(r"_(\d+)_steps", f.name).group(1)))
-    if ckpts:
-        return ckpts[-1]
-    if (p / f"{microduck_env.ENV_ID}.zip").exists():  # final model of a finished run
-        return p / f"{microduck_env.ENV_ID}.zip"
-    sys.exit(f"no model in {p}")
 
 
 path = find_model(A.model)
