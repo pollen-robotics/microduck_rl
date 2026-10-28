@@ -6,6 +6,21 @@ from pm_env import Sim, Policy
 s = Sim(n=16, seed=6)
 t = s.env.action_manager.get_term("joint_pos")
 nudge = Policy(sys.argv[1] if len(sys.argv) > 1 else "/Users/remi/microduck/notes/precision-mode/policies/nudge-candidate.onnx")
+def run_split(label, pol, units=(0.3, 0, 0), reps=3):
+    """One nudge = 90 ticks; jitter in the step part (0-0.6 s) and in the settle inside the skill (0.6-1.8 s)."""
+    step, settle = [], []
+    for r in range(reps):
+        for _ in range(50): s.step([0, 0, 0])
+        prev = None
+        for k in range(90):
+            s.step(list(units) if k < 25 else [0, 0, 0], policy=pol, smooth=False)
+            tg = t._processed_actions.clone()
+            if prev is not None:
+                (step if k < 30 else settle).append((tg - prev).abs().mean(dim=1))
+            prev = tg
+    print(f"{label:34s} step part {1000 * torch.stack(step).mean():6.1f} mrad   settle inside the skill {1000 * torch.stack(settle).mean():6.1f} mrad")
+
+
 def run(label, ticks, cmd, pol=None, smooth=True):
     prev, d, raw_prev, draw = None, [], None, []
     for k in range(ticks):
@@ -23,3 +38,6 @@ run("velstand walking 0.3 m/s", 100, lambda k: [0.3, 0, 0])
 for _ in range(100): s.step([0, 0, 0])
 run("nudge fwd (skill, 1.8 s)", 90, lambda k: [0.3, 0, 0] if k < 25 else [0, 0, 0], pol=nudge, smooth=False)
 run("nudge settle part only (zeros)", 60, lambda k: [0, 0, 0], pol=nudge, smooth=False)
+run_split("nudge fwd, split", nudge)
+run_split("nudge left, split", nudge, (0, 0.3, 0))
+run_split("nudge turn, split", nudge, (0, 0, 0.524))

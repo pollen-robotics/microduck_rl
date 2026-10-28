@@ -131,7 +131,7 @@ def test_safe_variant_makes_falls_expensive():
     assert si.weight < 0.0 and nudge.GO_S < si.params["after_s"] < si.params["until_s"] <= nudge.GO_S + nudge.SETTLE_S
     assert cfg.rewards["nudge_settle_action_rate"].weight < 0.0
     assert cfg.actions["joint_pos"].clamp_margin == nudge.SAFE_CLAMP_MARGIN
-    assert cfg.curriculum["action_rate_weight"].params["weight_stages"][-1]["weight"] == -0.5
+    assert cfg.curriculum["action_rate_weight"].params["weight_stages"][-1]["weight"] == -2.0
 
 
 def test_safe_fine_tune_has_no_entropy_bonus():

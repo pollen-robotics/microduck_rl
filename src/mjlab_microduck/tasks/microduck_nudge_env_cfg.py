@@ -103,7 +103,9 @@ SAFE_OVERRUN_WEIGHT = -10.0           # per rad of commanded target past a joint
 # + 0.35 (its model range is narrower than the real joint; shipped velstand goes 0.43 past it).
 SAFE_CLAMP_MARGIN = 0.05
 # Run 6: the end-pose term fell 2.7 -> 1.7 once the action rate reached -1.0 (iteration 2000); keep -0.5.
-SAFE_ACTION_RATE_STAGES = ((0, -0.2), (1200, -0.5))
+# Run 11 (resumed from run 10 @~3350, so the last stage applies at once): the step part jitters 96-104 mrad of target
+# change per tick, twice velstand's walking (50); -0.5 -> -2.0 over the whole skill.
+SAFE_ACTION_RATE_STAGES = ((0, -0.2), (1200, -0.5), (3300, -2.0))
 # Run 8 (fine-tune of run 7 @2000, the file on cream-converse): the real duck fell once in 11 nudges, the tilt growing
 # 7 -> 22 deg over 0.6 s of the settle; sim falls ~2 % (6 / 384). Price any lean beyond 8 deg.
 SAFE_TILT_WEIGHT = -20.0
