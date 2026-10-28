@@ -1,0 +1,14 @@
+# CrossQ, as footstepnet_envs/hyperparams/crossq.yml (its best algorithm in the paper)
+microduck-footsteps-any-obstacle-multigoal-v0:
+  n_timesteps: !!float 15e6
+  policy: 'MlpPolicy'
+  learning_rate: !!float 0.001
+  buffer_size: 1000000
+  batch_size: 256
+  n_envs: 16
+  gamma: 0.99
+  ent_coef: 'auto'
+  train_freq: 4
+  gradient_steps: 512
+  learning_starts: 100000
+  policy_kwargs: "dict(net_arch=[384, 256])"

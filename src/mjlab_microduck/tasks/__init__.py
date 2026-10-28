@@ -50,6 +50,10 @@ from .microduck_sitstand_env_cfg import (
     make_microduck_sitstand_env_cfg,
     MicroduckSitStandRlCfg,
 )
+from .microduck_footsteps_env_cfg import (
+    make_microduck_footsteps_env_cfg,
+    MicroduckFootstepsRlCfg,
+)
 from .microduck_velocity_rollers_env_cfg import (
     make_microduck_velocity_rollers_env_cfg,
     MicroduckRollersRlCfg,
@@ -86,6 +90,15 @@ register_mjlab_task(
     env_cfg=make_microduck_velocity_env_cfg(),
     play_env_cfg=make_microduck_velocity_env_cfg(play=True),
     rl_cfg=MicroduckRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Footstep-conditioned walking (FootstepNet targets in the twist slot)
+register_mjlab_task(
+    task_id="Mjlab-Footsteps-Flat-MicroDuck",
+    env_cfg=make_microduck_footsteps_env_cfg(),
+    play_env_cfg=make_microduck_footsteps_env_cfg(play=True),
+    rl_cfg=MicroduckFootstepsRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
@@ -259,6 +272,7 @@ _BL_ALLCOLLISIONS = MICRODUCK_ALLCOLLISIONS_BACKLASH_ROBOT_CFG
 _BACKLASH_TASKS = (
     ("Mjlab-Velocity-Flat-Backlash-MicroDuck", make_microduck_velocity_env_cfg, {}, MicroduckRlCfg, _BL_WALK),
     ("Mjlab-Velocity-Rough-Backlash-MicroDuck", make_microduck_velocity_env_cfg, {"rough": True}, MicroduckRlCfg, _BL_WALK),
+    ("Mjlab-Footsteps-Flat-Backlash-MicroDuck", make_microduck_footsteps_env_cfg, {}, MicroduckFootstepsRlCfg, _BL_WALK),
     ("Mjlab-VelStand-Flat-Backlash-MicroDuck", make_microduck_velstand_env_cfg, {}, MicroduckVelStandRlCfg, _BL_ALLCOLLISIONS),
     ("Mjlab-VelStand-Rough-Backlash-MicroDuck", make_microduck_velstand_env_cfg, {"rough": True}, MicroduckVelStandRlCfg, _BL_ALLCOLLISIONS),
     ("Mjlab-StandUp-Flat-Backlash-MicroDuck", make_microduck_standup_env_cfg, {}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
