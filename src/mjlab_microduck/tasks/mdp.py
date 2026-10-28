@@ -8135,6 +8135,17 @@ def nudge_settle_imitation(env: ManagerBasedRlEnv, command_name: str = "twist", 
     return torch.nan_to_num(gap * on, nan=0.0)
 
 
+def nudge_settle_action_rate(env: ManagerBasedRlEnv, command_name: str = "twist", after_s: float = 0.6,
+                             until_s: float = 1.8) -> torch.Tensor:
+    """Sum of squared raw action changes, only once the step should be over (after_s..until_s from the go onset): the
+    stock action-rate term prices the step and the settle alike, and the settle is where the real legs shook. Positive
+    quantity, negative weight."""
+    t = _nudge_term(env, command_name).elapsed()
+    on = ((t >= after_s) & (t < until_s)).float()
+    d = env.action_manager.action - env.action_manager.prev_action
+    return torch.nan_to_num(d.pow(2).sum(dim=1) * on, nan=0.0)
+
+
 class OnnxMlp(torch.nn.Module):
     """A deployed microduck ONNX (obs normalizer baked: (obs - mean) / div, then Gemm/ELU x3, Gemm) as a frozen torch
     module, batched, on any device. Used to put robotd's walking policy in the training loop."""

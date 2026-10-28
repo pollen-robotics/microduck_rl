@@ -110,7 +110,11 @@ SAFE_TILT_WEIGHT = -20.0
 SAFE_TILT_FREE_DEG = 8.0
 # Run 9: the late settle copies the walking policy's calm stance (run 7: 3-4x velstand's standing jitter there; the
 # real duck's legs shook after the step).
-SAFE_SETTLE_IMITATION_WEIGHT = -10.0
+# Run 10: run 9's -10 was ~100x too weak (worth ~0.1 per episode against ~10 for the hold terms; settle jitter 21.7 ->
+# 20.9 mrad/tick). -300, plus an action-rate term of its own on the settle.
+SAFE_SETTLE_IMITATION_WEIGHT = -300.0
+SAFE_SETTLE_ACTION_RATE_WEIGHT = -30.0
+SAFE_SETTLE_ACTION_RATE_AFTER_S = 0.6
 SAFE_SETTLE_IMITATION_AFTER_S = 1.2
 RUNTIME_ENTROPY_COEF = 0.005
 
@@ -231,6 +235,9 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtim
         cfg.rewards["nudge_settle_imitation"] = RewardTermCfg(
             func=microduck_mdp.nudge_settle_imitation, weight=SAFE_SETTLE_IMITATION_WEIGHT,
             params={"command_name": "twist", "after_s": SAFE_SETTLE_IMITATION_AFTER_S, "until_s": GO_S + SETTLE_S})
+        cfg.rewards["nudge_settle_action_rate"] = RewardTermCfg(
+            func=microduck_mdp.nudge_settle_action_rate, weight=SAFE_SETTLE_ACTION_RATE_WEIGHT,
+            params={"command_name": "twist", "after_s": SAFE_SETTLE_ACTION_RATE_AFTER_S, "until_s": GO_S + SETTLE_S})
         if isinstance(cfg.actions["joint_pos"], microduck_mdp.RuntimeLayerJointPositionActionCfg):
             cfg.actions["joint_pos"].clamp_margin = SAFE_CLAMP_MARGIN
         if "action_rate_weight" in cfg.curriculum:
