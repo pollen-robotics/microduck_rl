@@ -35,7 +35,7 @@
         "sed -i '/<!-- Part sole_right -->/{n; n; s/class=\"collision\"/name=\"right_foot_collision\" class=\"collision\"/}' robot_groundcontact_rollers.xml",
         "sed -i '/<!-- Part power_support -->/{n; n; s/class=\"collision\"/class=\"self_collision_only\"/}' robot_groundcontact_rollers.xml",
         "sed -i 's/ inheritrange=\"1\"//g' robot_groundcontact_rollers.xml",
-        "sed -i 's|<site[^>]*name=\"head_camera\"[^>]*pos=\"\\([^\"]*\\)\"[^>]*/>|&\\n              <camera name=\"head_camera\" pos=\"\\1\" quat=\"0 0 -1 0\"/>|' robot_groundcontact_rollers.xml"
+        "sed -i 's|<site[^>]*name=\"head_camera\"[^>]*pos=\"\\([^\"]*\\)\"[^>]*/>|&\\n              <camera name=\"head_camera\" pos=\"\\1\" quat=\"0 0 0 1\"/>|' robot_groundcontact_rollers.xml"
     ],
     "joint_properties": {
         "default": {

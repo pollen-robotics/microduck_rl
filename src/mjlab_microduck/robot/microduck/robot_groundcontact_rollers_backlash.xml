@@ -293,7 +293,7 @@
               <geom type="mesh" class="visual" pos="0.01 -0.016786 0.0260226" quat="0.5 0.5 0.5 0.5" mesh="speaker" material="speaker_material"/>
               <!-- Frame head_camera -->
               <site group="3" name="head_camera" pos="0.0155 -9.13778e-05 -0.0733" quat="0.707107 0 0.707107 -0"/>
-              <camera name="head_camera" pos="0.0155 -9.13778e-05 -0.0733" quat="0 0 -1 0"/>
+              <camera name="head_camera" pos="0.0155 -9.13778e-05 -0.0733" quat="0 0 0 1"/>
               <!-- Frame tof -->
               <site group="3" name="tof" pos="0.0135 0.0224086 -0.0733" quat="0.707107 0 0.707107 -0"/>
               <!-- Frame head_imu -->
