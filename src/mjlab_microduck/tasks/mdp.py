@@ -8198,7 +8198,7 @@ def _ex_update(env: ManagerBasedRlEnv) -> dict:
 
 
 def _ex_ref(env: ManagerBasedRlEnv, motion: str, command_name: str) -> torch.Tensor:
-    return _exm.reference(_exm.MOTIONS[motion], _gp_phase(env, command_name))
+    return _exm.reference(_exm.get_motion(motion), _gp_phase(env, command_name))
 
 
 def _ex_state(env: ManagerBasedRlEnv) -> torch.Tensor:
@@ -8281,3 +8281,65 @@ def ex_feet_offset_obs(env: ManagerBasedRlEnv) -> torch.Tensor:
     if c["step"] < 0:
         return torch.zeros(env.num_envs, 6, device=env.device)
     return torch.nan_to_num((_ex_feet_pos(env) - c["feet0"]).reshape(env.num_envs, 6), nan=0.0)
+
+
+# ── Round 2 (2026-10-28 night): velocity tracking of the oscillations, head-dive guard, still settle ──────────────
+def _ex_rate(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Measured trunk rates (N, 4) in TRUNK_CHANNELS order: ZYX Euler rates (roll, pitch, yaw; rad/s) from the body
+    angular velocity, and d/dt of the dz channel (root z speed - mean foot-site z speed, m/s)."""
+    robot: Entity = env.scene["robot"]
+    rpy = _ex_trunk_rpy(env)
+    cr, sr = torch.cos(rpy[:, 0]), torch.sin(rpy[:, 0])
+    cp = torch.clamp(torch.cos(rpy[:, 1]), min=0.1)
+    tp = torch.sin(rpy[:, 1]) / cp
+    w = robot.data.root_link_ang_vel_b
+    p, q, r = w[:, 0], w[:, 1], w[:, 2]
+    droll = p + sr * tp * q + cr * tp * r
+    dpitch = cr * q - sr * r
+    dyaw = (sr * q + cr * r) / cp
+    _ex_feet_pos(env)
+    vz_feet = robot.data.site_lin_vel_w[:, _ex_cache(env)["feet_ids"], 2].mean(dim=1)
+    ddz = robot.data.root_link_lin_vel_w[:, 2] - vz_feet
+    return torch.stack((droll, dpitch, dyaw, ddz), dim=-1)
+
+
+def ex_track_rate(
+    env: ManagerBasedRlEnv,
+    motion: str,
+    channel: str,
+    std: float,
+    command_name: str = "twist",
+) -> torch.Tensor:
+    """exp(-((measured rate - reference rate) / std)^2) on one trunk channel. Positive weight. Rewards moving WITH
+    the reference's oscillation (phase and amplitude), which a position kernel narrower than the amplitude does not."""
+    i = _exm.TRUNK_CHANNELS.index(channel)
+    ref = _exm.reference_rate(_exm.get_motion(motion), _gp_phase(env, command_name))[:, _exm.CH[channel]]
+    err = _ex_rate(env)[:, i] - ref
+    return torch.nan_to_num(torch.exp(-(err / std) ** 2), nan=0.0)
+
+
+def ex_head_dev_cost(
+    env: ManagerBasedRlEnv,
+    motion: str,
+    channels: tuple = ("neck_pitch",),
+    free: float = 0.3,
+    command_name: str = "twist",
+) -> torch.Tensor:
+    """COST (>= 0, negative weight): summed |head joint - reference| beyond `free` rad (round 1's neck dive)."""
+    idx = [_exm.CH[ch] for ch in channels]
+    err = (_ex_state(env) - _ex_ref(env, motion, command_name))[:, idx]
+    return torch.nan_to_num(torch.clamp(err.abs() - free, min=0.0).sum(dim=-1), nan=0.0)
+
+
+def ex_settle_still(
+    env: ManagerBasedRlEnv,
+    settle_from: float = 0.88,
+    ramp: float = 0.04,
+    command_name: str = "twist",
+) -> torch.Tensor:
+    """COST (>= 0, negative weight): summed squared servo joint speed, gated (cosine ramp) for φ >= settle_from, so
+    the stand net receives a still robot at the hand-back."""
+    robot: Entity = env.scene["robot"]
+    phi = _gp_phase(env, command_name)
+    gate = 0.5 - 0.5 * torch.cos(torch.pi * torch.clamp((phi - settle_from) / ramp, 0.0, 1.0))
+    return torch.nan_to_num(gate * _servo_joint_vel(env, robot).pow(2).sum(dim=-1), nan=0.0)

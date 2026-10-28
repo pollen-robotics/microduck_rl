@@ -409,3 +409,15 @@ register_mjlab_task(
     rl_cfg=make_expressive_rl_cfg("Sassy"),
     runner_cls=MicroduckOnPolicyRunner,
 )
+
+# Round 2 (2026-10-28 night): new references + velocity tracking, ALL from scratch (every warm-started r1 run dived the neck).
+from .expressive_motions import MOTIONS_R2 as _EXPRESSIVE_MOTIONS_R2
+
+for _name in _EXPRESSIVE_MOTIONS_R2:
+    register_mjlab_task(
+        task_id=f"Mjlab-Expressive-{_name}-R2-MicroDuck",
+        env_cfg=make_microduck_expressive_env_cfg(f"{_name}-R2"),
+        play_env_cfg=make_microduck_expressive_env_cfg(f"{_name}-R2", play=True),
+        rl_cfg=make_expressive_rl_cfg(f"{_name}-R2"),
+        runner_cls=MicroduckOnPolicyRunner,
+    )

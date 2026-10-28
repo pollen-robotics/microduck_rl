@@ -154,3 +154,89 @@ HMPH = Motion("Hmph", 3.5, (
 ), note="trunk turned away on planted feet, nose up, chin flick, back")
 
 MOTIONS = {m.name: m for m in (SASSY, PROUD, SHY, EXCITED, GIGGLE, HMPH)}
+
+
+# ── Round 2 (2026-10-28 night, notes/expressive/LEDGER.md "Round 2") ────────────────────────────────────────────────
+# Round 1 eval: the oscillations barely appeared (Sassy wiggle x0.37 and out of phase, Giggle shake x0.19, Excited
+# sagged instead of bouncing), Hmph parked the left hip yaw on its stop, and the stand net stepped at the hand-back.
+# Round 2 references: slower / feasible oscillations, Hmph turns -18°, and EVERY envelope closes (value AND
+# velocity 0, the cosine envelope has zero slope at t3) by φ ≤ R2_END_PHI, then a still stand until the hand-back.
+# Registered as Mjlab-Expressive-<Name>-R2-MicroDuck (motion key "<Name>-R2"), trained from scratch.
+R2_END_PHI = 0.87
+
+SASSY_R2 = Motion("Sassy", 3.5, (
+    Comp("pitch", 0.08, (0.10, 0.45, 2.15, 2.45)),
+    Comp("pitch", -0.05, (2.30, 2.50, 2.75, 3.00)),
+    Comp("dz", -0.006, (0.10, 0.45, 2.15, 2.45)),
+    Comp("yaw", 0.22, (0.30, 0.65, 1.95, 2.30), freq=2.0),      # 2 Hz: 4 swings of the tail
+    Comp("roll", 0.07, (0.30, 0.65, 1.95, 2.30), freq=2.0),     # in phase with the yaw
+    Comp("head_yaw", 0.6, (0.10, 0.50, 2.70, 3.00)),
+    Comp("head_roll", 0.3, (0.10, 0.50, 2.70, 3.00)),
+    Comp("head_pitch", -0.25, (2.25, 2.50, 2.75, 3.00)),
+    Comp("neck_pitch", 0.12, (2.25, 2.50, 2.75, 3.00)),
+), note="r2: booty wiggle 2.0 Hz (yaw ±0.22 + roll ±0.07 in phase) over a bow, head over the left shoulder; chin-up hold",
+   settle_from=0.88)
+
+PROUD_R2 = Motion("Proud", 3.0, PROUD.comps, note="r2: " + PROUD.note, settle_from=0.88)   # ends at φ 0.85 already
+
+SHY_R2 = Motion("Shy", 3.5, (
+    Comp("dz", -0.008, (0.15, 0.80, 2.55, 3.00)),
+    Comp("pitch", 0.07, (0.15, 0.80, 2.55, 3.00)),
+    Comp("yaw", 0.15, (0.50, 0.90, 2.25, 2.75), freq=0.8),
+    Comp("head_pitch", 0.30, (0.15, 0.80, 2.55, 3.00)),
+    Comp("neck_pitch", -0.10, (0.15, 0.80, 2.55, 3.00)),
+    Comp("head_yaw", -0.50, (0.20, 0.90, 2.55, 3.00)),
+    Comp("head_roll", 0.15, (0.20, 0.90, 2.55, 3.00)),
+), note="r2: crouch, hunch, slow 0.8 Hz twist, head down and turned away; ends at φ 0.86", settle_from=0.88)
+
+EXCITED_R2 = Motion("Excited", 3.0, (
+    Comp("dz", -0.007, (0.15, 0.45, 2.15, 2.55)),
+    Comp("dz", 0.007, (0.15, 0.45, 2.15, 2.55), freq=2.5, ph=PI2),    # -0.007 + 0.007 cos: 0 .. -14 mm, 6 bounces
+    Comp("head_pitch", -0.10, (0.15, 0.45, 2.15, 2.55)),
+    Comp("head_pitch", 0.10, (0.15, 0.45, 2.15, 2.55), freq=2.5, ph=-PI2),
+    Comp("neck_pitch", 0.10, (0.15, 0.45, 2.15, 2.55)),
+), note="r2: 2.5 Hz squats 0..-14 mm (height-rate tracked), head bobbing in sync, looking up", settle_from=0.88)
+
+GIGGLE_R2 = Motion("Giggle", 2.5, (
+    Comp("pitch", -0.05, (0.10, 0.40, 1.70, 2.00)),
+    Comp("roll", 0.08, (0.25, 0.45, 1.55, 1.85), freq=4.0),            # the shake: ±0.08 rad at 4 Hz
+    Comp("head_pitch", -0.25, (0.10, 0.40, 1.75, 2.05)),
+    Comp("head_pitch", 0.06, (0.25, 0.45, 1.55, 1.85), freq=4.0),
+    Comp("neck_pitch", 0.15, (0.10, 0.40, 1.75, 2.05)),
+), note="r2: 4 Hz roll shake ±0.08 (roll-rate tracked), leaning back, head tossed back", settle_from=0.88)
+
+HMPH_R2 = Motion("Hmph", 3.5, (
+    Comp("yaw", -math.radians(18.0), (0.15, 0.55, 2.40, 3.00)),       # -18°: off the hip-yaw stops
+    Comp("roll", -0.04, (0.15, 0.55, 2.40, 3.00)),
+    Comp("pitch", -0.05, (0.15, 0.55, 2.40, 3.00)),
+    Comp("head_yaw", -0.50, (0.20, 0.55, 2.40, 3.00)),
+    Comp("head_pitch", -0.25, (0.20, 0.55, 2.40, 3.00)),
+    Comp("head_pitch", -0.10, (0.95, 1.10, 1.10, 1.40)),
+    Comp("neck_pitch", 0.15, (0.20, 0.55, 2.40, 3.00)),
+    Comp("head_roll", -0.15, (0.20, 0.55, 2.40, 3.00)),
+), note="r2: trunk turned away -18° on planted feet, nose up, chin flick, back", settle_from=0.88)
+
+MOTIONS_R2 = {m.name: m for m in (SASSY_R2, PROUD_R2, SHY_R2, EXCITED_R2, GIGGLE_R2, HMPH_R2)}
+# Every motion by key: "Sassy" (round 1), "Sassy-R2" (round 2). The reward / obs functions look motions up here.
+ALL_MOTIONS = {**MOTIONS, **{f"{k}-R2": v for k, v in MOTIONS_R2.items()}}
+TRUNK_CHANNELS = ("roll", "pitch", "yaw", "dz")
+
+
+def get_motion(key: str) -> Motion:
+    return ALL_MOTIONS[key]
+
+
+def reference_rate(motion: Motion, phi: torch.Tensor, h: float = 0.002) -> torch.Tensor:
+    """(N,) phase -> (N, 8) time derivative of the reference (units / s), central difference over ±h seconds."""
+    dphi = h / motion.period
+    return (reference(motion, phi + dphi) - reference(motion, phi - dphi)) / (2.0 * h)
+
+
+def osc_channels(motion: Motion) -> tuple:
+    """Trunk channels with an oscillating component (velocity-tracked in round 2)."""
+    return tuple(ch for ch in TRUNK_CHANNELS if any(c.ch == ch and c.freq > 0.0 for c in motion.comps))
+
+
+def peak_rate(motion: Motion, ch: str, n: int = 4001) -> float:
+    phi = torch.linspace(0.0, 1.0, n, dtype=torch.float64)
+    return float(reference_rate(motion, phi)[:, CH[ch]].abs().max())

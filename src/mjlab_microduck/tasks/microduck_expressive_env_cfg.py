@@ -23,12 +23,13 @@ import mujoco
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers import CurriculumTermCfg, ObservationTermCfg, RewardTermCfg, TerminationTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg
 from mjlab.tasks.velocity import mdp
 
 from mjlab_microduck.robot.microduck_constants import get_ground_pick_spec
 from mjlab_microduck.tasks import mdp as microduck_mdp
-from mjlab_microduck.tasks.expressive_motions import MOTIONS
+from mjlab_microduck.tasks.expressive_motions import get_motion, osc_channels, peak_rate
 from mjlab_microduck.tasks.microduck_ground_pick_env_cfg import make_microduck_ground_pick_env_cfg
 from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg
 
@@ -54,6 +55,17 @@ W_FEET_DRIFT = -40.0      # per m of summed horizontal drift (1 cm on both feet:
 W_FEET_LIFT = -100.0      # per m above the start height + 3 mm
 W_FOOT_SLIP = -2.0        # per m/s of summed foot speed
 
+# Round 2 (motion key "<Name>-R2", trained from scratch). See LEDGER.md "Round 2".
+W_OSC_BOOST = 1.6         # position-tracking weight multiplier on the oscillating trunk channels
+W_TRACK_RATE = 3.0        # velocity tracking of each oscillating trunk channel (rate vs d/dt of the reference)
+RATE_STD_FRAC = 0.35      # rate kernel std = this x the channel's peak reference rate (floored below)
+RATE_STD_MIN = {"roll": 0.15, "pitch": 0.15, "yaw": 0.15, "dz": 0.01}
+W_TRACK_HEAD_WIDE, STD_HEAD_WIDE = 1.5, 0.4   # gradient at a 1.5 rad head error (r1's 0.12 kernel had none)
+W_NECK_DEV, NECK_DEV_FREE = -5.0, 0.3         # per rad of |neck - reference| beyond 0.3 rad
+W_JOINT_LIMIT, JOINT_LIMIT_MARGIN = 2.0, 0.05 # self-negating: -(intrusion into the last 0.05 rad / 0.05)^2 per joint
+W_SETTLE_STILL = -0.05    # per (rad/s)^2 of summed servo speed after settle_from (still robot at the hand-back)
+RATE_NAMES = {"roll": "track_roll", "pitch": "track_pitch", "yaw": "track_yaw", "dz": "track_height"}
+
 
 @lru_cache(maxsize=1)
 def expressive_joint_limits() -> dict:
@@ -64,7 +76,7 @@ def expressive_joint_limits() -> dict:
 
 
 def make_microduck_expressive_env_cfg(motion: str, play: bool = False) -> ManagerBasedRlEnvCfg:
-    mo = MOTIONS[motion]
+    mo = get_motion(motion)
     cfg = make_microduck_ground_pick_env_cfg(play=play, rough=False)
 
     # ── One motion per episode, from φ = 0 (standing) ──────────────────────────
@@ -131,6 +143,9 @@ def make_microduck_expressive_env_cfg(motion: str, play: bool = False) -> Manage
     critic["ex_error"] = ObservationTermCfg(func=microduck_mdp.ex_error_obs, params={"motion": motion})
     critic["ex_feet_offset"] = ObservationTermCfg(func=microduck_mdp.ex_feet_offset_obs)
 
+    if motion.endswith("-R2"):
+        _add_round2_terms(cfg, motion, mo)
+
     # ── A fall ends the episode ────────────────────────────────────────────────
     cfg.terminations["fell_over"] = TerminationTermCfg(
         func=mdp.bad_orientation, params={"limit_angle": math.radians(FALL_ANGLE_DEG)}, time_out=False,
@@ -138,8 +153,37 @@ def make_microduck_expressive_env_cfg(motion: str, play: bool = False) -> Manage
     return cfg
 
 
+def _add_round2_terms(cfg: ManagerBasedRlEnvCfg, motion: str, mo) -> None:
+    """Round 2: oscillations tracked in velocity too (and weighted up), a wide head kernel + neck-dive cost, joints
+    kept off their stops, a still robot at the hand-back."""
+    for ch in osc_channels(mo):
+        cfg.rewards[RATE_NAMES[ch]].weight *= W_OSC_BOOST
+        std = max(RATE_STD_FRAC * peak_rate(mo, ch), RATE_STD_MIN[ch])
+        cfg.rewards[f"{RATE_NAMES[ch]}_rate"] = RewardTermCfg(
+            func=microduck_mdp.ex_track_rate, weight=W_TRACK_RATE,
+            params={"motion": motion, "channel": ch, "std": std, "command_name": "twist"},
+        )
+    cfg.rewards["track_head_wide"] = RewardTermCfg(
+        func=microduck_mdp.ex_track, weight=W_TRACK_HEAD_WIDE,
+        params={"motion": motion, "channels": ("neck_pitch", "head_pitch", "head_yaw", "head_roll"),
+                "std": STD_HEAD_WIDE, "command_name": "twist"},
+    )
+    cfg.rewards["neck_dev"] = RewardTermCfg(
+        func=microduck_mdp.ex_head_dev_cost, weight=W_NECK_DEV,
+        params={"motion": motion, "channels": ("neck_pitch",), "free": NECK_DEV_FREE, "command_name": "twist"},
+    )
+    cfg.rewards["joint_limit_proximity"] = RewardTermCfg(
+        func=microduck_mdp.joint_limit_proximity_penalty, weight=W_JOINT_LIMIT,
+        params={"margin": JOINT_LIMIT_MARGIN, "asset_cfg": SceneEntityCfg("robot", joint_names=SERVO_JOINTS)},
+    )
+    cfg.rewards["settle_still"] = RewardTermCfg(
+        func=microduck_mdp.ex_settle_still, weight=W_SETTLE_STILL,
+        params={"settle_from": mo.settle_from, "command_name": "twist"},
+    )
+
+
 def make_expressive_rl_cfg(motion: str) -> RslRlOnPolicyRunnerCfg:
-    name = f"expressive_{motion.lower()}"
+    name = f"expressive_{motion.lower().replace('-', '_')}"
     return RslRlOnPolicyRunnerCfg(
         actor=RslRlModelCfg(
             hidden_dims=(512, 256, 128), activation="elu", obs_normalization=True,

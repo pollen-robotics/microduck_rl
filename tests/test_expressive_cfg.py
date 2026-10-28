@@ -10,8 +10,12 @@ import torch
 
 import mjlab_microduck.tasks  # noqa: F401  (registry first)
 from mjlab_microduck.robot.microduck_constants import HOME_FRAME, get_ground_pick_spec
-from mjlab_microduck.tasks.expressive_motions import CH, HEAD_JOINTS, MOTIONS, STAND_HEIGHT, bound, reference
+from mjlab_microduck.tasks.expressive_motions import (
+    ALL_MOTIONS, CH, HEAD_JOINTS, MOTIONS, MOTIONS_R2, R2_END_PHI, STAND_HEIGHT, bound, osc_channels, reference,
+    reference_rate,
+)
 from mjlab_microduck.tasks.microduck_expressive_env_cfg import (
+    JOINT_LIMIT_MARGIN,
     SERVO_JOINTS,
     expressive_joint_limits,
     make_microduck_expressive_env_cfg,
@@ -35,9 +39,9 @@ def _ref(motion, n=2001):
     return phi, reference(motion, phi).numpy()
 
 
-@pytest.mark.parametrize("name", list(MOTIONS))
+@pytest.mark.parametrize("name", list(ALL_MOTIONS))
 def test_reference_bounds(name):
-    mo = MOTIONS[name]
+    mo = ALL_MOTIONS[name]
     _, r = _ref(mo)
     for ch, lim in TRUNK_MAX.items():
         assert bound(mo, ch) <= lim + 1e-9, (ch, bound(mo, ch))
@@ -53,9 +57,9 @@ def test_reference_bounds(name):
     assert yaw <= min(-limits["left_hip_yaw"][0], limits["right_hip_yaw"][1]) - 0.05
 
 
-@pytest.mark.parametrize("name", list(MOTIONS))
+@pytest.mark.parametrize("name", list(ALL_MOTIONS))
 def test_reference_starts_and_ends_at_stand_and_is_smooth(name):
-    mo = MOTIONS[name]
+    mo = ALL_MOTIONS[name]
     phi, r = _ref(mo)
     assert np.abs(r[0]).max() < 1e-9
     assert np.abs(r[phi.numpy() >= mo.settle_from]).max() < 1e-9, "every envelope must close before the settle"
@@ -83,9 +87,9 @@ def test_stand_height_matches_model():
     assert abs((d.qpos[2] - np.mean(feet)) - STAND_HEIGHT - 0.002) < 1e-3   # FK minus the measured 2 mm sag
 
 
-@pytest.mark.parametrize("name", list(MOTIONS))
+@pytest.mark.parametrize("name", list(ALL_MOTIONS))
 def test_env_cfg_contract(name):
-    mo = MOTIONS[name]
+    mo = ALL_MOTIONS[name]
     cfg = make_microduck_expressive_env_cfg(name)
     assert cfg.episode_length_s == mo.period
     tw = cfg.commands["twist"]
@@ -105,3 +109,72 @@ def test_env_cfg_contract(name):
         assert k not in cfg.rewards
     assert "sample_mouth_payload" not in cfg.events
     assert len(cfg.actions["joint_pos"].clip) == 14
+
+
+# ── Round 2 ──────────────────────────────────────────────────────────────────
+R2 = [f"{k}-R2" for k in MOTIONS_R2]
+
+
+@pytest.mark.parametrize("name", R2)
+def test_r2_ends_still_at_stand_before_handback(name):
+    """Round 1: the stand net stepped at the hand-back. Every r2 envelope closes (value and velocity 0) by φ 0.87."""
+    mo = ALL_MOTIONS[name]
+    assert 0.85 <= mo.settle_from <= 0.9
+    for c in mo.comps:
+        assert c.env[3] <= R2_END_PHI * mo.period + 1e-9, c
+    phi = torch.linspace(R2_END_PHI, 0.999, 200, dtype=torch.float64)
+    assert np.abs(reference(mo, phi).numpy()).max() < 1e-9
+    assert np.abs(reference_rate(mo, phi).numpy()).max() < 1e-6
+
+
+def _osc(mo, ch):
+    return [c for c in mo.comps if c.ch == ch and c.freq > 0]
+
+
+def test_r2_feasible_oscillations():
+    s, g, e, h = (MOTIONS_R2[k] for k in ("Sassy", "Giggle", "Excited", "Hmph"))
+    assert {c.freq for c in _osc(s, "yaw") + _osc(s, "roll")} == {2.0}
+    assert osc_channels(s) == ("roll", "yaw")
+    assert [(c.amp, c.freq) for c in _osc(g, "roll")] == [(0.08, 4.0)]
+    phi = torch.linspace(0.0, 1.0, 4001, dtype=torch.float64)
+    dz = reference(e, phi).numpy()[:, CH["dz"]]
+    assert abs(dz.min() + 0.014) < 2e-4 and dz.max() < 1e-9 and {c.freq for c in _osc(e, "dz")} == {2.5}
+    yaw = reference(h, phi).numpy()[:, CH["yaw"]]
+    assert abs(yaw.min() - math.radians(-18.0)) < 1e-6
+    # planted-feet trunk yaw goes through the hip yaws: stay clear of the joint-limit proximity band
+    lim = expressive_joint_limits()
+    assert -yaw.min() < -lim["left_hip_yaw"][0] - 2 * JOINT_LIMIT_MARGIN
+
+
+def test_home_clear_of_joint_limit_band():
+    for jn, (lo, hi) in expressive_joint_limits().items():
+        assert min(_home(jn) - lo, hi - _home(jn)) > JOINT_LIMIT_MARGIN, jn
+
+
+@pytest.mark.parametrize("name", R2)
+def test_r2_env_terms(name):
+    mo = ALL_MOTIONS[name]
+    cfg = make_microduck_expressive_env_cfg(name)
+    r = cfg.rewards
+    names = {"roll": "track_roll", "pitch": "track_pitch", "yaw": "track_yaw", "dz": "track_height"}
+    for ch in osc_channels(mo):
+        assert r[f"{names[ch]}_rate"].weight > 0 and r[f"{names[ch]}_rate"].params["std"] > 0
+    if name.startswith("Excited"):
+        assert "track_height_rate" in r
+    assert r["track_head_wide"].weight > 0 and r["track_head_wide"].params["std"] >= 0.3
+    assert r["track_head"].params["std"] < 0.2                       # the narrow kernel stays
+    assert r["neck_dev"].weight < 0 and r["neck_dev"].params["free"] == 0.3
+    assert r["joint_limit_proximity"].weight > 0 and r["joint_limit_proximity"].params["margin"] == JOINT_LIMIT_MARGIN
+    assert r["settle_still"].weight < 0
+    for k in ("track_head_wide", "neck_dev", "joint_limit_proximity", "settle_still"):
+        assert k not in make_microduck_expressive_env_cfg(name[:-3]).rewards     # round 1 untouched
+
+
+def test_r2_tasks_registered_from_scratch():
+    from mjlab.tasks.registry import _REGISTRY
+    from mjlab_microduck.tasks import ExpressiveFromPickRunner
+    for k in MOTIONS_R2:
+        t = _REGISTRY[f"Mjlab-Expressive-{k}-R2-MicroDuck"]
+        assert t.runner_cls is not None and not issubclass(t.runner_cls, ExpressiveFromPickRunner), k
+        assert t.rl_cfg.experiment_name == f"expressive_{k.lower()}_r2"
+        assert t.rl_cfg.max_iterations == 3000
