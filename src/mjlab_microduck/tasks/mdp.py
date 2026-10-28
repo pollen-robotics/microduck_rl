@@ -8003,10 +8003,12 @@ class RuntimeLayerJointPositionAction(_JointAction):
             outside = self._env.command_manager.get_term(self.cfg.command_name).outside_skill()
             self.outside = outside
             self.policy_actions = actions.clone()
+            # the walking policy's answer to this observation, every tick: it drives outside the skill, and inside
+            # it is the calm stance the late settle is compared with (nudge_settle_imitation)
+            with torch.no_grad():
+                walk = self._handover(self._env.obs_buf["actor"])
+            self.handover_actions = walk
             if outside.any():
-                with torch.no_grad():
-                    walk = self._handover(self._env.obs_buf["actor"])
-                self.handover_actions = walk
                 actions = torch.where(outside[:, None], walk, actions)
                 # robotd observes the output it applied: the next observation's last action is the walking policy's
                 # (this term is the env's only action term, so it owns the whole action vector)
@@ -8116,6 +8118,21 @@ def nudge_tilt(env: ManagerBasedRlEnv, free_deg: float = 8.0, asset_cfg: SceneEn
     tilt = torch.acos(torch.clamp(-g[:, 2], -1.0, 1.0))
     over = torch.relu(tilt - math.radians(free_deg))
     return torch.nan_to_num(over * over, nan=0.0)
+
+
+def nudge_settle_imitation(env: ManagerBasedRlEnv, command_name: str = "twist", after_s: float = 1.2,
+                           until_s: float = 1.8, action_name: str = "joint_pos") -> torch.Tensor:
+    """Mean squared gap between the trained policy's output and the walking policy's for the same observation, in the
+    late settle (after_s..until_s from the go onset), when the step is done and the duck should simply stand. Run 7's
+    settle jitter was 21.7 mrad of target change per tick against velstand's 6.6 standing, and Rémi saw the legs shake
+    there on the real duck (2026-10-28). Positive quantity, negative weight."""
+    term = env.action_manager.get_term(action_name)
+    if getattr(term, "_handover", None) is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    t = _nudge_term(env, command_name).elapsed()
+    on = ((t >= after_s) & (t < until_s)).float()
+    gap = (term.policy_actions - term.handover_actions).pow(2).mean(dim=1)
+    return torch.nan_to_num(gap * on, nan=0.0)
 
 
 class OnnxMlp(torch.nn.Module):

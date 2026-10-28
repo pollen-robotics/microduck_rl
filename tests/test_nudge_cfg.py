@@ -127,6 +127,8 @@ def test_safe_variant_makes_falls_expensive():
     assert cfg.terminations["fell_over"].params["limit_angle"] <= math.radians(45.0)
     assert cfg.rewards["nudge_target_overrun"].weight < 0.0
     assert cfg.rewards["nudge_tilt"].weight < 0.0 and 0.0 < cfg.rewards["nudge_tilt"].params["free_deg"] <= 12.0
+    si = cfg.rewards["nudge_settle_imitation"]
+    assert si.weight < 0.0 and nudge.GO_S < si.params["after_s"] < si.params["until_s"] <= nudge.GO_S + nudge.SETTLE_S
     assert cfg.actions["joint_pos"].clamp_margin == nudge.SAFE_CLAMP_MARGIN
     assert cfg.curriculum["action_rate_weight"].params["weight_stages"][-1]["weight"] == -0.5
 
