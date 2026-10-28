@@ -472,6 +472,13 @@ TEACHER_MASK_KEEP_SIDE_CONE_DEG = 45.0   # v8 stuck states sit 36-41° off the s
 # |ω| as the old gate on every family (rise battery, backlash).
 TEACHER_STILL_GYRO = 1.0
 TEACHER_STILL_QVEL = float("inf")   # joint speed ignored
+# Exploration-noise cap (2026-10-28, run 52bccilw eval). Even with the gate open, the student
+# got WORSE on stuck poses (gets up 41 % → 12-15 %; freeze spread to face-up), while the teacher
+# with training's labels gets up from 98 % of the student's own stuck states. Training never
+# visits them: at the learned std 0.35 the student escapes 79 % of them in rollouts; at ≤ 0.2 it
+# stays frozen (2-7 %) like the deployed policy — and 97 % of those frames pass the gyro gate, so
+# BC finally labels the deterministic freeze. Fine-tuning from a converged checkpoint only.
+MAX_ACTION_STD = 0.2
 ENABLE_FOOT_CLEARANCE = True
 FOOT_CLEARANCE_MIN = 0.015            # PPO cost on the measured feet: box proxy (≈ mesh 18-20 mm); walking p1 ≥ 21 mm unpushed
 FOOT_CLEARANCE_LABEL_MIN = 0.020      # teacher-label path projection (emulated: 15 mm → swing p50 +6, 25 mm → +9, rise kept)
@@ -1049,6 +1056,7 @@ MicroduckVelStandRlCfg = RslRlOnPolicyRunnerCfg(
             **({"expert_mask_keep_side_cone_deg": TEACHER_MASK_KEEP_SIDE_CONE_DEG,
                 "expert_mask_still_gyro": TEACHER_STILL_GYRO,
                 "expert_mask_still_qvel": TEACHER_STILL_QVEL} if ENABLE_SIDE_UNMASKED_TEACHER else {}),
+            "max_action_std": MAX_ACTION_STD,
             **({"label_min_foot_clearance": FOOT_CLEARANCE_LABEL_MIN, "label_clearance_joints": FOOT_CLEARANCE_LABEL_JOINTS,
                 "home_joint_pos": home_servo_pos()} if ENABLE_FOOT_CLEARANCE else {}),
         } if ENABLE_EXPERT_BC else None,

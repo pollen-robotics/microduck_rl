@@ -132,6 +132,10 @@ def default_bc_cfg() -> dict:
         # cos(cone)) AND still (|gyro| < still_gyro, mean |joint vel| < still_qvel) keep their
         # joint obs. Stuck states are still; a roll in progress never is. None = off.
         "expert_mask_keep_side_cone_deg": None,
+        # Cap on PPO's exploration std, applied after every update (None = off). The side
+        # freeze is a fixed point of the DETERMINISTIC policy only: at std 0.35 rollouts shake
+        # out of it, so neither PPO nor BC ever sees it (velstand, 2026-10-28).
+        "max_action_std": None,
         "expert_mask_still_gyro": 0.3,    # rad/s, obs cols 0:3
         "expert_mask_still_qvel": 0.4,    # rad/s mean |.|, obs cols 20:34 (noise ±0.25 → ~0.13 at rest)
         # Foot-clearance projection of the stand teacher's labels (same branch). alpha_stand rolls
@@ -415,4 +419,13 @@ class PpoWithExpertBc(PPO):
         loss_dict = super().update()
         if self.expert is not None:
             loss_dict.update(self._bc_update())
+        cap = (self.bc_cfg or {}).get("max_action_std")
+        if cap is not None:
+            dist = getattr(self.actor, "distribution", None)
+            std = getattr(dist, "std_param", None)
+            if std is None:
+                raise RuntimeError("max_action_std needs std_type='scalar' (an actor distribution.std_param)")
+            with torch.no_grad():
+                std.clamp_(max=cap)
+            loss_dict["action_std_capped_max"] = float(std.max())
         return loss_dict

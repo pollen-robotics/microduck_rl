@@ -154,3 +154,8 @@ def test_still_gate_ignores_joint_jitter():
     obs[0, 20:34] = 2.0                           # joints jittering under exploration noise
     obs[1, 0:3] = torch.tensor([3.0, 0.0, 0.0])   # rolling through the side
     assert distill.still_mask_from_obs(obs, bc["expert_mask_still_gyro"], bc["expert_mask_still_qvel"]).tolist() == [True, False]
+
+
+def test_velstand_caps_exploration_std():
+    bc = vs.MicroduckVelStandRlCfg.algorithm.bc_cfg
+    assert bc["max_action_std"] == vs.MAX_ACTION_STD and 0.0 < vs.MAX_ACTION_STD < 0.35
