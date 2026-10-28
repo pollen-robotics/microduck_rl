@@ -144,3 +144,14 @@ def test_smooth_variant_prices_jitter_from_the_start():
     assert stages[0]["step"] == 0 and stages[0]["weight"] <= -1.0
     assert cfg.rewards["action_rate_l2"].weight <= -1.0
     assert cfg.rewards["nudge_settle_imitation"].weight == nudge.SMOOTH_SETTLE_IMITATION_WEIGHT
+
+
+def test_ease_variant_discovers_with_a_light_tax_then_matches_smooth():
+    cfg = make_microduck_nudge_env_cfg(runtime_layer=True, safe=True, smooth=True,
+                                       smooth_stages=nudge.EASE_ACTION_RATE_STAGES)
+    stages = cfg.curriculum["action_rate_weight"].params["weight_stages"]
+    assert stages[0]["step"] == 0 and -0.5 < stages[0]["weight"] < 0
+    assert cfg.rewards["action_rate_l2"].weight == stages[0]["weight"]
+    assert stages[-1]["weight"] == nudge.SMOOTH_ACTION_RATE_STAGES[-1][1]
+    assert [s["step"] for s in stages] == sorted(s["step"] for s in stages)
+    assert cfg.rewards["nudge_settle_imitation"].weight == nudge.SMOOTH_SETTLE_IMITATION_WEIGHT

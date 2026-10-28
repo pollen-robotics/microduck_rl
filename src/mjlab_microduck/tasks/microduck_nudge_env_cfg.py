@@ -111,6 +111,10 @@ SAFE_ACTION_RATE_STAGES = ((0, -0.2), (1200, -0.5), (3300, -2.0))
 # moderate pull to velstand's stance in the late settle (run 10's -300 made falls worse).
 SMOOTH_ACTION_RATE_STAGES = ((0, -1.0),)
 SMOOTH_SETTLE_IMITATION_WEIGHT = -50.0
+# Run 13 (Mjlab-NudgeSmoothEase): run 12's -1.0 from iteration 0 held the step back (final x error 6.5 -> 4.2 mm by
+# iteration 1100; run 5 under -0.2 was at 4.0 by 300; @1000 forward requests did not move at all, lateral and turn did).
+# A lighter tax while the steps are discovered, full weight once they exist.
+EASE_ACTION_RATE_STAGES = ((0, -0.3), (900, -0.6), (1600, -1.0))
 # Run 8 (fine-tune of run 7 @2000, the file on cream-converse): the real duck fell once in 11 nudges, the tilt growing
 # 7 -> 22 deg over 0.6 s of the settle; sim falls ~2 % (6 / 384). Price any lean beyond 8 deg.
 SAFE_TILT_WEIGHT = -20.0
@@ -131,7 +135,8 @@ DROP_CURRICULA = ("standing_envs", "head_pose_bias_weight", "body_pose_range", "
 
 
 def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtime_layer: bool = False,
-                                 safe: bool = False, smooth: bool = False) -> ManagerBasedRlEnvCfg:
+                                 safe: bool = False, smooth: bool = False,
+                                 smooth_stages: tuple = SMOOTH_ACTION_RATE_STAGES) -> ManagerBasedRlEnvCfg:
     cfg = make_microduck_velocity_env_cfg(play=play, rough=False)
     pre_s = HANDOVER_PRE_S if runtime_layer else PRE_S
     post_s = HANDOVER_POST_S if runtime_layer else 0.0
@@ -251,10 +256,10 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtim
             cfg.curriculum["action_rate_weight"].params["weight_stages"] = [
                 {"step": it * NUM_STEPS_PER_ENV, "weight": w} for it, w in SAFE_ACTION_RATE_STAGES]
     if smooth:
-        cfg.rewards["action_rate_l2"].weight = SMOOTH_ACTION_RATE_STAGES[0][1]
+        cfg.rewards["action_rate_l2"].weight = smooth_stages[0][1]
         if "action_rate_weight" in cfg.curriculum:
             cfg.curriculum["action_rate_weight"].params["weight_stages"] = [
-                {"step": it * NUM_STEPS_PER_ENV, "weight": w} for it, w in SMOOTH_ACTION_RATE_STAGES]
+                {"step": it * NUM_STEPS_PER_ENV, "weight": w} for it, w in smooth_stages]
         if "nudge_settle_imitation" in cfg.rewards:
             cfg.rewards["nudge_settle_imitation"].weight = SMOOTH_SETTLE_IMITATION_WEIGHT
     return cfg
