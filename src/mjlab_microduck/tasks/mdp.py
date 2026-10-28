@@ -7742,6 +7742,16 @@ class FootstepCommand(CommandTerm):
         self.target_w = torch.zeros(n, 3, device=self.device)  # swing foot target: world x, y, yaw
         self.last_step = torch.zeros(n, 3, device=self.device)  # last sampled step, neutral convention
         self.event = torch.zeros(n, dtype=torch.bool, device=self.device)  # support switched in the last compute()
+        # the switch was a real step: the landing foot left the ground (contact sensor) for >= min_air and the step
+        # lasted >= min_step_time (the odometry rule alone also fires when rocking flips the lowest sole point between
+        # two grounded feet — run 1 farmed that at 13 switches/s)
+        self.valid = torch.zeros(n, dtype=torch.bool, device=self.device)
+        self.step_credit = torch.zeros(n, device=self.device)  # min(step duration / nominal, 1) of that step
+        self.swing_air = torch.zeros(n, device=self.device)  # longest airborne stretch of the swing foot this step [s]
+        self._air = torch.zeros(n, 2, device=self.device)  # current airborne stretch per foot (L, R) [s]
+        from mjlab.sensor import ContactSensor
+
+        self._contact: ContactSensor = env.scene[cfg.contact_sensor_name]
         self.pos_err = torch.zeros(n, device=self.device)  # placement error of that switch
         self.yaw_err = torch.zeros(n, device=self.device)
         self.progress = torch.zeros(n, device=self.device)  # swing foot approach to target since last compute [m]
@@ -7749,9 +7759,10 @@ class FootstepCommand(CommandTerm):
         self._needs_init = torch.ones(n, dtype=torch.bool, device=self.device)
         self._command = torch.zeros(n, 3, device=self.device)
         self._t_since_switch = torch.zeros(n, device=self.device)
-        for k in ("placement_pos_err", "placement_yaw_err", "steps_per_s", "range_scale"):
+        for k in ("placement_pos_err", "placement_yaw_err", "steps_per_s", "switches_per_s", "range_scale"):
             self.metrics[k] = torch.zeros(n, device=self.device)
         self._n_events = torch.zeros(n, device=self.device)
+        self._n_switches = torch.zeros(n, device=self.device)
         self._t_episode = torch.zeros(n, device=self.device)
 
     @property
@@ -7766,8 +7777,8 @@ class FootstepCommand(CommandTerm):
         centre = pos + quat_apply(quat, self._sole_center.expand(pos.shape))
         return torch.cat([centre[..., :2], _yaw_from_quat(quat).unsqueeze(-1)], -1)
 
-    def _lowest_foot(self) -> torch.Tensor:
-        """(N,) foot owning the lowest odometry sole point (world z; the anchor z cancels in the comparison)."""
+    def _lowest_points(self) -> torch.Tensor:
+        """(N, 2) world z of each foot's lowest odometry sole point."""
         pos = self.robot.data.site_pos_w[:, self._site_ids]
         quat = self.robot.data.site_quat_w[:, self._site_ids]
         z = []
@@ -7775,7 +7786,12 @@ class FootstepCommand(CommandTerm):
             pts = self._anchors[f].unsqueeze(0).expand(self.num_envs, -1, -1)
             q = quat[:, f].unsqueeze(1).expand(-1, pts.shape[1], -1)
             z.append((pos[:, f, 2:3] + quat_apply(q, pts)[..., 2]).min(-1).values)
-        return (z[1] < z[0]).long()
+        return torch.stack(z, -1)
+
+    def _lowest_foot(self, z: torch.Tensor | None = None) -> torch.Tensor:
+        """(N,) foot owning the lowest odometry sole point (the anchor z cancels in the comparison)."""
+        z = self._lowest_points() if z is None else z
+        return (z[:, 1] < z[:, 0]).long()
 
     def range_scale(self) -> float:
         s0, s1 = self.cfg.ramp_steps
@@ -7823,9 +7839,11 @@ class FootstepCommand(CommandTerm):
         extras = super().reset(env_ids)
         self._needs_init[env_ids] = True  # kinematics are stale here; initialised in the next compute()
         self.event[env_ids] = False
+        self.valid[env_ids] = False
         self.progress[env_ids] = 0.0
         self.last_step[env_ids] = 0.0
         self._n_events[env_ids] = 0.0
+        self._n_switches[env_ids] = 0.0
         self._t_episode[env_ids] = 0.0
         return extras
 
@@ -7840,19 +7858,33 @@ class FootstepCommand(CommandTerm):
         soles = self._soles()
         ar = torch.arange(self.num_envs, device=self.device)
 
+        z = self._lowest_points()
         init = self._needs_init.nonzero().squeeze(-1)
         if len(init):
-            self.support[init] = self._lowest_foot()[init]
+            self.support[init] = self._lowest_foot(z)[init]
             self._other_ticks[init] = 0
             self._sample_targets(init, soles)
             self._dist[init] = self._swing_dist(soles)[init]
+            self.swing_air[init] = 0.0
+            self._air[init] = 0.0
+            self._t_since_switch[init] = 0.0
             self._needs_init[init] = False
 
+        # swing bookkeeping (before the switch test: the landing tick belongs to the swing that ends)
+        self._t_since_switch += dt
+        airborne = self._contact.data.found == 0  # (N, 2), LEFT, RIGHT = support index order
+        self._air = torch.where(airborne, self._air + dt, torch.zeros_like(self._air))
+        self.swing_air = torch.maximum(self.swing_air, self._air[ar, 1 - self.support])
+
         # odometry rule: switch when the other foot holds the lowest sole point for SWITCH_CONFIRM_TICKS ticks
-        other_low = self._lowest_foot() != self.support
+        other_low = self._lowest_foot(z) != self.support
         self._other_ticks = torch.where(other_low, self._other_ticks + 1, torch.zeros_like(self._other_ticks))
         self.event = (self._other_ticks >= self.cfg.confirm_ticks) & ~self._needs_init
         self.event[init] = False
+        swung = self.swing_air >= self.cfg.min_air
+        self.valid = self.event & swung & (self._t_since_switch >= self.cfg.min_step_time)
+        self.step_credit = (self._t_since_switch / self.cfg.nominal_step_time).clamp(max=1.0)
+        self._n_switches += self.event.float()
         ids = self.event.nonzero().squeeze(-1)
         if len(ids):
             landed = soles[ids, 1 - self.support[ids]]
@@ -7861,11 +7893,14 @@ class FootstepCommand(CommandTerm):
             self.support[ids] = 1 - self.support[ids]
             self._other_ticks[ids] = 0
             self._sample_targets(ids, soles)
-            # metrics: running means over the episode's switches
-            k = self._n_events[ids]
-            for name, v in (("placement_pos_err", self.pos_err[ids]), ("placement_yaw_err", self.yaw_err[ids])):
-                self.metrics[name][ids] = (self.metrics[name][ids] * k + v) / (k + 1)
-            self._n_events[ids] += 1
+            self.swing_air[ids] = 0.0
+            self._t_since_switch[ids] = 0.0
+        vids = self.valid.nonzero().squeeze(-1)
+        if len(vids):  # metrics: running means over the episode's real steps
+            k = self._n_events[vids]
+            for name, v in (("placement_pos_err", self.pos_err[vids]), ("placement_yaw_err", self.yaw_err[vids])):
+                self.metrics[name][vids] = (self.metrics[name][vids] * k + v) / (k + 1)
+            self._n_events[vids] += 1
 
         dist = self._swing_dist(soles)
         self.progress = torch.where(self.event | self._needs_init, torch.zeros_like(dist), self._dist - dist)
@@ -7873,6 +7908,7 @@ class FootstepCommand(CommandTerm):
         self._dist = dist
         self._t_episode += dt
         self.metrics["steps_per_s"][:] = self._n_events / self._t_episode.clamp(min=dt)
+        self.metrics["switches_per_s"][:] = self._n_switches / self._t_episode.clamp(min=dt)
         self.metrics["range_scale"][:] = self.range_scale()
 
         # command: target in the current support sole frame
@@ -7898,6 +7934,13 @@ class FootstepCommandCfg(CommandTermCfg):
     repeat_prob: float = 0.4  # next step = previous step + noise (steady walking sequences)
     repeat_noise: tuple = (0.005, 0.003, 0.03)
     neutral_prob: float = 0.1  # exact neutral step: stepping in place
+    # what counts as a step (paid): the landing foot out of ground contact for >= min_air during the step, and
+    # >= min_step_time since the previous switch; pay scales with min(step duration / nominal_step_time, 1):
+    # cadences above ~4 steps/s earn nothing extra per second
+    contact_sensor_name: str = "feet_ground_contact"  # (left, right) foot geoms vs terrain
+    min_air: float = 0.06
+    min_step_time: float = 0.125
+    nominal_step_time: float = 0.25
     resampling_time_range: tuple[float, float] = (1e9, 1e9)
 
     def build(self, env: ManagerBasedRlEnv) -> "FootstepCommand":
@@ -7906,12 +7949,14 @@ class FootstepCommandCfg(CommandTermCfg):
 
 def footstep_placement(env: ManagerBasedRlEnv, command_name: str, pos_scale: float = 25.0,
                        yaw_scale: float = 5.0) -> torch.Tensor:
-    """Paid once per step, at the support switch: exp(-pos_scale·|Δxy| - yaw_scale·|Δyaw|) of the landed foot vs its
-    target (Sigmaban's reward_tracking_footsteps, exp(-5(5·pos + yaw))): 1 cm → 0.78, 4 cm → 0.37, 6° → 0.59.
-    Returns value / step_dt so the WEIGHT is the reward per step taken (≥ 0 → positive weight)."""
+    """Paid once per REAL step (FootstepCommand.valid: landing foot lifted, step long enough), at the support switch:
+    exp(-pos_scale·|Δxy| - yaw_scale·|Δyaw|) of the landed foot vs its target (Sigmaban's reward_tracking_footsteps,
+    exp(-5(5·pos + yaw))): 1 cm → 0.78, 4 cm → 0.37, 6° → 0.59. Scaled by step_credit (duration / nominal, ≤ 1):
+    shuffling faster than the nominal cadence earns nothing extra per second. Returns value / step_dt so the WEIGHT
+    is the reward per nominal step (≥ 0 → positive weight)."""
     c: FootstepCommand = env.command_manager.get_term(command_name)
-    r = torch.exp(-pos_scale * c.pos_err - yaw_scale * c.yaw_err)
-    return torch.where(c.event, r, torch.zeros_like(r)) / env.step_dt
+    r = torch.exp(-pos_scale * c.pos_err - yaw_scale * c.yaw_err) * c.step_credit
+    return torch.where(c.valid, r, torch.zeros_like(r)) / env.step_dt
 
 
 def footstep_swing_progress(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:

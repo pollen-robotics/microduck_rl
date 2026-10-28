@@ -69,3 +69,11 @@ def test_target_range_widens_and_contains_neutral(cfg):
 def test_play_uses_full_range():
     c = make_microduck_footsteps_env_cfg(play=True).commands[COMMAND_NAME]
     assert c.ramp_steps == (0, 1)
+
+
+def test_paid_steps_need_a_real_swing(cfg):
+    # run 1 farmed odometry switches from rocking (13/s, feet never left the ground): placement pays only when the
+    # landing foot was airborne (contact sensor in the scene) and the step was not faster than the nominal cadence
+    c = cfg.commands[COMMAND_NAME]
+    assert c.contact_sensor_name in [s.name for s in cfg.scene.sensors]
+    assert 0 < c.min_air < c.nominal_step_time and 0 < c.min_step_time < c.nominal_step_time
