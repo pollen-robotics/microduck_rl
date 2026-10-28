@@ -2,7 +2,7 @@
 
     uv run scripts/footsteps_patterns.py --planner footstepnet/footstepnet_5cm.onnx [--out footstep_patterns]
 
-For each pattern: FootstepNet plans from the start stance (feet parallel, FEET_SPACING apart, right foot support)
+For each pattern: FootstepNet plans from the start stance (feet parallel, STANDING_SPACING apart, right foot support)
 to a goal, plus one closing step that squares the feet up. Writes `<out>/footstep_patterns.pdf` (one A4 page per
 pattern, PRINT AT 100 % / actual size — the 100 mm bar checks it) and `<out>/<name>.json`.
 
@@ -33,8 +33,12 @@ PATTERNS = {
     "turn_left_90": ((0.0, 0.0, 90.0), "left"),
     "turn_right_90": ((0.0, 0.0, -90.0), "right"),
     "arc_left_45": ((0.10, 0.04, 45.0), "left"),
-    "side_left_4cm": ((0.0, 0.04, 0.0), "left"),
+    "side_left_6cm": ((0.0, 0.06, 0.0), "left"),
 }
+# Sole-centre spacing of the robot STANDING (home pose FK 83.6 mm; velstand after 5 s standing 85.6 mm, MuJoCo
+# walk-backlash model) — where the pattern starts. FEET_SPACING (95 mm) is the walking stance the planner steps
+# around; printing the start at 95 mm put the paper soles ~1 cm outside the robot's feet on each side.
+STANDING_SPACING = 0.084  # m
 A4 = (210.0, 297.0)  # mm, portrait
 MARGIN, HEADER = 12.0, 30.0  # mm
 FOOT_RGB = {"left": (0.1, 0.45, 0.9), "right": (0.95, 0.5, 0.05)}
@@ -47,9 +51,9 @@ def compose(a, b):
 
 def plan_pattern(planner, goal_centre, goal_foot):
     """Start stance → goal, then the other foot squares up. Returns (start soles, steps, reached)."""
-    half = FEET_SPACING / 2
+    half = STANDING_SPACING / 2
     start = {"left": np.array([0.0, half, 0.0]), "right": np.array([0.0, -half, 0.0])}
-    goal = compose(goal_centre, (0.0, SIDE[goal_foot] * half, 0.0))
+    goal = compose(goal_centre, (0.0, SIDE[goal_foot] * FEET_SPACING / 2, 0.0))
     plan, reached = planner.plan(start["right"], "right", goal, goal_foot, None, max_steps=50)
     steps = [(pose, foot) for pose, foot in plan]
     last_pose, last_foot = steps[-1] if steps else (start["right"], "right")
