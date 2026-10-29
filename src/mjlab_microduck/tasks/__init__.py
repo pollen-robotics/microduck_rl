@@ -421,3 +421,16 @@ for _name in _EXPRESSIVE_MOTIONS_R2:
         rl_cfg=make_expressive_rl_cfg(f"{_name}-R2"),
         runner_cls=MicroduckOnPolicyRunner,
     )
+
+# Dodge dance (2026-10-29, notes/dodge): data-driven reference (motion_data/*.csv), feet planted, round 2 terms, from
+# scratch. "Tremendous" = full amplitude, "Tremendous-70" = trunk channels x0.7 with the same head.
+from .expressive_motions import DATA_MOTIONS as _EXPRESSIVE_DATA_MOTIONS
+
+for _name in _EXPRESSIVE_DATA_MOTIONS:
+    register_mjlab_task(
+        task_id=f"Mjlab-Expressive-{_name}-MicroDuck",
+        env_cfg=make_microduck_expressive_env_cfg(_name),
+        play_env_cfg=make_microduck_expressive_env_cfg(_name, play=True),
+        rl_cfg=make_expressive_rl_cfg(_name),
+        runner_cls=MicroduckOnPolicyRunner,
+    )

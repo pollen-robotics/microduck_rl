@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 
+import numpy as np
 import torch
 
 REF_CHANNELS = ("roll", "pitch", "yaw", "dz", "neck_pitch", "head_pitch", "head_yaw", "head_roll")
@@ -62,6 +64,8 @@ def _E(t: torch.Tensor, t0, t1, t2, t3) -> torch.Tensor:
 
 def reference(motion: Motion, phi: torch.Tensor) -> torch.Tensor:
     """(N,) phase -> (N, 8) reference offsets in REF_CHANNELS order."""
+    if isinstance(motion, DataMotion):
+        return _data_interp(motion, phi, 0)
     t = phi * motion.period
     out = torch.zeros(phi.shape[0], len(REF_CHANNELS), device=phi.device, dtype=phi.dtype)
     for c in motion.comps:
@@ -72,7 +76,9 @@ def reference(motion: Motion, phi: torch.Tensor) -> torch.Tensor:
 
 
 def bound(motion: Motion, ch: str) -> float:
-    """Upper bound of |reference| on a channel (sum of |amp|)."""
+    """Upper bound of |reference| on a channel (sum of |amp|; the table's max |value| for a data motion)."""
+    if isinstance(motion, DataMotion):
+        return float(_data_table(motion, torch.device("cpu"), torch.float64)[1][:, CH[ch]].abs().max())
     return sum(abs(c.amp) for c in motion.comps if c.ch == ch)
 
 
@@ -222,21 +228,83 @@ ALL_MOTIONS = {**MOTIONS, **{f"{k}-R2": v for k, v in MOTIONS_R2.items()}}
 TRUNK_CHANNELS = ("roll", "pitch", "yaw", "dz")
 
 
-def get_motion(key: str) -> Motion:
-    return ALL_MOTIONS[key]
+def get_motion(key: str):
+    return ALL_MOTIONS[key] if key in ALL_MOTIONS else DATA_MOTIONS[key]
 
 
 def reference_rate(motion: Motion, phi: torch.Tensor, h: float = 0.002) -> torch.Tensor:
-    """(N,) phase -> (N, 8) time derivative of the reference (units / s), central difference over ±h seconds."""
+    """(N,) phase -> (N, 8) time derivative of the reference (units / s), central difference over ±h seconds
+    (a data motion interpolates its stored analytic rates)."""
+    if isinstance(motion, DataMotion):
+        return _data_interp(motion, phi, 1)
     dphi = h / motion.period
     return (reference(motion, phi + dphi) - reference(motion, phi - dphi)) / (2.0 * h)
 
 
 def osc_channels(motion: Motion) -> tuple:
-    """Trunk channels with an oscillating component (velocity-tracked in round 2)."""
+    """Trunk channels with an oscillating component (velocity-tracked in round 2; a data motion lists them)."""
+    if isinstance(motion, DataMotion):
+        return motion.rate_channels
     return tuple(ch for ch in TRUNK_CHANNELS if any(c.ch == ch and c.freq > 0.0 for c in motion.comps))
 
 
 def peak_rate(motion: Motion, ch: str, n: int = 4001) -> float:
     phi = torch.linspace(0.0, 1.0, n, dtype=torch.float64)
     return float(reference_rate(motion, phi)[:, CH[ch]].abs().max())
+
+
+# ── Data-driven motions (2026-10-29, notes/dodge): a 50 Hz table instead of envelopes ──────────────────────────────
+# The dodge dance "Tremendous" (combo A, 110 BPM, 32 beats + tail, T = the music excerpt, 18.25 s) re-solved with
+# BOTH FEET PLANTED on the stand footprint (notes/dodge/tools/planted_ref.py): every key pose keeps its trunk lean
+# direction, face direction and head offset as far as a static CoM >= 10 mm inside the soles and the joint ranges
+# allow; min-jerk snaps that arrive ON the beat; back to the stand (value and rate 0) before settle_from.
+# File columns: t, the 8 REF_CHANNELS, then their analytic time derivatives d_<ch> (per s). Kept OUT of ALL_MOTIONS
+# (its amplitudes exceed the small-motion test bounds); get_motion() finds it by key.
+MOTION_DATA = Path(__file__).parent / "motion_data"
+
+
+@dataclass(frozen=True)
+class DataMotion:
+    name: str
+    period: float                       # T (s) = the table's duration (music excerpt)
+    file: str                           # CSV in motion_data/
+    trunk_scale: float = 1.0            # scales roll / pitch / yaw / dz (head channels untouched)
+    note: str = ""
+    settle_from: float = 0.982          # φ from which the legs are pulled back to HOME (stand reached at 17.80 s = φ 0.975)
+    settle_ramp: float = 0.01           # φ width of the settle gate (0.18 s at 18.25 s)
+    rate_channels: tuple = ("roll", "pitch", "dz")   # trunk channels velocity-tracked
+    comps: tuple = ()                   # no envelope components
+
+
+_DATA_CACHE: dict = {}
+
+
+def _data_table(motion: DataMotion, device, dtype):
+    """(dt, values (n, 8), rates (n, 8)) on device, trunk channels scaled."""
+    key = (motion.file, motion.trunk_scale, str(device), dtype)
+    if key not in _DATA_CACHE:
+        a = np.loadtxt(MOTION_DATA / motion.file, delimiter=",", comments="#")
+        s = np.ones(len(REF_CHANNELS))
+        s[[CH[c] for c in TRUNK_CHANNELS]] = motion.trunk_scale
+        _DATA_CACHE[key] = (float(a[1, 0] - a[0, 0]),
+                            torch.as_tensor(a[:, 1:9] * s, device=device, dtype=dtype),
+                            torch.as_tensor(a[:, 9:17] * s, device=device, dtype=dtype))
+    return _DATA_CACHE[key]
+
+
+def _data_interp(motion: DataMotion, phi: torch.Tensor, which: int) -> torch.Tensor:
+    dt, *tabs = _data_table(motion, phi.device, phi.dtype)
+    tab = tabs[which]
+    x = torch.clamp(phi * motion.period / dt, 0.0, tab.shape[0] - 1.0)
+    i0 = torch.clamp(x.floor().long(), max=tab.shape[0] - 2)
+    w = (x - i0.to(x.dtype)).unsqueeze(-1)
+    return tab[i0] * (1.0 - w) + tab[i0 + 1] * w
+
+
+_TREMENDOUS_NOTE = ("dodge dance A (Tremendous), feet planted on the stand footprint: slips / sways / limbos / dips "
+                    "on every beat at 110 BPM, beak to the sky in bar 4 and at the end")
+DATA_MOTIONS = {
+    "Tremendous": DataMotion("Tremendous", 18.25, "tremendous_planted.csv", note=_TREMENDOUS_NOTE),
+    "Tremendous-70": DataMotion("Tremendous", 18.25, "tremendous_planted.csv", trunk_scale=0.7,
+                                note=_TREMENDOUS_NOTE + "; trunk channels x0.7, head unchanged (safer variant)"),
+}

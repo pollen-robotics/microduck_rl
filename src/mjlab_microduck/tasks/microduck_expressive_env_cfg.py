@@ -29,7 +29,7 @@ from mjlab.tasks.velocity import mdp
 
 from mjlab_microduck.robot.microduck_constants import get_ground_pick_spec
 from mjlab_microduck.tasks import mdp as microduck_mdp
-from mjlab_microduck.tasks.expressive_motions import get_motion, osc_channels, peak_rate
+from mjlab_microduck.tasks.expressive_motions import DataMotion, get_motion, osc_channels, peak_rate
 from mjlab_microduck.tasks.microduck_ground_pick_env_cfg import make_microduck_ground_pick_env_cfg
 from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg
 
@@ -65,6 +65,10 @@ W_NECK_DEV, NECK_DEV_FREE = -5.0, 0.3         # per rad of |neck - reference| be
 W_JOINT_LIMIT, JOINT_LIMIT_MARGIN = 2.0, 0.05 # self-negating: -(intrusion into the last 0.05 rad / 0.05)^2 per joint
 W_SETTLE_STILL = -0.05    # per (rad/s)^2 of summed servo speed after settle_from (still robot at the hand-back)
 RATE_NAMES = {"roll": "track_roll", "pitch": "track_pitch", "yaw": "track_yaw", "dz": "track_height"}
+# Data motions (the dodge dance, 2026-10-29): round 2 terms + a wide trunk kernel (the trunk swings ±13° on every beat,
+# the narrow 0.04 / 0.05 rad kernels alone give no gradient while the policy is far off).
+W_TRACK_TRUNK_WIDE, STD_TRUNK_WIDE = 1.5, 0.15
+DATA_MAX_ITERATIONS = 7000      # 18.25 s episodes (912 steps): ~6x longer than round 2's, see LEDGER "dodge"
 
 
 @lru_cache(maxsize=1)
@@ -109,7 +113,7 @@ def make_microduck_expressive_env_cfg(motion: str, play: bool = False) -> Manage
     cfg.rewards["track_head"] = track(("neck_pitch", "head_pitch", "head_yaw", "head_roll"), W_TRACK_HEAD, STD_HEAD)
     cfg.rewards["settle_legs"] = RewardTermCfg(
         func=microduck_mdp.ex_settle_legs, weight=W_SETTLE_LEGS,
-        params={"settle_from": mo.settle_from, "command_name": "twist"},
+        params={"settle_from": mo.settle_from, "command_name": "twist", **_ramp(mo)},
     )
 
     # ── Feet planted (feet_grounded / feet_flat come from the ground pick) ─────
@@ -143,8 +147,13 @@ def make_microduck_expressive_env_cfg(motion: str, play: bool = False) -> Manage
     critic["ex_error"] = ObservationTermCfg(func=microduck_mdp.ex_error_obs, params={"motion": motion})
     critic["ex_feet_offset"] = ObservationTermCfg(func=microduck_mdp.ex_feet_offset_obs)
 
-    if motion.endswith("-R2"):
+    if motion.endswith("-R2") or isinstance(mo, DataMotion):
         _add_round2_terms(cfg, motion, mo)
+    if isinstance(mo, DataMotion):
+        cfg.rewards["track_trunk_wide"] = RewardTermCfg(
+            func=microduck_mdp.ex_track, weight=W_TRACK_TRUNK_WIDE,
+            params={"motion": motion, "channels": ("roll", "pitch"), "std": STD_TRUNK_WIDE, "command_name": "twist"},
+        )
 
     # ── A fall ends the episode ────────────────────────────────────────────────
     cfg.terminations["fell_over"] = TerminationTermCfg(
@@ -178,12 +187,18 @@ def _add_round2_terms(cfg: ManagerBasedRlEnvCfg, motion: str, mo) -> None:
     )
     cfg.rewards["settle_still"] = RewardTermCfg(
         func=microduck_mdp.ex_settle_still, weight=W_SETTLE_STILL,
-        params={"settle_from": mo.settle_from, "command_name": "twist"},
+        params={"settle_from": mo.settle_from, "command_name": "twist", **_ramp(mo)},
     )
+
+
+def _ramp(mo) -> dict:
+    """A data motion is 18 s long: its settle gate ramps over settle_ramp (φ) instead of the default 0.04."""
+    return {"ramp": mo.settle_ramp} if isinstance(mo, DataMotion) else {}
 
 
 def make_expressive_rl_cfg(motion: str) -> RslRlOnPolicyRunnerCfg:
     name = f"expressive_{motion.lower().replace('-', '_')}"
+    iters = DATA_MAX_ITERATIONS if isinstance(get_motion(motion), DataMotion) else 3000
     return RslRlOnPolicyRunnerCfg(
         actor=RslRlModelCfg(
             hidden_dims=(512, 256, 128), activation="elu", obs_normalization=True,
@@ -200,5 +215,5 @@ def make_expressive_rl_cfg(motion: str) -> RslRlOnPolicyRunnerCfg:
         run_name=name,
         save_interval=250,
         num_steps_per_env=24,
-        max_iterations=3000,
+        max_iterations=iters,
     )
