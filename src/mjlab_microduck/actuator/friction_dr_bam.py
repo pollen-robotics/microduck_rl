@@ -26,13 +26,59 @@ from mjlab.actuator.actuator import ActuatorCmd
 
 
 class FrictionDRBamActuator(BamActuator):
-    """BamActuator + per-env friction_scale on the BAM friction budget."""
+    """BamActuator + per-env friction_scale on the BAM friction budget.
+
+    Also tracks the GEARBOX load at physics rate (``gear_load_peak``). The teeth
+    carry the motor torque minus what it takes to accelerate the rotor:
+    ``τ_gear = τ_motor − J_rotor · q̈`` (J_rotor = BAM's armature, reflected to
+    the output). At a hard stop q̈ is a few-millisecond spike that a 50 Hz
+    finite difference cannot see (XL330 bench, 2026-10-30: impact ≈ 0.068 N·m
+    per rad/s of arrival speed on a rigid stop), so the peak is taken over every
+    physics substep and read once per control step by ``mdp.gear_load_peak``.
+    Gear friction is not subtracted: it loads the teeth too.
+    """
 
     def initialize(self, mj_model, model, data, device) -> None:
         super().initialize(mj_model, model, data, device)
         # kp_scale is (num_envs, 1); mirror it for a per-env friction multiplier.
         self.friction_scale = torch.ones_like(self.kp_scale)
         self.default_friction_scale = self.friction_scale.clone()
+        n, j = self.kp_scale.shape[0], len(self._target_names)
+        self._rotor_inertia = float(self._bam_model.actuator.get_extra_inertia())
+        self.gear_load_peak = torch.zeros(n, j, device=device)
+        self._gear_prev_vel = torch.zeros(n, j, device=device)
+        self._gear_prev_torque = torch.zeros(n, j, device=device)
+        # False until one substep has run since the reset: a reset teleports the
+        # joints, and differencing across it would read as a huge impact.
+        self._gear_valid = torch.zeros(n, 1, dtype=torch.bool, device=device)
+
+    def compute(self, cmd: ActuatorCmd) -> torch.Tensor:
+        torque = super().compute(cmd)
+        vel = cmd.vel
+        # The torque returned on the previous call is what acted over the
+        # substep that produced vel - prev_vel.
+        acc = (vel - self._gear_prev_vel) / self._dt
+        load = torch.nan_to_num((self._gear_prev_torque - self._rotor_inertia * acc).abs(), nan=0.0)
+        load = torch.where(self._gear_valid, load, torch.zeros_like(load))
+        torch.maximum(self.gear_load_peak, load, out=self.gear_load_peak)
+        self._gear_prev_vel = vel.detach().clone()
+        self._gear_prev_torque = torque.detach().clone()
+        self._gear_valid.fill_(True)
+        return torque
+
+    def reset(self, env_ids=None) -> None:
+        super().reset(env_ids)
+        if getattr(self, "_gear_valid", None) is None:
+            return
+        ids = slice(None) if env_ids is None else env_ids
+        self._gear_valid[ids] = False
+        self.gear_load_peak[ids] = 0.0
+
+    def take_gear_load_peak(self) -> torch.Tensor:
+        """Peak |τ_gear| per joint since the last call, then start a new window."""
+        peak = self.gear_load_peak.clone()
+        self.gear_load_peak.zero_()
+        return peak
 
     def _compute_friction_budget(
         self,

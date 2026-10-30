@@ -472,6 +472,45 @@ SERVO_ACC_THRESH = 300.0
 SERVO_STALL_TORQUE = 0.4
 SERVO_STALL_VEL = 0.5
 
+# Gear protection (2026-10-30, branch gear_protection). v8 still breaks knees, hip
+# pitch and neck pitch on the robots. The XL330 bench (one fresh motor per setting
+# driven into a hard stop until the first tooth skip) says what kills a gearbox: the
+# load on the teeth, with life ∝ (load − 0.40 N·m)^−2.4 and a plateau near 0.40, and
+# above all the HOLD after the impact (×3.6 life when the servo stops pushing). The
+# protection costs above miss it in two ways: servo_stall is a count at 0.4 N·m (no
+# gradient where the curve is steepest), and servo_acc_spike differences velocity at
+# 50 Hz, blind to a few-millisecond contact. Measured on v8 in this sim
+# (scripts/gear_wear_eval.py): lying down, neck_pitch sits at FULL torque ~30 % of the
+# time (pushing off the head); walking, the knees pass 0.4 N·m on ~2 % of steps, just.
+#   - gear_hold:   Σ (|τ| − 0.3)₊² on servos moving < 0.5 rad/s — the graded stall.
+#   - gear_impact: Σ (peak gear load − 0.4)₊² with the gear load at PHYSICS rate,
+#                  τ_motor − J_rotor·q̈ (FrictionDRBamActuator): arrival speed into the
+#                  floor and back-driven landings, which the 50 Hz term cannot see.
+# Both ≈ 0 while walking (reward mass measured there, not guessed). The run-5/6
+# lesson (servo_stall ×3 → BALLISTIC rise) is why the hold is never priced alone:
+# a ballistic rise is a fast arrival, which gear_impact prices.
+#   - label_hold_clamp (distill.py): the stand expert's labels on fallen frames keep
+#                  their direction but never ask a stalled knee / hip pitch / neck pitch
+#                  for more than LABEL_HOLD_MAX_ERR past where it is. BC coef 1.0
+#                  dominates the fallen frames, so without this the rewards above only
+#                  nudge a rise the teacher dictates.
+# Fine-tune from v8 by PLAIN resume (--init-checkpoint the v8 bundle): curricula stay
+# final, and these ramp from GEAR_BASE_ITER, v8's last iteration.
+ENABLE_GEAR_PROTECTION = True
+GEAR_BASE_ITER = 2750
+GEAR_RAMP_ITERS = 300
+GEAR_STAGE0_FRAC = 0.25
+GEAR_HOLD_WEIGHT = -3.0
+GEAR_HOLD_TORQUE = 0.3
+GEAR_HOLD_VEL = 0.5
+GEAR_IMPACT_WEIGHT = -1.0
+GEAR_IMPACT_THRESH = 0.4
+ENABLE_LABEL_HOLD_CLAMP = True
+LABEL_HOLD_JOINTS = (2, 3, 5, 11, 12)   # hip_pitch, knee (both legs), neck_pitch
+# Stall torque per rad of error at P gain 200: BAM 0.56 N·m/rad, the bench motors ≈ 0.9
+# (1.05 A/rad × 0.80-0.91 N·m/A), so 0.35 rad ≈ 0.2-0.3 N·m — under the 0.4 plateau.
+LABEL_HOLD_MAX_ERR = 0.35
+
 # Topple pushes: velocity kicks big enough to knock the robot over, so falling
 # (and therefore protective landing + recovery) gets dense on-policy data.
 # Ramp starts once fell_over is off (a topple before that is just a reset).
@@ -944,6 +983,31 @@ def make_microduck_velstand_env_cfg(play: bool = False, rough: bool = False) -> 
                 ],
             },
         )
+    if ENABLE_GEAR_PROTECTION:
+        cfg.rewards["gear_hold"] = RewardTermCfg(
+            func=microduck_mdp.gear_hold_cost,
+            weight=GEAR_HOLD_WEIGHT * GEAR_STAGE0_FRAC,
+            params={"threshold": GEAR_HOLD_TORQUE, "vel_thresh": GEAR_HOLD_VEL},
+        )
+        cfg.rewards["gear_impact"] = RewardTermCfg(
+            func=microduck_mdp.gear_impact_cost,
+            weight=GEAR_IMPACT_WEIGHT * GEAR_STAGE0_FRAC,
+            params={"threshold": GEAR_IMPACT_THRESH, "power": 2.0},
+        )
+        if not play:
+            for name, full in (("gear_hold", GEAR_HOLD_WEIGHT), ("gear_impact", GEAR_IMPACT_WEIGHT)):
+                cfg.curriculum[f"{name}_weight"] = CurriculumTermCfg(
+                    func=microduck_mdp.reward_weight,
+                    params={
+                        "reward_name": name,
+                        "weight_stages": [
+                            {"step": 0, "weight": full * GEAR_STAGE0_FRAC},
+                            {"step": (GEAR_BASE_ITER + GEAR_RAMP_ITERS // 2) * NUM_STEPS_PER_ENV, "weight": full * 0.5},
+                            {"step": (GEAR_BASE_ITER + GEAR_RAMP_ITERS) * NUM_STEPS_PER_ENV, "weight": full},
+                        ],
+                    },
+                )
+
     cfg.curriculum["com_upward_weight"] = CurriculumTermCfg(
         func=microduck_mdp.reward_weight,
         params={
@@ -994,6 +1058,8 @@ MicroduckVelStandRlCfg = RslRlOnPolicyRunnerCfg(
             **({"unanchor_turn_in_place": True} if ENABLE_YAW_FIX else {}),
             **({"anchor_yaw_remap": ANCHOR_YAW_REMAP} if ENABLE_ANCHOR_YAW_REMAP else {}),
             **({"expert_mask_cols": TEACHER_MASK_COLS, "expert_mask_tilt_deg": TEACHER_MASK_TILT_DEG} if ENABLE_JOINT_MASKED_TEACHER else {}),
+            **({"label_hold_clamp": {"joints": LABEL_HOLD_JOINTS, "max_err": LABEL_HOLD_MAX_ERR, "vel_thresh": GEAR_HOLD_VEL}}
+               if ENABLE_LABEL_HOLD_CLAMP else {}),
         } if ENABLE_EXPERT_BC else None,
     ),
     wandb_project="mjlab_microduck",

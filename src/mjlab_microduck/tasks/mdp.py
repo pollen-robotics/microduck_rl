@@ -757,6 +757,115 @@ def servo_stall_penalty(
     return stalled.float().sum(dim=1)
 
 
+# ── Gearbox wear, from the XL330 bench (2026-10-30, "XL330 gear breakage — bench
+# results and firmware request"). One fresh motor per setting, driven into a hard
+# stop until the first tooth skip. What it found, and what these terms price:
+#   - life falls steeply with the load on the teeth, life ∝ (load − 0.40)^−2.4
+#     (N·m at the output), and levels off near 0.40 N·m: one motor passed 40 000
+#     impacts at 0.43 with no tooth damage;
+#   - teeth skip during the HOLD after the impact, not at the peak: brake + 0.5 A
+#     after contact (hold 0.24 N·m) lived 3.6× longer than the same impact
+#     followed by pushing again (hold 0.45-0.63);
+#   - the impact is set by arrival speed (the rotor's inertia stopped by the teeth),
+#     which a current limit cannot touch.
+# On the robots knees, hip pitch and neck pitch break, and they are also the three
+# joints with the highest mean current in the 2026-10-29 torture test — the joints
+# that hold, not the ones with the highest peaks (every joint peaks ~1 A).
+# servo_stall above is a COUNT at 0.4 N·m: no gradient between 0.4 and 1.0, where
+# the bench curve is steepest. These are graded instead, and the impact one reads
+# the gear load at physics rate (FrictionDRBamActuator.gear_load_peak).
+GEAR_WEAR_PLATEAU_NM = 0.40
+GEAR_WEAR_EXPONENT = 2.4
+
+
+def gear_wear(load: torch.Tensor) -> torch.Tensor:
+    """Bench-fit wear per loading event, in units where (1 N·m above plateau) = 1."""
+    return torch.clamp(load - GEAR_WEAR_PLATEAU_NM, min=0.0).pow(GEAR_WEAR_EXPONENT)
+
+
+def _servo_joint_weights(env: ManagerBasedRlEnv, asset: Entity, joint_weights: dict | None) -> torch.Tensor:
+    """(J,) per-servo weights from ``{regex: weight}`` (first match wins, unmatched → 1.0), cached."""
+    import re
+
+    key = ("_servo_joint_weights", id(asset), tuple(sorted((joint_weights or {}).items())))
+    cache = env.__dict__.setdefault("_servo_joint_weights_cache", {})
+    if key not in cache:
+        names = [asset.joint_names[i] for i in _servo_joint_ids(env, asset)]
+        w = []
+        for n in names:
+            match = next((v for p, v in (joint_weights or {}).items() if re.fullmatch(p, n)), 1.0)
+            w.append(float(match))
+        cache[key] = torch.tensor(w, device=env.device)
+    return cache[key]
+
+
+def gear_load_peak(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG) -> torch.Tensor:
+    """(N, J) peak gearbox load (N·m) per servo over the last control step, servo order.
+
+    Taken from the actuator once per env step and cached on the step counter, so
+    several reward terms (and an eval script) read the same window. Zeros on an
+    actuator that does not track it.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    step = int(env.common_step_counter)
+    cached = getattr(env, "_gear_load_peak_cache", None)
+    if cached is not None and cached[0] == step:
+        return cached[1]
+    servo_names = [asset.joint_names[i] for i in _servo_joint_ids(env, asset)]
+    col = {n: i for i, n in enumerate(servo_names)}
+    out = torch.zeros(env.num_envs, len(servo_names), device=env.device)
+    for act in asset.actuators:
+        if not hasattr(act, "take_gear_load_peak"):
+            continue
+        peak = act.take_gear_load_peak()
+        for k, name in enumerate(act._target_names):
+            if name in col:
+                out[:, col[name]] = peak[:, k]
+    env._gear_load_peak_cache = (step, out)
+    return out
+
+
+def gear_impact_cost(
+    env: ManagerBasedRlEnv,
+    threshold: float = GEAR_WEAR_PLATEAU_NM,
+    power: float = 2.0,
+    joint_weights: dict | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Σ_j w_j · (peak gear load − threshold)₊^power over the control step.
+
+    The gear load includes the rotor-inertia spike at a hard stop, so this prices
+    arrival speed into an obstacle (a leg driven into the floor, a back-driven
+    landing) as well as plain overload. Free below the bench plateau. >= 0 →
+    weight it negatively.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    peak = gear_load_peak(env, asset_cfg)
+    w = _servo_joint_weights(env, asset, joint_weights)
+    return (torch.clamp(peak - threshold, min=0.0).pow(power) * w).sum(dim=1)
+
+
+def gear_hold_cost(
+    env: ManagerBasedRlEnv,
+    threshold: float = 0.3,
+    vel_thresh: float = 0.5,
+    joint_weights: dict | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Σ_j w_j · (|τ_j| − threshold)₊² on servos that push without moving.
+
+    The graded version of servo_stall: a servo held against a pin at 1.0 N·m
+    costs ~6× one at 0.6, where the count charged both the same. Billed per step,
+    so a long hold costs more than a short one. >= 0 → weight it negatively.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    torque = torch.nan_to_num(asset.data.actuator_force, nan=0.0)
+    vel = torch.nan_to_num(_servo_joint_vel(env, asset), nan=0.0)
+    w = _servo_joint_weights(env, asset, joint_weights)
+    excess = torch.clamp(torque.abs() - threshold, min=0.0).pow(2)
+    return (excess * (vel.abs() < vel_thresh).float() * w).sum(dim=1)
+
+
 def servo_acc_spike_penalty(
     env: ManagerBasedRlEnv,
     acc_thresh: float = 300.0,

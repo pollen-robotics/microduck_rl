@@ -121,6 +121,17 @@ def default_bc_cfg() -> dict:
         # from the 35° BC gate broke the END of the rise (the expert needs its joints there).
         "expert_mask_cols": (),
         "expert_mask_tilt_deg": 75.0,
+        # Bounded holds in the stand expert's labels (2026-10-30, branch gear_protection). The
+        # XL330 bench found the teeth skip during the HOLD after an impact, and life went ×3.6
+        # when the servo stopped pushing hard against the obstacle; the stall torque of a
+        # position servo is set by its error, so a label that asks a joint which is not moving
+        # to go far past where it is asks for a full-torque hold. When set, on fallen frames the
+        # expert's target for each listed joint whose |velocity| < vel_thresh is clamped to
+        # within max_err (rad) of its current position: the label keeps the direction, the
+        # student learns a bounded push. {"joints": servo indices, "max_err": rad,
+        # "vel_thresh": rad/s, "pos_slice": joint_pos_rel cols, "vel_slice": joint_vel cols}.
+        # Actions and joint_pos_rel share HOME as their origin (action scale 1.0).
+        "label_hold_clamp": None,
     }
 
 
@@ -174,6 +185,22 @@ def expert_input(
         rows = mask_rows.nonzero().flatten()
         out[rows.unsqueeze(1), cols.unsqueeze(0)] = 0.0
     return out
+
+
+def clamp_label_holds(flat_obs: torch.Tensor, labels: torch.Tensor, cfg: dict) -> tuple[torch.Tensor, torch.Tensor]:
+    """(labels with stalled joints' targets held within max_err of their position, mask of clamped entries)."""
+    cols = torch.as_tensor(cfg["joints"], device=labels.device, dtype=torch.long)
+    p0, p1 = cfg.get("pos_slice", (6, 20))
+    v0, v1 = cfg.get("vel_slice", (20, 34))
+    q = flat_obs[:, p0:p1][:, cols]
+    qd = flat_obs[:, v0:v1][:, cols]
+    lab = labels[:, cols]
+    err = lab - q
+    e = float(cfg["max_err"])
+    clamp = (qd.abs() < cfg.get("vel_thresh", 0.5)) & (err.abs() > e)
+    out = labels.clone()
+    out[:, cols] = torch.where(clamp, q + err.clamp(-e, e), lab)
+    return out, clamp
 
 
 def _interp_rows(x: torch.Tensor, xp: torch.Tensor, fp: torch.Tensor) -> torch.Tensor:
@@ -321,6 +348,11 @@ class PpoWithExpertBc(PPO):
                 exp_flat = expert_input(torch.cat([exp_td[g] for g in groups], dim=-1), tuple(cfg["twist_slice"]),
                                         tuple(cfg.get("expert_mask_cols", ())), tilted[fallen])
                 target[fallen] = self.expert(_with_flat(exp_td, groups, exp_flat))
+                if cfg.get("label_hold_clamp"):
+                    # Against the student's TRUE obs (exp_flat may have its joints masked).
+                    own = torch.cat([obs_td[fallen][g] for g in groups], dim=-1)
+                    target[fallen], clamped = clamp_label_holds(own, target[fallen], cfg["label_hold_clamp"])
+                    stats["expert_bc_label_hold_clamped"] = clamped.float().mean().item()
             if (~fallen).any():
                 anc_td = obs_td[~fallen]
                 if cfg.get("anchor_yaw_remap"):
