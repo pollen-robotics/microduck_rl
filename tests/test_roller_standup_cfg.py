@@ -119,21 +119,15 @@ def test_task_is_registered():
     assert "Mjlab-RollerStandUp-Flat-MicroDuck" in list_tasks()
 
 
-def test_joint_indices_match_actual_roller_model():
-    """Verrou : les roues passives sont intercalées dans l'ordre des joints.
+def _servo_joint_names():
+    """Les noms de joints dans l'espace SERVO du modèle rollers.
 
-    Réutiliser les indices du standup ([0-4, 9-13]) donnerait des récompenses
-    qui pointent sur des roues. Ce test compile le vrai MjSpec du robot rollers
-    et vérifie les noms aux indices utilisés. Pur CPU, pas de sim.
+    Reproduit _servo_joint_ids() de mdp.py : joints d'entité (donc sans le
+    free-joint), moins les ``passive_*``. Pur CPU, pas de sim.
     """
     import mujoco
 
     from mjlab_microduck.robot.microduck_constants import get_walk_rollers_spec
-    from mjlab_microduck.tasks.microduck_roller_standup_env_cfg import (
-        _LEG_JOINTS,
-        _NECK_JOINTS,
-        _WHEEL_JOINTS,
-    )
 
     model = get_walk_rollers_spec().compile()
     articulated = [
@@ -141,19 +135,71 @@ def test_joint_indices_match_actual_roller_model():
         for j in range(model.njnt)
         if model.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE
     ]
+    return [n for n in articulated if not n.startswith("passive_")]
 
-    assert [articulated[i] for i in _LEG_JOINTS] == [
+
+def test_joint_indices_are_servo_space():
+    """Verrou sur le bug qui crashait l'env au premier calcul de récompense.
+
+    Les roues passives sont intercalées dans l'ordre des joints d'ENTITÉ, mais
+    pose_target_match / pose_l1_penalty passent par _servo_joint_pos(), qui les
+    a déjà retirées : elles indexent une vue à 14 colonnes. Les indices d'entité
+    ([0-4, 11-15]) y débordent — 14 et 15 sont hors bornes, ce qui déclenche un
+    device-side assert CUDA (« index out of bounds ») dès le premier pas.
+
+    Dans la vue servo, les roues n'existent plus : la disposition est celle du
+    modèle sans roues, donc les mêmes indices que standup / sitstand.
+    """
+    from mjlab_microduck.tasks.microduck_roller_standup_env_cfg import (
+        _LEG_JOINTS,
+        _NECK_JOINTS,
+    )
+
+    servo = _servo_joint_names()
+    assert len(servo) == 14, "la vue servo doit avoir exactement les 14 servos"
+
+    assert [servo[i] for i in _LEG_JOINTS] == [
         "left_hip_yaw", "left_hip_roll", "left_hip_pitch", "left_knee", "left_ankle",
         "right_hip_yaw", "right_hip_roll", "right_hip_pitch", "right_knee", "right_ankle",
     ]
-    assert [articulated[i] for i in _NECK_JOINTS] == [
+    assert [servo[i] for i in _NECK_JOINTS] == [
         "neck_pitch", "head_pitch", "head_yaw", "head_roll",
     ]
-    assert [articulated[i] for i in _WHEEL_JOINTS] == [
+    # Aucun recouvrement, et les deux listes couvrent toute la vue servo.
+    assert len(set(_LEG_JOINTS) | set(_NECK_JOINTS)) == len(servo)
+
+
+def test_entity_joint_order_matches_the_documented_layout():
+    """Épingle le bloc de commentaire d'ordre d'ENTITÉ du cfg.
+
+    Le cfg documente où tombent les roues dans le tableau de joints d'entité
+    (5-6 et 16-17) pour expliquer pourquoi ces indices-là ne valent pas côté
+    récompense. C'est ce commentaire qui justifie tout le reste du bloc, et plus
+    rien ne le vérifiait depuis la suppression de _WHEEL_JOINTS : sans ce test
+    il peut dériver silencieusement si le modèle rollers est réexporté.
+
+    Les bornes de la vue servo, elles, sont vérifiées pour TOUS les envs par
+    tests/test_joint_index_bounds.py.
+    """
+    import mujoco
+
+    from mjlab_microduck.robot.microduck_constants import get_walk_rollers_spec
+
+    model = get_walk_rollers_spec().compile()
+    articulated = [
+        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j)
+        for j in range(model.njnt)
+        if model.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE
+    ]
+    assert len(articulated) == 18
+    assert [articulated[i] for i in (5, 6, 16, 17)] == [
         "passive_LF_wheel", "passive_LR_wheel", "passive_RF_wheel", "passive_RR_wheel",
     ]
-    # Aucun recouvrement, et les trois listes couvrent tous les joints.
-    assert len(set(_LEG_JOINTS) | set(_NECK_JOINTS) | set(_WHEEL_JOINTS)) == len(articulated)
+    assert [articulated[i] for i in (0, 4, 7, 10, 11, 15)] == [
+        "left_hip_yaw", "left_ankle",
+        "neck_pitch", "head_roll",
+        "right_hip_yaw", "right_ankle",
+    ]
 
 
 def test_recovery_rewards_present_with_expected_weights():
