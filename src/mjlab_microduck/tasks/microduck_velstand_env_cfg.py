@@ -505,6 +505,12 @@ GEAR_HOLD_TORQUE = 0.3
 GEAR_HOLD_VEL = 0.5
 GEAR_IMPACT_WEIGHT = -1.0
 GEAR_IMPACT_THRESH = 0.4
+# Run 1 (HF job 6ae4c9ad, ungated) at iter 3000, 3 seeds of 32 envs × 20 s pushed every 3-5 s
+# (scripts/gear_wear_eval.py --scenario push): falls 117/132/139 vs v8's 106/105/103 — the costs
+# taxed the fast catching step that keeps it up, and every extra fall is a landing, where most
+# of the wear is (fall phase ≈ 60 % of it). Rise wear −35 %, walking unchanged. So bill only
+# past 25° of tilt (the eval's "upright" line): landings, lying and the rise are all beyond it.
+GEAR_GATE_TILT_DEG = 25.0
 ENABLE_LABEL_HOLD_CLAMP = True
 LABEL_HOLD_JOINTS = (2, 3, 5, 11, 12)   # hip_pitch, knee (both legs), neck_pitch
 # Stall torque per rad of error at P gain 200: BAM 0.56 N·m/rad, the bench motors ≈ 0.9
@@ -987,12 +993,13 @@ def make_microduck_velstand_env_cfg(play: bool = False, rough: bool = False) -> 
         cfg.rewards["gear_hold"] = RewardTermCfg(
             func=microduck_mdp.gear_hold_cost,
             weight=GEAR_HOLD_WEIGHT * GEAR_STAGE0_FRAC,
-            params={"threshold": GEAR_HOLD_TORQUE, "vel_thresh": GEAR_HOLD_VEL},
+            params={"threshold": GEAR_HOLD_TORQUE, "vel_thresh": GEAR_HOLD_VEL,
+                    "gate_tilt_above_deg": GEAR_GATE_TILT_DEG},
         )
         cfg.rewards["gear_impact"] = RewardTermCfg(
             func=microduck_mdp.gear_impact_cost,
             weight=GEAR_IMPACT_WEIGHT * GEAR_STAGE0_FRAC,
-            params={"threshold": GEAR_IMPACT_THRESH, "power": 2.0},
+            params={"threshold": GEAR_IMPACT_THRESH, "power": 2.0, "gate_tilt_above_deg": GEAR_GATE_TILT_DEG},
         )
         if not play:
             for name, full in (("gear_hold", GEAR_HOLD_WEIGHT), ("gear_impact", GEAR_IMPACT_WEIGHT)):

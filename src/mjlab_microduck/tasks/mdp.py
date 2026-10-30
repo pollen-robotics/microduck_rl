@@ -830,6 +830,7 @@ def gear_impact_cost(
     threshold: float = GEAR_WEAR_PLATEAU_NM,
     power: float = 2.0,
     joint_weights: dict | None = None,
+    gate_tilt_above_deg: float | None = None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Σ_j w_j · (peak gear load − threshold)₊^power over the control step.
@@ -837,12 +838,14 @@ def gear_impact_cost(
     The gear load includes the rotor-inertia spike at a hard stop, so this prices
     arrival speed into an obstacle (a leg driven into the floor, a back-driven
     landing) as well as plain overload. Free below the bench plateau. >= 0 →
-    weight it negatively.
+    weight it negatively. ``gate_tilt_above_deg``: bill only while the trunk is
+    tilted past it (landings, lying, the rise), leaving upright stumble steps free.
     """
     asset: Entity = env.scene[asset_cfg.name]
     peak = gear_load_peak(env, asset_cfg)
     w = _servo_joint_weights(env, asset, joint_weights)
-    return (torch.clamp(peak - threshold, min=0.0).pow(power) * w).sum(dim=1)
+    cost = (torch.clamp(peak - threshold, min=0.0).pow(power) * w).sum(dim=1)
+    return cost if gate_tilt_above_deg is None else cost * _fallen_mask(env, asset, 0.0, gate_tilt_above_deg)
 
 
 def gear_hold_cost(
@@ -850,6 +853,7 @@ def gear_hold_cost(
     threshold: float = 0.3,
     vel_thresh: float = 0.5,
     joint_weights: dict | None = None,
+    gate_tilt_above_deg: float | None = None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Σ_j w_j · (|τ_j| − threshold)₊² on servos that push without moving.
@@ -857,13 +861,15 @@ def gear_hold_cost(
     The graded version of servo_stall: a servo held against a pin at 1.0 N·m
     costs ~6× one at 0.6, where the count charged both the same. Billed per step,
     so a long hold costs more than a short one. >= 0 → weight it negatively.
+    ``gate_tilt_above_deg`` as in gear_impact_cost.
     """
     asset: Entity = env.scene[asset_cfg.name]
     torque = torch.nan_to_num(asset.data.actuator_force, nan=0.0)
     vel = torch.nan_to_num(_servo_joint_vel(env, asset), nan=0.0)
     w = _servo_joint_weights(env, asset, joint_weights)
     excess = torch.clamp(torque.abs() - threshold, min=0.0).pow(2)
-    return (excess * (vel.abs() < vel_thresh).float() * w).sum(dim=1)
+    cost = (excess * (vel.abs() < vel_thresh).float() * w).sum(dim=1)
+    return cost if gate_tilt_above_deg is None else cost * _fallen_mask(env, asset, 0.0, gate_tilt_above_deg)
 
 
 def servo_acc_spike_penalty(

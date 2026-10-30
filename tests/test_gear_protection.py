@@ -47,9 +47,13 @@ class _Asset:
         return list(range(len(self.joint_names))), self.joint_names
 
 
+class _Scene(dict):
+    pass
+
+
 class _Env:
     def __init__(self, torque, vel, peak=None):
-        self.scene = {"robot": _Asset(torque, vel, peak=peak)}
+        self.scene = _Scene(robot=_Asset(torque, vel, peak=peak))
         self.num_envs = torque.shape[0]
         self.device = "cpu"
         self.step_dt = 0.02
@@ -111,6 +115,21 @@ def test_gear_impact_cost_is_free_below_threshold():
     out = microduck_mdp.gear_impact_cost(env, threshold=0.4, power=2.0)
     assert out[0].item() == 0.0
     assert math.isclose(out[1].item(), 0.25, rel_tol=1e-5)
+
+
+def test_gear_costs_tilt_gate_spares_upright_robots():
+    torque = torch.zeros(2, 14)
+    torque[:, 3] = 0.6
+    env = _Env(torque, torch.zeros(2, 14), peak=torch.full((2, 14), 0.9))
+    asset = env.scene["robot"]
+    asset.data.root_link_pos_w = torch.tensor([[0.0, 0.0, 0.11], [0.0, 0.0, 0.05]])
+    s = math.sin(math.radians(30) / 2)
+    asset.data.root_link_quat_w = torch.tensor([[1.0, 0.0, 0.0, 0.0], [math.cos(math.radians(30) / 2), s, 0.0, 0.0]])
+    env.scene.terrain = type("T", (), {"env_origins": torch.zeros(2, 3)})()
+    hold = microduck_mdp.gear_hold_cost(env, gate_tilt_above_deg=25.0)
+    impact = microduck_mdp.gear_impact_cost(env, gate_tilt_above_deg=25.0)
+    assert hold[0].item() == 0.0 and hold[1].item() > 0.0      # upright: free; tilted 30°: billed
+    assert impact[0].item() == 0.0 and impact[1].item() > 0.0
 
 
 # ── physics-rate gear load in the actuator ───────────────────────────────────
