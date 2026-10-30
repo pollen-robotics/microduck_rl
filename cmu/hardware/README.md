@@ -10,7 +10,7 @@ Three things live here, all for teammates who want to change the robot's printed
   Elegoo Centauri Carbon): the slicer profiles we use, the exact command lines, the orientation and brim rules, the
   Centauri preview rule, the delivery format, and the ready-to-print V1.20 files of the backpack.
 - [battery-redesign/](battery-redesign/README.md): a proposed backpack change that carries the battery on the cap in a
-  printed cradle closed by a screwed bar, so the battery is held on every side; its STLs, checks and the script that
+  printed cradle closed by two screwed bars, so the battery is held on every side; its STLs, checks and the script that
   builds them from the V1.20 parts. Owned here, not a copy.
 
 Everything except the `README.md` pages and `battery-redesign/` is a copy of the private robotics working tree, refreshed by

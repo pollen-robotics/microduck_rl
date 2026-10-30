@@ -90,7 +90,7 @@ footer { font: 400 12px/1.5 var(--mono); color: var(--muted); border-top: 1px so
   <header>
     <div class="eyebrow">MicroDuck · battery backpack · V1.20 vs battery on the cap</div>
     <h1>Battery on the cap</h1>
-    <p class="lede">The V1.20 frame has nothing that locates the battery above the step at z −15.2, and nothing stops it lifting into the roof. This redesign carries the battery in a printed cradle on the cap, closed by a screwed bar, so cap and battery come off together. Drag to orbit, scroll to zoom, right-drag to pan.</p>
+    <p class="lede">The V1.20 frame has nothing that locates the battery above the step at z −15.2, and nothing stops it lifting into the roof. This redesign carries the battery in a printed cradle on the cap, closed by two screwed bars, so cap and battery come off together. Drag to orbit, scroll to zoom, right-drag to pan.</p>
   </header>
 
   <div class="work">
@@ -112,7 +112,7 @@ footer { font: 400 12px/1.5 var(--mono); color: var(--muted); border-top: 1px so
       <div class="group">
         <div class="label">Design</div>
         <div class="seg" role="group" aria-label="Design">
-          <button id="m-cap" type="button" aria-pressed="true">Battery on the cap<small>cradle and screwed bar on the back panel</small></button>
+          <button id="m-cap" type="button" aria-pressed="true">Battery on the cap<small>cradle and two screwed bars on the back panel</small></button>
           <button id="m-old" type="button" aria-pressed="false">V1.20 as printed<small>for comparison</small></button>
         </div>
       </div>
@@ -154,38 +154,38 @@ footer { font: 400 12px/1.5 var(--mono); color: var(--muted); border-top: 1px so
       <article class="card">
         <div class="where">Cap · pins 1–3</div>
         <h3>A cradle on the back panel</h3>
-        <p>Side walls, a floor and three roof tabs grow straight off the cap's inner wall, so the cap prints back-face-down exactly as today with every new feature rising off the bed. The battery goes in from the front, and the cap, cradle and battery come off the robot as one unit.</p>
+        <p>Side walls, a floor and one middle roof tab grow straight off the cap's inner wall, so the cap prints back-face-down exactly as today with every new feature rising off the bed. The battery goes in from the front, and the cap, cradle and battery come off the robot as one unit.</p>
         <dl class="dims">
           <dt>pack at</dt><dd>x −74.05 → −62.05</dd>
           <dt>side walls</dt><dd>|y| 15.8 → 17.0, z −13.7 → 36</dd>
           <dt>floor</dt><dd>1.2 mm, |y| ≤ 16.2</dd>
-          <dt>roof tabs</dt><dd>y −17→−11, −3→6, 11→17</dd>
+          <dt>roof tab</dt><dd>middle only, y −3→6</dd>
           <dt>play</dt><dd>0.3 mm every side</dd>
           <dt>added</dt><dd id="c-mass">≈ 2 g</dd>
         </dl>
       </article>
       <article class="card">
         <div class="where">New part · pins 4–5</div>
-        <h3>Retainer bar, 2 × M2 × 6</h3>
-        <p>A 1.5 mm bar across the battery's front face screws into two bosses at the front ends of the cradle walls. It closes the cradle into a ring, so the battery is fully captured even with the cap in your hand. It sits below plug 1 and clears the switch body by 0.3 mm.</p>
+        <h3>Two retainer bars, 2 × M2 × 6 each</h3>
+        <p>Two 1.5 mm bars across the battery's front face, one low and one high, each screw into a pair of boss columns beside the cradle walls. They close the cradle into a ring, so the battery is fully captured even with the cap in your hand. The low bar clears the switch body by 0.3 mm.</p>
         <dl class="dims">
-          <dt>bar</dt><dd>42.2 × 5 × 1.5 mm</dd>
-          <dt>at</dt><dd>x −61.75 → −60.25, z −10.5 → −5.5</dd>
-          <dt>screws</dt><dd>M2×6 at (±18.6, −8)</dd>
-          <dt>bosses</dt><dd>⌀5, 5 deep, M2 pilot</dd>
-          <dt>mass</dt><dd>≈ 0.3 g</dd>
+          <dt>each bar</dt><dd>42.2 × 5 × 1.5 mm</dd>
+          <dt>at</dt><dd>x −61.75 → −60.25, z −8 and 24</dd>
+          <dt>screws</dt><dd>4 × M2×6 at (±18.6, −8 and 24)</dd>
+          <dt>bosses</dt><dd>⌀5 columns, M2 pilot 5.5 deep</dd>
+          <dt>mass</dt><dd>≈ 0.6 g for both</dd>
         </dl>
       </article>
       <article class="card">
         <div class="where">Frame · pin 6, plugs</div>
-        <h3>Frame untouched up front, slack for plug 1</h3>
-        <p>The switch and DFR1202 stay exactly as V1.20. The frame only gets 1.1 mm longer at its rim and a 1.5 mm recess in the floor where the cradle floor sits. Plug 1 rides with the cap on a looped lead S, so the cap pulls about 40 mm back before you unplug it. Plug 2 parks in the front bay.</p>
+        <h3>Roof openings, plug 1 on top</h3>
+        <p>The stiff battery leads stand straight up through two openings in the roof that straddle the cap seam, so they never trap the cap. Plug 1 sits on top of the box and lead S comes back in through a third opening in the frame roof. The switch and DFR1202 stay as V1.20; the frame also gets 1.1 mm longer at its rim and a 1.5 mm floor recess. Plug 2 parks in the front bay.</p>
         <dl class="dims">
           <dt>box depth</dt><dd>29.45 → 30.55 mm</dd>
           <dt>floor recess</dt><dd>x −68.15 → −61.75</dd>
-          <dt>lead S (red)</dt><dd id="c-slack">73 mm drawn</dd>
-          <dt>needed at 40 mm</dt><dd id="c-reach">57 mm straight</dd>
-          <dt>cut to</dt><dd>75–80 mm</dd>
+          <dt>main opening</dt><dd>6.9 × 12 mm, y −14 → −2</dd>
+          <dt>balance opening</dt><dd>6.9 × 10 mm, y 7 → 17</dd>
+          <dt>lead S opening</dt><dd>11 × 6.5 mm, frame only</dd>
         </dl>
       </article>
     </div>
@@ -200,15 +200,15 @@ footer { font: 400 12px/1.5 var(--mono); color: var(--muted); border-top: 1px so
       <h2>Wiring and charging</h2>
       <ol class="todo">
         <li>Switch up through the floor panel and the DFR1202 clipped in, exactly as V1.20. Plug 2 parks in the front bay beside the board.</li>
-        <li>Cut lead S's battery end to 75–80 mm and leave it looped in the robot-right side space, below plug 1.</li>
-        <li>Battery into the cradle from the front, leads up through the gaps between the roof tabs, then the retainer bar and its two M2 × 6 screws.</li>
-        <li>Plug the battery into plug 1, tuck the loop, offer the cap up and fit the three cap screws.</li>
-        <li>Charging: three cap screws out, pull the cap back about 40 mm, unplug plug 1 beside the box. The battery stays captured in the cap; two bar screws release it.</li>
+        <li>Feed lead S's battery end up through the frame's roof opening at the robot-right; its XT30 passes through.</li>
+        <li>Battery into the cradle from the front, leads standing up either side of the middle roof tab, then both retainer bars with their four M2 × 6 screws.</li>
+        <li>Offer the cap up with the leads rising through the two seam openings, fit the three cap screws, then join plug 1 on top of the box.</li>
+        <li>Charging: unplug plug 1 on top, take out the three cap screws and pull the cap straight back. The battery stays captured in the cap; four bar screws release it.</li>
       </ol>
     </div>
   </section>
 
-  <footer>Loads ../stl, ../checks and ../../battery-backpack directly. Bought parts are envelope boxes, not their real shapes; plug parking spots and lead S, C routes are approximate. Open items are in ../README.md.</footer>
+  <footer>Loads ../stl, ../checks and ../../battery-backpack directly. Bought parts are envelope boxes, not their real shapes; plug parking spots and lead routes are approximate. Open items are in ../README.md.</footer>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -317,40 +317,22 @@ footer { font: 400 12px/1.5 var(--mono); color: var(--muted); border-top: 1px so
     grp('barCap').add(edges(mk('cap_bar', M.newSolid), NEW_EDGE));
     grp('batCap');
     const bc = edges(new THREE.Mesh(g.battery, M.bat), 0x111111); bc.position.x = -1.8; bc.userData.part = true; G.batCap.add(bc);
-    const p1 = C.plugs['plug 1 (rides with the cap)'];
-    const p1top = boxMesh([p1.lo[0], p1.lo[1], 12], p1.hi, M.plug); p1top.userData.part = true; G.batCap.add(p1top);
-    const bal = boxMesh(C.plugs['balance plug'].lo, C.plugs['balance plug'].hi, M.plug); bal.userData.part = true; G.batCap.add(bal);
-    grp('p1low').add(boxMesh(p1.lo, [p1.hi[0], p1.hi[1], 12], M.plug));
+    const p1 = C.plugs['plug 1 (on top of the box)'], p1mid = (p1.lo[0] + p1.hi[0]) / 2;
+    const p1bat = boxMesh(p1.lo, [p1mid, p1.hi[1], p1.hi[2]], M.plug); p1bat.userData.part = true; G.batCap.add(p1bat);
+    const bal = boxMesh(C.plugs['balance plug (on top of the box)'].lo, C.plugs['balance plug (on top of the box)'].hi, M.plug); bal.userData.part = true; G.batCap.add(bal);
+    grp('p1fix').add(boxMesh([p1mid, p1.lo[1], p1.lo[2]], p1.hi, M.plug));
     grp('partsCap').add(boxMesh(C.plugs['plug 2 (front bay)'].lo, C.plugs['plug 2 (front bay)'].hi, M.plug));
-    grp('wiresCap'); grp('slack');
-    G.slackDefs = [];
+    grp('wiresCap');
     Object.entries(C.routes).forEach(([k, w]) => {
       const mtl = isPower(k) ? M.red : M.dark;
-      if (/16 AWG/.test(k)) { G.batCap.add(tube(w.points, w.r, mtl)); return; }
-      if (w.slack) { G.slackDefs.push({ pts: w.points, r: w.r, mtl, mesh: null }); return; }
+      if (w.moves) { G.batCap.add(tube(w.points, w.r, mtl)); return; }
       G.wiresCap.add(tube(w.points, w.r, mtl));
     });
     const ck = C.checks;
     $('c-mass').textContent = '≈ ' + ck.mass_g_est.cradle + ' g';
-    $('c-slack').textContent = ck.slack.lead_S_red_drawn_mm + ' mm drawn';
-    $('c-reach').textContent = ck.slack.straight_reach_at_40mm_mm + ' mm straight';
     setBg(); applyClip(); view('inside'); sync();
     $('loading').remove();
     loop();
-  }
-
-  function slackTubes(dx) {
-    const t = Math.min(1, dx / 40) * 0.85;
-    G.slackDefs.forEach((s) => {
-      const P = s.pts, n = P.length, E = [P[0][0] - dx, P[0][1], P[0][2]], L = P[n - 1];
-      const pts = P.map((c, i) => {
-        if (i === 0) return E;
-        const f = i / (n - 1), S = [E[0] + (L[0] - E[0]) * f, E[1] + (L[1] - E[1]) * f, E[2] + (L[2] - E[2]) * f];
-        return [c[0] + (S[0] - c[0]) * t, c[1] + (S[1] - c[1]) * t, c[2] + (S[2] - c[2]) * t];
-      });
-      if (s.mesh) { G.slack.remove(s.mesh); s.mesh.geometry.dispose(); }
-      s.mesh = tube(pts, s.r, s.mtl); G.slack.add(s.mesh);
-    });
   }
 
   const fmt = (v) => (Math.abs(v) < 0.005 ? '0' : v.toFixed(2)) + ' mm³';
@@ -359,9 +341,10 @@ footer { font: 400 12px/1.5 var(--mono); color: var(--muted); border-top: 1px so
     const c = C.checks, f = c.fit_mm3, ok0 = (v) => v <= 0.001;
     const rows = [
       ['Cap with cradle: one closed solid', c.cap.bodies === 1 ? 'yes' : 'no', c.cap.bodies === 1],
-      ['Bar and frame: one closed solid each', c.bar.bodies === 1 && c.frame.bodies === 1 ? 'yes' : 'no', c.bar.bodies === 1 && c.frame.bodies === 1],
+      ['Frame: one closed solid; bar file: two separate bars', c.bar.bodies === 2 && c.frame.bodies === 1 ? 'yes' : 'no', c.bar.bodies === 2 && c.frame.bodies === 1],
       ['Battery slid into the cradle from 20 mm in front', fmt(f['battery slid into cradle from 20 mm in front (cap off)']) + ' hit', ok0(f['battery slid into cradle from 20 mm in front (cap off)'])],
-      ['Cap, cradle, bar, battery, plug 1 pulled 45 mm back', fmt(f['cap, battery, bar, plug 1 pulled 45 mm back vs frame']) + ' hit on the frame', ok0(f['cap, battery, bar, plug 1 pulled 45 mm back vs frame'])],
+      ['Cap, cradle, bars, battery and leads pulled 45 mm back', fmt(f['cap, battery, bars and leads pulled 45 mm back vs frame']) + ' hit on the frame', ok0(f['cap, battery, bars and leads pulled 45 mm back vs frame'])],
+      ['XT30 through the main and lead S openings', fmt(f['plug 1 passed through the main opening'] + f['lead S XT30 passed through its frame opening']) + ' hit', ok0(f['plug 1 passed through the main opening'] + f['lead S XT30 passed through its frame opening'])],
       ['Same pull vs switch, board, pads, swap plugs', ['dfr1202', 'dfr_pads', 'switch_swann', 'swap_plugs'].every((k) => ok0(f['cap pulled back vs ' + k])) ? '0 mm³' : 'hit', ['dfr1202', 'dfr_pads', 'switch_swann', 'swap_plugs'].every((k) => ok0(f['cap pulled back vs ' + k]))],
       ['Seated: battery vs bar and frame', fmt(f['battery vs bar'] + f['battery vs frame']), ok0(f['battery vs bar'] + f['battery vs frame'])],
       ['Seated: battery vs cap', fmt(f['battery vs cap + cradle (seated)']) + ': the sharp-cornered envelope grazes the cap corner radius by 0.2 mm; real pack edges are rounded', null],
@@ -373,7 +356,8 @@ footer { font: 400 12px/1.5 var(--mono); color: var(--muted); border-top: 1px so
       const pre = /servo lead to J3|5 V lead to J4/.test(k);
       rows.push(['Wire: ' + k, pre ? fmt(v) + ' at the front window, same in the V1.20 data' : fmt(v), pre ? null : v <= 0.02]);
     });
-    rows.push(['Lead S slack at 40 mm', c.slack.lead_S_red_drawn_mm + ' mm lead vs ' + c.slack.straight_reach_at_40mm_mm + ' mm straight-line reach', c.slack.lead_S_red_drawn_mm > c.slack.straight_reach_at_40mm_mm + 5]);
+    rows.push(['Lead S length drawn', c.lead_lengths_mm['lead S red: plug 1 to switch'] + ' mm red, ' + c.lead_lengths_mm['lead S black: plug 1 to plug 2'] + ' mm black', true]);
+    rows.push(['Head and neck vs plug 1 on top', 'not checked; plug 1 sits up to 6 mm above the box', null]);
     Object.entries(c.driver_lanes_mm3).forEach(([k, v]) => rows.push(['4 mm driver lane: ' + k, fmt(v), ok0(v)]));
     rows.push(['Hip sweep', 'not rerun; the outline only grows 1.1 mm at the rim', null]);
     return rows;
@@ -390,13 +374,13 @@ footer { font: 400 12px/1.5 var(--mono); color: var(--muted); border-top: 1px so
 
   const PINS = [
     { n: 1, t: 'Cradle side walls', p: [-68, -16.4, 20], mode: 'cap', mv: 'cap' },
-    { n: 2, t: 'Roof tabs', p: [-68, -14, 35.6], mode: 'cap', mv: 'cap' },
+    { n: 2, t: 'Middle roof tab', p: [-68, 1.5, 35.4], mode: 'cap', mv: 'cap' },
     { n: 3, t: 'Cradle floor', p: [-70, -6, -23.1], mode: 'cap', mv: 'cap' },
-    { n: 4, t: 'Retainer bar', p: [-61, 5, -8], mode: 'cap', mv: 'bar' },
+    { n: 4, t: 'Retainer bars', p: [-61, 5, 24], mode: 'cap', mv: 'bar' },
     { n: 5, t: 'M2×6 into wall boss', p: [-60.25, -18.6, -2.5], mode: 'cap', mv: 'bar' },
     { n: 6, t: 'Floor recess (frame)', p: [-66, 8, -23.2], mode: 'cap' },
-    { n: '', t: 'Plug 1 on slack', p: [-68.9, -21.4, 26], mode: 'cap', mv: 'bat', parts: true },
-    { n: '', t: 'Lead S loop', p: [-72.5, -27, -13.5], mode: 'cap' },
+    { n: '', t: 'Plug 1 on top', p: [-58, -16, 50], mode: 'cap', parts: true },
+    { n: 7, t: 'Roof openings', p: [-68, -8, 43.5], mode: 'cap' },
     { n: '', t: 'Plug 2 (front bay)', p: [-54, 22.5, 29.5], mode: 'cap', parts: true },
     { n: '', t: 'Battery', p: [-67, -5, 12], mode: 'any', mv: 'bat', parts: true },
     { n: '', t: 'Switch', p: [-54, 0, -30], mode: 'any', parts: true },
@@ -439,15 +423,13 @@ footer { font: 400 12px/1.5 var(--mono); color: var(--muted); border-top: 1px so
     G.capCap.position.x = -capEff; G.barCap.position.x = -capEff + barRel;
     G.batCap.visible = isCap; G.batCap.position.x = -capEff + batEff;
     G.batCap.children.forEach((c) => { c.visible = c.userData.part ? parts : wires; });
-    const p1Off = Math.max(-40, -capEff + batEff);
-    G.p1low.visible = isCap && parts; G.p1low.position.x = p1Off;
-    G.partsCap.visible = isCap && parts; G.wiresCap.visible = isCap && wires; G.slack.visible = isCap && wires;
-    if (isCap) slackTubes(-p1Off);
+    G.p1fix.visible = isCap && parts;
+    G.partsCap.visible = isCap && parts; G.wiresCap.visible = isCap && wires;
     G.partsCommon.visible = parts;
     G.robot.visible = $('c-robot').checked; G.shell.visible = $('c-shell').checked;
     const pulled = capEff - batEff;
     $('status').textContent = isCap
-      ? (batEff > 0 ? 'Cap off the robot · bar off · battery sliding out of the cradle' : pulled >= 40 ? 'Cap 40 mm back: plug 1 at the end of its slack, unplug it here' : pulled > 0 ? 'Cap, cradle and battery coming off together · plug 1 following on lead S' : 'Battery captured in the cap cradle · 0.3 mm play · bar on 2 × M2×6')
+      ? (batEff > 0 ? 'Cap off the robot · bars off · battery sliding out of the cradle' : pulled > 0 ? 'Plug 1 unplugged · cap, cradle, battery and leads coming off together' : 'Battery captured in the cap cradle · 0.3 mm play · two bars, 4 × M2×6')
       : 'V1.20: battery free to lift 7.3 mm, no frame guides';
     [['m-cap', 'cap'], ['m-old', 'old']].forEach(([id, k]) => $(id).setAttribute('aria-pressed', String(state.mode === k)));
     fillChecks();

@@ -3,7 +3,7 @@
   "frame": {
    "bodies": 1,
    "status": "Error.NoError",
-   "volume_cm3": 15.684,
+   "volume_cm3": 15.505,
    "bounds": [
     [
      -68.15,
@@ -20,7 +20,7 @@
   "cap": {
    "bodies": 1,
    "status": "Error.NoError",
-   "volume_cm3": 9.381,
+   "volume_cm3": 9.724,
    "bounds": [
     [
      -75.55,
@@ -33,12 +33,12 @@
      43.0
     ]
    ],
-   "cradle_volume_cm3": 1.773
+   "cradle_volume_cm3": 2.231
   },
   "bar": {
-   "bodies": 1,
+   "bodies": 2,
    "status": "Error.NoError",
-   "volume_cm3": 0.304,
+   "volume_cm3": 0.608,
    "bounds": [
     [
      -61.75,
@@ -48,14 +48,14 @@
     [
      -60.25,
      21.1,
-     -5.5
+     26.5
     ]
    ]
   },
   "mass_g_est": {
-   "cradle": 1.9,
-   "bar": 0.3,
-   "frame_delta": 0.5
+   "cradle": 2.4,
+   "bar": 0.6,
+   "frame_delta": 0.3
   },
   "fit_mm3": {
    "battery vs cap + cradle (seated)": 0.07,
@@ -64,20 +64,25 @@
    "bar vs frame": 0.0,
    "cap + cradle vs frame (seated)": 0.0,
    "battery slid into cradle from 20 mm in front (cap off)": 0.0,
-   "cap, battery, bar, plug 1 pulled 45 mm back vs frame": 0.0,
+   "cap, battery, bars and leads pulled 45 mm back vs frame": 0.0,
+   "plug 1 passed through the main opening": 0.0,
+   "lead S XT30 passed through its frame opening": 0.0,
    "cap pulled back vs dfr1202": 0.0,
    "cap pulled back vs dfr_pads": 0.0,
    "cap pulled back vs switch_swann": 0.0,
    "cap pulled back vs swap_plugs": 0.0
   },
   "plugs_mm3": {
-   "plug 1 (rides with the cap)": 0.0,
+   "plug 1 (on top of the box)": 0.0,
    "plug 2 (front bay)": 0.0,
-   "balance plug": 0.0,
+   "balance plug (on top of the box)": 0.0,
    "dfr1202 vs cradle + bar": 0.0,
    "dfr_pads vs cradle + bar": 0.0,
    "switch_swann vs cradle + bar": 0.0,
-   "swap_plugs vs cradle + bar": 0.0
+   "swap_plugs vs cradle + bar": 0.0,
+   "plugs on top vs shell_left": 0.0,
+   "plugs on top vs shell_right": 0.0,
+   "plugs on top vs rear_pack": 0.0
   },
   "wires_mm3": {
    "servo lead to J3": 0.57,
@@ -85,20 +90,27 @@
    "robot servo inlet (from OpenRB J4)": 0.0,
    "robot A7Z lead (from the neck)": 0.0,
    "battery lead (16 AWG)": 0.0,
-   "lead S red: plug 1 to switch (slack loop)": 0.013,
-   "lead S black: plug 1 to plug 2 (slack loop)": 0.0,
+   "balance lead": 0.0,
+   "lead S red: plug 1 to switch": 0.0,
+   "lead S black: plug 1 to plug 2": 0.0,
    "lead S red: switch to plug 2": 0.0,
    "lead C: plug 2 to DFR VIN/GND": 0.001
   },
-  "slack": {
-   "lead_S_red_drawn_mm": 72.8,
-   "straight_reach_at_40mm_mm": 57.4
+  "lead_lengths_mm": {
+   "battery lead (16 AWG)": 21.3,
+   "balance lead": 9.5,
+   "lead S red: plug 1 to switch": 69.5,
+   "lead S black: plug 1 to plug 2": 94.9,
+   "lead S red: switch to plug 2": 17.7,
+   "lead C: plug 2 to DFR VIN/GND": 35.8
   },
   "driver_lanes_mm3": {
    "upper cover screw (+16.1, 26)": 0.0,
    "upper cover screw (-16.1, 26)": 0.0,
    "bar screw (+18.6, -8.0) from the front, cap off": 0.0,
-   "bar screw (-18.6, -8.0) from the front, cap off": 0.0
+   "bar screw (+18.6, 24.0) from the front, cap off": 0.0,
+   "bar screw (-18.6, -8.0) from the front, cap off": 0.0,
+   "bar screw (-18.6, 24.0) from the front, cap off": 0.0
   },
   "layout": {
    "battery_x": [
@@ -114,16 +126,8 @@
    "play_mm": 0.3,
    "roof_tabs_y": [
     [
-     -17.0,
-     -11.0
-    ],
-    [
      -3.0,
      6.0
-    ],
-    [
-     11.0,
-     17.0
     ]
    ],
    "walls_y": [
@@ -132,19 +136,52 @@
    ],
    "boss": {
     "y": 18.6,
-    "z": -8.0,
+    "zs": [
+     -8.0,
+     24.0
+    ],
     "r": 2.5,
     "x": [
-     -66.75,
+     -74.39999999999999,
      -61.75
-    ]
+    ],
+    "pilot": 5.5
    },
    "bar": {
     "y": 21.1,
-    "z": [
-     -10.5,
-     -5.5
-    ]
+    "h": 5.0
+   },
+   "roof_openings": {
+    "main": {
+     "x": [
+      -71.5,
+      -64.6
+     ],
+     "y": [
+      -14.0,
+      -2.0
+     ]
+    },
+    "balance": {
+     "x": [
+      -71.5,
+      -64.6
+     ],
+     "y": [
+      7.0,
+      17.0
+     ]
+    },
+    "lead_S": {
+     "x": [
+      -60.0,
+      -49.0
+     ],
+     "y": [
+      -25.0,
+      -18.5
+     ]
+    }
    }
   }
  },
@@ -575,64 +612,75 @@
     [
      -68.05,
      -8,
-     38.0
+     44.5
     ],
     [
-     -68.05,
-     -19,
-     38.0
-    ],
-    [
-     -68.9,
-     -21.4,
-     32.0
-    ],
-    [
-     -68.9,
-     -21.4,
-     25.0
-    ]
-   ],
-   "length_mm": 28.0
-  },
-  "lead S red: plug 1 to switch (slack loop)": {
-   "r": 0.9,
-   "slack": true,
-   "points": [
-    [
-     -68.9,
-     -21.4,
-     -1.0
-    ],
-    [
-     -71.0,
-     -23.0,
-     -6.0
+     -70.0,
+     -11.0,
+     47.0
     ],
     [
      -73.0,
-     -27.0,
-     -12.4
+     -14.0,
+     47.5
     ],
     [
-     -64.0,
-     -29.5,
-     -12.4
+     -71.5,
+     -16.0,
+     46.6
+    ]
+   ],
+   "length_mm": 21.3
+  },
+  "balance lead": {
+   "r": 0.7,
+   "moves": "cap",
+   "points": [
+    [
+     -68.05,
+     12,
+     34.489999999999995
     ],
     [
-     -60.5,
-     -29.5,
-     -2.0
+     -68.05,
+     12,
+     44.0
+    ]
+   ],
+   "length_mm": 9.5
+  },
+  "lead S red: plug 1 to switch": {
+   "r": 0.9,
+   "points": [
+    [
+     -45.5,
+     -16.0,
+     46.6
     ],
     [
-     -57.5,
-     -27.0,
-     -11.5
+     -44.0,
+     -18.0,
+     45.5
     ],
     [
-     -56.5,
-     -22.0,
-     -3.0
+     -47.0,
+     -21.5,
+     44.6
+    ],
+    [
+     -54.5,
+     -21.75,
+     44.0
+    ],
+    [
+     -54.5,
+     -21.75,
+     41.0
+    ],
+    [
+     -54.5,
+     -21.75,
+     10.0
     ],
     [
      -55.0,
@@ -645,51 +693,50 @@
      1.5
     ]
    ],
-   "length_mm": 72.8
+   "length_mm": 69.5
   },
-  "lead S black: plug 1 to plug 2 (slack loop)": {
+  "lead S black: plug 1 to plug 2": {
    "r": 0.9,
-   "slack": true,
    "points": [
     [
-     -67.9,
-     -20.6,
-     -1.0
+     -45.5,
+     -14.0,
+     46.6
     ],
     [
-     -71.5,
-     -24.5,
-     -7.0
+     -44.0,
+     -16.0,
+     45.5
     ],
     [
-     -72.0,
-     -28.5,
-     -12.0
-    ],
-    [
-     -65.0,
-     -28.0,
-     -11.0
-    ],
-    [
-     -61.5,
-     -28.0,
-     0.0
-    ],
-    [
-     -58.5,
-     -26.0,
-     -12.0
-    ],
-    [
-     -57.0,
+     -47.0,
      -20.0,
-     3.5
+     44.6
     ],
     [
-     -57.0,
-     15.0,
-     4.0
+     -52.5,
+     -20.2,
+     44.0
+    ],
+    [
+     -52.5,
+     -20.2,
+     41.0
+    ],
+    [
+     -52.5,
+     -20.2,
+     10.0
+    ],
+    [
+     -56.5,
+     -18.0,
+     5.0
+    ],
+    [
+     -56.5,
+     18.0,
+     5.0
     ],
     [
      -54.0,
@@ -697,7 +744,7 @@
      3.0
     ]
    ],
-   "length_mm": 104.5
+   "length_mm": 94.9
   },
   "lead S red: switch to plug 2": {
    "r": 0.9,
@@ -753,16 +800,16 @@
   }
  },
  "plugs": {
-  "plug 1 (rides with the cap)": {
+  "plug 1 (on top of the box)": {
    "lo": [
-    -74.0,
-    -24.0,
-    -1.0
+    -71.5,
+    -21.0,
+    44.0
    ],
    "hi": [
-    -63.8,
-    -18.8,
-    25.0
+    -45.5,
+    -11.0,
+    49.2
    ]
   },
   "plug 2 (front bay)": {
@@ -777,16 +824,16 @@
     29.0
    ]
   },
-  "balance plug": {
+  "balance plug (on top of the box)": {
    "lo": [
-    -70.05,
-    13.0,
-    36.55
+    -71.05,
+    8.0,
+    44.0
    ],
    "hi": [
-    -64.05,
-    21.0,
-    41.05
+    -65.05,
+    16.0,
+    48.5
    ]
   }
  }
