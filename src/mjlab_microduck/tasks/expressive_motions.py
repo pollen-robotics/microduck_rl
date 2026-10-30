@@ -323,4 +323,10 @@ DATA_MOTIONS = {
                                      note=_V3_NOTE + "; BOLD: the same key poses, harder dynamics (design 6.5 / 8 rad/s, "
                                                      "ZMP allowed 35 mm out of the soles instead of 25, head hits 22 % "
                                                      "instead of 15 %, chin nods 0.16 rad instead of 0.12)", **_V3),
+    # v4 = v3 polished after Rémi played v3 on the real duck; resumed from the v3 run (LEDGER "Tremendous v4").
+    "Tremendous-V4": DataMotion("Tremendous-V4", 18.25, "tremendous_v4.csv", overspeed=7.0,
+                                note=_V3_NOTE + "; V4 (notes/dodge/tools/planted_v4.py): bars 1-3, 7, 8 unchanged; a double "
+                                                "hit on the two dings (8.50 / 8.64 s, frozen through the break), a head-bob "
+                                                "groove opening the second half (chin down on the beat, the body rocking) "
+                                                "and a bob-and-weave bar (dip / rise)", **_V3),
 }

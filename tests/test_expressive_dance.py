@@ -23,7 +23,8 @@ V3 = [k for k in NAMES if DATA_MOTIONS[k].v3]
 # speed x 1.10 (planted_v3.SPEED_TOL), below the task's joint_overspeed threshold.
 BOUNDS = {"Tremendous": (0.30, 0.65, 0.0, (-0.03, 0.003), 5.0), "Tremendous-70": (0.30, 0.65, 0.0, (-0.03, 0.003), 5.0),
           "Tremendous-V3": (0.55, 0.70, 0.30, (-0.025, 0.003), 7.7),
-          "Tremendous-V3-Bold": (0.55, 0.75, 0.30, (-0.028, 0.003), 8.8)}
+          "Tremendous-V3-Bold": (0.55, 0.75, 0.30, (-0.028, 0.003), 8.8),
+          "Tremendous-V4": (0.55, 0.70, 0.30, (-0.025, 0.003), 7.7)}
 
 
 def _home(jn):
