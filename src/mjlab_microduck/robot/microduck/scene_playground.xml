@@ -1,0 +1,21 @@
+<mujoco model="scene">
+    <include file="robot_allcollisions.xml" />
+    <visual>
+        <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0" />
+        <global azimuth="160" elevation="-20" />
+    </visual>
+    <asset>
+        <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072" />
+        <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300" />
+        <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2" />
+    </asset>
+    <worldbody>
+        <light pos="0 0 3.5" dir="0 0 -1" directional="true" />
+        <geom name="floor" size="0 0 0.05" pos="0 0 0" type="plane" material="groundplane" />
+        <geom name="wall_n" type="box" size="2 0.05 0.3" pos="0 2 0.3" rgba="0.8 0.5 0.3 1" />
+        <geom name="box_a"  type="box" size="0.1 0.1 0.1" pos="1.0 0.2 0.1" rgba="0.3 0.6 0.4 1" />
+    </worldbody>
+    <keyframe>
+        <key name="SIT" qpos="0 0 0.07 1 0 0 0 0 0 -0.5236 1.0472 0 0.5 1.6 0 0 0 0 0.5236 -1.0472 0" ctrl="0 0 -0.5236 1.0472 0 0.5 1.6 0 0 0 0 0.5236 -1.0472 0"/>
+    </keyframe>
+</mujoco>
