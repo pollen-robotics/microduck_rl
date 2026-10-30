@@ -107,6 +107,32 @@ def test_env_cfg_dance_terms(name):
     assert r["joint_limit_proximity"].weight > 0
     assert r["settle_legs"].params["ramp"] == mo.settle_ramp == r["settle_still"].params["ramp"]
     assert "ex_reference" not in cfg.observations["actor"].terms
+    # r2 (2026-10-30): linear deviation costs on the head joints and the trunk roll (the kernels had no gradient)
+    dev = {"neck_dev": (("neck_pitch",), 0.3), "head_dev": (("head_pitch", "head_yaw"), 0.25),
+           "head_roll_dev": (("head_roll",), 0.15), "trunk_roll_dev": (("roll",), 0.05)}
+    for k, (chs, free) in dev.items():
+        assert r[k].func is r["neck_dev"].func and r[k].weight < 0, k
+        assert tuple(r[k].params["channels"]) == chs and r[k].params["free"] == free, k
+        assert r[k].params["motion"] == name, k
+    assert r["trunk_roll_dev"].weight <= r["head_dev"].weight          # roll errors are smaller: at least as steep
+
+
+def test_dev_cost_is_linear_beyond_the_free_band():
+    """ex_head_dev_cost reads any REF_CHANNELS channel (trunk roll included): 0 inside the band, then |err| - free."""
+    from mjlab_microduck.tasks import mdp as M
+    state, ref = torch.zeros(3, len(CH)), torch.zeros(3, len(CH))
+    state[:, CH["roll"]] = torch.tensor([0.03, 0.15, -0.25])
+    state[:, CH["head_pitch"]] = torch.tensor([0.0, 1.0, -2.0])
+    ref[:, CH["head_yaw"]] = torch.tensor([0.1, 0.0, 2.5])          # state 0: yaw errors 0.1 / 0 / 2.5
+    orig = M._ex_state, M._ex_ref
+    M._ex_state, M._ex_ref = (lambda env: state), (lambda env, motion, command_name: ref)
+    try:
+        roll = M.ex_head_dev_cost(None, "Tremendous", ("roll",), 0.05)
+        head = M.ex_head_dev_cost(None, "Tremendous", ("head_pitch", "head_yaw"), 0.25)
+    finally:
+        M._ex_state, M._ex_ref = orig
+    assert torch.allclose(roll, torch.tensor([0.0, 0.10, 0.20]))
+    assert torch.allclose(head, torch.tensor([0.0, 0.75, 1.75 + 2.25]))
 
 
 def test_tasks_registered_from_scratch():

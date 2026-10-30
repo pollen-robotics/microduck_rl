@@ -69,6 +69,12 @@ RATE_NAMES = {"roll": "track_roll", "pitch": "track_pitch", "yaw": "track_yaw", 
 # the narrow 0.04 / 0.05 rad kernels alone give no gradient while the policy is far off).
 W_TRACK_TRUNK_WIDE, STD_TRUNK_WIDE = 1.5, 0.15
 DATA_MAX_ITERATIONS = 7000      # 18.25 s episodes (912 steps): ~6x longer than round 2's, see LEDGER "dodge"
+# Data motions, r2 (2026-10-30, LEDGER "Tremendous r2"): the 1029 runs parked head_pitch 2.3 rad off (chin down in both
+# sky poses) and never leaned right (roll -2..-5° where the reference asks +9.5..+13°). Far off, the Gaussian kernels
+# give no gradient, so the head joints and the trunk roll get neck_dev's linear cost (per rad beyond a free band).
+W_HEAD_DEV, HEAD_DEV_FREE = -5.0, 0.25            # head_pitch + head_yaw (also stops the -146° yaw at the end)
+W_HEAD_ROLL_DEV, HEAD_ROLL_DEV_FREE = -5.0, 0.15  # head_roll (range ±0.44, reference ±0.35)
+W_TRUNK_ROLL_DEV, TRUNK_ROLL_DEV_FREE = -10.0, 0.05   # trunk roll: ~3° free, errors are ~5x smaller than the head's
 
 
 @lru_cache(maxsize=1)
@@ -154,6 +160,13 @@ def make_microduck_expressive_env_cfg(motion: str, play: bool = False) -> Manage
             func=microduck_mdp.ex_track, weight=W_TRACK_TRUNK_WIDE,
             params={"motion": motion, "channels": ("roll", "pitch"), "std": STD_TRUNK_WIDE, "command_name": "twist"},
         )
+        for name, w, chs, free in (("head_dev", W_HEAD_DEV, ("head_pitch", "head_yaw"), HEAD_DEV_FREE),
+                                   ("head_roll_dev", W_HEAD_ROLL_DEV, ("head_roll",), HEAD_ROLL_DEV_FREE),
+                                   ("trunk_roll_dev", W_TRUNK_ROLL_DEV, ("roll",), TRUNK_ROLL_DEV_FREE)):
+            cfg.rewards[name] = RewardTermCfg(
+                func=microduck_mdp.ex_head_dev_cost, weight=w,
+                params={"motion": motion, "channels": chs, "free": free, "command_name": "twist"},
+            )
 
     # ── A fall ends the episode ────────────────────────────────────────────────
     cfg.terminations["fell_over"] = TerminationTermCfg(

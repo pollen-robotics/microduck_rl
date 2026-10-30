@@ -8325,7 +8325,8 @@ def ex_head_dev_cost(
     free: float = 0.3,
     command_name: str = "twist",
 ) -> torch.Tensor:
-    """COST (>= 0, negative weight): summed |head joint - reference| beyond `free` rad (round 1's neck dive)."""
+    """COST (>= 0, negative weight): summed |channel - reference| beyond `free` rad (round 1's neck dive). Any
+    REF_CHANNELS channel works: the head joints, or the trunk roll (the dance's right leans, 2026-10-30)."""
     idx = [_exm.CH[ch] for ch in channels]
     err = (_ex_state(env) - _ex_ref(env, motion, command_name))[:, idx]
     return torch.nan_to_num(torch.clamp(err.abs() - free, min=0.0).sum(dim=-1), nan=0.0)

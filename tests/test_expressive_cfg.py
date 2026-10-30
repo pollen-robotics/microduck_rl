@@ -168,6 +168,8 @@ def test_r2_env_terms(name):
     assert r["settle_still"].weight < 0
     for k in ("track_head_wide", "neck_dev", "joint_limit_proximity", "settle_still"):
         assert k not in make_microduck_expressive_env_cfg(name[:-3]).rewards     # round 1 untouched
+    for k in ("track_trunk_wide", "head_dev", "head_roll_dev", "trunk_roll_dev"):
+        assert k not in r, k                                                     # dance-only terms (DataMotion)
 
 
 def test_r2_tasks_registered_from_scratch():
