@@ -75,7 +75,9 @@ def test_torch_source_is_pinned_to_a_cuda_index_on_aarch64():
     sources = uv_cfg["sources"]["torch"]
     indexes = {p["name"]: p["url"] for p in uv_cfg.get("index", [])}
     for src in sources:
-        assert "aarch64" in src["marker"], "the torch source must stay aarch64-scoped"
+        assert "aarch64" in src["marker"] or "win32" in src["marker"], (
+            "torch sources must stay scoped to aarch64 or win32"
+        )
         assert indexes[src["index"]].startswith(_CUDA_INDEX), (
             f"index {src['index']} is not a PyTorch CUDA index"
         )
@@ -101,6 +103,7 @@ def test_x86_64_resolution_stays_on_pypi():
         p
         for p in _packages("torch")
         if "platform_machine == 'aarch64'" not in _markers(p)
+        and "sys_platform == 'win32'" not in _markers(p)
     ]
     assert others, "no non-aarch64 torch entry found"
     for pkg in others:
