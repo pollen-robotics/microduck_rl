@@ -26,6 +26,49 @@ MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene.xml"
 MICRODUCK_ROLLERS_XML = "src/mjlab_microduck/robot/microduck/scene_rollers.xml"
 MICRODUCK_BALL_XML = "src/mjlab_microduck/robot/microduck/scene_ball.xml"
 
+# Deployed policy order, independent of XML order. Mouth control stays separate.
+POLICY_JOINT_NAMES = (
+    "left_hip_yaw", "left_hip_roll", "left_hip_pitch", "left_knee", "left_ankle",
+    "neck_pitch", "head_pitch", "head_yaw", "head_roll",
+    "right_hip_yaw", "right_hip_roll", "right_hip_pitch", "right_knee", "right_ankle",
+)
+
+
+def joint_actuator_id(model, joint_name):
+    """Resolve one unit-gear hinge actuator; joint targets are in radians."""
+    joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+    if joint_id < 0:
+        raise ValueError(f"Missing policy joint: {joint_name}")
+    candidates = np.flatnonzero(
+        (model.actuator_trntype == mujoco.mjtTrn.mjTRN_JOINT)
+        & (model.actuator_trnid[:, 0] == joint_id)
+    )
+    if len(candidates) != 1:
+        raise ValueError(f"Joint {joint_name} requires exactly one joint actuator")
+    actuator_id = int(candidates[0])
+    if model.jnt_type[joint_id] != mujoco.mjtJoint.mjJNT_HINGE:
+        raise ValueError(f"Joint {joint_name} must be a hinge")
+    if not np.array_equal(model.actuator_gear[actuator_id], [1, 0, 0, 0, 0, 0]):
+        raise ValueError(f"Actuator for {joint_name} must have unit gear")
+    return actuator_id
+
+
+def validate_position_actuator(model, actuator_id):
+    """Reject controls that would not mean a joint position in radians."""
+    gain = model.actuator_gainprm[actuator_id, 0]
+    bias = model.actuator_biasprm[actuator_id]
+    if not (
+        model.actuator_dyntype[actuator_id] in (
+            mujoco.mjtDyn.mjDYN_NONE, mujoco.mjtDyn.mjDYN_FILTEREXACT,
+        )  # Native position(timeconst=...) keeps position-target semantics.
+        and model.actuator_gaintype[actuator_id] == mujoco.mjtGain.mjGAIN_FIXED
+        and model.actuator_biastype[actuator_id] == mujoco.mjtBias.mjBIAS_AFFINE
+        and gain > 0
+        and bias[0] == 0
+        and bias[1] == -gain
+    ):
+        raise ValueError(f"Actuator {model.actuator(actuator_id).name} must be a position actuator")
+
 # BAM M6 defaults — MUST mirror `_BAM_ACTUATOR_KWARGS` in
 # src/mjlab_microduck/robot/microduck_constants.py (the actuator every policy is
 # trained against in warp). Not imported from there: that module drags in
@@ -74,10 +117,19 @@ def load_mujoco_with_bam(xml_path: str, bam_model, timestep: float, vin_drop_gai
     spec = mujoco.MjSpec.from_file(xml_path)
     names = []
     for act in spec.actuators:
+        if act.trntype != mujoco.mjtTrn.mjTRN_JOINT:
+            raise ValueError(f"BAM actuator {act.name} requires a joint transmission")
         tgt = act.target
         tgt_name = tgt.name if hasattr(tgt, "name") else str(tgt)
         if tgt_name.startswith("passive_"):
             continue
+        joint = spec.joint(tgt_name)
+        if joint.type != mujoco.mjtJoint.mjJNT_HINGE:
+            raise ValueError(f"BAM joint {tgt_name} must be a hinge")
+        if not np.array_equal(act.gear, [1, 0, 0, 0, 0, 0]):
+            raise ValueError(f"BAM actuator {act.name} must have unit gear")
+        if not act.name:
+            raise ValueError(f"BAM actuator for {tgt_name} must be named")
         act.set_to_motor()
         act.forcelimited = True
         act.forcerange = (-force_limit, force_limit)
@@ -381,22 +433,30 @@ class PolicyInference:
         print(f"Body IDs:")
         print(f"  trunk_base: id={self.trunk_base_id}")
 
-        # Joint information
-        self.n_joints = model.nu
-
-        # For robots with passive/interspersed joints (e.g. roller skates), the actuated
-        # joints are not contiguous in qpos/qvel. Compute the correct indices from the
-        # actuator transmission joint IDs so extraction works for any joint ordering.
+        # Resolve policy order separately from XML order and auxiliary actuators.
+        self.n_joints = len(POLICY_JOINT_NAMES)
+        self.policy_actuator_ids = [joint_actuator_id(model, name) for name in POLICY_JOINT_NAMES]
+        self.policy_actuator_names = [model.actuator(i).name for i in self.policy_actuator_ids]
+        mouth_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "mouth")
+        self.mouth_actuator_id = joint_actuator_id(model, "mouth") if mouth_joint_id >= 0 else None
+        controlled_ids = self.policy_actuator_ids + (
+            [self.mouth_actuator_id] if self.mouth_actuator_id is not None else []
+        )
+        for actuator_id in controlled_ids:
+            if self.bam_ctrl is None:
+                validate_position_actuator(model, actuator_id)
+            elif model.actuator(actuator_id).name not in self.bam_ctrl.dof_to_q_target:
+                raise ValueError(f"Actuator {model.actuator(actuator_id).name} is missing from BAM")
         self.joint_qpos_indices = [
-            int(model.jnt_qposadr[model.actuator_trnid[i, 0]]) for i in range(model.nu)
+            int(model.jnt_qposadr[model.actuator_trnid[i, 0]]) for i in self.policy_actuator_ids
         ]
         self.joint_qvel_indices = [
-            int(model.jnt_dofadr[model.actuator_trnid[i, 0]]) for i in range(model.nu)
+            int(model.jnt_dofadr[model.actuator_trnid[i, 0]]) for i in self.policy_actuator_ids
         ]
 
         # Default pose for the policy (flexed legs)
-        self.default_pose = DEFAULT_POSE[:self.n_joints]
-        print(f"Number of actuators: {self.n_joints}")
+        self.default_pose = DEFAULT_POSE.copy()
+        print(f"Policy joints: {self.n_joints} (model actuators: {model.nu})")
         print(f"Default pose: {self.default_pose}")
         print(f"Action scale: {self.action_scale}")
 
@@ -860,11 +920,13 @@ class PolicyInference:
         obs_batch = obs.reshape(1, -1)
         action = self.ort_session.run([self.output_name], {self.input_name: obs_batch})[0]
         action = action.squeeze(0).astype(np.float32)
+        self._validate_policy_vector(action)
         self.last_action = action.copy()
         return action
 
     def apply_action(self, action):
         """Apply action to MuJoCo controls with optional delay."""
+        action = self._validate_policy_vector(action)
         if self.use_delay:
             self.action_buffer[self.buffer_index] = action.copy()
             delayed_index = (self.buffer_index - self.current_lag) % len(self.action_buffer)
@@ -883,15 +945,50 @@ class PolicyInference:
         self.set_position_targets(target_positions)
 
     def set_position_targets(self, target_positions):
-        """Send joint position targets to the actuators.
+        """Send fourteen policy targets without changing auxiliary targets.
 
         BAM: the firmware position loop lives in the controller (ctrl is the
         motor TORQUE it writes on update()). Legacy: MuJoCo position actuators.
         """
+        target_positions = self._validate_policy_vector(target_positions)
         if self.bam_ctrl is not None:
-            self.bam_ctrl.q_target[:] = target_positions
+            for name, target in zip(self.policy_actuator_names, target_positions):
+                self.bam_ctrl.set_q_target(name, target)
         else:
-            self.data.ctrl[:] = target_positions
+            self.data.ctrl[self.policy_actuator_ids] = target_positions
+
+    def _validate_policy_vector(self, values):
+        values = np.asarray(values)
+        if values.shape != (self.n_joints,) or not np.isfinite(values).all():
+            raise ValueError(f"Expected {self.n_joints} finite policy values")
+        return values
+
+    def set_mouth_target(self, target):
+        """Command the optional mouth hinge independently, in model radians.
+
+        Limits come from the supplied model, not a presumed stock jaw aperture.
+        This target bypasses the policy's action scale and delay buffer.
+        """
+        if self.mouth_actuator_id is None:
+            raise ValueError("This model has no actuated mouth joint")
+        value = np.asarray(target, dtype=float)
+        if value.shape != () or not np.isfinite(value):
+            raise ValueError("Mouth target must be one finite angle in radians")
+        target = float(value)
+        actuator_id = self.mouth_actuator_id
+        joint_id = self.model.actuator_trnid[actuator_id, 0]
+        if self.model.jnt_limited[joint_id]:
+            low, high = self.model.jnt_range[joint_id]
+            if not low <= target <= high:
+                raise ValueError(f"Mouth target must be within joint range [{low}, {high}]")
+        if self.bam_ctrl is not None:
+            self.bam_ctrl.set_q_target(self.model.actuator(actuator_id).name, target)
+        else:
+            if self.model.actuator_ctrllimited[actuator_id]:
+                low, high = self.model.actuator_ctrlrange[actuator_id]
+                if not low <= target <= high:
+                    raise ValueError(f"Mouth target must be within control range [{low}, {high}]")
+            self.data.ctrl[actuator_id] = target
 
 
 # ---------------------------------------------------------------------------
@@ -1172,6 +1269,9 @@ def main():
     parser.add_argument("--roller", action="store_true", help="Use roller skate robot XML (robot_walk_rollers.xml)")
     parser.add_argument("--scene", type=str, default=None, help="Path to a scene XML, overriding the default pick (e.g. src/mjlab_microduck/robot/microduck/scene_allcollisions.xml)")
     parser.add_argument("--walking", type=str, default=None, help="Path to walking policy ONNX file")
+    parser.add_argument("--mouth-target", type=float, default=None, metavar="RADIANS",
+                        help="Independent mouth hinge target for a scene with an actuated mouth; "
+                             "must be within that model's limits (not a stock aperture specification)")
     parser.add_argument("--standing", "-s", type=str, default=None, help="Path to standing policy ONNX file")
     parser.add_argument("--ground-pick", type=str, default=None, help="Path to ground pick policy ONNX file (press G to activate)")
     parser.add_argument("--sit", type=str, default=None, help="Path to OLD one-way sitting policy ONNX file (press Y to sit, Y again switches back to standing/walking policy)")
@@ -1384,6 +1484,11 @@ def main():
     if bam_ctrl is not None:
         bam_ctrl.reset(data.qpos)   # clears voltage-drop state, q_target = current qpos
     policy.set_position_targets(policy.default_pose)
+    if args.mouth_target is not None:
+        try:
+            policy.set_mouth_target(args.mouth_target)
+        except ValueError as exc:
+            parser.error(str(exc))
     mujoco.mj_forward(model, data)
 
     # Verify observation size
