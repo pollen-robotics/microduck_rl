@@ -8344,3 +8344,21 @@ def ex_settle_still(
     phi = _gp_phase(env, command_name)
     gate = 0.5 - 0.5 * torch.cos(torch.pi * torch.clamp((phi - settle_from) / ramp, 0.0, 1.0))
     return torch.nan_to_num(gate * _servo_joint_vel(env, robot).pow(2).sum(dim=-1), nan=0.0)
+
+
+def ex_settle_legs_dev(
+    env: ManagerBasedRlEnv,
+    settle_from: float = 0.88,
+    ramp: float = 0.04,
+    free: float = 0.03,
+    command_name: str = "twist",
+) -> torch.Tensor:
+    """COST (>= 0, negative weight): summed |leg joint - HOME| beyond `free` rad over the 10 leg servos, gated (cosine
+    ramp) for φ >= settle_from: a LINEAR pull back to the stand pose for the hand-back (dance v3, 2026-10-30). The
+    Gaussian settle_legs kernel (std 0.15) has little gradient 0.2 rad away: the r2 dance ended ~13° off HOME at the
+    hips / ankles and the stand net stepped and turned up to 28° after φ = 1."""
+    robot: Entity = env.scene["robot"]
+    phi = _gp_phase(env, command_name)
+    gate = 0.5 - 0.5 * torch.cos(torch.pi * torch.clamp((phi - settle_from) / ramp, 0.0, 1.0))
+    dq = (_servo_joint_pos(env, robot) - _servo_default_joint_pos(env, robot))[:, [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]]
+    return torch.nan_to_num(gate * torch.clamp(dq.abs() - free, min=0.0).sum(dim=-1), nan=0.0)

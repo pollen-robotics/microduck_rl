@@ -274,6 +274,10 @@ class DataMotion:
     settle_ramp: float = 0.01           # φ width of the settle gate (0.18 s at 18.25 s)
     rate_channels: tuple = ("roll", "pitch", "dz")   # trunk channels velocity-tracked
     comps: tuple = ()                   # no envelope components
+    # v3 (2026-10-30, LEDGER "Tremendous v3"): bigger / more dynamic dance. None / defaults = the 1029 / r2 behaviour.
+    hip_roll_range: float | None = None # training robot's hip roll range (+-rad); None = the export's +-0.384
+    overspeed: float = 5.0              # joint_overspeed threshold (rad/s)
+    v3: bool = False                    # trunk yaw in the wide kernel + yaw dev cost, wide dz kernel, linear settle cost
 
 
 _DATA_CACHE: dict = {}
@@ -303,8 +307,20 @@ def _data_interp(motion: DataMotion, phi: torch.Tensor, which: int) -> torch.Ten
 
 _TREMENDOUS_NOTE = ("dodge dance A (Tremendous), feet planted on the stand footprint: slips / sways / limbos / dips "
                     "on every beat at 110 BPM, beak to the sky in bar 4 and at the end")
+_V3_NOTE = ("dodge dance A (Tremendous) v3, feet planted: the same bars, bigger and more dynamic (notes/dodge/tools/"
+            "planted_v3.py): side tilts +-22 deg on the real hip-roll range (r2: 14; the high-side shin meeting the trunk "
+            "and the leg length stop it there), trunk twists +-12 deg, limbo lean -36 deg, a squash bounce bottoming ON "
+            "every beat (dz to -22 mm, r2: -2.4), head hits (overshoot + settle) and chin nods on the beat, head yaw to "
+            "+-0.74 rad, beak 61 deg up in the sky holds; back at the stand on beat 32 (17.45 s), still after")
+# v3: the stand is reached at 17.4545 s (beat 32); settle_from 0.962 = 17.56 s, the gate is full from 17.74 s.
+_V3 = dict(settle_from=0.962, rate_channels=("roll", "pitch", "yaw", "dz"), hip_roll_range=0.52, v3=True)
 DATA_MOTIONS = {
     "Tremendous": DataMotion("Tremendous", 18.25, "tremendous_planted.csv", note=_TREMENDOUS_NOTE),
     "Tremendous-70": DataMotion("Tremendous", 18.25, "tremendous_planted.csv", trunk_scale=0.7,
                                 note=_TREMENDOUS_NOTE + "; trunk channels x0.7, head unchanged (safer variant)"),
+    "Tremendous-V3": DataMotion("Tremendous-V3", 18.25, "tremendous_v3.csv", note=_V3_NOTE, overspeed=7.0, **_V3),
+    "Tremendous-V3-Bold": DataMotion("Tremendous-V3-Bold", 18.25, "tremendous_v3_bold.csv", overspeed=8.0,
+                                     note=_V3_NOTE + "; BOLD: the same key poses, harder dynamics (design 6.5 / 8 rad/s, "
+                                                     "ZMP allowed 35 mm out of the soles instead of 25, head hits 22 % "
+                                                     "instead of 15 %, chin nods 0.16 rad instead of 0.12)", **_V3),
 }

@@ -168,8 +168,12 @@ def test_r2_env_terms(name):
     assert r["settle_still"].weight < 0
     for k in ("track_head_wide", "neck_dev", "joint_limit_proximity", "settle_still"):
         assert k not in make_microduck_expressive_env_cfg(name[:-3]).rewards     # round 1 untouched
-    for k in ("track_trunk_wide", "head_dev", "head_roll_dev", "trunk_roll_dev"):
+    for k in ("track_trunk_wide", "head_dev", "head_roll_dev", "trunk_roll_dev", "trunk_yaw_dev", "track_height_wide",
+              "settle_legs_dev"):
         assert k not in r, k                                                     # dance-only terms (DataMotion)
+    assert r["joint_overspeed"].params["threshold"] == 5.0
+    m = cfg.scene.entities["robot"].spec_fn().compile()
+    assert m.jnt_range[m.joint("left_hip_roll").id][1] < 0.39                   # the export's hip roll range
 
 
 def test_r2_tasks_registered_from_scratch():

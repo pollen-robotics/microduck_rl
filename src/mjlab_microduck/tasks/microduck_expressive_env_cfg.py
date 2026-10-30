@@ -17,6 +17,7 @@ has to come from the joints, not from sliding the feet.
 
 import math
 from copy import deepcopy
+from dataclasses import replace
 from functools import lru_cache
 
 import mujoco
@@ -27,7 +28,7 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg
 from mjlab.tasks.velocity import mdp
 
-from mjlab_microduck.robot.microduck_constants import get_ground_pick_spec
+from mjlab_microduck.robot.microduck_constants import MICRODUCK_GROUND_PICK_ROBOT_CFG, get_ground_pick_spec
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.expressive_motions import DataMotion, get_motion, osc_channels, peak_rate
 from mjlab_microduck.tasks.microduck_ground_pick_env_cfg import make_microduck_ground_pick_env_cfg
@@ -75,12 +76,29 @@ DATA_MAX_ITERATIONS = 7000      # 18.25 s episodes (912 steps): ~6x longer than 
 W_HEAD_DEV, HEAD_DEV_FREE = -5.0, 0.25            # head_pitch + head_yaw (also stops the -146° yaw at the end)
 W_HEAD_ROLL_DEV, HEAD_ROLL_DEV_FREE = -5.0, 0.15  # head_roll (range ±0.44, reference ±0.35)
 W_TRUNK_ROLL_DEV, TRUNK_ROLL_DEV_FREE = -10.0, 0.05   # trunk roll: ~3° free, errors are ~5x smaller than the head's
+# Data motions, v3 (2026-10-30, LEDGER "Tremendous v3"): the dance gets trunk twists (yaw), a squash bounce (dz to
+# -21 mm), the real hip-roll range, and a longer still tail. r2 A ended ~13° off HOME at the hips / ankles (the 0.15-std
+# settle_legs kernel has little gradient there) and the stand net stepped + turned 28° after the hand-back.
+W_TRUNK_YAW_DEV, TRUNK_YAW_DEV_FREE = -10.0, 0.05     # trunk yaw: same linear cost as the roll
+W_TRACK_HEIGHT_WIDE, STD_HEIGHT_WIDE = 1.0, 0.012     # dz: the 4 mm kernel alone is blind 15 mm off
+W_SETTLE_LEGS_DEV, SETTLE_LEGS_DEV_FREE = -4.0, 0.03  # per rad of |leg joint - HOME| beyond 0.03, in the settle window
 
 
-@lru_cache(maxsize=1)
-def expressive_joint_limits() -> dict:
-    """{servo joint: (lo, hi)} on the ground-pick model, in the 14-servo order."""
-    m = get_ground_pick_spec().compile()
+def _hip_roll_spec(hip_roll: float):
+    def spec_fn() -> mujoco.MjSpec:
+        """The ground-pick robot with the real hip-roll range (ground_grasp.py: the export's +-0.384 is conservative,
+        the physical robot was posed at 0.463 rad and rests at -0.566)."""
+        spec = get_ground_pick_spec()
+        for jn in ("left_hip_roll", "right_hip_roll"):
+            spec.joint(jn).range = [-hip_roll, hip_roll]
+        return spec
+    return spec_fn
+
+
+@lru_cache(maxsize=4)
+def expressive_joint_limits(hip_roll: float | None = None) -> dict:
+    """{servo joint: (lo, hi)} on the ground-pick model (hip roll +-`hip_roll` if given), in the 14-servo order."""
+    m = (get_ground_pick_spec() if hip_roll is None else _hip_roll_spec(hip_roll)()).compile()
     return {jn: tuple(float(v) for v in m.jnt_range[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, jn)])
             for jn in SERVO_JOINTS}
 
@@ -88,6 +106,9 @@ def expressive_joint_limits() -> dict:
 def make_microduck_expressive_env_cfg(motion: str, play: bool = False) -> ManagerBasedRlEnvCfg:
     mo = get_motion(motion)
     cfg = make_microduck_ground_pick_env_cfg(play=play, rough=False)
+    hip_roll = getattr(mo, "hip_roll_range", None)
+    if hip_roll is not None:
+        cfg.scene.entities = {"robot": replace(MICRODUCK_GROUND_PICK_ROBOT_CFG, spec_fn=_hip_roll_spec(hip_roll))}
 
     # ── One motion per episode, from φ = 0 (standing) ──────────────────────────
     cfg.episode_length_s = mo.period
@@ -131,11 +152,11 @@ def make_microduck_expressive_env_cfg(motion: str, play: bool = False) -> Manage
     cfg.rewards["body_ang_vel"].weight = -0.02
     cfg.rewards["angular_momentum"].weight = -0.01
     cfg.rewards["joint_overspeed"] = RewardTermCfg(
-        func=microduck_mdp.joint_overspeed_penalty, weight=0.15, params={"threshold": 5.0},
+        func=microduck_mdp.joint_overspeed_penalty, weight=0.15, params={"threshold": getattr(mo, "overspeed", 5.0)},
     )
     jp = cfg.actions["joint_pos"]
     assert isinstance(jp, JointPositionActionCfg)
-    limits = expressive_joint_limits()
+    limits = expressive_joint_limits(hip_roll)
     jp.clip = {jn: (lo - TARGET_CLIP_MARGIN, hi + TARGET_CLIP_MARGIN) for jn, (lo, hi) in limits.items()}
     cfg.rewards["action_overrun"] = RewardTermCfg(
         func=microduck_mdp.action_target_overrun_l1, weight=ACTION_OVERRUN_WEIGHT,
@@ -158,14 +179,27 @@ def make_microduck_expressive_env_cfg(motion: str, play: bool = False) -> Manage
     if isinstance(mo, DataMotion):
         cfg.rewards["track_trunk_wide"] = RewardTermCfg(
             func=microduck_mdp.ex_track, weight=W_TRACK_TRUNK_WIDE,
-            params={"motion": motion, "channels": ("roll", "pitch"), "std": STD_TRUNK_WIDE, "command_name": "twist"},
+            params={"motion": motion, "channels": ("roll", "pitch", "yaw") if mo.v3 else ("roll", "pitch"),
+                    "std": STD_TRUNK_WIDE, "command_name": "twist"},
         )
-        for name, w, chs, free in (("head_dev", W_HEAD_DEV, ("head_pitch", "head_yaw"), HEAD_DEV_FREE),
-                                   ("head_roll_dev", W_HEAD_ROLL_DEV, ("head_roll",), HEAD_ROLL_DEV_FREE),
-                                   ("trunk_roll_dev", W_TRUNK_ROLL_DEV, ("roll",), TRUNK_ROLL_DEV_FREE)):
+        devs = [("head_dev", W_HEAD_DEV, ("head_pitch", "head_yaw"), HEAD_DEV_FREE),
+                ("head_roll_dev", W_HEAD_ROLL_DEV, ("head_roll",), HEAD_ROLL_DEV_FREE),
+                ("trunk_roll_dev", W_TRUNK_ROLL_DEV, ("roll",), TRUNK_ROLL_DEV_FREE)]
+        if mo.v3:
+            devs.append(("trunk_yaw_dev", W_TRUNK_YAW_DEV, ("yaw",), TRUNK_YAW_DEV_FREE))
+        for name, w, chs, free in devs:
             cfg.rewards[name] = RewardTermCfg(
                 func=microduck_mdp.ex_head_dev_cost, weight=w,
                 params={"motion": motion, "channels": chs, "free": free, "command_name": "twist"},
+            )
+        if mo.v3:
+            cfg.rewards["track_height_wide"] = RewardTermCfg(
+                func=microduck_mdp.ex_track, weight=W_TRACK_HEIGHT_WIDE,
+                params={"motion": motion, "channels": ("dz",), "std": STD_HEIGHT_WIDE, "command_name": "twist"},
+            )
+            cfg.rewards["settle_legs_dev"] = RewardTermCfg(
+                func=microduck_mdp.ex_settle_legs_dev, weight=W_SETTLE_LEGS_DEV,
+                params={"settle_from": mo.settle_from, "free": SETTLE_LEGS_DEV_FREE, "command_name": "twist", **_ramp(mo)},
             )
 
     # ── A fall ends the episode ────────────────────────────────────────────────
