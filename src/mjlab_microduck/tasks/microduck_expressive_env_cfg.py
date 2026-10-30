@@ -29,7 +29,7 @@ from mjlab.tasks.velocity import mdp
 
 from mjlab_microduck.robot.microduck_constants import get_ground_pick_spec
 from mjlab_microduck.tasks import mdp as microduck_mdp
-from mjlab_microduck.tasks.expressive_motions import DataMotion, get_motion, osc_channels, peak_rate
+from mjlab_microduck.tasks.expressive_motions import DataMotion, StepMotion, get_motion, osc_channels, peak_rate
 from mjlab_microduck.tasks.microduck_ground_pick_env_cfg import make_microduck_ground_pick_env_cfg
 from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg
 
@@ -75,6 +75,19 @@ DATA_MAX_ITERATIONS = 7000      # 18.25 s episodes (912 steps): ~6x longer than 
 W_HEAD_DEV, HEAD_DEV_FREE = -5.0, 0.25            # head_pitch + head_yaw (also stops the -146° yaw at the end)
 W_HEAD_ROLL_DEV, HEAD_ROLL_DEV_FREE = -5.0, 0.15  # head_roll (range ±0.44, reference ±0.35)
 W_TRUNK_ROLL_DEV, TRUNK_ROLL_DEV_FREE = -10.0, 0.05   # trunk roll: ~3° free, errors are ~5x smaller than the head's
+# STEPPING dance (2026-10-30, branch dance-steps, notes/dodge/steps/LEDGER.md): the planted-feet costs (drift from the
+# start, any lift, any foot speed, both feet grounded) are replaced by a contact schedule + foot targets. Profile
+# "base"; "feet" (the hedge run) doubles the step terms.
+STEP_TERMS = {   # name: (weight, params)
+    "step_foot_track": (3.0, {"std": 0.015}),        # foot displacement vs the reference (horizontal)
+    "step_foot_dev": (-20.0, {"free": 0.01}),        # linear beyond 1 cm: gradient even when the foot never moved
+    "step_contact": (1.5, {}),                       # contact found == schedule
+    "step_clearance": (2.0, {"std": 0.008}),         # swing foot at the reference clearance (18 mm apex)
+    "step_unscheduled_lift": (-100.0, {"tol": 0.003}),   # a foot scheduled down stays down (no shuffle)
+    "step_root": (1.0, {"std": 0.02}),               # root displacement (lunge / recoil / weight shifts)
+}
+W_STEP_SLIP = -3.0        # per m/s of contact-gated foot speed (+ pivot speed x 2 cm): never a slide
+STEP_PROFILES = {"base": 1.0, "feet": 2.0}
 
 
 @lru_cache(maxsize=1)
@@ -85,7 +98,7 @@ def expressive_joint_limits() -> dict:
             for jn in SERVO_JOINTS}
 
 
-def make_microduck_expressive_env_cfg(motion: str, play: bool = False) -> ManagerBasedRlEnvCfg:
+def make_microduck_expressive_env_cfg(motion: str, play: bool = False, step_profile: str = "base") -> ManagerBasedRlEnvCfg:
     mo = get_motion(motion)
     cfg = make_microduck_ground_pick_env_cfg(play=play, rough=False)
 
@@ -168,6 +181,9 @@ def make_microduck_expressive_env_cfg(motion: str, play: bool = False) -> Manage
                 params={"motion": motion, "channels": chs, "free": free, "command_name": "twist"},
             )
 
+    if isinstance(mo, StepMotion):
+        _add_step_terms(cfg, motion, STEP_PROFILES[step_profile])
+
     # ── A fall ends the episode ────────────────────────────────────────────────
     cfg.terminations["fell_over"] = TerminationTermCfg(
         func=mdp.bad_orientation, params={"limit_angle": math.radians(FALL_ANGLE_DEG)}, time_out=False,
@@ -202,6 +218,25 @@ def _add_round2_terms(cfg: ManagerBasedRlEnvCfg, motion: str, mo) -> None:
         func=microduck_mdp.ex_settle_still, weight=W_SETTLE_STILL,
         params={"settle_from": mo.settle_from, "command_name": "twist", **_ramp(mo)},
     )
+
+
+def _add_step_terms(cfg: ManagerBasedRlEnvCfg, motion: str, scale: float) -> None:
+    """Stepping dance: replace the planted-feet costs by the contact schedule + foot targets (STEP_TERMS x scale),
+    a contact-gated slip cost, and a flat-foot cost on the loaded feet only."""
+    for name in ("feet_drift", "feet_lift", "foot_slip", "feet_grounded"):
+        cfg.rewards.pop(name, None)
+    funcs = {"step_foot_track": microduck_mdp.ex_step_foot_track, "step_foot_dev": microduck_mdp.ex_step_foot_dev,
+             "step_contact": microduck_mdp.ex_step_contact, "step_clearance": microduck_mdp.ex_step_clearance,
+             "step_unscheduled_lift": microduck_mdp.ex_step_unscheduled_lift, "step_root": microduck_mdp.ex_step_root_track}
+    for name, (w, params) in STEP_TERMS.items():
+        cfg.rewards[name] = RewardTermCfg(func=funcs[name], weight=w * scale,
+                                          params={"motion": motion, "command_name": "twist", **params})
+    cfg.rewards["step_slip"] = RewardTermCfg(func=microduck_mdp.ex_step_slip, weight=W_STEP_SLIP * scale,
+                                             params={"sensor_name": "feet_ground_contact"})
+    cfg.rewards["feet_flat"].params["sensor_name"] = "feet_ground_contact"
+    critic = cfg.observations["critic"].terms
+    critic["ex_step_ref"] = ObservationTermCfg(func=microduck_mdp.ex_step_ref_obs, params={"motion": motion})
+    critic["ex_step_err"] = ObservationTermCfg(func=microduck_mdp.ex_step_err_obs, params={"motion": motion})
 
 
 def _ramp(mo) -> dict:

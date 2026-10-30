@@ -434,3 +434,21 @@ for _name in _EXPRESSIVE_DATA_MOTIONS:
         rl_cfg=make_expressive_rl_cfg(_name),
         runner_cls=MicroduckOnPolicyRunner,
     )
+
+# STEPPING dance (2026-10-30, branch dance-steps, notes/dodge/steps): contact schedule + foot targets, from scratch.
+# "TremendousSteps" = base step weights; "TremendousSteps-Feet" = the hedge with the step terms x2.
+from .expressive_motions import STEP_MOTIONS as _EXPRESSIVE_STEP_MOTIONS  # noqa: E402
+
+for _name in _EXPRESSIVE_STEP_MOTIONS:
+    _tid = _name.replace("-", "")
+    for _prof, _suffix in (("base", ""), ("feet", "-Feet")):
+        _rl = make_expressive_rl_cfg(_name)
+        if _suffix:
+            _rl.experiment_name = _rl.run_name = _rl.experiment_name + "_feet"
+        register_mjlab_task(
+            task_id=f"Mjlab-Expressive-{_tid}{_suffix}-MicroDuck",
+            env_cfg=make_microduck_expressive_env_cfg(_name, step_profile=_prof),
+            play_env_cfg=make_microduck_expressive_env_cfg(_name, play=True, step_profile=_prof),
+            rl_cfg=_rl,
+            runner_cls=MicroduckOnPolicyRunner,
+        )

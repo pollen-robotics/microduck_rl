@@ -8180,7 +8180,8 @@ def _ex_cache(env: ManagerBasedRlEnv) -> dict:
     c = getattr(env, "_ex_cache", None)
     if c is None:
         c = {"step": -1, "yaw0": torch.zeros(env.num_envs, device=env.device),
-             "feet0": torch.zeros(env.num_envs, 2, 3, device=env.device)}
+             "feet0": torch.zeros(env.num_envs, 2, 3, device=env.device),
+             "root0": torch.zeros(env.num_envs, 2, device=env.device)}
         env._ex_cache = c
     return c
 
@@ -8194,6 +8195,7 @@ def _ex_update(env: ManagerBasedRlEnv) -> dict:
         if cap.any():
             c["yaw0"] = torch.where(cap, _ex_trunk_rpy(env)[:, 2], c["yaw0"])
             c["feet0"] = torch.where(cap[:, None, None], _ex_feet_pos(env), c["feet0"])
+            c["root0"] = torch.where(cap[:, None], env.scene["robot"].data.root_link_pos_w[:, :2], c["root0"])
     return c
 
 
@@ -8344,3 +8346,127 @@ def ex_settle_still(
     phi = _gp_phase(env, command_name)
     gate = 0.5 - 0.5 * torch.cos(torch.pi * torch.clamp((phi - settle_from) / ramp, 0.0, 1.0))
     return torch.nan_to_num(gate * _servo_joint_vel(env, robot).pow(2).sum(dim=-1), nan=0.0)
+
+
+
+# ── STEPPING dance (2026-10-30, branch dance-steps): contact schedule + foot targets ────────────────────────────────
+# The reference (expressive_motions.step_reference) gives, per foot, the horizontal DISPLACEMENT from its φ = 0 position
+# in the start heading frame, the swing clearance, the contact schedule (1 = loaded), and the root displacement.
+# Measured counterparts use the per-episode captures of _ex_update (feet0, root0, yaw0).
+def _ex_step_ref(env: ManagerBasedRlEnv, motion: str, command_name: str) -> torch.Tensor:
+    return _exm.step_reference(_exm.get_motion(motion), _gp_phase(env, command_name))
+
+
+def _ex_to_start_frame(env: ManagerBasedRlEnv, xy: torch.Tensor) -> torch.Tensor:
+    """Rotate world xy displacements (N, ..., 2) by -yaw0 (the start heading)."""
+    c = _ex_cache(env)
+    cy, sy = torch.cos(c["yaw0"]), torch.sin(c["yaw0"])
+    while cy.dim() < xy.dim() - 1:
+        cy, sy = cy.unsqueeze(-1), sy.unsqueeze(-1)
+    x, y = xy[..., 0], xy[..., 1]
+    return torch.stack((cy * x + sy * y, -sy * x + cy * y), dim=-1)
+
+
+def _ex_feet_step_state(env: ManagerBasedRlEnv):
+    """(disp (N, 2, 2) per-foot horizontal displacement in the start frame, clearance (N, 2) above the start height)."""
+    c = _ex_update(env)
+    feet = _ex_feet_pos(env)
+    disp = _ex_to_start_frame(env, feet[..., :2] - c["feet0"][..., :2])
+    return disp, feet[..., 2] - c["feet0"][..., 2]
+
+
+def _ex_ref_feet(ref: torch.Tensor):
+    disp = torch.stack((ref[:, [_exm.SC["lf_x"], _exm.SC["lf_y"]]], ref[:, [_exm.SC["rf_x"], _exm.SC["rf_y"]]]), dim=1)
+    clear = ref[:, [_exm.SC["lf_z"], _exm.SC["rf_z"]]]
+    contact = ref[:, [_exm.SC["l_contact"], _exm.SC["r_contact"]]]
+    return disp, clear, contact
+
+
+def _ex_contact_found(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
+    found = env.scene.sensors[sensor_name].data.found       # contact COUNT per foot (can exceed 1): -> 0 / 1
+    return (found.reshape(env.num_envs, -1)[:, :2] > 0).float()
+
+
+def ex_step_foot_track(env: ManagerBasedRlEnv, motion: str, std: float = 0.015,
+                       command_name: str = "twist") -> torch.Tensor:
+    """Mean over the feet of exp(-(|foot displacement - reference| / std)^2) (horizontal). Positive weight."""
+    disp, _ = _ex_feet_step_state(env)
+    rdisp, _, _ = _ex_ref_feet(_ex_step_ref(env, motion, command_name))
+    err = torch.linalg.norm(disp - rdisp, dim=-1)
+    return torch.nan_to_num(torch.exp(-(err / std) ** 2).mean(dim=-1), nan=0.0)
+
+
+def ex_step_foot_dev(env: ManagerBasedRlEnv, motion: str, free: float = 0.01,
+                     command_name: str = "twist") -> torch.Tensor:
+    """COST (>= 0): summed foot placement error beyond `free` (m), linear (gradient however far off)."""
+    disp, _ = _ex_feet_step_state(env)
+    rdisp, _, _ = _ex_ref_feet(_ex_step_ref(env, motion, command_name))
+    err = torch.linalg.norm(disp - rdisp, dim=-1)
+    return torch.nan_to_num(torch.clamp(err - free, min=0.0, max=0.2).sum(dim=-1), nan=0.0)
+
+
+def ex_step_contact(env: ManagerBasedRlEnv, motion: str, sensor_name: str = "feet_ground_contact",
+                    command_name: str = "twist") -> torch.Tensor:
+    """Mean over the feet of 1 - |contact found - scheduled contact| (the schedule is interpolated, so the frames
+    around a lift-off / touch-down give half credit). Positive weight."""
+    _, _, rc = _ex_ref_feet(_ex_step_ref(env, motion, command_name))
+    found = _ex_contact_found(env, sensor_name)
+    return torch.nan_to_num(1.0 - (found - rc).abs().mean(dim=-1), nan=0.0)
+
+
+def ex_step_clearance(env: ManagerBasedRlEnv, motion: str, std: float = 0.008,
+                      command_name: str = "twist") -> torch.Tensor:
+    """During a scheduled swing: exp(-((clearance - reference clearance) / std)^2), weighted by (1 - schedule) and
+    summed over the feet (0 when both feet are scheduled down). Positive weight: a foot that does not lift earns nothing."""
+    _, clear = _ex_feet_step_state(env)
+    _, rclear, rc = _ex_ref_feet(_ex_step_ref(env, motion, command_name))
+    k = torch.exp(-((clear - rclear) / std) ** 2)
+    return torch.nan_to_num(((1.0 - rc) * k).sum(dim=-1), nan=0.0)
+
+
+def ex_step_slip(env: ManagerBasedRlEnv, sensor_name: str = "feet_ground_contact",
+                 toe: float = 0.02) -> torch.Tensor:
+    """COST (>= 0): contact-gated foot slip: summed over feet in contact of the horizontal foot-site speed plus the
+    pivot speed |yaw rate| x `toe` (m/s). A step is fine, a slide or a pivot on a loaded foot is not."""
+    robot: Entity = env.scene["robot"]
+    _ex_feet_pos(env)
+    ids = _ex_cache(env)["feet_ids"]
+    v = torch.linalg.norm(robot.data.site_lin_vel_w[:, ids, :2], dim=-1)
+    w = robot.data.site_ang_vel_w[:, ids, 2].abs() if hasattr(robot.data, "site_ang_vel_w") else torch.zeros_like(v)
+    found = _ex_contact_found(env, sensor_name)
+    return torch.nan_to_num((found * (v + toe * w)).sum(dim=-1), nan=0.0)
+
+
+def ex_step_unscheduled_lift(env: ManagerBasedRlEnv, motion: str, tol: float = 0.003, max_h: float = 0.05,
+                             command_name: str = "twist") -> torch.Tensor:
+    """COST (>= 0): clearance beyond `tol` (m) of a foot scheduled to be DOWN (weighted by the schedule): no extra
+    steps, no shuffling."""
+    _, clear = _ex_feet_step_state(env)
+    _, _, rc = _ex_ref_feet(_ex_step_ref(env, motion, command_name))
+    return torch.nan_to_num((rc * torch.clamp(clear - tol, min=0.0, max=max_h)).sum(dim=-1), nan=0.0)
+
+
+def ex_step_root_track(env: ManagerBasedRlEnv, motion: str, std: float = 0.02,
+                       command_name: str = "twist") -> torch.Tensor:
+    """exp(-(|root displacement - reference| / std)^2) (horizontal, start frame): the weight shifts / lunges."""
+    c = _ex_update(env)
+    d = _ex_to_start_frame(env, env.scene["robot"].data.root_link_pos_w[:, :2] - c["root0"])
+    ref = _ex_step_ref(env, motion, command_name)[:, [_exm.SC["root_x"], _exm.SC["root_y"]]]
+    return torch.nan_to_num(torch.exp(-(torch.linalg.norm(d - ref, dim=-1) / std) ** 2), nan=0.0)
+
+
+def ex_step_ref_obs(env: ManagerBasedRlEnv, motion: str, command_name: str = "twist") -> torch.Tensor:
+    """Critic: the step reference (12)."""
+    return torch.nan_to_num(_ex_step_ref(env, motion, command_name), nan=0.0)
+
+
+def ex_step_err_obs(env: ManagerBasedRlEnv, motion: str, sensor_name: str = "feet_ground_contact",
+                    command_name: str = "twist") -> torch.Tensor:
+    """Critic: foot displacement error (4), clearance error (2), contact found (2)."""
+    c = _ex_cache(env)
+    if c["step"] < 0:
+        return torch.zeros(env.num_envs, 8, device=env.device)
+    disp, clear = _ex_feet_step_state(env)
+    rdisp, rclear, _ = _ex_ref_feet(_ex_step_ref(env, motion, command_name))
+    out = torch.cat(((disp - rdisp).reshape(env.num_envs, 4), clear - rclear, _ex_contact_found(env, sensor_name)), dim=-1)
+    return torch.nan_to_num(out, nan=0.0)

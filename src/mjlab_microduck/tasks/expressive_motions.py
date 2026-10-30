@@ -229,7 +229,9 @@ TRUNK_CHANNELS = ("roll", "pitch", "yaw", "dz")
 
 
 def get_motion(key: str):
-    return ALL_MOTIONS[key] if key in ALL_MOTIONS else DATA_MOTIONS[key]
+    if key in ALL_MOTIONS:
+        return ALL_MOTIONS[key]
+    return DATA_MOTIONS[key] if key in DATA_MOTIONS else STEP_MOTIONS[key]
 
 
 def reference_rate(motion: Motion, phi: torch.Tensor, h: float = 0.002) -> torch.Tensor:
@@ -308,3 +310,55 @@ DATA_MOTIONS = {
     "Tremendous-70": DataMotion("Tremendous", 18.25, "tremendous_planted.csv", trunk_scale=0.7,
                                 note=_TREMENDOUS_NOTE + "; trunk channels x0.7, head unchanged (safer variant)"),
 }
+
+
+# ── STEPPING Tremendous (2026-10-30, branch dance-steps, notes/dodge/steps) ─────────────────────────────────────────
+# Same dance (combo A, 110 BPM, T = 18.25 s) but the legs take REAL STEPS: one foot at a time lifts (18 mm clearance),
+# moves, lands and stays put while loaded. Reference = notes/dodge/steps/tools/steps_ref.py: every recorded pose re-solved
+# on its stance on the training model (full lean-back, trunk twist, legs >= 4 mm off the battery), whole-body IK every
+# frame. 4 steps: the left foot steps back into limbo_L (beat 9) and home into sky_R (beat 12), the right foot back
+# into limbo_R (beat 21) and home into slip_L (beat 24); the dips lunge over the front foot.
+# File columns: t, the 8 REF_CHANNELS, their rates, then STEP_COLS (foot sites in the start frame, contact schedule,
+# root xy). The step tables are used as DISPLACEMENTS from φ = 0 (robust to the spawn stance).
+STEP_COLS = ("lf_x", "lf_y", "lf_yaw", "lf_z", "rf_x", "rf_y", "rf_yaw", "rf_z", "l_contact", "r_contact",
+             "root_x", "root_y")
+SC = {n: i for i, n in enumerate(STEP_COLS)}
+
+
+@dataclass(frozen=True)
+class StepMotion(DataMotion):
+    """A data motion with a contact schedule and foot targets (the stepping dance)."""
+
+
+_STEP_CACHE: dict = {}
+
+
+def _step_table(motion: StepMotion, device, dtype):
+    """(dt, (n, 12) table): foot / root xy as displacements from the first row, yaw and clearance as stored."""
+    key = (motion.file, str(device), dtype)
+    if key not in _STEP_CACHE:
+        a = np.loadtxt(MOTION_DATA / motion.file, delimiter=",", comments="#")[:, 17:17 + len(STEP_COLS)].copy()
+        for c in ("lf_x", "lf_y", "rf_x", "rf_y", "root_x", "root_y"):
+            a[:, SC[c]] -= a[0, SC[c]]
+        t = np.loadtxt(MOTION_DATA / motion.file, delimiter=",", comments="#", usecols=0)
+        _STEP_CACHE[key] = (float(t[1] - t[0]), torch.as_tensor(a, device=device, dtype=dtype))
+    return _STEP_CACHE[key]
+
+
+def step_reference(motion: StepMotion, phi: torch.Tensor) -> torch.Tensor:
+    """(N,) phase -> (N, 12) step channels (STEP_COLS order; xy as displacements from φ = 0, contact in [0, 1])."""
+    dt, tab = _step_table(motion, phi.device, phi.dtype)
+    x = torch.clamp(phi * motion.period / dt, 0.0, tab.shape[0] - 1.0)
+    i0 = torch.clamp(x.floor().long(), max=tab.shape[0] - 2)
+    w = (x - i0.to(x.dtype)).unsqueeze(-1)
+    return tab[i0] * (1.0 - w) + tab[i0 + 1] * w
+
+
+_STEPS_NOTE = ("dodge dance A (Tremendous) WITH STEPS: slips / sways with a trunk twist, the left then the right foot "
+               "steps back into the limbo and home into the sky / slip, dips lunge over the front foot; beak to the "
+               "sky in bar 4 and at the end; starts and ends on the stand footprint")
+STEP_MOTIONS = {
+    "Tremendous-Steps": StepMotion("Tremendous-Steps", 18.25, "tremendous_steps.csv", note=_STEPS_NOTE,
+                                   rate_channels=("roll", "pitch", "yaw", "dz")),
+}
+DATA_MOTIONS_ALL = {**DATA_MOTIONS, **STEP_MOTIONS}
