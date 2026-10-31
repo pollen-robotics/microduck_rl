@@ -511,6 +511,10 @@ GEAR_IMPACT_THRESH = 0.4
 # of the wear is (fall phase ≈ 60 % of it). Rise wear −35 %, walking unchanged. So bill only
 # past 25° of tilt (the eval's "upright" line): landings, lying and the rise are all beyond it.
 GEAR_GATE_TILT_DEG = 25.0
+# Per-joint cost weights ({regex: w}, unmatched → 1). The robots break knees, hip pitch and neck
+# pitch; in sim v8 holds neck pitch at max torque ≈ 30 % of its time on the ground, and hip yaw's
+# sim wear is mostly back-driving on landings, which no robot has shown.
+GEAR_JOINT_WEIGHTS = {r".*_knee": 3.0, r".*_hip_pitch": 2.0, r"neck_pitch": 3.0, r".*_hip_yaw": 0.3}
 ENABLE_LABEL_HOLD_CLAMP = True
 LABEL_HOLD_JOINTS = (2, 3, 5, 11, 12)   # hip_pitch, knee (both legs), neck_pitch
 # Stall torque per rad of error at P gain 200: BAM 0.56 N·m/rad, the bench motors ≈ 0.9
@@ -994,15 +998,19 @@ def make_microduck_velstand_env_cfg(play: bool = False, rough: bool = False) -> 
             func=microduck_mdp.gear_hold_cost,
             weight=GEAR_HOLD_WEIGHT * GEAR_STAGE0_FRAC,
             params={"threshold": GEAR_HOLD_TORQUE, "vel_thresh": GEAR_HOLD_VEL,
-                    "gate_tilt_above_deg": GEAR_GATE_TILT_DEG},
+                    "joint_weights": GEAR_JOINT_WEIGHTS, "gate_tilt_above_deg": GEAR_GATE_TILT_DEG},
         )
-        cfg.rewards["gear_impact"] = RewardTermCfg(
-            func=microduck_mdp.gear_impact_cost,
-            weight=GEAR_IMPACT_WEIGHT * GEAR_STAGE0_FRAC,
-            params={"threshold": GEAR_IMPACT_THRESH, "power": 2.0, "gate_tilt_above_deg": GEAR_GATE_TILT_DEG},
-        )
+        gear_terms = [("gear_hold", GEAR_HOLD_WEIGHT)]
+        if GEAR_IMPACT_WEIGHT:
+            cfg.rewards["gear_impact"] = RewardTermCfg(
+                func=microduck_mdp.gear_impact_cost,
+                weight=GEAR_IMPACT_WEIGHT * GEAR_STAGE0_FRAC,
+                params={"threshold": GEAR_IMPACT_THRESH, "power": 2.0,
+                        "joint_weights": GEAR_JOINT_WEIGHTS, "gate_tilt_above_deg": GEAR_GATE_TILT_DEG},
+            )
+            gear_terms.append(("gear_impact", GEAR_IMPACT_WEIGHT))
         if not play:
-            for name, full in (("gear_hold", GEAR_HOLD_WEIGHT), ("gear_impact", GEAR_IMPACT_WEIGHT)):
+            for name, full in gear_terms:
                 cfg.curriculum[f"{name}_weight"] = CurriculumTermCfg(
                     func=microduck_mdp.reward_weight,
                     params={
