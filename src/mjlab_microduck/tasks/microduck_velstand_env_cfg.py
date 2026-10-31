@@ -503,7 +503,7 @@ GEAR_STAGE0_FRAC = 0.25
 GEAR_HOLD_WEIGHT = -3.0
 GEAR_HOLD_TORQUE = 0.3
 GEAR_HOLD_VEL = 0.5
-GEAR_IMPACT_WEIGHT = -1.0
+GEAR_IMPACT_WEIGHT = 0.0   # ablation: hold cost only
 GEAR_IMPACT_THRESH = 0.4
 # Run 1 (HF job 6ae4c9ad, ungated) at iter 3000, 3 seeds of 32 envs × 20 s pushed every 3-5 s
 # (scripts/gear_wear_eval.py --scenario push): falls 117/132/139 vs v8's 106/105/103 — the costs
