@@ -3,7 +3,12 @@
 The backpack is the orange box on the robot's back. It holds a Tattu 2S 650 mAh LiPo standing upright, a Swann 39
 rocker switch in its floor, and a DFRobot DFR1202 5 V buck converter for the head board; it bolts on where the bench
 power box does, with the same four screws, and is swapped for that box when the robot runs from the bench supply.
-Decision record D-010 (2026-10-15), refitted to the Swann switch on 2026-10-17; the robot prints are V1.20.
+Decision record D-010 (2026-10-15), refitted to the Swann switch on 2026-10-17; the last numbered robot prints are V1.20.
+
+**The STL files in `stl/` are now the battery-on-the-cap redesign, not V1.20.** The battery rides in a cradle on the cap, held by
+two screwed bars, and its leads leave through the roof: see [../battery-redesign/README.md](../battery-redesign/README.md), which
+replaces the pocket, cap and plug details below. The rest of this page, the design record, renders and checks here still
+describe V1.20; the V1.20 frame and cap are kept in `../battery-redesign/v120-source/` and `../printing/ready/V1.20/`.
 
 Read in this order: the renders (`renders/TEAM-sheet.png`, `renders/BP-sheet.png`, why the battery stands upright in
 `renders/lead-bend-explainer.png`), then [DESIGN-D010.md](DESIGN-D010.md) (what is inside, how each part is held, the
@@ -38,7 +43,7 @@ itself, the cap screws (now 3 x M2 x 8, 3.0 mm screw-head floors; the 1.0 mm flo
 
 ## Files
 
-- `stl/`: `battery_backpack_frame-world.stl` and `battery_backpack_cap-world.stl` in the robot frame (design against
+- `stl/` (redesign, owned in this fork): `battery_backpack_{frame,cap,bar}-world.stl` in the robot frame (design against
   these); `*-print.stl` the same solids in their print pose, lowest point on z = 0 (drag these into a slicer).
 - `mating/`: the robot parts next to the box, robot frame: `rear_pack.stl` (the V1.9 pack the box screws onto, with
   the posts), `rear_frame.stl` and `rear_lid.stl` (the bench power box and its cap: the sibling design with the same

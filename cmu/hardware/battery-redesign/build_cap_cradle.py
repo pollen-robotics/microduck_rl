@@ -4,13 +4,16 @@ bars across the battery's front face, each held by 2 x M2 x 6. The stiff battery
 that straddle the cap seam, plug 1 sits on top of the box, and lead S comes back in through a third opening in the frame roof.
 Unplug plug 1 on top, then the 3 cap screws take the cap, cradle, bars and battery off together. The box grows 1.1 mm deeper
 (frame rim slab copied back, cap moved back). World frame mm, x forward, y left, z up. Builds from the V1.20 world STLs in
-cmu/hardware/battery-backpack and writes battery_backpack_{frame,cap,bar}-{world,print}.stl (the bar files hold both bars),
-battery_backpack_cradle_added-world.stl (the cradle alone, for the viewer's highlight), removed_recess.stl and checks.json:
+v120-source/ next to this script, with the envelopes and mating parts in cmu/hardware/battery-backpack, and writes
+battery_backpack_{frame,cap,bar}-{world,print}.stl (the current parts, kept in cmu/hardware/battery-backpack/stl; the bar files
+hold both bars), battery_backpack_cradle_added-world.stl (the cradle alone, kept in viewer/ for its highlight),
+removed_recess.stl and checks.json:
 
     uv run --with trimesh --with manifold3d python cmu/hardware/battery-redesign/build_cap_cradle.py \\
         cmu/hardware/battery-backpack OUT_DIR
 """
 import json, sys, numpy as np, trimesh, manifold3d as mf
+from pathlib import Path
 BP, OUT = sys.argv[1], sys.argv[2]
 def load(p): m = trimesh.load(p, force='mesh', process=True); m.merge_vertices(); return m
 def to_mf(m): return mf.Manifold(mf.Mesh(vert_properties=np.asarray(m.vertices, np.float32), tri_verts=np.asarray(m.faces, np.uint32)))
@@ -45,7 +48,8 @@ SEAM_X = (-71.5, -64.6)
 OPEN_MAIN_Y, OPEN_BAL_Y = (-14.0, -2.0), (7.0, 17.0)
 OPEN_S = dict(x=(-60.0, -49.0), y=(-25.0, -18.5))                      # frame only: lead S back in, passes its XT30; long side in x so the print bridge is 6.5 mm
 
-F0 = to_mf(load(f'{BP}/stl/battery_backpack_frame-world.stl')); C0 = to_mf(load(f'{BP}/stl/battery_backpack_cap-world.stl'))
+V120 = Path(__file__).resolve().parent / 'v120-source'
+F0 = to_mf(load(f'{V120}/battery_backpack_frame-world.stl')); C0 = to_mf(load(f'{V120}/battery_backpack_cap-world.stl'))
 
 # ---- frame: grow 1.1 at the rim, cut a 1.5 mm recess in the floor for the cradle floor. Switch and DFR untouched.
 slab = F0 ^ box((X_SPLIT, -40, -40), (X_SPLIT + GROW + 0.5, 40, 50))   # 0.5 mm overlap: a face-to-face join at the old rim

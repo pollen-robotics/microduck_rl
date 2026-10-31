@@ -111,8 +111,8 @@ FILES += [
     (f"{REL}/run/delivery-folder/zhengxia_MicroDuck_V1.20/Elegoo/zhengxia_V1.20_Orange_Elegoo-Centauri-Carbon_2h22m.gcode",
      f"{HWP}/ready/V1.20/Elegoo/zhengxia_V1.20_Orange_Elegoo-Centauri-Carbon_2h22m.gcode"),
 ]
-add(BP, f"{HWB}/stl", ["battery_backpack_frame-world.stl", "battery_backpack_cap-world.stl",
-                       "battery_backpack_frame-print.stl", "battery_backpack_cap-print.stl"])
+# hardware/battery-backpack/stl is owned here since the battery-on-the-cap redesign replaced the V1.20 parts
+# (hardware/battery-redesign/build_cap_cradle.py writes them; the V1.20 world STLs it starts from are in its v120-source/).
 add(f"{BP}/build", f"{HWB}/envelopes", ["battery-world.stl", "dfr1202-world.stl", "dfr_pads-world.stl", "switch_swann-world.stl",
                                         "switch-world.stl", "plugs-world.stl", "swap_plugs-world.stl", "wires.json", "build.json"])
 add(BP, f"{HWB}/checks", ["bp_checks.json", "bp_mass.json", "bp_hip_sweep.json", "release-rows-orange.json"])

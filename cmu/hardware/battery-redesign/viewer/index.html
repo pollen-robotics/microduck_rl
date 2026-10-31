@@ -208,7 +208,7 @@ footer { font: 400 12px/1.5 var(--mono); color: var(--muted); border-top: 1px so
     </div>
   </section>
 
-  <footer>Loads ../stl, ../checks and ../../battery-backpack directly. Bought parts are envelope boxes, not their real shapes; plug parking spots and lead routes are approximate. Open items are in ../README.md.</footer>
+  <footer>Loads ../v120-source, ../checks and ../../battery-backpack directly. Bought parts are envelope boxes, not their real shapes; plug parking spots and lead routes are approximate. Open items are in ../README.md.</footer>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -223,11 +223,11 @@ footer { font: 400 12px/1.5 var(--mono); color: var(--muted); border-top: 1px so
   const FILES = {
     rear_pack: V120 + 'mating/rear_pack.stl', shell_left: V120 + 'mating/shell_left.stl', shell_right: V120 + 'mating/shell_right.stl',
     openrb: V120 + 'mating/openrb-board-upright.stl',
-    frame_v120: V120 + 'stl/battery_backpack_frame-world.stl', cap_v120: V120 + 'stl/battery_backpack_cap-world.stl',
+    frame_v120: '../v120-source/battery_backpack_frame-world.stl', cap_v120: '../v120-source/battery_backpack_cap-world.stl',
     battery: V120 + 'envelopes/battery-world.stl', switch: V120 + 'envelopes/switch_swann-world.stl', dfr1202: V120 + 'envelopes/dfr1202-world.stl',
     plugs: V120 + 'envelopes/plugs-world.stl', swap_plugs: V120 + 'envelopes/swap_plugs-world.stl',
-    frame_cap: '../stl/battery_backpack_frame-world.stl', cap_cap: '../stl/battery_backpack_cap-world.stl',
-    cap_bar: '../stl/battery_backpack_bar-world.stl', cap_cradle: '../stl/battery_backpack_cradle_added-world.stl',
+    frame_cap: V120 + 'stl/battery_backpack_frame-world.stl', cap_cap: V120 + 'stl/battery_backpack_cap-world.stl',
+    cap_bar: V120 + 'stl/battery_backpack_bar-world.stl', cap_cradle: 'battery_backpack_cradle_added-world.stl',
   };
 
   const renderer = new THREE.WebGLRenderer({ antialias: true });

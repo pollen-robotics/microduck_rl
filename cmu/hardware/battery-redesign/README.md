@@ -1,6 +1,6 @@
 # Battery backpack redesign: the battery rides on the cap
 
-A proposal, not a release. The V1.20 frame has nothing that locates the battery above the step at z -15.2, and nothing
+The current backpack geometry; its parts are in [../battery-backpack/stl/](../battery-backpack/stl/). Not a numbered print release. The V1.20 frame has nothing that locates the battery above the step at z -15.2, and nothing
 stops it lifting 7.3 mm into the lead space in a fall: the only sideways guides are two fences on the cap. This design
 moves the battery onto the back panel. The frame keeps the switch and DFR1202 exactly as V1.20; the cap carries a printed
 cradle, and two small screwed bars across the battery's front face close it. The stiff battery leads stand up through
@@ -38,19 +38,21 @@ the four bar screws release it.
 
 ## Files
 
-- `stl/battery_backpack_{frame,cap,bar}-world.stl`: the parts in the robot frame (design against these). The bar file holds
-  both bars. `stl/battery_backpack_{frame,cap,bar}-print.stl`: the same parts in their print pose, lowest point on z = 0,
+- `../battery-backpack/stl/battery_backpack_{frame,cap,bar}-world.stl`: the parts in the robot frame (design against these;
+  the viewer and checks use them). The bar file holds both bars. `../battery-backpack/stl/battery_backpack_{frame,cap,bar}-print.stl`: the same parts in their print pose, lowest point on z = 0,
   ready to drag into a slicer: frame rim down (23.15 mm tall, 637 mm2 contact), cap back face down (13.8 mm, 2691 mm2), both
   bars flat (1.5 mm, 203 mm2 each, 27 mm apart); the V1.20 rotation x' = y, y' = z, z' = x. All tip angles are above 10
   degrees, so no brim (`../printing/README.md`). The frame and cap each load in Bambu Studio 02.08 as one manifold part, the
   bar file as two.
-  `stl/battery_backpack_cradle_added-world.stl` is the cradle alone, only for the viewer's highlight.
+  `viewer/battery_backpack_cradle_added-world.stl` is the cradle alone, only for the viewer's highlight.
+- `v120-source/`: the V1.20 frame and cap in the robot frame, the starting point of the build script and the viewer's
+  comparison. The V1.20 print release itself stays in `../printing/ready/V1.20/`.
 - `checks/checks.json`: the checks below, plus the plug parking boxes and the wire centrelines they were run against.
-- `build_cap_cradle.py`: builds all of the above from the V1.20 world STLs in `../battery-backpack/` with trimesh and
+- `build_cap_cradle.py`: builds all of the above from `v120-source/` and the envelopes in `../battery-backpack/` with trimesh and
   manifold3d (command in its header). Unlike `../battery-backpack/cad-source/`, it runs as is.
 - `viewer/index.html`: a 3D viewer (three.js) of this design against V1.20, with a section cut, the cap-removal and
-  battery-removal sliders, labels and the checks table. It reads the STLs and JSON above and
-  in `../battery-backpack/` directly, so serve `cmu/hardware` over HTTP (browsers block those reads from `file://`):
+  battery-removal sliders, labels and the checks table. It reads the STLs and JSON above
+  directly, so serve `cmu/hardware` over HTTP (browsers block those reads from `file://`):
 
   ```bash
   cd cmu/hardware && python3 -m http.server 8000
