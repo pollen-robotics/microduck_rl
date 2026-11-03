@@ -1,6 +1,9 @@
 """Microduck stationary vertical jump environment (Mjlab-Jump-Flat-MicroDuck).
 
-Symmetric two-footed vertical jumping in place on flat terrain:
+Symmetric two-footed vertical jumping in place on flat terrain, registered both
+as ``Mjlab-Jump-Flat-MicroDuck`` (``robot_walk.xml``) and its ±1° serial-play
+backlash twin ``Mjlab-Jump-Flat-Backlash-MicroDuck`` (``robot_walk_backlash.xml``,
+preserving the shared 61D actor observation and 14D action contract):
   - Unit-scaled dense simultaneous air-time + trunk-lift above STAND_Z (0.115 m),
     gated by uprightness and post-spawn settle (eliminates both the sparse-reward
     do-nothing basin and spawn-drop/tuck-collapse exploits).

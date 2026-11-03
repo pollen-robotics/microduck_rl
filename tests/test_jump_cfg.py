@@ -1,13 +1,23 @@
-"""Configuration and MDP unit tests for Mjlab-Jump-Flat-MicroDuck."""
+"""Configuration and MDP unit tests for Mjlab-Jump-Flat-MicroDuck and its Backlash twin."""
 
+import math
+import re
 from types import SimpleNamespace
 
+import mujoco
+import pytest
 import torch
 
-from mjlab_microduck.robot.microduck_constants import MICRODUCK_WALK_BACKLASH_ROBOT_CFG
+from mjlab_microduck.robot.microduck_constants import (
+    BACKLASH_HOME_FRAME,
+    MICRODUCK_WALK_BACKLASH_ROBOT_CFG,
+    get_walk_backlash_spec,
+    get_walk_spec,
+)
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.backlash import make_backlash_variant
 from mjlab_microduck.tasks.microduck_jump_env_cfg import (
+    HEAD_BODY_NAMES,
     STAND_Z,
     MicroduckJumpRlCfg,
     make_microduck_jump_env_cfg,
@@ -121,20 +131,137 @@ def test_jump_rl_cfg_has_distinct_experiment_and_symmetry():
     assert MicroduckJumpRlCfg.algorithm.symmetry_cfg is not None
 
 
-def test_jump_backlash_variant_mirrors_walk_model():
-    """Backlash twin must swap to MICRODUCK_WALK_BACKLASH_ROBOT_CFG and backlash obs."""
+def test_jump_flat_and_backlash_tasks_are_registered():
+    """Only the Flat base task and its Flat-Backlash twin are registered."""
+    from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg
+
+    from mjlab_microduck.tasks import _BACKLASH_TASKS
+
+    tasks = list_tasks()
+    jump_tasks = [t for t in tasks if "Jump" in t]
+    assert sorted(jump_tasks) == [
+        "Mjlab-Jump-Flat-Backlash-MicroDuck",
+        "Mjlab-Jump-Flat-MicroDuck",
+    ]
+
+    rows = [r for r in _BACKLASH_TASKS if r[0].startswith("Mjlab-Jump-")]
+    assert len(rows) == 1
+    task_id, make_fn, kw, rl_cfg, robot_cfg = rows[0]
+    assert task_id == "Mjlab-Jump-Flat-Backlash-MicroDuck"
+    assert make_fn is make_microduck_jump_env_cfg
+    assert kw == {}
+    assert rl_cfg is MicroduckJumpRlCfg
+    assert robot_cfg is MICRODUCK_WALK_BACKLASH_ROBOT_CFG
+
+    for play in (False, True):
+        reg_bl = load_env_cfg("Mjlab-Jump-Flat-Backlash-MicroDuck", play=play)
+        assert reg_bl.scene.entities["robot"].spec_fn is get_walk_backlash_spec
+    assert load_rl_cfg("Mjlab-Jump-Flat-Backlash-MicroDuck").experiment_name == "jump"
+
+
+def test_jump_backlash_variant_mirrors_walk_model_and_preserves_invariants():
+    """Backlash twin must swap to MICRODUCK_WALK_BACKLASH_ROBOT_CFG, remap both
+    actor/critic obs to encoder-through-backlash, preserve encoder-bias split,
+    scope dof_pos_limits away from ±1° backlash stops, and leave base cfg unmutated."""
+    base_cfg = make_microduck_jump_env_cfg()
+    orig_pose_joints = base_cfg.rewards["pose"].params["asset_cfg"].joint_names
+
     bl_cfg = make_backlash_variant(
         make_microduck_jump_env_cfg(), MICRODUCK_WALK_BACKLASH_ROBOT_CFG
     )
+    vel_cfg = make_microduck_velocity_env_cfg()
+
     assert bl_cfg.scene.entities["robot"] is MICRODUCK_WALK_BACKLASH_ROBOT_CFG
-    assert (
-        bl_cfg.observations["actor"].terms["joint_pos"].func
-        is microduck_mdp.joint_pos_rel_backlash
+    assert bl_cfg.scene.entities["robot"].init_state is BACKLASH_HOME_FRAME
+
+    for grp in ("actor", "critic"):
+        assert list(bl_cfg.observations[grp].terms.keys()) == list(
+            vel_cfg.observations[grp].terms.keys()
+        ), f"Backlash obs layout mismatch in group {grp}"
+        jp = bl_cfg.observations[grp].terms["joint_pos"]
+        jv = bl_cfg.observations[grp].terms["joint_vel"]
+        assert jp.func is microduck_mdp.joint_pos_rel_backlash
+        assert jv.func is microduck_mdp.joint_vel_rel_backlash
+        assert jp.params["asset_cfg"].joint_names == (r"^(?!passive_).*",)
+        assert jv.params["asset_cfg"].joint_names == (r"^(?!passive_).*",)
+
+    # Actor sees biased encoder view; critic keeps privileged unbiased view.
+    assert bl_cfg.observations["actor"].terms["joint_pos"].params["biased"] is True
+    assert bl_cfg.observations["critic"].terms["joint_pos"].params["biased"] is False
+
+    # Backlash hinges ride their ±1° hard stops and must be excluded from soft limits.
+    assert bl_cfg.rewards["dof_pos_limits"].params["asset_cfg"].joint_names == (
+        r"^(?!passive_).*",
     )
-    assert (
-        bl_cfg.observations["actor"].terms["joint_vel"].func
-        is microduck_mdp.joint_vel_rel_backlash
+
+    # Pose regex excludes backlash hinges without mutating the base config's SceneEntityCfg.
+    bl_pose_joints = bl_cfg.rewards["pose"].params["asset_cfg"].joint_names
+    assert all("_backlash" in pat for pat in bl_pose_joints)
+    assert base_cfg.rewards["pose"].params["asset_cfg"].joint_names == orig_pose_joints
+
+
+@pytest.mark.parametrize("spec_fn", [get_walk_spec, get_walk_backlash_spec])
+def test_jump_selectors_resolve_on_walk_and_backlash_mjcf(spec_fn):
+    """Compile actual walk and walk_backlash MJCFs on CPU to lock joint/geom/site/body selectors."""
+    model = spec_fn().compile()
+    is_backlash = spec_fn is get_walk_backlash_spec
+
+    articulated = [
+        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j)
+        for j in range(model.njnt)
+        if model.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE
+    ]
+    servo_pat = re.compile(r"^(?!passive_).*")
+    servos = [n for n in articulated if servo_pat.match(n)]
+    assert len(servos) == 14
+
+    backlash_joints = [
+        (j, mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j))
+        for j in range(model.njnt)
+        if model.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE
+        and mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j).startswith("passive_")
+        and mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j).endswith("_backlash")
+    ]
+    if is_backlash:
+        assert len(backlash_joints) == 14
+        half_play = math.radians(1.0)
+        for j_id, j_name in backlash_joints:
+            lo, hi = model.jnt_range[j_id]
+            assert math.isclose(lo, -half_play, rel_tol=1e-6), j_name
+            assert math.isclose(hi, half_play, rel_tol=1e-6), j_name
+            # First-match rule in BACKLASH_HOME_FRAME must pin backlash hinges at 0.0 rad.
+            matched_val = next(
+                val for pat, val in BACKLASH_HOME_FRAME.joint_pos.items() if re.match(pat, j_name)
+            )
+            assert matched_val == 0.0, j_name
+    else:
+        assert len(backlash_joints) == 0
+
+    bl_cfg = make_backlash_variant(
+        make_microduck_jump_env_cfg(), MICRODUCK_WALK_BACKLASH_ROBOT_CFG
     )
+    pose_pats = [re.compile(p) for p in bl_cfg.rewards["pose"].params["asset_cfg"].joint_names]
+    pose_matched = [n for n in articulated if any(p.match(n) for p in pose_pats)]
+    assert len(pose_matched) == 10  # 5 left leg + 5 right leg servos only
+    assert all(not n.startswith("passive_") for n in pose_matched)
+
+    geom_names = {
+        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g) for g in range(model.ngeom)
+    }
+    assert {"left_foot_collision", "right_foot_collision"} <= geom_names
+
+    site_names = {
+        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SITE, s) for s in range(model.nsite)
+    }
+    assert {"left_foot", "right_foot", "imu"} <= site_names
+
+    body_names = [
+        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, b) for b in range(model.nbody)
+    ]
+    assert "trunk_base" in body_names
+    for pat in HEAD_BODY_NAMES:
+        rx = re.compile(f"^{pat}$")
+        assert any(b and rx.match(b) for b in body_names), f"Unmatched head DR body: {pat}"
 
 
 # ── Minimal CPU mock env for MDP function unit tests ─────────────────────────
