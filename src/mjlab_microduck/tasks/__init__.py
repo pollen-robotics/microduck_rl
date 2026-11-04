@@ -53,6 +53,7 @@ from .microduck_sitstand_env_cfg import (
 from .microduck_velocity_rollers_env_cfg import (
     make_microduck_velocity_rollers_env_cfg,
     MicroduckRollersRlCfg,
+    MicroduckRollersHeadFreeRlCfg,
 )
 from .microduck_velocity_swizzle_env_cfg import (
     make_microduck_velocity_swizzle_env_cfg,
@@ -184,6 +185,17 @@ register_mjlab_task(
     runner_cls=MicroduckOnPolicyRunner,
 )
 
+# Roller skate, HEAD-FREE: same recipe, but the head is driven externally
+# (slewed head_pose command overrides the neck targets) and the policy learns to
+# skate unaffected. See _apply_head_override in the rollers cfg.
+register_mjlab_task(
+    task_id="Mjlab-Velocity-Flat-MicroDuck-Rollers-HeadFree",
+    env_cfg=make_microduck_velocity_rollers_env_cfg(head_override=True),
+    play_env_cfg=make_microduck_velocity_rollers_env_cfg(play=True, head_override=True),
+    rl_cfg=MicroduckRollersHeadFreeRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
 # Roller SWIZZLE task — clean classic swizzle (symmetric, feet grounded).
 register_mjlab_task(
     task_id="Mjlab-Velocity-Swizzle-MicroDuck",
@@ -269,6 +281,7 @@ _BACKLASH_TASKS = (
     ("Mjlab-GroundPick-Rough-Backlash-MicroDuck", make_microduck_ground_pick_env_cfg, {"rough": True}, MicroduckGroundPickRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-BallKick-Flat-Backlash-MicroDuck", make_microduck_ball_kick_env_cfg, {}, MicroduckBallKickRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-Velocity-Flat-Backlash-MicroDuck-Rollers", make_microduck_velocity_rollers_env_cfg, {}, MicroduckRollersRlCfg, _BL_ROLLERS),
+    ("Mjlab-Velocity-Flat-Backlash-MicroDuck-Rollers-HeadFree", make_microduck_velocity_rollers_env_cfg, {"head_override": True}, MicroduckRollersHeadFreeRlCfg, _BL_ROLLERS),
     ("Mjlab-Velocity-Swizzle-Backlash-MicroDuck", make_microduck_velocity_swizzle_env_cfg, {}, MicroduckSwizzleRlCfg, _BL_ROLLERS),
     ("Mjlab-RollerCrouch-Flat-Backlash-MicroDuck", make_microduck_roller_crouch_env_cfg, {}, MicroduckRollerCrouchRlCfg, _BL_ROLLERS),
     ("Mjlab-RollerSlope-Flat-Backlash-MicroDuck", make_microduck_roller_slope_env_cfg, {}, MicroduckRollerSlopeRlCfg, _BL_ROLLERS),

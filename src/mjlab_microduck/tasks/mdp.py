@@ -5510,6 +5510,86 @@ def zero_command_padding(
     return torch.zeros(env.num_envs, dim, device=env.device)
 
 
+# ==============================================================================
+# Externally-driven head (roller head-free variant)
+# ==============================================================================
+#
+# The policy keeps its 14 outputs (obs/action contract unchanged), but the 4
+# neck/head columns are OVERWRITTEN before reaching the servos by an external
+# head target: a rate-limited (slewed) copy of the ``head_pose`` command, as
+# deltas from HOME in [neck_pitch, head_pitch, head_yaw, head_roll] order.
+# The policy never controls the head — it only has to keep skating while
+# someone else moves it. The slewed target (NOT the raw command) is what the
+# actor observes in the head_pose slot, so the deployment contract is simply:
+# "the head slot holds the neck delta currently being written to the servos".
+#
+# last_action keeps reporting the policy's RAW outputs (mjlab's last_action
+# reads raw_action), neck columns included — the runtime must feed back the
+# policy's own outputs there, not the overridden neck targets.
+
+from mjlab.envs.mdp.actions import JointPositionActionCfg as _JointPositionActionCfg  # noqa: E402
+import re as _re  # noqa: E402
+
+
+class HeadOverrideJointPositionAction(_JointAction):
+    """JointPositionAction whose neck/head targets come from a slewed command."""
+
+    cfg: "HeadOverrideJointPositionActionCfg"
+
+    def __init__(self, cfg: "HeadOverrideJointPositionActionCfg", env: ManagerBasedRlEnv):
+        super().__init__(cfg=cfg, env=env)
+        cols = []
+        for pat in _NECK_JOINT_PATTERNS:
+            hits = [i for i, n in enumerate(self._target_names) if _re.fullmatch(pat, n)]
+            if len(hits) != 1:
+                raise ValueError(
+                    f"head override: pattern {pat!r} matched {hits} in {self._target_names}"
+                )
+            cols.append(hits[0])
+        self._neck_cols = torch.tensor(cols, device=self.device, dtype=torch.long)
+        self._neck_home = self._entity.data.default_joint_pos[
+            :, self._target_ids[self._neck_cols]
+        ].clone()
+        self._head_target = torch.zeros(self.num_envs, len(cols), device=self.device)
+        self._max_step = float(cfg.slew_rate) * float(env.step_dt)
+
+    @property
+    def head_target(self) -> torch.Tensor:
+        """(N, 4) slewed neck/head deltas from HOME currently applied."""
+        return self._head_target
+
+    def process_actions(self, actions: torch.Tensor):
+        super().process_actions(actions)
+        cmd = self._env.command_manager.get_command(self.cfg.command_name)
+        step = torch.clamp(cmd - self._head_target, -self._max_step, self._max_step)
+        self._head_target += step
+        self._processed_actions[:, self._neck_cols] = self._neck_home + self._head_target
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        super().reset(env_ids)
+        self._head_target[env_ids] = 0.0
+
+
+@_dataclass(kw_only=True)
+class HeadOverrideJointPositionActionCfg(_JointPositionActionCfg):
+    command_name: str = "head_pose"
+    # Max neck/head target speed, rad/s per joint (0.55 s for the full ±1.1 rad
+    # pitch range). Must match the runtime's head slew.
+    slew_rate: float = 2.0
+
+    def build(self, env: ManagerBasedRlEnv) -> HeadOverrideJointPositionAction:
+        return HeadOverrideJointPositionAction(self, env)
+
+
+def head_override_target(
+    env: ManagerBasedRlEnv, action_name: str = "joint_pos"
+) -> torch.Tensor:
+    """Obs: the slewed neck/head deltas the head-override action is applying (N, 4)."""
+    term = env.action_manager.get_term(action_name)
+    return term.head_target
+
+
+
 def head_pose_tracking(
     env: ManagerBasedRlEnv,
     command_name: str = "head_pose",

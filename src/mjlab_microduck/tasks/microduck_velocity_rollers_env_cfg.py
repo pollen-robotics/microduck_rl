@@ -28,6 +28,7 @@ Task design (unchanged — the roller recipe):
 
 import math
 from copy import deepcopy
+from dataclasses import replace
 
 # Symmetry — OFF: SYMMETRY_CFG's obs permutation is hardcoded for the old 51D
 # layout and breaks on the 61D obs (same situation as all other v1.5+ envs).
@@ -84,8 +85,13 @@ from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg, SYMMETRY_CFG
 
 def make_microduck_velocity_rollers_env_cfg(
     play: bool = False,
+    head_override: bool = False,
 ) -> ManagerBasedRlEnvCfg:
-    """Create Microduck roller skate velocity tracking environment configuration."""
+    """Create Microduck roller skate velocity tracking environment configuration.
+
+    ``head_override=True`` builds the head-free variant: the head is driven
+    externally (see ``_apply_head_override``) and the policy only skates.
+    """
 
     # passive_.*: 999.0 → passive wheel joints are matched but effectively ignored
     std_standing = {
@@ -626,7 +632,86 @@ def make_microduck_velocity_rollers_env_cfg(
             },
         )
 
+    if head_override:
+        _apply_head_override(cfg, play)
+
     return cfg
+
+
+# ── Head-free variant ─────────────────────────────────────────────────────────
+# Goal: move the head on top of the roller policy WITHOUT it affecting the
+# skating (direction stays driven by the twist slot only). The head is NOT a
+# task: the policy never controls it. Its 4 neck/head outputs are overwritten
+# by an external, slewed head_pose command (HeadOverrideJointPositionAction),
+# and the actor sees that applied target in the head_pose slot so it can
+# anticipate the CoM shift (the head is ~38% of the robot's mass). No reward
+# mentions the head; the locomotion rewards are unchanged, so the only way to
+# score is to skate the same whatever the head does.
+#
+# Deployment contract (runtime must match, or sim and robot disagree):
+#   neck/head servo target = HOME + slew(cmd, HEAD_SLEW_RAD_S)   (policy's neck
+#   outputs are IGNORED); head_pose obs slot = that same slewed delta;
+#   last_action = the policy's raw 14 outputs, neck included.
+HEAD_SLEW_RAD_S = 2.0
+HEAD_CMD_RESAMPLE_S = (1.0, 4.0)
+HEAD_ZERO_CMD_PROB = 0.2  # idle head (the deployment default) explicitly trained
+# Per-joint final caps = the walker's (reachable delta from HOME, ~10% margin).
+# Stages lag the skate's discovery (wheel_speed plateaus by ~iter 500): a large
+# head disturbance before the stride exists would tax its discovery.
+HEAD_RANGE_STAGES = [
+    # iter, ((neck_pitch), (head_pitch), (head_yaw), (head_roll))
+    (0,    ((-0.05, 0.05), (-0.05, 0.05), (-0.07, 0.07), (-0.015, 0.015))),
+    (750,  ((-0.22, 0.22), (-0.22, 0.22), (-0.28, 0.28), (-0.06, 0.06))),
+    (1500, ((-0.50, 0.50), (-0.50, 0.50), (-0.63, 0.63), (-0.14, 0.14))),
+    (2500, ((-0.83, 0.83), (-0.83, 0.83), (-1.05, 1.05), (-0.23, 0.23))),
+    (3500, ((-1.10, 1.10), (-1.10, 1.10), (-1.40, 1.40), (-0.31, 0.31))),
+]
+
+
+def _apply_head_override(cfg: ManagerBasedRlEnvCfg, play: bool) -> None:
+    from dataclasses import fields
+
+    old = cfg.actions["joint_pos"]
+    cfg.actions["joint_pos"] = microduck_mdp.HeadOverrideJointPositionActionCfg(
+        **{f.name: getattr(old, f.name) for f in fields(old) if f.init},
+        command_name="head_pose",
+        slew_rate=HEAD_SLEW_RAD_S,
+    )
+
+    ranges = HEAD_RANGE_STAGES[-1][1] if play else HEAD_RANGE_STAGES[0][1]
+    cfg.commands["head_pose"] = microduck_mdp.UniformPoseCommandCfg(
+        resampling_time_range=HEAD_CMD_RESAMPLE_S,
+        ranges=ranges,
+        zero_command_prob=HEAD_ZERO_CMD_PROB,
+    )
+    for group in ("actor", "critic"):
+        cfg.observations[group].terms["head_command"] = ObservationTermCfg(
+            func=microduck_mdp.head_override_target,
+            params={"action_name": "joint_pos"},
+        )
+
+    # The head is not the policy's to hold: anything pricing neck position or
+    # neck action would be an unescapable tax (position) or meaningless (the
+    # neck outputs never reach a servo).
+    for name in ("neck_joint_pos_l2", "neck_action_rate_l2"):
+        cfg.rewards.pop(name, None)
+    for key in ("std_standing", "std_walking", "std_running"):
+        std = cfg.rewards["pose"].params[key]
+        for pat in (r".*neck.*", r".*head.*"):
+            std[pat] = 999.0
+
+    if play:
+        cfg.curriculum.pop("head_pose_range", None)
+    else:
+        cfg.curriculum["head_pose_range"] = CurriculumTermCfg(
+            func=microduck_mdp.pose_command_range_curriculum,
+            params={
+                "command_name": "head_pose",
+                "range_stages": [
+                    {"step": it * 24, "ranges": r} for it, r in HEAD_RANGE_STAGES
+                ],
+            },
+        )
 
 
 MicroduckRollersRlCfg = RslRlOnPolicyRunnerCfg(
@@ -666,4 +751,11 @@ MicroduckRollersRlCfg = RslRlOnPolicyRunnerCfg(
     save_interval=250,
     num_steps_per_env=24,
     max_iterations=50_000,
+)
+
+
+MicroduckRollersHeadFreeRlCfg = replace(
+    MicroduckRollersRlCfg,
+    experiment_name="velocity_rollers_headfree",
+    run_name="velocity_rollers_headfree",
 )
