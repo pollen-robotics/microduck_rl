@@ -668,7 +668,17 @@ HEAD_RANGE_STAGES = [
 ]
 
 
-def _apply_head_override(cfg: ManagerBasedRlEnvCfg, play: bool) -> None:
+def _apply_head_override(
+    cfg: ManagerBasedRlEnvCfg,
+    play: bool,
+    range_stages: list = HEAD_RANGE_STAGES,
+) -> None:
+    """Turn ``cfg`` into its head-free twin (see the block comment above).
+
+    ``range_stages``: [(iteration, per-joint ranges), ...] for the head command;
+    the last stage is used directly in play. Shared by the swizzle task, which
+    needs a later schedule (its own skill and heading curricula come first).
+    """
     from dataclasses import fields
 
     old = cfg.actions["joint_pos"]
@@ -678,7 +688,7 @@ def _apply_head_override(cfg: ManagerBasedRlEnvCfg, play: bool) -> None:
         slew_rate=HEAD_SLEW_RAD_S,
     )
 
-    ranges = HEAD_RANGE_STAGES[-1][1] if play else HEAD_RANGE_STAGES[0][1]
+    ranges = range_stages[-1][1] if play else range_stages[0][1]
     cfg.commands["head_pose"] = microduck_mdp.UniformPoseCommandCfg(
         resampling_time_range=HEAD_CMD_RESAMPLE_S,
         ranges=ranges,
@@ -708,7 +718,7 @@ def _apply_head_override(cfg: ManagerBasedRlEnvCfg, play: bool) -> None:
             params={
                 "command_name": "head_pose",
                 "range_stages": [
-                    {"step": it * 24, "ranges": r} for it, r in HEAD_RANGE_STAGES
+                    {"step": it * 24, "ranges": r} for it, r in range_stages
                 ],
             },
         )

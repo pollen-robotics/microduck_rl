@@ -24,14 +24,32 @@ from mjlab.tasks.velocity import mdp
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.microduck_velocity_rollers_env_cfg import (
     MicroduckRollersRlCfg,
+    _apply_head_override,
     make_microduck_velocity_rollers_env_cfg,
 )
+
+# Head-free variant: head command range schedule. Held tiny until iter 1500 —
+# the swizzle and the heading curriculum (straight until 1000, follow by 2500)
+# come first — then widened in 4 gentle steps. The stride head-free run
+# (0otqeivr) lost ~0.07 wheel_speed at every stage boundary of a 750-iter
+# spacing, so the steps here are smaller relative to the range.
+SWIZZLE_HEAD_RANGE_STAGES = [
+    # iter, ((neck_pitch), (head_pitch), (head_yaw), (head_roll))
+    (0,    ((-0.05, 0.05), (-0.05, 0.05), (-0.07, 0.07), (-0.015, 0.015))),
+    (1500, ((-0.22, 0.22), (-0.22, 0.22), (-0.28, 0.28), (-0.06, 0.06))),
+    (2250, ((-0.50, 0.50), (-0.50, 0.50), (-0.63, 0.63), (-0.14, 0.14))),
+    (3000, ((-0.83, 0.83), (-0.83, 0.83), (-1.05, 1.05), (-0.23, 0.23))),
+    (3750, ((-1.10, 1.10), (-1.10, 1.10), (-1.40, 1.40), (-0.31, 0.31))),
+]
 
 # Stride / anti-swizzle rewards to drop for the swizzle task.
 _ANTI_SWIZZLE = ("single_support", "glide", "skating_air_time", "gait_symmetry", "hip_roll_neutral")
 
 
-def make_microduck_velocity_swizzle_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def make_microduck_velocity_swizzle_env_cfg(
+    play: bool = False,
+    head_override: bool = False,
+) -> ManagerBasedRlEnvCfg:
     """Roller swizzle env: the stride env minus its anti-swizzle terms, plus symmetry
     and grounded rewards. Everything else (robot, obs, command, DR) is identical."""
     cfg = make_microduck_velocity_rollers_env_cfg(play=play)
@@ -107,6 +125,19 @@ def make_microduck_velocity_swizzle_env_cfg(play: bool = False) -> ManagerBasedR
         },
     )
 
+    if head_override:
+        # Head-free twin: the head is driven externally (neck targets overwritten by
+        # a slewed head command), the policy only swizzles. Replaces the
+        # policy-managed head control below — see _apply_head_override.
+        _apply_head_override(cfg, play, range_stages=SWIZZLE_HEAD_RANGE_STAGES)
+    else:
+        _add_policy_head_control(cfg)
+
+    return cfg
+
+
+def _add_policy_head_control(cfg: ManagerBasedRlEnvCfg) -> None:
+    """Head-pose control where the POLICY produces the head pose (Y button)."""
     # --- Head-pose control (Y button): the policy produces the head pose ---------
     # Head-pose command (4D deltas from HOME: [neck_pitch, head_pitch, head_yaw,
     # head_roll]). Ported from the velocity env; ranges start small (widened by the
@@ -187,12 +218,16 @@ def make_microduck_velocity_swizzle_env_cfg(play: bool = False) -> ManagerBasedR
         },
     )
 
-    return cfg
-
 
 # Same PPO hyperparameters as the stride roller task, new experiment/run name.
 MicroduckSwizzleRlCfg = dataclasses.replace(
     MicroduckRollersRlCfg,
     experiment_name="velocity_swizzle",
     run_name="velocity_swizzle",
+)
+
+MicroduckSwizzleHeadFreeRlCfg = dataclasses.replace(
+    MicroduckRollersRlCfg,
+    experiment_name="velocity_swizzle_headfree",
+    run_name="velocity_swizzle_headfree",
 )
