@@ -42,7 +42,7 @@ uv run scripts/export.py Mjlab-Velocity-Flat-MicroDuck --wandb-run-path <...>
 uv run publish --onnx output.onnx --repo <user>/microduck-<name> --kind episodic --duration-s 4.0   # share it (see "Publishing a policy")
 
 # drive the exported policy in CPU MuJoCo with the keyboard
-uv run scripts/infer_policy.py --walking output.onnx
+uv run scripts/infer_policy.py --walking output.onnx --new-cmd-obs
 ```
 
 Resume from a checkpoint:
@@ -54,6 +54,9 @@ uv run train Mjlab-Velocity-Flat-MicroDuck --env.scene.num-envs 4096 \
 
 No GPU? Add `--hf-jobs` to any train command to run it on Hugging Face Jobs
 instead of locally (see [scripts/hf/README.md](scripts/hf/README.md)).
+
+For setup errors, checkpoint loading, simulation performance and a short CUDA
+smoke-test recipe, see [Training and simulation troubleshooting](docs/troubleshooting.md).
 
 ## Tasks
 
