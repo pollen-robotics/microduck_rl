@@ -80,6 +80,15 @@ UPRIGHT_GATE_HIGH_Z = 0.065
 # dominate the height/pose deficit of a butt-rest, so sitting can't pay.
 NONFOOT_CONTACT_WEIGHT = 4.0
 
+# Transition duration (s): the command slews its internal target blend over
+# this time and the posture rewards track that moving setpoint, so it IS the
+# learned crouch / rise duration (baked into the policy — the runtime only
+# flips 0/1). Sitstand uses 2.0 s; the 2 s crouch felt too slow on the first
+# run → 1.0 s. Travel ≈ 43 mm → ≈ 0.043 m/s, still under sitstand's
+# MAX_DESCENT_SPEED 0.05 / MAX_RISE_SPEED 0.08 caps. Going below ~0.85 s
+# needs those caps raised too, or the policy is taxed for tracking the ramp.
+POSTURE_RAMP_S = 1.0
+
 # Spawn band for the crouched reset bucket: just above the measured rest.
 CROUCH_SPAWN_Z = (0.074, 0.084)
 
@@ -121,6 +130,7 @@ def make_microduck_crouchstand_env_cfg(
         assert cfg.rewards[name].params["stand_z"] == STAND_Z
 
     cfg.commands["twist"].sit_z = CROUCH_Z
+    cfg.commands["twist"].ramp_s = POSTURE_RAMP_S
 
     cfg.rewards["upright_while_tall"].params["height_low"] = UPRIGHT_GATE_LOW_Z
     cfg.rewards["upright_while_tall"].params["height_high"] = UPRIGHT_GATE_HIGH_Z

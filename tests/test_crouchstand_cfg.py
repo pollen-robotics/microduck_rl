@@ -19,10 +19,13 @@ from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.microduck_crouchstand_env_cfg import (
     CROUCH_TARGET_OVERRIDES,
     CROUCH_Z,
+    POSTURE_RAMP_S,
     MicroduckCrouchStandRlCfg,
     make_microduck_crouchstand_env_cfg,
 )
 from mjlab_microduck.tasks.microduck_sitstand_env_cfg import (
+    MAX_DESCENT_SPEED,
+    MAX_RISE_SPEED,
     SITTING_TARGET_OVERRIDES,
     STAND_Z,
 )
@@ -158,3 +161,10 @@ def test_crouch_keyframe_balances_on_flat_feet():
     assert min(front, back) > 15.0, (front, back)   # CoM well inside the 49 mm sole
     assert abs(z - CROUCH_Z) < 0.008, z               # target height matches geometry
     assert 0.0 <= pitch <= 12.0, pitch                # slight forward lean, roller-like
+
+
+def test_ramp_duration_fits_under_speed_caps(cfg):
+    assert cfg.commands["twist"].ramp_s == POSTURE_RAMP_S
+    ramp_speed = (STAND_Z - CROUCH_Z) / POSTURE_RAMP_S
+    # tracking the ramp must not be taxed by the descent / rise caps
+    assert ramp_speed < MAX_DESCENT_SPEED and ramp_speed < MAX_RISE_SPEED
