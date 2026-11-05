@@ -6548,6 +6548,22 @@ def posture_stillness(
     return torch.exp(-((v / vel_std) ** 2)) * z_gate * tilt_gate * ramp_done
 
 
+def nonfoot_ground_contact_penalty(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+) -> torch.Tensor:
+    """-1 per step while any non-foot robot body touches the ground, else 0.
+
+    SELF-NEGATING → use a POSITIVE weight. Crouchstand's feet-only rule: the
+    squat must be held on the soles, and without this the seated butt-rest
+    (sitstand's low posture) is the cheap basin next to the crouch target.
+    Reads a contact sensor whose primary excludes the foot bodies.
+    """
+    found = env.scene.sensors[sensor_name].data.found
+    touching = (found.view(found.shape[0], -1) > 0).any(dim=-1)
+    return -touching.float()
+
+
 def posture_rise_bootstrap(
     env: ManagerBasedRlEnv,
     command_name: str,

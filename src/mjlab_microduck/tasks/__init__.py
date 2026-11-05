@@ -47,6 +47,10 @@ from .microduck_sitstand_env_cfg import (
     make_microduck_sitstand_env_cfg,
     MicroduckSitStandRlCfg,
 )
+from .microduck_crouchstand_env_cfg import (
+    make_microduck_crouchstand_env_cfg,
+    MicroduckCrouchStandRlCfg,
+)
 from .microduck_velocity_rollers_env_cfg import (
     make_microduck_velocity_rollers_env_cfg,
     MicroduckRollersRlCfg,
@@ -142,6 +146,15 @@ register_mjlab_task(
     env_cfg=make_microduck_sitstand_env_cfg(rough=True),
     play_env_cfg=make_microduck_sitstand_env_cfg(play=True, rough=True),
     rl_cfg=MicroduckSitStandRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# CrouchStand task — commanded feet-only crouch ↔ stand (sitstand recipe, squat target)
+register_mjlab_task(
+    task_id="Mjlab-CrouchStand-Flat-MicroDuck",
+    env_cfg=make_microduck_crouchstand_env_cfg(),
+    play_env_cfg=make_microduck_crouchstand_env_cfg(play=True),
+    rl_cfg=MicroduckCrouchStandRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
@@ -260,6 +273,7 @@ _BACKLASH_TASKS = (
     ("Mjlab-StandUp-Rough-Backlash-MicroDuck", make_microduck_standup_env_cfg, {"rough": True}, MicroduckStandUpRlCfg, _BL_ALLCOL),
     ("Mjlab-SitStand-Flat-Backlash-MicroDuck", make_microduck_sitstand_env_cfg, {}, MicroduckSitStandRlCfg, _BL_ALLCOL),
     ("Mjlab-SitStand-Rough-Backlash-MicroDuck", make_microduck_sitstand_env_cfg, {"rough": True}, MicroduckSitStandRlCfg, _BL_ALLCOL),
+    ("Mjlab-CrouchStand-Flat-Backlash-MicroDuck", make_microduck_crouchstand_env_cfg, {}, MicroduckCrouchStandRlCfg, _BL_ALLCOL),
     ("Mjlab-GroundPick-Flat-Backlash-MicroDuck", make_microduck_ground_pick_env_cfg, {}, MicroduckGroundPickRlCfg, _BL_ALLCOL),
     ("Mjlab-GroundPick-Rough-Backlash-MicroDuck", make_microduck_ground_pick_env_cfg, {"rough": True}, MicroduckGroundPickRlCfg, _BL_ALLCOL),
     ("Mjlab-BallKick-Flat-Backlash-MicroDuck", make_microduck_ball_kick_env_cfg, {}, MicroduckBallKickRlCfg, _BL_ALLCOL),
