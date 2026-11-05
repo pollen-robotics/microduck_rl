@@ -79,6 +79,16 @@ class PublishConfig:
     twist_help: str | None = None
     """Prose for `command.twist` when the slots mean something (flamingo: '[flag, side, 0]')."""
 
+    # -- training checkpoint (opt-in)
+    share_training: bool = False
+    """Also share the training checkpoint (+ its distillation teachers) as a bundle in a SEPARATE repo
+    (`share-training`, docs/training_checkpoints.md); the manifest's `training.bundle` points to it.
+    Needs a checkpoint source (--wandb-run-path or --checkpoint-file), not --onnx."""
+    training_repo: str | None = None
+    """Bundle repo. Default: `<owner of --repo>/microduck-training`."""
+    training_public: bool = False
+    """Create the bundle repo public (existing repos keep their visibility)."""
+
     # -- how
     private: bool = True
     """Create the repo private (--no-private for public). Existing repos keep their visibility."""
@@ -142,6 +152,27 @@ def _resolve_weights(cfg: PublishConfig, workdir: Path) -> tuple[Path, dict]:
     return result.onnx_path, training
 
 
+def _share_training(cfg: PublishConfig, onnx_path: Path, training: dict) -> str:
+    """Bundle the checkpoint this ONNX came from; returns its hf:// spec for the manifest."""
+    from mjlab_microduck.publish.training import DEFAULT_REPO_NAME, ShareConfig, share
+
+    if cfg.onnx is not None:
+        _fail("--share-training needs the checkpoint: publish with --task + --wandb-run-path/--checkpoint-file, not --onnx")
+    owner = cfg.repo.split("/", 1)[0]
+    return share(
+        ShareConfig(
+            wandb_run_path=cfg.wandb_run_path if cfg.checkpoint_file is None else None,
+            checkpoint=training.get("checkpoint"),
+            checkpoint_file=cfg.checkpoint_file,
+            task=cfg.task,
+            repo=cfg.training_repo or f"{owner}/{DEFAULT_REPO_NAME}",
+            public=cfg.training_public,
+            dry_run=cfg.dry_run,
+        ),
+        onnx_files=[(onnx_path, {"repo": cfg.repo, "file": m.POLICY_FILE})],
+    )
+
+
 def _default_name(repo: str) -> str:
     stem = repo.rsplit("/", 1)[-1]
     return stem.removeprefix("microduck-").removeprefix("microduck_") or stem
@@ -163,6 +194,9 @@ def run(cfg: PublishConfig) -> int:
         if cfg.smoke:
             m.smoke_run_onnx(onnx_path)
             print("[publish] smoke run: finite, non-constant output")
+
+        if cfg.share_training:
+            training["bundle"] = _share_training(cfg, onnx_path, training)
 
         command_help = {"twist": cfg.twist_help} if cfg.twist_help else None
         manifest = m.build_manifest(

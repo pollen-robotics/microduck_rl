@@ -44,6 +44,20 @@ def _invoked_as_train() -> bool:
     return prog.removesuffix(".py").removesuffix("-script") == "train"
 
 
+def maybe_init_checkpoint() -> None:
+    """Consume `--init-checkpoint <spec>` (checkpoints.py) on a local `train`; a no-op without it.
+
+    Runs AFTER the HF Jobs check, so a `--hf-jobs` submission forwards the flag untouched and the
+    job's own `train` consumes it remotely (with the job's HF token for private bundles).
+    """
+    if not _invoked_as_train() or not any(a.split("=", 1)[0] == "--init-checkpoint" for a in sys.argv[1:]):
+        return
+    from mjlab_microduck.checkpoints import consume_init_flag, install_init_checkpoint_patch
+
+    sys.argv[1:] = consume_init_flag(sys.argv[1:])
+    install_init_checkpoint_patch()
+
+
 def maybe_submit_to_hf_jobs() -> None:
     """Consume `--hf-jobs` and exit the process; a no-op without the flag.
 

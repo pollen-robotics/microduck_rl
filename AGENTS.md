@@ -18,6 +18,11 @@ uv run play <TASK_ID> --wandb-run-path <entity/project/run_id>
 uv run scripts/export.py <TASK_ID> --wandb-run-path <...>   # → ONNX (bakes obs normalizer — mandatory path)
 uv run publish --task <TASK_ID> --wandb-run-path <...> --checkpoint N --repo <user>/microduck-<name> --kind episodic --duration-s 4.0
                                                     # → HF Hub repo (policy.onnx + schema-2 manifest.json + README) the daemon loads via `robotctl policy add`
+                                    #   add --share-training to also bundle the training checkpoint (opt-in, see below)
+uv run share-training --wandb-run-path <...> --checkpoint N [--onnx hf://<policy-repo>/<file>.onnx]
+                                    # → training bundle (full .pt + provenance + teachers) in <owner>/microduck-training
+uv run train <TASK_ID> --init-checkpoint hf://<owner>/microduck-training/bundles/<exp>/<run>_<iter>
+                                    # resume from a bundle (MICRODUCK_WARM_START=1 to warm-start another task)
 uv run scripts/infer_policy.py --walking out.onnx   # CPU MuJoCo deployment rehearsal (BAM M6 actuators as in training; --no-bam = XML PD)
 uv run --with pytest pytest tests/
 ```
@@ -44,7 +49,9 @@ Never launch a long run without one.
 - `src/mjlab_microduck/actuator/friction_dr_bam.py` — BAM actuator + friction DR + backlash encoder.
 - `src/mjlab_microduck/export.py` — the ONNX export (normalizer baked in); `scripts/export.py` wraps it.
 - `src/mjlab_microduck/publish/` — `uv run publish`: schema-2 manifest builder + ONNX shape/smoke
-  gate + Hub upload. Contract = `docs/policy-manifest.md` in the `microduck` repo; only
+  gate + Hub upload; `training.py` = `uv run share-training` (training bundles).
+- `src/mjlab_microduck/checkpoints.py` — checkpoint specs (`hf://...` bundles or local paths), the
+  `--init-checkpoint` train flag, used by train / export / distillation teachers. Contract = `docs/policy-manifest.md` in the `microduck` repo; only
   constant-command episodic/perpetual policies are publishable (phase/posture-flag are the set's).
 - `scripts/` — export wrapper, infer, sim2real comparison, wandb helpers.
 - `tests/` — cfg-invariant and mdp-function regression tests (CPU, no GPU needed).
@@ -220,8 +227,12 @@ Never launch a long run without one.
   policy was trained under those conditions. Only warm-start across tasks with
   compatible normalizers (the stand expert's twist std is 0.005: never seed a
   walking env from it).
-- Deployed-policy provenance: Hub ONNX files carry `run_path=None`; find the run
-  by exact last-layer weight match against wandb checkpoints (2026-09: walk =
+- Deployed-policy provenance: ONNX exported since 2026-10-27 carry it in their metadata
+  (`run_path`, `task_id`, `checkpoint`, `checkpoint_sha256`); older Hub files carry only
+  `run_path=None`. The training bundles in
+  `pollen-robotics/microduck-training` record it (`onnx[]` in each `bundle.json`, matched by sha256).
+  For an ONNX not bundled yet, `scripts/find_onnx_source.py` finds the run
+  by exact weight match against wandb checkpoints (2026-09: walk =
   441tzs6d@3750, stand = 69u48n8l@9750; 2026-10 Hub v7 velstand = j4i6yoq2@1250,
   lineage in `docs/velstand_policy.md`, sitstand in `docs/sitstand_policy.md`).
 - Watch per-iteration: mean reward rising AND episode length behaving as the
@@ -239,6 +250,31 @@ Never launch a long run without one.
   fails the human eye — watch the video AND check which geom/axis touches.
 - Report what rollouts actually show ("rolls but face-plants 1 in 3"), not
   "it works!". The user decides when it's good enough.
+
+## Sharing training checkpoints (training bundles)
+
+Full reference: `docs/training_checkpoints.md`. The rules an agent must follow:
+
+- **Opt-in, always.** Never upload a checkpoint (or flip a bundle repo public) unless the user asked
+  for it in this session. `publish` shares nothing extra without `--share-training`;
+  `share-training` creates repos private unless `--public`.
+- **Never put `.pt` files in a policy (ONNX) repo.** Bundles live in a separate repo,
+  `<owner>/microduck-training`, one folder per `bundles/<experiment>/<run>_<iter>/`.
+- **When a policy is updated on the Hub** (via `publish`, or by hand in
+  `pollen-robotics/microduck-policies`) and the user wants the checkpoint shared: run
+  `share-training` on the exact checkpoint with `--onnx <the deployed file>`. It refuses to record
+  an ONNX whose actor weights do not match bit-exact — if it refuses, the provenance is wrong;
+  find the right checkpoint with `scripts/find_onnx_source.py`, never drop `--onnx` to make it pass.
+  Tag like the policy set (`--tag velstand-v9`).
+- **Teachers come along automatically** (read from the run's own `bc_cfg`), so a velstand bundle is
+  trainable without wandb access. Do not hand-upload teachers.
+- **Bundles are immutable** (keyed by run + iteration; a different checkpoint under an existing id
+  is refused). Only `onnx` records merge into an existing bundle.
+- **Loading:** `--init-checkpoint <spec>` replaces `--agent.resume` + `--wandb-run-path` (both is an
+  error); it RESUMES (curricula continue). Cross-task = warm start: prefix `MICRODUCK_WARM_START=1`
+  (see "Warm start ≠ resume" above). Check out the bundle's `code.commit` (+ `uncommitted.diff`) first.
+- `--checkpoint-file` of `share-training` (no wandb) records this checkout's HEAD as provenance and
+  refuses a dirty tree: commit and push before sharing.
 
 ## Sim2real footguns (cost real debugging weeks)
 

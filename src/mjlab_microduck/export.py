@@ -62,6 +62,24 @@ class ExportResult:
     checkpoint_iteration: int | None
 
 
+def _provenance_metadata(task_id: str, checkpoint_path: Path | None) -> dict[str, str]:
+    """Task, checkpoint iteration + sha256 (= a training bundle's `checkpoint_sha256`) and the exporting
+    checkout's commit, as ONNX metadata (strings). The TRAINING commit lives in the bundle."""
+    import hashlib
+
+    from mjlab_microduck.publish.manifest import git_provenance
+
+    out = {"task_id": task_id}
+    if checkpoint_path is not None:
+        out["checkpoint"] = str(_iteration_of(checkpoint_path))
+        out["checkpoint_sha256"] = hashlib.sha256(Path(checkpoint_path).read_bytes()).hexdigest()
+    git = git_provenance()
+    if git:
+        out["export_commit"] = str(git["commit"])
+        out["export_dirty"] = str(git["dirty"]).lower()
+    return out
+
+
 def _iteration_of(checkpoint_path: Path | None) -> int | None:
     if checkpoint_path is None:
         return None
@@ -152,9 +170,9 @@ def run_export(task_id: str, cfg: ExportConfig) -> ExportResult:
     if TRAINED_MODE:
         log_root_path = (Path("logs") / "rsl_rl" / agent_cfg.experiment_name).resolve()
         if cfg.checkpoint_file is not None:
-            resume_path = Path(cfg.checkpoint_file)
-            if not resume_path.exists():
-                raise FileNotFoundError(f"Checkpoint file not found: {resume_path}")
+            from mjlab_microduck.checkpoints import resolve
+
+            resume_path = resolve(cfg.checkpoint_file)  # a local .pt or an hf:// training bundle
             print(f"[INFO]: Loading checkpoint: {resume_path.name}")
         elif cfg.checkpoint is not None:
             # Select a specific checkpoint iteration, from wandb or local.
@@ -263,7 +281,10 @@ def run_export(task_id: str, cfg: ExportConfig) -> ExportResult:
 
     runner.export_policy_to_onnx(path, filename)
 
-    metadata = get_base_metadata(runner.env.unwrapped, run_path=cfg.checkpoint_file)
+    # Provenance travels WITH the file: before 2026-10 `run_path` was `checkpoint_file`, i.e. "None"
+    # for every wandb export, and deployed policies had to be traced by weight matching.
+    metadata = get_base_metadata(runner.env.unwrapped, run_path=str(cfg.wandb_run_path or cfg.checkpoint_file))
+    metadata.update(_provenance_metadata(task_id, resume_path))
     attach_metadata_to_onnx(onnx_path, metadata)
 
     print(f"Written {onnx_path}")

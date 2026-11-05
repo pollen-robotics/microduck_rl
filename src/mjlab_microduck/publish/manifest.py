@@ -392,11 +392,14 @@ def render_readme(manifest: dict[str, Any], repo_id: str, base_model: str | None
         lines += ["", f"A remix of [{base_model}](https://huggingface.co/{base_model})."]
     if training:
         lines += ["", "## Training", ""]
-        for key in ("task_id", "repo", "branch", "commit", "run", "checkpoint", "exported"):
+        for key in ("task_id", "repo", "branch", "commit", "run", "checkpoint", "exported", "bundle"):
             if key in training:
                 lines.append(f"- **{key}**: `{training[key]}`")
         if training.get("dirty"):
             lines.append("- exported from a checkout with uncommitted changes")
+        if training.get("bundle"):
+            lines.append(f"- train from it: `uv run train {training.get('task_id', '<task>')} --init-checkpoint {training['bundle']}` "
+                         f"(in [{training.get('repo', 'the code repo')}](https://github.com/{training.get('repo', '')}))")
     return "\n".join(lines) + "\n"
 
 
