@@ -381,7 +381,7 @@ TURN_IN_PLACE_MIN_FRAC = 0.1             # velocity recipe: 0.4
 # stand expert → the stand-up is untouched. Plus the fine yaw-only term (reward agrees
 # with the labels; the stock term preferred standing still at 0.3 in place) and a
 # turn-in-place bucket reaching down to 0.2 rad/s.
-ENABLE_ANCHOR_YAW_REMAP = False  # v8 only; OFF = Hub v7/v9 recipe (see docs/velstand_policy.md)
+ENABLE_ANCHOR_YAW_REMAP = True  # 2026-11: v7 + remap only (plain resume from j4i6yoq2@1250); OFF = Hub v7/v9 recipe
 ANCHOR_YAW_REMAP = {
     "lin": (0.0, 0.1, 0.2, 0.3, 0.4),
     "targets": (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
