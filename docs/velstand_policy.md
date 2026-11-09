@@ -8,9 +8,18 @@ get-up and yaw commands that are actually tracked. Task
 on each `ENABLE_*` toggle hold the design and lesson arc), BC machinery in
 `src/mjlab_microduck/tasks/distill.py`.
 
-**Current policy: wandb `pollen-robotics/mjlab_microduck/0045i2si` @ `model_2749.pt`** —
-`velstand.onnx` in Hub `pollen-robotics/microduck-policies`, tag **v8** (2026-10-12), validated
-on the real robot (get-up, turning, walking). Previous: v7 = `j4i6yoq2` @ 1250.
+**Current policy: wandb `pollen-robotics/mjlab_microduck/j4i6yoq2` @ `model_1250.pt`** —
+`velstand.onnx` in Hub `pollen-robotics/microduck-policies`, tag **v9** (2026-11), which is
+**the v7 file re-published unchanged**. v8 (`0045i2si` @ 2749, 2026-10-12) turned out worse than
+v7 on the robot and was rolled back; v9 exists only so the robot-side policy updater sees a newer
+version instead of a downgrade.
+
+**This checkout reproduces the v7 / v9 recipe**: the v8 pieces (`ENABLE_ANCHOR_YAW_REMAP`,
+`ENABLE_JOINT_MASKED_TEACHER`, `ENABLE_WIDE_SPAWNS`) are kept in the cfg but OFF. With them off,
+every env cfg (flat / rough, train / play) is identical to commit `454ddb91` (itself checked
+identical to `53fb7d1`, the commit that trained v7) by full cfg dump; the runner cfg differs only
+by no-op bc_cfg defaults and the teachers being loaded from their Hub training bundles (same
+checkpoints). Turn the three toggles back on to reproduce v8.
 
 ## Lineage
 
@@ -28,9 +37,9 @@ every curriculum stays at its final stage — the policy is fine-tuned, not re-t
 | stand teacher | `69u48n8l` @ 9750 | standup env | `alpha_stand.onnx` — the get-up BC expert (and, from v7, the body-tilt teacher) |
 | velstand v1 | `6op8a8u8` @ 5999 | `d3edc1f` (tag `velstand-best-6op8a8u8`) | protective fall + get-up via expert BC + walk anchor, flat |
 | v5/v6 prod | `fhathosb` @ 3750 | `e40fbda`, branch `protective_fall` | same recipe on Rough + Backlash, rough-terrain spawn fix |
-| v7 prod | `j4i6yoq2` @ 1250 | `53fb7d1`, branch `improve_velstand2` | standing body control (below) |
+| **v7 prod = v9** | **`j4i6yoq2` @ 1250** | `53fb7d1`, branch `improve_velstand2` | standing body control (below) |
 | v8 get-up | `qz5g3bwi` @ 1750 | `333ef7b`, branch `improve_standup_velstand` | joint-masked stand teacher + wide get-up spawns (below); robot-tested, not published |
-| **v8 prod** | **`0045i2si` @ 2749** | **`3750776`, branch `improve_standup_velstand`** | walk anchor fed a calibrated yaw remap + fine yaw reward (below) |
+| v8 (rolled back) | `0045i2si` @ 2749 | `3750776`, branch `improve_standup_velstand` | walk anchor fed a calibrated yaw remap + fine yaw reward (below); Hub v8, replaced by v9 = v7 |
 
 ## Stage v7 — `j4i6yoq2` (standing body control)
 
@@ -210,7 +219,7 @@ probe and the walk bench before picking.
 
 ```bash
 uv run scripts/export.py Mjlab-VelStand-Rough-Backlash-MicroDuck \
-  --wandb-run-path pollen-robotics/mjlab_microduck/0045i2si --checkpoint 2749
+  --wandb-run-path pollen-robotics/mjlab_microduck/j4i6yoq2 --checkpoint 1250
 uv run python claude_experiments/velstand_yaw_probe.py output.onnx --backlash
 uv run python claude_experiments/velstand_rise_battery.py output.onnx --backlash
 ```

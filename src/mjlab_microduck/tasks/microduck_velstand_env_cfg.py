@@ -1,8 +1,11 @@
 """Microduck VelStand environment: walking + protective fall + recovery, one policy.
 
-CURRENT POLICY (Hub v7, 2026-10-05): wandb j4i6yoq2 @ model_1250, trained from this
+CURRENT POLICY (Hub v9 = v7, 2026-11): wandb j4i6yoq2 @ model_1250, trained from this
 file at commit 53fb7d1 — warm-started from fhathosb@3750 with ENABLE_BODY_CONTROL.
-Lineage, launch commands and eval numbers: docs/velstand_policy.md.
+v8 (0045i2si@2749) was rolled back on the robot; its pieces stay in this file behind
+ENABLE_ANCHOR_YAW_REMAP / ENABLE_JOINT_MASKED_TEACHER / ENABLE_WIDE_SPAWNS, all OFF so
+the file reproduces the v7 recipe. Lineage, launch commands and eval numbers:
+docs/velstand_policy.md.
 
 BODY CONTROL (2026-10, ENABLE_BODY_CONTROL): body_pose roll/pitch (± z) commanded
 only while standing (StandingGatedPoseCommand: exact zero while walking, as
@@ -378,7 +381,7 @@ TURN_IN_PLACE_MIN_FRAC = 0.1             # velocity recipe: 0.4
 # stand expert → the stand-up is untouched. Plus the fine yaw-only term (reward agrees
 # with the labels; the stock term preferred standing still at 0.3 in place) and a
 # turn-in-place bucket reaching down to 0.2 rad/s.
-ENABLE_ANCHOR_YAW_REMAP = True
+ENABLE_ANCHOR_YAW_REMAP = False  # v8 only; OFF = Hub v7/v9 recipe (see docs/velstand_policy.md)
 ANCHOR_YAW_REMAP = {
     "lin": (0.0, 0.1, 0.2, 0.3, 0.4),
     "targets": (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
@@ -437,11 +440,11 @@ YAW_REMAP_TURN_IN_PLACE_MIN_FRAC = 0.2   # velocity recipe: 0.4 (in-place |wz| <
 #   - WIDER SPAWNS in the same 45 % prone slice: random servo joints (head
 #     included) on half of it, a quarter of it at a uniformly random orientation,
 #     plus a small sitting slice — the states where the freeze happens.
-ENABLE_JOINT_MASKED_TEACHER = True
+ENABLE_JOINT_MASKED_TEACHER = False  # v8 only; OFF = Hub v7/v9 recipe
 TEACHER_MASK_TILT_DEG = 75.0
 # Flat 61D actor obs: ang_vel 0:3, gravity 3:6, joint_pos 6:20, joint_vel 20:34, last action 34:48.
 TEACHER_MASK_COLS = tuple(range(6, 48))
-ENABLE_WIDE_SPAWNS = True
+ENABLE_WIDE_SPAWNS = False  # v8 only; OFF = Hub v7/v9 recipe
 WIDE_JOINT_RANDOM_PROB = 0.5    # share of the prone slice with random servo joints
 WIDE_JOINT_RANGE_FRAC = 0.9
 WIDE_SO3_PROB = 0.25            # share of the prone slice at a uniformly random orientation (always random joints)
