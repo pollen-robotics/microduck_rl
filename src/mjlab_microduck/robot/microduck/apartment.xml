@@ -113,6 +113,18 @@
           pos="-0.20 -1.1375 -0.40" material="bookshelf_mat" contype="1" conaffinity="1"/>
     <geom name="stair_4" type="box" size="0.20 0.0875 0.10"
           pos="-0.20 -1.3125 -0.50" material="bookshelf_mat" contype="1" conaffinity="1"/>
+    <!-- Stairwell shell (bottom + n/s/w/e walls, 0.6 m deep) so downward ToF beams that
+         enter the hole hit the well instead of passing under the floor slabs. -->
+    <geom name="well_bottom" type="box" size="0.20 0.35 0.005"
+          pos="-0.20 -1.05 -0.605" material="bookshelf_mat" contype="1" conaffinity="1"/>
+    <geom name="well_n" type="box" size="0.20 0.005 0.30"
+          pos="-0.20 -0.695 -0.30" material="bookshelf_mat" contype="1" conaffinity="1"/>
+    <geom name="well_s" type="box" size="0.20 0.005 0.30"
+          pos="-0.20 -1.405 -0.30" material="bookshelf_mat" contype="1" conaffinity="1"/>
+    <geom name="well_w" type="box" size="0.005 0.35 0.30"
+          pos="-0.405 -1.05 -0.30" material="bookshelf_mat" contype="1" conaffinity="1"/>
+    <geom name="well_e" type="box" size="0.005 0.35 0.30"
+          pos="0.005 -1.05 -0.30" material="bookshelf_mat" contype="1" conaffinity="1"/>
     <!-- Per-room floor overlays (visual only) — each room's floor is its OWN texture, so the
          floor-dominated low-camera view is unambiguous room to room. -->
     <geom name="floor_kitchen" type="box" size="1.50 1.25 0.002"
