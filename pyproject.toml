@@ -87,7 +87,9 @@ override-dependencies = [
 # mjlab now comes from PyPI (==1.3.0, pinned in [project.dependencies]); no git source.
 # Official BAM actuator model. Switch to `main` (or a tag) once the
 # mjlab-facing API lands there.
-better-actuator-models = { git = "https://github.com/Rhoban/bam.git", branch = "mjlab_frictionloss" }
+# xl330m288t-mg-rl = the mjlab_frictionloss commit previously locked (62bd8ce) +
+# the metal-gear XL330-M288-T model (xl330m288t-MG, 1 A supply current limit).
+better-actuator-models = { git = "https://github.com/Rhoban/bam.git", branch = "xl330m288t-mg-rl" }
 # For local BAM development, comment the line above and use:
 # better-actuator-models = { path = "/home/antoine/Rhoban/bam", editable = true }
 # On linux-aarch64 (DGX Spark / GB10) PyPI's torch wheel is CPU-ONLY:

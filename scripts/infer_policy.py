@@ -37,7 +37,12 @@ BAM_KP_FW = 200.0                 # microduck's preserved firmware stiffness
 BAM_VIN_RANGE = (6.5, 8.2)        # per-env battery voltage DR in training
 BAM_VIN_DROP_GAIN_RANGE = (0.0, 0.2)  # load-dependent sag V_drop = gain * sum|tau|
 BAM_VIN_MIN = 6.0                 # floor on effective voltage after sag
-BAM_MAX_CURRENT = None            # training runs WITHOUT the firmware current limiter
+BAM_MAX_CURRENT = None            # no extra (phase-current) limiter on top of the servo models
+# Metal-gear XL330-M288-T on these joints (bam "xl330m288t-MG", which carries the
+# 1 A supply current limit of the V4 firmware), plastic-gear "xl330" elsewhere.
+BAM_PER_JOINT_MOTORS = (
+    (r"(left|right)_hip_pitch|(left|right)_knee|neck_pitch", "xl330m288t-MG"),
+)
 # Stiff joint-friction constraint, copied from bam.mjlab.BamActuator
 # (stiff_frictionloss=True in training): warp has no noslip solver, so BAM
 # stiffens frictionloss so a statically-held joint does not creep. Mirrored
@@ -63,21 +68,36 @@ def load_mujoco_with_bam(xml_path: str, bam_model, timestep: float, vin_drop_gai
     position actuators -> torque motors with the voltage-bounded forcerange,
     joint damping/frictionloss zeroed (BAM rewrites them every step), stiff
     friction constraint. Armature is set on the dofs by MujocoController.
-    Returns (model, data, bam_ctrl, actuator_names).
+    Joints matching BAM_PER_JOINT_MOTORS get their own servo model, as
+    FrictionDRBamActuator does in warp (mjlab_microduck.bam_servos): the
+    controller's model then holds per-joint parameter arrays.
+    Returns (model, data, bam_ctrl, actuator_names); bam_ctrl.model is the
+    (possibly per-joint) BAM model actually driving the joints.
     """
     from bam.mujoco import MujocoController
-
-    kt = bam_model.kt.value
-    R = bam_model.R.value
-    force_limit = bam_model.actuator.vin * kt / R
+    from mjlab_microduck import bam_servos
 
     spec = mujoco.MjSpec.from_file(xml_path)
-    names = []
+    targets = []
     for act in spec.actuators:
         tgt = act.target
         tgt_name = tgt.name if hasattr(tgt, "name") else str(tgt)
-        if tgt_name.startswith("passive_"):
-            continue
+        if not tgt_name.startswith("passive_"):
+            targets.append((act, tgt_name))
+    joint_names = [j for _, j in targets]
+
+    carrier, joint_models, motor_names = bam_servos.resolve_joint_models(
+        joint_names, BAM_MOTOR_NAME, BAM_MODEL, BAM_PER_JOINT_MOTORS,
+        default_model=bam_model,
+    )
+    vin = bam_model.actuator.vin
+    force_limit = max(vin * m.kt.value / m.R.value for m in joint_models)
+    carrier.actuator.kp = bam_model.actuator.kp
+    carrier.actuator.vin = vin
+    carrier.actuator.max_current = bam_model.actuator.max_current
+
+    names = []
+    for act, tgt_name in targets:
         act.set_to_motor()
         act.forcelimited = True
         act.forcerange = (-force_limit, force_limit)
@@ -92,16 +112,17 @@ def load_mujoco_with_bam(xml_path: str, bam_model, timestep: float, vin_drop_gai
                 joint.solimp_friction = BAM_STIFF_SOLIMP_FRICTION
                 break
 
+    bam_servos.vectorize_parameters(carrier, joint_models)
     model = spec.compile()
     model.opt.timestep = timestep
     data = mujoco.MjData(model)
-    bam_ctrl = MujocoController(bam_model, names, model, data,
+    bam_ctrl = MujocoController(carrier, names, model, data,
                                 vin_drop_gain=vin_drop_gain, vin_min=vin_min)
-    print(f"BAM {BAM_MODEL} actuators on {len(names)} joints: kt={kt:.4f} R={R:.4f} "
-          f"vin={bam_model.actuator.vin:.2f}V kp_fw={bam_model.actuator.kp:.0f} "
+    print(f"BAM {BAM_MODEL} actuators on {len(names)} joints: "
+          f"{bam_servos.describe(joint_names, motor_names)} | "
+          f"vin={vin:.2f}V kp_fw={carrier.actuator.kp:.0f} "
           f"vin_drop_gain={vin_drop_gain} vin_min={vin_min} "
-          f"max_current={bam_model.actuator.max_current} forcerange=+/-{force_limit:.3f}Nm "
-          f"armature={bam_model.actuator.get_extra_inertia():.2e}")
+          f"max_current={carrier.actuator.max_current} forcerange=+/-{force_limit:.3f}Nm")
     return model, data, bam_ctrl, names
 
 

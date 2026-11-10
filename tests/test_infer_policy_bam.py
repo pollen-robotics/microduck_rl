@@ -6,7 +6,9 @@ motor-converted model). These tests lock the two halves together:
   microduck_constants (not imported there to keep the script torch/warp-free);
 * the motor conversion matches what ``bam.mjlab.BamActuator.edit_spec`` does
   (torque motors, voltage-bounded forcerange, armature, zeroed XML friction,
-  stiff friction constraint) and a step loop runs with a live friction budget.
+  stiff friction constraint) and a step loop runs with a live friction budget;
+* the metal-gear joints get the ``xl330m288t-MG`` model (with its 1 A supply
+  current limit) and the others the plastic-gear ``xl330`` one.
 """
 
 import importlib.util
@@ -40,6 +42,7 @@ def test_cpu_bam_constants_mirror_training_cfg(ip):
     assert ip.BAM_VIN_DROP_GAIN_RANGE == k["vin_drop_gain_range"]
     assert ip.BAM_VIN_MIN == k["vin_min"]
     assert ip.BAM_MAX_CURRENT == k.get("max_current")
+    assert ip.BAM_PER_JOINT_MOTORS == k["per_joint_motors"]
     assert ip.BAM_STIFF_SOLREF_FRICTION == BamActuator._STIFF_SOLREF_FRICTION
     assert ip.BAM_STIFF_SOLIMP_FRICTION == BamActuator._STIFF_SOLIMP_FRICTION
 
@@ -55,7 +58,8 @@ def bam_sim(ip):
 
 def test_actuators_converted_like_warp(bam_sim):
     ip, bam_model, model, data, ctrl, names = bam_sim
-    kt, R = bam_model.kt.value, bam_model.R.value
+    m = ctrl.model  # per-joint parameter arrays, in actuator order
+    kt, R = np.asarray(m.kt.value), np.asarray(m.R.value)
     assert len(names) == 14 and model.nu == 14
     assert not any(n.startswith("passive_") for n in names)
     # Torque motors: ctrl is the BAM torque, no MuJoCo PD left over.
@@ -65,13 +69,48 @@ def test_actuators_converted_like_warp(bam_sim):
     # (set_to_motor leaves the old PD biasprm bytes behind; inert under BIAS_NONE,
     # exactly as in warp's edit_spec.)
     assert (model.actuator_forcelimited == 1).all()
-    assert np.allclose(model.actuator_forcerange[:, 1], 7.4 * kt / R)
+    assert np.allclose(model.actuator_forcerange[:, 1], (7.4 * kt / R).max())
     dofs = model.jnt_dofadr[model.actuator_trnid[:, 0]]
-    assert np.allclose(model.dof_armature[dofs], bam_model.actuator.get_extra_inertia())
+    assert np.allclose(model.dof_armature[dofs], m.actuator.get_extra_inertia())
     assert np.allclose(model.dof_solref[dofs], ip.BAM_STIFF_SOLREF_FRICTION)
     assert np.allclose(model.dof_solimp[dofs], ip.BAM_STIFF_SOLIMP_FRICTION)
-    assert bam_model.actuator.kp == ip.BAM_KP_FW
-    assert bam_model.actuator.max_current is None  # training has no current limiter
+    assert m.actuator.kp == ip.BAM_KP_FW
+    assert m.actuator.max_current is None  # no extra phase-current limiter
+
+
+def test_metal_gear_joints_get_their_own_servo_model(bam_sim):
+    from bam.model import load_model
+    from mjlab_microduck.bam_servos import NO_CURRENT_LIMIT
+
+    ip, bam_model, model, data, ctrl, names = bam_sim
+    m = ctrl.model
+    joints = [
+        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j)
+        for j in model.actuator_trnid[:, 0]
+    ]
+    metal = {"left_hip_pitch", "right_hip_pitch", "left_knee", "right_knee", "neck_pitch"}
+    assert metal <= set(joints)
+    mg = load_model(motor_name="xl330m288t-MG", model=ip.BAM_MODEL)
+    pg = load_model(motor_name="xl330", model=ip.BAM_MODEL)
+    for i, joint in enumerate(joints):
+        ref = mg if joint in metal else pg
+        for key in ("kt", "R", "armature", "friction_base", "load_friction_motor_stribeck"):
+            assert np.isclose(m.get_parameters()[key].value[i], ref.get_parameters()[key].value), (joint, key)
+        assert m.current_limit.value[i] == (1.0 if joint in metal else NO_CURRENT_LIMIT)
+
+    # The limiter holds a metal-gear joint's supply current at 1 A and never
+    # touches a plastic-gear one (same command, same state for every joint).
+    act = m.actuator
+    n = len(joints)
+    # 3 rad of error asks for full duty, well past the 1 A limit at stall.
+    act.compute_control(np.full(n, 3.0), np.zeros(n), np.zeros(n), 0.005)
+    duty = act.duty_cycle
+    supply = np.abs(duty) * (duty * act.vin) / np.asarray(m.R.value)
+    for i, joint in enumerate(joints):
+        if joint in metal:
+            assert np.isclose(supply[i], 1.0)
+        else:
+            assert np.isclose(duty[i], min(1.0, 3.0 * act.kp * act.error_gain))
 
 
 def test_bam_step_loop_runs_with_live_friction(bam_sim):
@@ -94,4 +133,4 @@ def test_bam_step_loop_runs_with_live_friction(bam_sim):
     limit = model.actuator_forcerange[0, 1]
     assert (np.abs(data.ctrl) <= limit + 1e-9).all()  # ctrl IS the motor torque
     assert (model.dof_frictionloss[dofs] > 0).all()  # BAM budget written every step
-    assert np.allclose(model.dof_damping[dofs], bam_model.friction_viscous.value)
+    assert np.allclose(model.dof_damping[dofs], ctrl.model.friction_viscous.value)

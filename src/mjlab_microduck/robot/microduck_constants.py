@@ -160,9 +160,18 @@ FULL_COLLISION = CollisionCfg(
 #   - vin_drop_gain_range: load-dependent voltage sag V_drop = gain * sum(|tau|)
 #   - vin_min: hard floor on the effective voltage after sag
 # kp_fw kept at 200 (microduck's preserved firmware stiffness; microban uses 125).
+# Metal-gear XL330-M288-T on the most loaded joints (knees, hip pitches, neck
+# pitch), plastic-gear XL330 elsewhere. The metal-gear model includes the 1 A
+# supply current limit that ROBOTIS's V4 firmware enforces in position control
+# (duck-control CURRENT_LIMIT_MA); the plastic-gear servos are modelled without
+# it. One actuator group with per-joint parameters, so all servos share the same
+# battery (see mjlab_microduck.bam_servos).
+METAL_GEAR_JOINTS_EXPR = r"(left|right)_hip_pitch|(left|right)_knee|neck_pitch"
+
 _BAM_ACTUATOR_KWARGS = dict(
     motor_name="xl330",
     model="m6",
+    per_joint_motors=((METAL_GEAR_JOINTS_EXPR, "xl330m288t-MG"),),
     target_names_expr=(r"^(?!passive_).*",),
     kp_fw=200.0,  # microduck's preserved firmware stiffness (microban uses 125)
     # vin_range=(6.9, 7.9),
