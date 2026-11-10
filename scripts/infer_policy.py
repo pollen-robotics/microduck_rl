@@ -38,6 +38,12 @@ BAM_VIN_RANGE = (6.5, 8.2)        # per-env battery voltage DR in training
 BAM_VIN_DROP_GAIN_RANGE = (0.0, 0.2)  # load-dependent sag V_drop = gain * sum|tau|
 BAM_VIN_MIN = 6.0                 # floor on effective voltage after sag
 BAM_MAX_CURRENT = None            # no extra (phase-current) limiter on top of the servo models
+# Command delay of the BAM actuator in training (mjlab ActuatorCfg delay_min_lag /
+# delay_max_lag), in PHYSICS steps (5 ms): each step the position target reaching
+# the firmware law is 3-6 steps old, the lag redrawn every step. The policies
+# depend on it: run without it, velstand stands still instead of walking.
+BAM_DELAY_MIN_LAG = 3
+BAM_DELAY_MAX_LAG = 6
 # Metal-gear XL330-M288-T on these joints (bam "xl330m288t-MG", which carries the
 # 1 A supply current limit of the V4 firmware), plastic-gear "xl330" elsewhere.
 BAM_PER_JOINT_MOTORS = (
@@ -59,6 +65,29 @@ def load_bam_model(kp_fw: float, vin: float, max_current):
     bam_model.actuator.vin = vin
     bam_model.actuator.max_current = max_current if (max_current and max_current > 0) else None
     return bam_model
+
+
+class BamCommandDelay:
+    """Physics-step command delay in front of the BAM controller, as mjlab's
+    actuator delay does in training: each physics step the commanded target is
+    queued and the controller gets the one from ``lag`` steps earlier, ``lag``
+    drawn uniformly in [min_lag, max_lag] every step."""
+
+    def __init__(self, min_lag: int, max_lag: int, seed: int | None = None):
+        self.min_lag, self.max_lag = min_lag, max_lag
+        self.rng = np.random.default_rng(seed)
+        self.command = None
+        self.history = []
+
+    def reset(self, target):
+        self.command = np.array(target, dtype=float)
+        self.history = [self.command.copy()] * (self.max_lag + 1)
+
+    def apply(self, bam_ctrl):
+        """Queue the current command and give bam_ctrl its delayed target."""
+        self.history = self.history[1:] + [self.command.copy()]
+        lag = int(self.rng.integers(self.min_lag, self.max_lag + 1))
+        bam_ctrl.q_target[:] = self.history[-1 - lag]
 
 
 def load_mujoco_with_bam(xml_path: str, bam_model, timestep: float, vin_drop_gain, vin_min):
@@ -241,6 +270,7 @@ class PolicyInference:
                  roulade_onnx_path=None,
                  kick_duration=3.0, roulade_duration=2.0):
         self.bam_ctrl = bam_ctrl  # bam.mujoco.MujocoController (None = legacy position actuators)
+        self.bam_delay = None  # BamCommandDelay in front of bam_ctrl (set in main)
         self.model = model
         self.data = data
         self.action_scale = action_scale
@@ -910,7 +940,10 @@ class PolicyInference:
         motor TORQUE it writes on update()). Legacy: MuJoCo position actuators.
         """
         if self.bam_ctrl is not None:
-            self.bam_ctrl.q_target[:] = target_positions
+            if self.bam_delay is not None:
+                self.bam_delay.command = np.array(target_positions, dtype=float)
+            else:
+                self.bam_ctrl.q_target[:] = target_positions
         else:
             self.data.ctrl[:] = target_positions
 
@@ -1218,6 +1251,10 @@ def main():
                         help="Use the unified 13D command obs layout (twist+head_pose+body_pose). "
                              "Required for policies trained with the new pose-command-tracking setup. "
                              "Old policies (51D obs, head_offset added to ctrl) need this flag OFF.")
+    parser.add_argument("--no-bam-delay", action="store_true",
+                        help=f"Disable the BAM command delay ({BAM_DELAY_MIN_LAG}-{BAM_DELAY_MAX_LAG} "
+                             "physics steps, as in training). Not the same as --delay, which "
+                             "buffers policy actions in 20 ms policy steps.")
     parser.add_argument("--no-bam", action="store_true",
                         help="Use the XML MuJoCo position actuators instead of the BAM M6 "
                              "voltage/friction model the policies are trained against.")
@@ -1404,6 +1441,11 @@ def main():
         data.qpos[qpos_idx] = policy.default_pose[i]
     if bam_ctrl is not None:
         bam_ctrl.reset(data.qpos)   # clears voltage-drop state, q_target = current qpos
+        if not args.no_bam_delay:
+            policy.bam_delay = BamCommandDelay(BAM_DELAY_MIN_LAG, BAM_DELAY_MAX_LAG)
+            policy.bam_delay.reset(policy.default_pose)
+            print(f"BAM command delay: {BAM_DELAY_MIN_LAG}-{BAM_DELAY_MAX_LAG} physics steps "
+                  f"({BAM_DELAY_MIN_LAG * 5}-{BAM_DELAY_MAX_LAG * 5} ms), as in training")
     policy.set_position_targets(policy.default_pose)
     mujoco.mj_forward(model, data)
 
@@ -1790,6 +1832,8 @@ def main():
 
                 for _ in range(decimation):
                     if bam_ctrl is not None:
+                        if policy.bam_delay is not None:
+                            policy.bam_delay.apply(bam_ctrl)
                         # BAM owns control/torque/friction: update() runs the
                         # firmware P-loop + DC-motor equation, writes the torque
                         # to data.ctrl and pushes the friction budget onto the

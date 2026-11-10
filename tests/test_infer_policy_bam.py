@@ -7,6 +7,7 @@ motor-converted model). These tests lock the two halves together:
 * the motor conversion matches what ``bam.mjlab.BamActuator.edit_spec`` does
   (torque motors, voltage-bounded forcerange, armature, zeroed XML friction,
   stiff friction constraint) and a step loop runs with a live friction budget;
+* the BAM command delay (physics steps) matches training's;
 * the metal-gear joints get the ``xl330m288t-MG`` model (with its 1 A supply
   current limit) and the others the plastic-gear ``xl330`` one.
 """
@@ -43,6 +44,8 @@ def test_cpu_bam_constants_mirror_training_cfg(ip):
     assert ip.BAM_VIN_MIN == k["vin_min"]
     assert ip.BAM_MAX_CURRENT == k.get("max_current")
     assert ip.BAM_PER_JOINT_MOTORS == k["per_joint_motors"]
+    assert ip.BAM_DELAY_MIN_LAG == k["delay_min_lag"]
+    assert ip.BAM_DELAY_MAX_LAG == k["delay_max_lag"]
     assert ip.BAM_STIFF_SOLREF_FRICTION == BamActuator._STIFF_SOLREF_FRICTION
     assert ip.BAM_STIFF_SOLIMP_FRICTION == BamActuator._STIFF_SOLIMP_FRICTION
 
@@ -134,3 +137,19 @@ def test_bam_step_loop_runs_with_live_friction(bam_sim):
     assert (np.abs(data.ctrl) <= limit + 1e-9).all()  # ctrl IS the motor torque
     assert (model.dof_frictionloss[dofs] > 0).all()  # BAM budget written every step
     assert np.allclose(model.dof_damping[dofs], ctrl.model.friction_viscous.value)
+
+
+def test_bam_command_delay_matches_training_lag(ip):
+    """Each physics step the controller gets the command from 3-6 steps earlier."""
+    class Ctrl:
+        q_target = np.zeros(1)
+
+    delay = ip.BamCommandDelay(ip.BAM_DELAY_MIN_LAG, ip.BAM_DELAY_MAX_LAG, seed=0)
+    delay.reset(np.zeros(1))
+    ctrl, lags = Ctrl(), []
+    for step in range(1, 400):
+        delay.command = np.array([float(step)])
+        delay.apply(ctrl)
+        if step > ip.BAM_DELAY_MAX_LAG:
+            lags.append(step - int(ctrl.q_target[0]))
+    assert set(lags) == set(range(ip.BAM_DELAY_MIN_LAG, ip.BAM_DELAY_MAX_LAG + 1))
