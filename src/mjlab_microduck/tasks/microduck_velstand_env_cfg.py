@@ -1,10 +1,10 @@
 """Microduck VelStand environment: walking + protective fall + recovery, one policy.
 
-CURRENT POLICY (Hub v9 = v7, 2026-11): wandb j4i6yoq2 @ model_1250, trained from this
-file at commit 53fb7d1 — warm-started from fhathosb@3750 with ENABLE_BODY_CONTROL.
-v8 (0045i2si@2749) was rolled back on the robot; its pieces stay in this file behind
-ENABLE_ANCHOR_YAW_REMAP / ENABLE_JOINT_MASKED_TEACHER / ENABLE_WIDE_SPAWNS, all OFF so
-the file reproduces the v7 recipe. Lineage, launch commands and eval numbers:
+CURRENT POLICY (2026-11-10): v7 + yaw remap, wandb n3fg9pgq @ model_2000 — plain resume
+of v7 (Hub v9 = v7 = j4i6yoq2@1250, trained from this file at commit 53fb7d1) with
+ENABLE_ANCHOR_YAW_REMAP on. v8 (0045i2si@2749) was rolled back on the robot; its two
+get-up pieces stay here behind ENABLE_JOINT_MASKED_TEACHER / ENABLE_WIDE_SPAWNS, OFF.
+All three OFF = the v7 recipe. Lineage, launch commands and eval numbers:
 docs/velstand_policy.md.
 
 BODY CONTROL (2026-10, ENABLE_BODY_CONTROL): body_pose roll/pitch (± z) commanded
