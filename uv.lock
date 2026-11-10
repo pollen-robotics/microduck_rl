@@ -103,7 +103,7 @@ wheels = [
 [[package]]
 name = "better-actuator-models"
 version = "1.0.1"
-source = { git = "https://github.com/Rhoban/bam.git?branch=xl330m288t-mg-rl#ba0337a2adeb57b79b6e34998fd4ef111adc3a81" }
+source = { git = "https://github.com/Rhoban/bam.git?branch=xl330m288t-mg-rl#7aa9bb8c2d6d926fb60972e3de121893a3d7d6ec" }
 dependencies = [
     { name = "colorama" },
     { name = "numpy" },
