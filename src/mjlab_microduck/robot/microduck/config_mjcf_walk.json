@@ -25,7 +25,7 @@
         "sed -i '/<!-- Part leg_2 -->/{n; n; s/class=\"collision\"/class=\"self_collision_only\"/}' robot_walk.xml",
         "sed -i '/<!-- Part power_support -->/{n; n; s/class=\"collision\"/class=\"self_collision_only\"/}' robot_walk.xml",
         "sed -i 's/ inheritrange=\"1\"//g' robot_walk.xml",
-        "sed -i 's|<site[^>]*name=\"head_camera\"[^>]*pos=\"\\([^\"]*\\)\"[^>]*/>|&\\n              <camera name=\"head_camera\" pos=\"\\1\" quat=\"0 0 -1 0\"/>|' robot_walk.xml"
+        "sed -i 's|<site[^>]*name=\"head_camera\"[^>]*pos=\"\\([^\"]*\\)\"[^>]*/>|&\\n              <camera name=\"head_camera\" pos=\"\\1\" quat=\"0 0 0 1\"/>|' robot_walk.xml"
     ],
     "joint_properties": {
         "default": {

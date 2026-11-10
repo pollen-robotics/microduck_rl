@@ -25,7 +25,7 @@
         "sed -i '/<!-- Part leg_2 -->/{n; n; s/class=\"collision\"/class=\"self_collision_only\"/}' robot_walk_backlash.xml",
         "sed -i '/<!-- Part power_support -->/{n; n; s/class=\"collision\"/class=\"self_collision_only\"/}' robot_walk_backlash.xml",
         "sed -i 's/ inheritrange=\"1\"//g' robot_walk_backlash.xml",
-        "sed -i 's|<site[^>]*name=\"head_camera\"[^>]*pos=\"\\([^\"]*\\)\"[^>]*/>|&\\n              <camera name=\"head_camera\" pos=\"\\1\" quat=\"0 0 -1 0\"/>|' robot_walk_backlash.xml",
+        "sed -i 's|<site[^>]*name=\"head_camera\"[^>]*pos=\"\\([^\"]*\\)\"[^>]*/>|&\\n              <camera name=\"head_camera\" pos=\"\\1\" quat=\"0 0 0 1\"/>|' robot_walk_backlash.xml",
         "python3 add_backlash.py robot_walk_backlash.xml --backlash-deg 2.0"
     ],
     "joint_properties": {

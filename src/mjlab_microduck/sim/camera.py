@@ -71,28 +71,16 @@ class Camera:
         if self.camera < 0:
             raise SystemExit(f"the model has no camera {name!r}")
 
-        # **The model's head camera faces backwards.** Measured against the duck's own forward axis
-        # and the ToF site's: the camera's view direction is -x where both of those are +x, exactly
-        # 180 degrees out. On screen that is a duck apparently seeing what is behind it — a cyan cube
-        # it is walking away from, sitting in frame.
+        # The model's head camera is used as it comes: it looks along the duck's forward axis and
+        # has its right axis along the world's *down*, so a rendered frame comes out on its side.
+        # That is right, because the real head camera is mounted a quarter turn off and every
+        # consumer already expects that: `mediad --rotate 90` stays true of a simulated duck for
+        # the same reason it is true of a real one. `tests/test_head_camera.py` pins both.
         #
-        # Turned 180 degrees about the camera's own **right** axis — not its up axis, which was the
-        # first attempt and came out upside down. Both turns fix the direction; only this one leaves
-        # the image the same way up. What the console has to undo is set by where the camera's right
-        # axis points: the original camera has it along the world's *down*, and a yaw turn moves it
-        # to *up*, so the quarter turn the console applies lands 180 degrees out.
-        #
-        # A roll turn keeps right pointing down, so a rendered frame comes out on its side exactly as
-        # the original did — which is correct, because the real head camera is mounted a quarter turn
-        # off and every consumer already expects that. `mediad --rotate 90` stays true of a simulated
-        # duck for the same reason it is true of a real one.
-        #
-        # Done here rather than in the MJCF, because that file belongs to the RL work and a camera
-        # nothing in training uses is not worth a change they have to review.
-        turn = np.array([0.0, 1.0, 0.0, 0.0])  # 180 degrees about x, scalar-first
-        fixed = np.zeros(4)
-        mujoco.mju_mulQuat(fixed, model.cam_quat[self.camera], turn)
-        model.cam_quat[self.camera] = fixed
+        # This used to turn the camera here, because the MJCF's pointed backwards. The turn was a
+        # 180 degree roll about the camera's own right axis (a yaw turn also fixes the direction
+        # but leaves the image upside down), and it now lives in the MJCF and in the
+        # `config_mjcf_*.json` post-processing that writes it.
         self.renderer = mujoco.Renderer(model, height=height, width=width)
         self.width = width
         self.height = height
