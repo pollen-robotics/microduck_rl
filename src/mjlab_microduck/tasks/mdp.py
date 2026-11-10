@@ -4660,7 +4660,8 @@ def maybe_set_random_prone_orientation(
         # Override z so the prone body has head/neck clearance when settling.
         z = torch.rand(len(selected), device=env.device) * (prone_z_max - prone_z_min) + prone_z_min
         env.sim.data.qpos[selected, 2] = z + _env_origin_z(env, selected)
-        so3 = torch.rand(len(selected), device=env.device) < so3_prob
+        # so3_prob == 0 draws nothing, so the RNG stream matches the pre-so3 code (v7 recipe)
+        so3 = (torch.rand(len(selected), device=env.device) < so3_prob) if so3_prob > 0.0 else torch.zeros(len(selected), dtype=torch.bool, device=env.device)
         if so3.any():
             ids = selected[so3]
             env.sim.data.qpos[ids, 3:7] = _uniform_random_quat(len(ids), env.device)

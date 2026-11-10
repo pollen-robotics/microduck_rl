@@ -8,9 +8,22 @@ get-up and yaw commands that are actually tracked. Task
 on each `ENABLE_*` toggle hold the design and lesson arc), BC machinery in
 `src/mjlab_microduck/tasks/distill.py`.
 
-**Current policy: wandb `pollen-robotics/mjlab_microduck/0045i2si` @ `model_2749.pt`** —
-`velstand.onnx` in Hub `pollen-robotics/microduck-policies`, tag **v8** (2026-10-12), validated
-on the real robot (get-up, turning, walking). Previous: v7 = `j4i6yoq2` @ 1250.
+**Current policy: wandb `pollen-robotics/mjlab_microduck/j4i6yoq2` @ `model_1250.pt`** —
+`velstand.onnx` in Hub `pollen-robotics/microduck-policies`, tag **v9** (2026-11), which is
+**the v7 file re-published unchanged**. v8 (`0045i2si` @ 2749, 2026-10-12) turned out worse than
+v7 on the robot and was rolled back; v9 exists only so the robot-side policy updater sees a newer
+version instead of a downgrade.
+
+**Newest policy (2026-11-10): v7 + yaw remap = wandb `pollen-robotics/mjlab_microduck/n3fg9pgq` @
+`model_2000.pt`** (Hub `apirrone/velstand_v7_yaw_remap`, not yet in the official set). On the robot
+it behaves like v7 and turns better. See "Stage v7 + yaw remap" below.
+
+**This checkout trains the v7 + yaw remap recipe**: `ENABLE_ANCHOR_YAW_REMAP` ON, the two v8 get-up
+pieces (`ENABLE_JOINT_MASKED_TEACHER`, `ENABLE_WIDE_SPAWNS`) OFF. With all three off, every env cfg
+(flat / rough, train / play) is identical to commit `454ddb91` (itself checked identical to
+`53fb7d1`, the commit that trained v7) by full cfg dump; the runner cfg differs only by no-op
+bc_cfg defaults and the teachers being loaded from their Hub training bundles (same checkpoints).
+Turn all three on to reproduce v8.
 
 ## Lineage
 
@@ -28,9 +41,51 @@ every curriculum stays at its final stage — the policy is fine-tuned, not re-t
 | stand teacher | `69u48n8l` @ 9750 | standup env | `alpha_stand.onnx` — the get-up BC expert (and, from v7, the body-tilt teacher) |
 | velstand v1 | `6op8a8u8` @ 5999 | `d3edc1f` (tag `velstand-best-6op8a8u8`) | protective fall + get-up via expert BC + walk anchor, flat |
 | v5/v6 prod | `fhathosb` @ 3750 | `e40fbda`, branch `protective_fall` | same recipe on Rough + Backlash, rough-terrain spawn fix |
-| v7 prod | `j4i6yoq2` @ 1250 | `53fb7d1`, branch `improve_velstand2` | standing body control (below) |
+| **v7 prod = v9** | **`j4i6yoq2` @ 1250** | `53fb7d1`, branch `improve_velstand2` | standing body control (below) |
 | v8 get-up | `qz5g3bwi` @ 1750 | `333ef7b`, branch `improve_standup_velstand` | joint-masked stand teacher + wide get-up spawns (below); robot-tested, not published |
-| **v8 prod** | **`0045i2si` @ 2749** | **`3750776`, branch `improve_standup_velstand`** | walk anchor fed a calibrated yaw remap + fine yaw reward (below) |
+| v8 (rolled back) | `0045i2si` @ 2749 | `3750776`, branch `improve_standup_velstand` | walk anchor fed a calibrated yaw remap + fine yaw reward (below); Hub v8, replaced by v9 = v7 |
+| **v7 + yaw remap** | **`n3fg9pgq` @ 2000** | branch `velstand_v7_yaw_remap` | v8b's anchor yaw remap only, plain resume from v7 (below) |
+
+## Stage v7 + yaw remap — `n3fg9pgq` (2026-11-10)
+
+| | |
+|---|---|
+| host | HF Jobs, `rtx-pro-6000` |
+| start | `j4i6yoq2` @ `model_1250.pt`, **plain resume** (curricula stay final) |
+| checkpoint used | **`model_2000.pt`** (run ended at 2249) — robot-tested 2026-11-10: like v7, turns better |
+
+```bash
+uv run train Mjlab-VelStand-Rough-Backlash-MicroDuck --env.scene.num-envs 4096 --agent.resume True \
+  --wandb-run-path pollen-robotics/mjlab_microduck/j4i6yoq2 --wandb-checkpoint-name model_1250.pt \
+  --agent.max_iterations 1000
+```
+
+### Why
+
+v8 turned much better than v7 on the robot but was rolled back for another reason, so the
+v8 get-up changes (v8a) are the suspects and the yaw remap (v8b) is not. This stage applies only
+`ENABLE_ANCHOR_YAW_REMAP` (anchor yaw remap + `track_yaw_fine` + turn-in-place bucket ≥ 0.2 rad/s)
+on top of v7.
+
+A re-run of the v7 stage (warm start from `fhathosb@3750`, run `cg9ssbo9`, 4000 iterations)
+showed that **training longer does not fix yaw**: in-place 1.0 rad/s stays ≤ v7's ≈ 0.45 at
+every checkpoint up to 3000, 0.6 stays ≈ 0, and the left/right bias and straight-walk drift
+wander from checkpoint to checkpoint. It is capped by the walk anchor, not by training time.
+
+### Sim eval (`scripts/velstand_bench.py`, flat + backlash, 64 envs per case, 128 for push)
+
+| | v7 `j4i6@1250` | Hub v8 `0045i2si@2749` | **`n3fg9pgq@2000`** | `n3fg9pgq@2249` |
+|---|---|---|---|---|
+| in place ±1.0 / ±0.6 rad/s | +0.48 / −0.41 · ≈ ±0.08 | +0.96 / −0.89 · ±0.56 | **+0.88 / −0.94 · +0.35 / −0.54** | +0.87 / −1.01 · +0.42 / −0.58 |
+| vx 0.2, ±0.6 / ±1.0 | +0.33 / −0.20 · +0.53 / −0.41 | ≈ ±0.56 · ≈ ±0.9 | **±0.55 · +0.91 / −0.95** | ±0.55 · +0.91 / −1.01 |
+| straight-walk drift | ≤ 0.05 | ≤ 0.06 | ≤ 0.01 | ≤ 0.02 |
+| rise HOME fd / fu / side | 100 / 98 / 100 | 100 / 86 / 92 | 100 / 95 / 100 | 100 / 95 / 100 |
+| rise rj fd / fu / side | 100 / 88 / 91 | 98 / 95 / 94 | 98 / 88 / 95 | 97 / 78 / 83 |
+| push 0.8 / 1.0 / 1.2 m/s, up at end | 98 / 95 / 98 | 100 / 97 / 97 (64 envs) | 96 / 94 / 91 | — |
+
+Checkpoint choice: get-up reliability swings between checkpoints of this run (1750: HOME face-up
+80 %, 2249: rj face-up 78 %); 2000 is the one at v7's level on every family. Slow in-place
+turning (0.3 rad/s) is still ≈ 0, and +0.6 in place is weaker to the left.
 
 ## Stage v7 — `j4i6yoq2` (standing body control)
 
@@ -210,7 +265,7 @@ probe and the walk bench before picking.
 
 ```bash
 uv run scripts/export.py Mjlab-VelStand-Rough-Backlash-MicroDuck \
-  --wandb-run-path pollen-robotics/mjlab_microduck/0045i2si --checkpoint 2749
+  --wandb-run-path pollen-robotics/mjlab_microduck/j4i6yoq2 --checkpoint 1250
 uv run python claude_experiments/velstand_yaw_probe.py output.onnx --backlash
 uv run python claude_experiments/velstand_rise_battery.py output.onnx --backlash
 ```
