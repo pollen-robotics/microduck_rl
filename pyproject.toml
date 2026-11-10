@@ -37,6 +37,9 @@ dependencies = [
     "torch==2.9.1",
 ]
 
+[project.optional-dependencies]
+visualization = ["pillow>=11,<13"]
+
 [project.entry-points."mjlab.tasks"]
 mjlab_microduck = "mjlab_microduck.tasks"
 
@@ -55,6 +58,10 @@ train = "mjlab_microduck.train_cli:main"
 duck-body = "mjlab_microduck.sim.body_server:main"
 publish = "mjlab_microduck.publish.cli:main"
 share-training = "mjlab_microduck.publish.training:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "src/mjlab_microduck/sim/visualization/tests"]
+
 [tool.ruff]
 src = ["src"]  # Helpful for recognizing first-party imports.
 indent-width = 4

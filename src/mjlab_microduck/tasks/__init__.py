@@ -281,3 +281,8 @@ for _task_id, _make_cfg, _kw, _rl_cfg, _robot_cfg in _BACKLASH_TASKS:
         rl_cfg=_rl_cfg,
         runner_cls=MicroduckOnPolicyRunner,
     )
+
+# Keep optional Studio training integration outside the upstream task recipes.
+from mjlab_microduck.sim.visualization.lateral.register import register_lateral_task
+
+register_lateral_task(MicroduckOnPolicyRunner)
