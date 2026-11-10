@@ -39,6 +39,9 @@ class ExportConfig:
     checkpoint: int | None = None      # Select checkpoint by iteration number (e.g. 3000)
     checkpoint_file: str | None = None
     motion_file: str | None = None
+    # VLA: also export the frozen sentence encoder next to the policy.
+    encoder_onnx: str | None = None
+    encoder_model: str | None = None
     num_envs: int | None = None
     device: str | None = None
     video: bool = False
@@ -85,6 +88,46 @@ def _iteration_of(checkpoint_path: Path | None) -> int | None:
         return None
     match = re.search(r"model_(\d+)\.pt$", checkpoint_path.name)
     return int(match.group(1)) if match else None
+
+
+def _add_vla_metadata(metadata: dict, onnx_path: str, *, cfg: ExportConfig, device: str) -> None:
+    """Record the text/encoder contract in the policy ONNX metadata.
+
+    Detection is graph-based (a second input named ``text_emb``), so this also
+    works when the policy was exported by an older run. The encoder export is
+    optional: pass ``--encoder-onnx`` to produce it in the same step.
+    """
+    from mjlab_microduck.publish import manifest as publish_manifest
+    from mjlab_microduck.vla.text_encoder import DEFAULT_MODEL
+
+    shape = publish_manifest.inspect_onnx(Path(onnx_path))
+    metadata["obs_len"] = shape.obs_len
+    metadata["vla"] = shape.is_vla
+    if not shape.is_vla:
+        if cfg.encoder_onnx:
+            raise ValueError(
+                "--encoder-onnx was given but the exported policy has a single "
+                "input (not a VLA policy)"
+            )
+        return
+
+    metadata["text_input"] = shape.text_input_name or publish_manifest.TEXT_INPUT
+    metadata["text_embedding_dim"] = shape.text_dim
+    metadata["text_group"] = "text"
+    if cfg.encoder_onnx:
+        from mjlab_microduck.vla.export_encoder import export_encoder_onnx
+
+        info = export_encoder_onnx(
+            cfg.encoder_model or DEFAULT_MODEL,
+            cfg.encoder_onnx,
+            expected_dim=shape.text_dim,
+            device=device,
+        )
+        metadata["text_encoder_model"] = info["model"]
+        metadata["text_encoder_file"] = info["file"]
+        metadata["text_encoder_dim"] = info["embedding_dim"]
+        metadata["text_encoder_sha256"] = info["sha256"]
+        print(f"[export] encoder: {info['file']} ({info['embedding_dim']}D)")
 
 
 def run_export(task_id: str, cfg: ExportConfig) -> ExportResult:
@@ -285,6 +328,7 @@ def run_export(task_id: str, cfg: ExportConfig) -> ExportResult:
     # for every wandb export, and deployed policies had to be traced by weight matching.
     metadata = get_base_metadata(runner.env.unwrapped, run_path=str(cfg.wandb_run_path or cfg.checkpoint_file))
     metadata.update(_provenance_metadata(task_id, resume_path))
+    _add_vla_metadata(metadata, onnx_path, cfg=cfg, device=device)
     attach_metadata_to_onnx(onnx_path, metadata)
 
     print(f"Written {onnx_path}")

@@ -30,7 +30,7 @@ _CUDA_INDEX = "https://download.pytorch.org/whl/cu"
 
 
 def _packages(name):
-    lock = tomllib.loads((_ROOT / "uv.lock").read_text())
+    lock = tomllib.loads((_ROOT / "uv.lock").read_text(encoding="utf-8"))
     return [p for p in lock["package"] if p["name"] == name]
 
 
@@ -56,7 +56,7 @@ def _aarch64_entry(pkgs):
 
 def test_torch_is_a_direct_dependency():
     """Without this, [tool.uv.sources] for torch is a silent no-op."""
-    pyproject = tomllib.loads((_ROOT / "pyproject.toml").read_text())
+    pyproject = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     deps = pyproject["project"]["dependencies"]
     assert any(d.split("=")[0].split("[")[0].strip() == "torch" for d in deps), (
         "torch must stay in [project.dependencies]: uv applies "
@@ -66,7 +66,7 @@ def test_torch_is_a_direct_dependency():
 
 
 def test_torch_source_is_pinned_to_a_cuda_index_on_aarch64():
-    pyproject = tomllib.loads((_ROOT / "pyproject.toml").read_text())
+    pyproject = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     uv_cfg = pyproject["tool"]["uv"]
     assert "torch" in uv_cfg.get("sources", {}), (
         "[tool.uv.sources] no longer has a torch entry -> aarch64 falls back "
@@ -74,8 +74,11 @@ def test_torch_source_is_pinned_to_a_cuda_index_on_aarch64():
     )
     sources = uv_cfg["sources"]["torch"]
     indexes = {p["name"]: p["url"] for p in uv_cfg.get("index", [])}
-    for src in sources:
-        assert "aarch64" in src["marker"], "the torch source must stay aarch64-scoped"
+    # Windows also routes torch to a CUDA index (PyPI's win wheel is CPU-only);
+    # the aarch64 guarantee only constrains the aarch64-scoped sources.
+    aarch64_sources = [src for src in sources if "aarch64" in src["marker"]]
+    assert aarch64_sources, "the aarch64 torch source was removed"
+    for src in aarch64_sources:
         assert indexes[src["index"]].startswith(_CUDA_INDEX), (
             f"index {src['index']} is not a PyTorch CUDA index"
         )
@@ -96,13 +99,18 @@ def test_lockfile_routes_aarch64_torch_to_cuda_wheels():
 
 
 def test_x86_64_resolution_stays_on_pypi():
-    """HF Jobs run on x86_64: their resolution must not move."""
+    """HF Jobs run on x86_64: their resolution must not move.
+
+    Windows is deliberately excluded: PyPI's Windows torch wheel is CPU-only,
+    so it is routed to the cu126 index (see the win32 source in pyproject.toml).
+    """
     others = [
         p
         for p in _packages("torch")
         if "platform_machine == 'aarch64'" not in _markers(p)
+        and "sys_platform == 'win32'" not in _markers(p)
     ]
-    assert others, "no non-aarch64 torch entry found"
+    assert others, "no non-aarch64/non-win32 torch entry found"
     for pkg in others:
         assert _registry(pkg) == "https://pypi.org/simple", (
             f"x86_64 torch moved to {_registry(pkg)!r} — HF Jobs would switch "

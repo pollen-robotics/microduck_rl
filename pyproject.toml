@@ -37,6 +37,14 @@ dependencies = [
     "torch==2.9.1",
 ]
 
+# Optional: free-sentence (language-conditioned / VLA) tasks need a frozen
+# sentence encoder. Kept out of the core deps so the locomotion training stack
+# does not pull `transformers`; install with `uv sync --extra vla`.
+[project.optional-dependencies]
+vla = [
+    "sentence-transformers>=3.0",
+]
+
 [project.entry-points."mjlab.tasks"]
 mjlab_microduck = "mjlab_microduck.tasks"
 
@@ -101,10 +109,24 @@ better-actuator-models = { git = "https://github.com/Rhoban/bam.git", branch = "
 # CUDA via its nvidia-*-cu12 deps — that resolution is unchanged.
 torch = [
   { index = "pytorch-cu129", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+  # On Windows, PyPI's torch wheel is CPU-only (torch.version.cuda is None),
+  # so training finds no GPU. Route torch to the CUDA 12.8 index there: cu128
+  # is the first release with Blackwell (sm_120) kernels, required for RTX
+  # 50-series GPUs (e.g. RTX 5060 Laptop). cu126 tops out at sm_90, so an
+  # RTX 50 card fails with "no kernel image is available for execution".
+  # cu128 needs an NVIDIA driver >= 570.x (CUDA 12.8) — the RTX 5060 ships
+  # with one (591.84 here).
+  { index = "pytorch-cu128", marker = "sys_platform == 'win32'" },
 ]
 
 [[tool.uv.index]]
 name = "pytorch-cu129"
 url = "https://download.pytorch.org/whl/cu129"
+# explicit: only packages that name this index resolve from it.
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 # explicit: only packages that name this index resolve from it.
 explicit = true

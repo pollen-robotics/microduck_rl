@@ -1,0 +1,271 @@
+{
+  "version": 1,
+  "encoder": {
+    "model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    "dim": 384,
+    "max_length": 64,
+    "normalize": true
+  },
+  "command_layout": [
+    "twist_x",
+    "twist_y",
+    "twist_z",
+    "neck_pitch",
+    "head_pitch",
+    "head_yaw",
+    "head_roll",
+    "body_x",
+    "body_y",
+    "body_z",
+    "body_roll",
+    "body_pitch",
+    "body_yaw"
+  ],
+  "intents": [
+    {
+      "name": "stand",
+      "command": {
+        "twist": [0.0, 0.0, 0.0],
+        "head_pose": [0.0, 0.0, 0.0, 0.0],
+        "body_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      },
+      "paraphrases": [
+        "站好别动",
+        "原地站着",
+        "停在那里不要动",
+        "保持站立",
+        "别走了",
+        "停一下",
+        "stand still",
+        "stay put",
+        "hold your position",
+        "stop and stand",
+        "remain standing"
+      ]
+    },
+    {
+      "name": "walk_forward",
+      "command": {
+        "twist": [0.2, 0.0, 0.0],
+        "head_pose": [0.0, 0.0, 0.0, 0.0],
+        "body_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      },
+      "paraphrases": [
+        "往前走",
+        "向前走",
+        "前进",
+        "往前迈步",
+        "向前移动",
+        "继续向前",
+        "往前一点",
+        "walk forward",
+        "go forward",
+        "move ahead",
+        "step forward",
+        "advance"
+      ]
+    },
+    {
+      "name": "walk_backward",
+      "command": {
+        "twist": [-0.15, 0.0, 0.0],
+        "head_pose": [0.0, 0.0, 0.0, 0.0],
+        "body_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      },
+      "paraphrases": [
+        "往后退",
+        "向后走",
+        "后退",
+        "往回走",
+        "向后退一点",
+        "退回去",
+        "walk backward",
+        "go backward",
+        "move back",
+        "step back",
+        "reverse"
+      ]
+    },
+    {
+      "name": "strafe_left",
+      "command": {
+        "twist": [0.0, 0.15, 0.0],
+        "head_pose": [0.0, 0.0, 0.0, 0.0],
+        "body_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      },
+      "paraphrases": [
+        "向左平移",
+        "往左边挪",
+        "向左侧移",
+        "左边走一点",
+        "横向左移",
+        "往左横着走",
+        "strafe left",
+        "sidestep left",
+        "move left",
+        "shift left",
+        "slide left"
+      ]
+    },
+    {
+      "name": "strafe_right",
+      "command": {
+        "twist": [0.0, -0.15, 0.0],
+        "head_pose": [0.0, 0.0, 0.0, 0.0],
+        "body_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      },
+      "paraphrases": [
+        "向右平移",
+        "往右边挪",
+        "向右侧移",
+        "右边走一点",
+        "横向右移",
+        "往右横着走",
+        "strafe right",
+        "sidestep right",
+        "move right",
+        "shift right",
+        "slide right"
+      ]
+    },
+    {
+      "name": "turn_left",
+      "command": {
+        "twist": [0.0, 0.0, 0.8],
+        "head_pose": [0.0, 0.0, 0.0, 0.0],
+        "body_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      },
+      "paraphrases": [
+        "向左转",
+        "左转",
+        "往左拐",
+        "转左",
+        "朝左转",
+        "原地左转",
+        "turn left",
+        "rotate left",
+        "spin left",
+        "face left",
+        "yaw left"
+      ]
+    },
+    {
+      "name": "turn_right",
+      "command": {
+        "twist": [0.0, 0.0, -0.8],
+        "head_pose": [0.0, 0.0, 0.0, 0.0],
+        "body_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      },
+      "paraphrases": [
+        "向右转",
+        "右转",
+        "往右拐",
+        "转右",
+        "朝右转",
+        "原地右转",
+        "turn right",
+        "rotate right",
+        "spin right",
+        "face right",
+        "yaw right"
+      ]
+    },
+    {
+      "name": "look_up",
+      "command": {
+        "twist": [0.0, 0.0, 0.0],
+        "head_pose": [0.0, 0.4, 0.0, 0.0],
+        "body_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      },
+      "paraphrases": [
+        "抬头",
+        "把头抬起来",
+        "向上看",
+        "头往上抬",
+        "抬高一点头",
+        "look up",
+        "raise your head",
+        "tilt your head up",
+        "look upward",
+        "head up"
+      ]
+    },
+    {
+      "name": "look_down",
+      "command": {
+        "twist": [0.0, 0.0, 0.0],
+        "head_pose": [0.0, -0.4, 0.0, 0.0],
+        "body_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      },
+      "paraphrases": [
+        "低头",
+        "把头低下来",
+        "向下看",
+        "头往下低",
+        "低下一点头",
+        "look down",
+        "lower your head",
+        "tilt your head down",
+        "look downward",
+        "head down"
+      ]
+    },
+    {
+      "name": "look_left",
+      "command": {
+        "twist": [0.0, 0.0, 0.0],
+        "head_pose": [0.0, 0.0, 0.5, 0.0],
+        "body_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      },
+      "paraphrases": [
+        "头向左转",
+        "看向左边",
+        "向左看",
+        "把头转向左",
+        "脑袋朝左看",
+        "look left",
+        "turn your head left",
+        "glance left",
+        "head to the left"
+      ]
+    },
+    {
+      "name": "look_right",
+      "command": {
+        "twist": [0.0, 0.0, 0.0],
+        "head_pose": [0.0, 0.0, -0.5, 0.0],
+        "body_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      },
+      "paraphrases": [
+        "头向右转",
+        "看向右边",
+        "向右看",
+        "把头转向右",
+        "脑袋朝右看",
+        "look right",
+        "turn your head right",
+        "glance right",
+        "head to the right"
+      ]
+    },
+    {
+      "name": "tilt_head",
+      "command": {
+        "twist": [0.0, 0.0, 0.0],
+        "head_pose": [0.0, 0.0, 0.0, 0.25],
+        "body_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      },
+      "paraphrases": [
+        "歪头",
+        "把头歪向一边",
+        "头侧一下",
+        "偏一下头",
+        "脑袋歪一下",
+        "tilt your head",
+        "cock your head",
+        "lean your head sideways",
+        "head tilt"
+      ]
+    }
+  ]
+}

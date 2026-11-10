@@ -13,6 +13,10 @@ wheels/
 # Virtual environments
 .venv
 
+# Local env overrides + cache dirs (machine-specific)
+.env
+.cache/
+
 # Logs and databases
 wandb
 logs
@@ -34,7 +38,7 @@ claude_experiments/
 
 backup_onnx/
 
-
+.idea
 logdir/.claude/
 logdir/
 logdir/.claude/worktrees/
