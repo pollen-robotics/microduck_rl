@@ -90,10 +90,14 @@ uv run scripts/infer_policy.py --walking walk.onnx --standing stand.onnx \
 
 Keyboard-driven (velocity commands, `G` ground pick, `Y` sit/stand, `R` roulade,
 `K`/`L` kicks); `--debug`, `--save-csv`, `--record` support sim2real comparisons.
-The servos are simulated with the same BAM M6 XL330 model the policies are
+The servos are simulated with the same BAM M6 models the policies are
 trained against (voltage control + load-dependent friction, via
-`bam.mujoco.MujocoController`); `--vin` / `--vin-drop-gain` / `--kp-fw` pin the
-training DR ranges to one value, `--no-bam` falls back to the XML PD actuators.
+`bam.mujoco.MujocoController`), per joint as in training (see
+[Actuator model](#actuator-model)), and with training's command delay (position
+targets reach the servo model 3–6 physics steps, 15–30 ms, late; policies trained
+with it stand still without it — `--no-bam-delay` turns it off). `--vin` /
+`--vin-drop-gain` / `--kp-fw` pin the training DR ranges to one value, `--no-bam`
+falls back to the XML PD actuators.
 
 ### Backlash variants
 
@@ -116,6 +120,22 @@ the Dynamixel XL330 (voltage control law, back-EMF, Coulomb/Stribeck/load-depend
 friction), with per-env domain randomization on battery voltage, voltage sag
 under load, command delay, and friction magnitude
 (`FrictionDRBamActuator` in `src/mjlab_microduck/actuator/`).
+
+The robot mixes two servo variants, each with its own BAM model:
+
+| joints | servo | BAM motor |
+|---|---|---|
+| left/right `hip_pitch`, left/right `knee`, `neck_pitch` | XL330-M288-T **metal gears**, ROBOTIS V4 firmware | `xl330m288t-MG` m6, includes the **1 A supply current limit** the firmware enforces in position control (duck-control `CURRENT_LIMIT_MA`) |
+| all others | XL330-M288-T plastic gears | `xl330` m6, no current limit |
+
+The split is `METAL_GEAR_JOINTS_EXPR` / `per_joint_motors` in
+`robot/microduck_constants.py`. Both variants stay **one** BAM actuator group with
+per-joint parameters (`src/mjlab_microduck/bam_servos.py`): a BAM actuator owns the
+battery (per-env voltage, sag from the sum of its joints' torques), so two groups
+would give the joints two uncorrelated batteries each seeing only part of the load.
+The metal-gear model comes from BAM branch `xl330m288t-mg-rl` (pinned in
+`pyproject.toml`); its identification is documented in BAM
+(`docs/identification/current_limit.rst` on branch `xl330m288t-mg`).
 
 At this scale — tiny servos driving a ~800 g biped — actuator fidelity is most
 of the sim2real gap, which is why the actuator is modeled down to its voltage

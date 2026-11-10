@@ -18,6 +18,13 @@ version instead of a downgrade.
 `model_2000.pt`** (Hub `apirrone/velstand_v7_yaw_remap`, not yet in the official set). On the robot
 it behaves like v7 and turns better. See "Stage v7 + yaw remap" below.
 
+**Newest policy, metal gears (2026-11-10): v7 + yaw remap fine-tuned on the metal-gear servo
+model = wandb `pollen-robotics/mjlab_microduck/j3tf601c` @ `model_2999.pt`** (Hub
+`apirrone/velstand_metalgears_2999`, private, not yet in the official set). For the robot with
+metal-gear XL330 on the hip pitches, knees and neck pitch; works nicely on it. See "Stage metal
+gears" below. On branch `xl330-metal-gears` every training uses that servo model (README,
+"Actuator model").
+
 **This checkout trains the v7 + yaw remap recipe**: `ENABLE_ANCHOR_YAW_REMAP` ON, the two v8 get-up
 pieces (`ENABLE_JOINT_MASKED_TEACHER`, `ENABLE_WIDE_SPAWNS`) OFF. With all three off, every env cfg
 (flat / rough, train / play) is identical to commit `454ddb91` (itself checked identical to
@@ -45,6 +52,69 @@ every curriculum stays at its final stage — the policy is fine-tuned, not re-t
 | v8 get-up | `qz5g3bwi` @ 1750 | `333ef7b`, branch `improve_standup_velstand` | joint-masked stand teacher + wide get-up spawns (below); robot-tested, not published |
 | v8 (rolled back) | `0045i2si` @ 2749 | `3750776`, branch `improve_standup_velstand` | walk anchor fed a calibrated yaw remap + fine yaw reward (below); Hub v8, replaced by v9 = v7 |
 | **v7 + yaw remap** | **`n3fg9pgq` @ 2000** | branch `velstand_v7_yaw_remap` | v8b's anchor yaw remap only, plain resume from v7 (below) |
+| **metal gears** | **`j3tf601c` @ 2999** | branch `xl330-metal-gears` @ `0cbe40ae` | v7 + yaw remap fine-tuned on the metal-gear servo model (1 A current limit), plain resume (below) |
+
+## Stage metal gears — `j3tf601c` (2026-11-10)
+
+| | |
+|---|---|
+| host | HF Jobs, `rtx-pro-6000`, namespace `pollen-robotics` (job `6af2e0939737d9a9e08fa0ab`, checkpoints in `pollen-robotics/velstand-v7-yawremap-metalgears`) |
+| start | `n3fg9pgq` @ `model_2000.pt`, **plain resume** (curricula stay final) |
+| code | branch `xl330-metal-gears` @ `0cbe40ae` (BAM `xl330m288t-mg-rl`) |
+| checkpoint used | **`model_2999.pt`** (the last one) — robot-tested 2026-11-10: works nicely |
+
+```bash
+uv run train Mjlab-VelStand-Rough-Backlash-MicroDuck --env.scene.num-envs 4096 --agent.resume True \
+  --wandb-run-path pollen-robotics/mjlab_microduck/n3fg9pgq --wandb-checkpoint-name model_2000.pt \
+  --agent.max_iterations 1000 \
+  --hf-jobs --namespace pollen-robotics --flavor rtx-pro-6000 --run-name velstand-v7-yawremap-metalgears
+```
+
+### Why
+
+The robot now has metal-gear XL330-M288-T on left/right hip_pitch, left/right knee and
+neck_pitch, running ROBOTIS's V4 firmware, which enforces the 1 A Current Limit in position
+control (the factory firmware only does in current-based modes). Plastic-gear policies ran on it
+but fell a little more, worst in push recovery. The stress-test logs show why the limit matters:
+without it those joints peak at 1.6–2.5 A (p95) when walking, and 15–30 % of 10 s windows have a
+joint above 950 mA.
+
+### What changed (actuator only — rewards, curricula, DR, obs untouched)
+
+| piece | what |
+|---|---|
+| BAM `xl330m288t-MG` m6 | identified on a pendulum bench with the robot's servo config (V4 firmware, I = D = 0, `pwm_slope` 255, `current_limit` 1000 mA), 90 logs, 3 masses, kp 50–400; supply-side current limit at 1 A. Held-out MAE 14.3 mrad; on large steps 16–20 mrad vs 28–36 without the limiter. Friction is the main difference with plastic gears (load-dependent Stribeck term ≈ 0.23 vs ≈ 0); kt, R, armature are within ~10 % of the plastic-gear model used here |
+| per-joint servo models | `per_joint_motors=((METAL_GEAR_JOINTS_EXPR, "xl330m288t-MG"),)`, one BAM actuator group with `(J,)` parameters (`bam_servos.py`); plastic-gear joints unchanged, with no current limit |
+
+### Sim eval (`scripts/velstand_bench.py`, flat + backlash, 64 envs per case, all on the metal-gear model)
+
+| | 2500 | 2750 | **2999** | `n3fg9pgq@2000` |
+|---|---|---|---|---|
+| push 0.8 / 1.0 / 1.2 m/s: fell % | 47 / 77 / 97 | 55 / 73 / 89 | 53 / 77 / 98 | 50 / 69 / 91 |
+| … recovered, % of falls | 90 / 86 / 95 | 94 / 91 / 86 | **97 / 96 / 97** | 97 / 95 / 84 |
+| rise HOME fd / fu / side | 100 / 98 / 100 | 100 / 92 / 98 | **100 / 100 / 100** | 100 / 98 / 100 |
+| rise rj fd / fu / side | 100 / 95 / 92 | 98 / 83 / 92 | 97 / 92 / 89 | 98 / 84 / 91 |
+| in place ±0.6 / ±1.0 rad/s | +0.57 / −0.56 · +0.99 / −0.95 | +0.52 / −0.54 · +1.04 / −0.87 | +0.58 / −0.53 · +0.90 / −0.88 | +0.43 / −0.58 · +0.97 / −0.99 |
+| vx 0.2 / 0.4 → achieved | 0.08 / 0.18 | 0.08 / 0.17 | 0.09 / 0.19 | 0.09 / 0.19 |
+| straight-walk drift | ≤ 0.04 | ≤ 0.11 | ≤ 0.06 | ≤ 0.02 |
+| body roll ±10° falls | 1.6 / 3.1 % | 0 / 0 | 0 / 4.7 % | 0 / 0 |
+
+±~6 points is noise at 64 envs. `n3fg9pgq@2000` on the metal-gear model (32 envs/case, before
+fine-tuning) was already close: walk/yaw/body unchanged, push within noise.
+
+### Checkpoint choice
+
+2999: best push recovery at every magnitude and best get-up from HOME, in-place ±0.6 symmetric.
+Weak points: in-place ±1.0 at 0.90 / −0.88, straight-walk drift up to 0.06 rad/s, 4.7 % falls
+on body roll −10°. 2750 has the weakest get-up (rj face-up 83 %, 16 % never rose) and the most
+drift. 2500 gets up best from random joints and turns evenly, but recovers less from pushes.
+
+### Rehearsal note
+
+The CPU rehearsal (`infer_policy.py`) had no command delay and froze velstand (0.00 m/s at a
+0.2 m/s command, also on develop); it now applies training's 3–6 physics-step delay. Even so,
+2500 did not start walking at a plain 0.2 m/s from standstill there (it does at 0.3, and in warp)
+— check low-speed starts on the robot when comparing checkpoints.
 
 ## Stage v7 + yaw remap — `n3fg9pgq` (2026-11-10)
 
