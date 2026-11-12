@@ -1,0 +1,107 @@
+{
+  "baseline_commit": "cb70b792312d559a4da09064d92009079671815f",
+  "policy_revision": "1b56c396825c052a4e26e95cf2b8d8298af9e9b4",
+  "policy_file": "alpha_walking.onnx",
+  "scope": "Headless XML position-control reproduction; synthetic extra hinge, no stock grasp claim",
+  "before_exit_code": 1,
+  "after_exit_code": 0,
+  "before": {
+    "inference_sha256": "03bfd0642a880cd379e057536ee819bd1377d4af7b5206a57907d10afd1d4270",
+    "policy_sha256": "e36332d383997d51401897734cd3e79cf5038406feddb18b4d57ecfb141daa6c",
+    "versions": {
+      "mujoco": "3.10.0",
+      "numpy": "2.4.1",
+      "onnxruntime": "1.24.4"
+    },
+    "cases": [
+      {
+        "auxiliary": false,
+        "passed": true,
+        "model_actuators": 14,
+        "phase": "physics",
+        "observations": [
+          61
+        ],
+        "actions": [
+          14
+        ],
+        "physics_steps": 10,
+        "warnings": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "finite": true
+      },
+      {
+        "auxiliary": true,
+        "passed": false,
+        "model_actuators": 15,
+        "phase": "observations",
+        "error_type": "ValueError",
+        "error": "operands could not be broadcast together with shapes (15,) (14,) "
+      }
+    ]
+  },
+  "after": {
+    "inference_sha256": "04c700e3556d9db81a12dfa62bee59b11febd6fca6b99c8ce7e60e321efc1d94",
+    "policy_sha256": "e36332d383997d51401897734cd3e79cf5038406feddb18b4d57ecfb141daa6c",
+    "versions": {
+      "mujoco": "3.10.0",
+      "numpy": "2.4.1",
+      "onnxruntime": "1.24.4"
+    },
+    "cases": [
+      {
+        "auxiliary": false,
+        "passed": true,
+        "model_actuators": 14,
+        "phase": "physics",
+        "observations": [
+          61
+        ],
+        "actions": [
+          14
+        ],
+        "physics_steps": 10,
+        "warnings": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "finite": true
+      },
+      {
+        "auxiliary": true,
+        "passed": true,
+        "model_actuators": 15,
+        "phase": "physics",
+        "observations": [
+          61
+        ],
+        "actions": [
+          14
+        ],
+        "physics_steps": 10,
+        "warnings": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "finite": true
+      }
+    ]
+  }
+}

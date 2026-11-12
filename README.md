@@ -95,6 +95,19 @@ trained against (voltage control + load-dependent friction, via
 `bam.mujoco.MujocoController`); `--vin` / `--vin-drop-gain` / `--kp-fw` pin the
 training DR ranges to one value, `--no-bam` falls back to the XML PD actuators.
 
+CPU replay can also use a scene with an independently actuated hinge named
+`mouth`. `--mouth-target RADIANS` sets its initial target after initialization;
+Python callers can use `PolicyInference.set_mouth_target()` while the policy
+runs. The fourteen policy joints retain their order and observation layout,
+even if the scene's actuator order differs. Mouth commands bypass policy action
+scaling and delay, and must be finite and within the model's joint limits (and
+control limits with `--no-bam`). The mouth must have one unit-gear joint actuator;
+`--no-bam` requires a position actuator. A mouth command on a scene without an
+actuated mouth is an error. The default scenes still have no articulated mouth;
+the routing tests use an artificial hinge, not stock beak geometry or dynamics.
+See the [before/after reproduction](docs/independent-mouth-replay.md) for the
+pinned released policy, headless commands and recorded results.
+
 ### Backlash variants
 
 Every main task has a **Backlash** twin that trains on a model with ±1° of gear
