@@ -7911,21 +7911,25 @@ def peck_alpha_obs(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
 
 
 class peck_rhythm:
-    """Pays one reward per GOOD peck: a head→foot touchdown after a real lift.
+    """Pays one reward per peck: a head→foot touchdown, GRADED by the peck.
 
     Per env it tracks the time since the head last touched the target foot
     (``air``) and how high the beak rose above its lowest point since then
     (``lift``, world z of the beak tip — a foot bouncing up into a still head
     does not count). On a touchdown:
 
-        pay = min(air, t_max) / t_max   if air ≥ t_min and lift ≥ lift_min
+        pay = min(air, t_max)/t_max · min(lift, lift_full)/lift_full
+              (0 if air < t_min)
 
-    Gait-air-time logic applied to the beak: touches faster than t_min (buzzing
-    / vibrating on the foot) pay nothing; lifts longer than t_max pay no more,
-    so the best RATE is a lift of ≈ t_max then a touch — a rhythmic ~2 Hz peck.
-    Active only once the reach is complete (flag 1 and alpha ≥ alpha_min);
-    the state keeps updating regardless so the first peck after arrival is
-    measured correctly. Returns ≥ 0 → POSITIVE weight.
+    Graded, not thresholded (run 4ykuelge, 2026-11-17: with a hard 12 mm /
+    0.15 s gate the policy converged to a frozen head on the foot — beak z
+    std ≤ 1.5 mm, 3 qualifying pecks in 120 env-s — because no exploratory
+    bob ever reached the gate). Now a 5 mm bob already pays ~25% of a full
+    peck, so the gradient starts at small motions. ``t_min`` (3 steps) only
+    removes contact flicker (median air 0.02 s, lift 0). Air capped at t_max
+    → the best RATE is a ~2 Hz peck. Active only once the reach is complete
+    (flag 1 and alpha ≥ alpha_min); the state always updates so the first
+    peck after arrival is measured correctly. Returns ≥ 0 → POSITIVE weight.
     """
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
@@ -7950,9 +7954,9 @@ class peck_rhythm:
         sensor_name: str,
         foot_body: str,
         beak_offset_in_foot: tuple,
-        t_min: float = 0.15,
+        t_min: float = 0.06,
         t_max: float = 0.4,
-        lift_min: float = 0.012,
+        lift_full: float = 0.02,
         alpha_min: float = 0.95,
     ) -> torch.Tensor:
         found = env.scene[sensor_name].data.found
@@ -7962,8 +7966,10 @@ class peck_rhythm:
 
         touchdown = touch & ~self._was
         lift = self._z_max - z
-        good = touchdown & (self._air >= t_min) & (lift >= lift_min)
-        pay = torch.clamp(self._air, max=t_max) / t_max * good.float()
+        lift_score = torch.clamp(lift, min=0.0, max=lift_full) / lift_full
+        air_score = torch.clamp(self._air, max=t_max) / t_max
+        good = touchdown & (self._air >= t_min)
+        pay = torch.nan_to_num(air_score * lift_score) * good.float()
 
         flag = env.command_manager.get_command(command_name)[:, 0]
         active = (flag > 0.5) & (_peck_alpha(env, command_name) >= alpha_min)
@@ -7975,6 +7981,46 @@ class peck_rhythm:
         self._z_max = torch.where(touch, z, torch.maximum(self._z_max, z))
         self._was = touch
         return pay
+
+
+def peck_beak_bob(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    foot_body: str,
+    beak_offset_in_foot: tuple,
+    v_cap: float = 0.15,
+    near: float = 0.04,
+    alpha_min: float = 0.95,
+    beak_site: str = "mouth_tip",
+) -> torch.Tensor:
+    """Dense peck bootstrap: min(|beak v_z|, v_cap)/v_cap near the foot.
+
+    Pays any vertical beak motion while the beak is within ``near`` of the
+    peck target and the reach is complete (flag 1, alpha ≥ alpha_min) — the
+    first small bob is immediately positive, which peck_rhythm alone (paid on
+    touchdown only) could not offer a frozen-head policy. Capped so a slam
+    earns no more than a brisk nod; 50 Hz jitter is held down by action_rate /
+    torque_rate. Returns [0, 1] → POSITIVE weight.
+    """
+    asset: Entity = env.scene["robot"]
+    beak, target = _peck_beak_and_target(env, foot_body, beak_offset_in_foot, beak_site)
+    site_id = env._peck_ids[0]
+    vz = torch.nan_to_num(asset.data.site_lin_vel_w[:, site_id, 2]).abs()
+    near_ok = (beak - target).norm(dim=-1) < near
+    flag = env.command_manager.get_command(command_name)[:, 0]
+    active = (flag > 0.5) & (_peck_alpha(env, command_name) >= alpha_min) & near_ok
+    return torch.clamp(vz, max=v_cap) / v_cap * active.float()
+
+
+def peck_sit_stillness(env: ManagerBasedRlEnv, command_name: str, **kwargs) -> torch.Tensor:
+    """``posture_stillness`` only while SIT is commanded (flag 0).
+
+    Under the peck command trunk stillness was a reward for NOT pecking (the
+    head is 38% of the mass — a bob moves the trunk), part of the frozen-head
+    optimum of run 4ykuelge.
+    """
+    flag = env.command_manager.get_command(command_name)[:, 0]
+    return posture_stillness(env, command_name=command_name, **kwargs) * (flag < 0.5).float()
 
 
 def peck_impact_cost(

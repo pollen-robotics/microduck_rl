@@ -95,12 +95,19 @@ def test_rewards_and_signs(side_cfg):
         assert name not in r, name
 
 
-def test_peck_rhythm_starts_off_and_is_curriculum_enabled(side_cfg):
+@pytest.mark.parametrize("term,cur", [("peck_rhythm", "peck_rhythm_weight"),
+                                      ("peck_beak_bob", "peck_bob_weight")])
+def test_peck_terms_start_off_and_are_curriculum_enabled(side_cfg, term, cur):
     _, cfg = side_cfg
-    assert cfg.rewards["peck_rhythm"].weight == 0.0
-    stages = cfg.curriculum["peck_rhythm_weight"].params["weight_stages"]
+    assert cfg.rewards[term].weight == 0.0
+    stages = cfg.curriculum[cur].params["weight_stages"]
     assert stages[0]["weight"] == 0.0 and stages[-1]["weight"] > 0.0
     assert stages[-1]["step"] >= 300 * 24  # after the reach exists
+
+
+def test_stillness_only_pays_under_sit(side_cfg):
+    _, cfg = side_cfg
+    assert cfg.rewards["rest_stillness"].func is microduck_mdp.peck_sit_stillness
 
 
 def test_sensors_target_the_right_foot(side_cfg):
@@ -182,9 +189,15 @@ def test_good_peck_pays(monkeypatch):
     assert max(pay) == pytest.approx(1.0) and sum(p > 0 for p in pay) == 1
 
 
-def test_buzzing_and_tiny_lifts_pay_nothing(monkeypatch):
-    assert max(_run([(True, 0.0)] + _peck(3, 0.02), monkeypatch)) == 0.0   # 0.06 s air
-    assert max(_run([(True, 0.0)] + _peck(20, 0.005), monkeypatch)) == 0.0  # 5 mm lift
+def test_peck_pay_is_graded_by_lift(monkeypatch):
+    # v2: no hard lift gate — a small bob already pays, proportionally
+    small = max(_run([(True, 0.0)] + _peck(20, 0.005), monkeypatch))
+    assert small == pytest.approx(0.25)
+
+
+def test_contact_flicker_pays_nothing(monkeypatch):
+    assert max(_run([(True, 0.0)] + _peck(2, 0.02), monkeypatch)) == 0.0   # 0.04 s air
+    assert max(_run([(True, 0.0)] + _peck(20, 0.0), monkeypatch)) == 0.0   # no lift
 
 
 def test_long_lifts_are_capped(monkeypatch):

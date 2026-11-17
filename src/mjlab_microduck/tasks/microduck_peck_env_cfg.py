@@ -32,11 +32,19 @@ Design (sitstand template — commanded two-state from the sit):
     so small target bobs (±0.4 rad) move the beak only 2-3 mm. With the
     overshoot a policy will learn (head_pitch −1.0 at 1.5 Hz) the beak lifts
     22 mm and 5-6 pecks / 4.7 s pay in every env, tilt ≤ 19°.
-  - The peck itself: ``peck_rhythm`` pays per head→foot touchdown after a real
-    beak lift (≥ PECK_LIFT_MIN in world z) and ≥ PECK_T_MIN of air; air time
-    capped at PECK_T_MAX → best rate is a ~2 Hz peck. Introduced by curriculum
-    AFTER the reach exists (skill-discovery ordering). Slamming is priced by
-    ``peck_impact_cost`` (head-foot force above the resting head weight).
+  - The peck itself: ``peck_rhythm`` pays per head→foot touchdown, graded by
+    the beak lift (full at PECK_LIFT_FULL, world z) and the air time (full at
+    PECK_T_MAX → best rate is a ~2 Hz peck), plus ``peck_beak_bob``, a dense
+    capped reward for vertical beak speed near the foot. Both introduced by
+    curriculum AFTER the reach exists (skill-discovery ordering). Slamming is
+    priced by ``peck_impact_cost`` (head-foot force above the resting head).
+  - Run 4ykuelge (v1, 2026-11-17) learned the reach perfectly by ~iter 300 and
+    then froze the head on the foot (beak z std ≤ 1.5 mm, 3 qualifying pecks
+    in 120 env-s at iter 1250): v1's hard 12 mm / 0.15 s peck gate was never
+    hit by exploration, and trunk stillness + a tight neck factor paid for
+    the frozen head. v2: graded peck + dense bob term, peck weight 20 → 40,
+    stillness only under the SIT command, neck std 0.6 → 0.8 (pose) / 1.0
+    (composite). Resume from 4ykuelge@1250 (reach already learned).
   - Self-collision cost excludes exactly the allowed head↔target-foot pair
     (the goal IS a self-contact; measured: it is the only self-contact in the
     pose).
@@ -98,9 +106,10 @@ PECK_PROB        = 0.75
 PECK_RAMP_S      = 1.5
 
 # ── Peck rhythm ───────────────────────────────────────────────────────────────
-PECK_T_MIN    = 0.15   # s of beak air before a touch counts (anti-buzz)
-PECK_T_MAX    = 0.40   # s; longer lifts pay no more → ~2 Hz is the best rate
-PECK_LIFT_MIN = 0.012  # m the beak tip must rise (world z) between touches
+PECK_T_MIN     = 0.06   # s of beak air before a touch counts (3 steps: drops contact flicker)
+PECK_T_MAX     = 0.40   # s; longer lifts pay no more → ~2 Hz is the best rate
+PECK_LIFT_FULL = 0.02   # m of beak rise (world z) for a full-value peck (graded below)
+PECK_WEIGHT    = 40.0   # per full peck; ≈ +1.6/step at 2 Hz
 PECK_FORCE_FREE = 3.0  # N; head resting on the foot ≈ 2.4 N is free
 
 # ── Poses (14 servo joints, policy order) ─────────────────────────────────────
@@ -204,7 +213,7 @@ def make_microduck_peck_env_cfg(
     # the oscillation must stay cheap (price only the escapable DC part).
     cfg.rewards["peck_pose_neck"] = RewardTermCfg(
         func=microduck_mdp.peck_pose_match, weight=1.5,
-        params={**pose_params, "joint_indices": _NECK_JOINTS, "std": 0.6},
+        params={**pose_params, "joint_indices": _NECK_JOINTS, "std": 0.8},
     )
     cfg.rewards["peck_pose_neck_l1"] = RewardTermCfg(
         func=microduck_mdp.peck_pose_l1, weight=0.5,   # self-negating → POSITIVE weight
@@ -223,15 +232,22 @@ def make_microduck_peck_env_cfg(
                 "beak_offset_in_foot": beak_offset, "std": 0.03},
     )
 
-    # The peck: per good touchdown (≤ 1 each). Weight set by curriculum below
-    # (0 until the reach exists); 20/peck at ~2 Hz ≈ +0.8/step ≈ 5% of stack.
+    # The peck: per touchdown, graded (≤ 1 each). Weight set by curriculum
+    # below (0 until the reach exists, then PECK_WEIGHT).
     cfg.rewards["peck_rhythm"] = RewardTermCfg(
         func=microduck_mdp.peck_rhythm, weight=0.0,
         params={
             "command_name": "twist", "sensor_name": beak_foot_cfg.name,
             "foot_body": foot_body, "beak_offset_in_foot": beak_offset,
-            "t_min": PECK_T_MIN, "t_max": PECK_T_MAX, "lift_min": PECK_LIFT_MIN,
+            "t_min": PECK_T_MIN, "t_max": PECK_T_MAX, "lift_full": PECK_LIFT_FULL,
         },
+    )
+    # Dense bootstrap for the bob: any vertical beak motion near the foot pays
+    # (capped). Same curriculum gate as peck_rhythm. See peck_beak_bob.
+    cfg.rewards["peck_beak_bob"] = RewardTermCfg(
+        func=microduck_mdp.peck_beak_bob, weight=0.0,
+        params={"command_name": "twist", "foot_body": foot_body,
+                "beak_offset_in_foot": beak_offset, "v_cap": 0.15, "near": 0.04},
     )
     # Slamming the head into the foot. Cost ≥ 0 → NEGATIVE weight.
     # Scripted-rollout calibration (training env, CPU): a head_pitch nod
@@ -244,11 +260,12 @@ def make_microduck_peck_env_cfg(
         params={"sensor_name": beak_foot_cfg.name, "force_threshold": PECK_FORCE_FREE},
     )
 
-    # Rest stillness (trunk) at either target, upright. posture_stillness is
+    # Rest stillness (trunk), SEATED HOLD ONLY (flag 0). posture_stillness is
     # reused with its STAND slot = SIT_Z (alpha 0) and SIT slot = PECK_Z
-    # (alpha 1): its target z is stand_z + alpha·(sit_z − stand_z).
+    # (alpha 1): its target z is stand_z + alpha·(sit_z − stand_z). It used to
+    # pay under the peck command too — a reward for not pecking (4ykuelge).
     cfg.rewards["rest_stillness"] = RewardTermCfg(
-        func=microduck_mdp.posture_stillness, weight=1.5,
+        func=microduck_mdp.peck_sit_stillness, weight=1.5,
         params={
             "command_name": "twist", "stand_z": SIT_Z, "sit_z": PECK_Z,
             "band_full": 0.012, "band_zero": 0.03, "vel_std": 0.05,
@@ -261,7 +278,7 @@ def make_microduck_peck_env_cfg(
     cfg.rewards["peck_composite"] = RewardTermCfg(
         func=_peck_composite, weight=3.0,
         params={**pose_params, "sit_z": SIT_Z, "peck_z": PECK_Z,
-                "height_std": 0.03, "upright_std": 0.40, "leg_std": 0.40, "neck_std": 0.60},
+                "height_std": 0.03, "upright_std": 0.40, "leg_std": 0.40, "neck_std": 1.00},
     )
 
     cfg.rewards["self_collisions"] = RewardTermCfg(
@@ -317,13 +334,24 @@ def make_microduck_peck_env_cfg(
     # The peck is paid only once the reach exists (sitstand-sized tasks reach
     # their pose by ~300-500 iters). If peck_rhythm stays ~0 after 600, the
     # pose stack is outbidding it — raise the weight, don't move it earlier.
+    # (v1 at 20 stayed ~0: see the 4ykuelge note in the module docstring.)
     cfg.curriculum["peck_rhythm_weight"] = CurriculumTermCfg(
         func=microduck_mdp.reward_weight,
         params={
             "reward_name": "peck_rhythm",
             "weight_stages": [
                 {"step": 0,         "weight": 0.0},
-                {"step": 400 * 24,  "weight": 20.0},
+                {"step": 400 * 24,  "weight": PECK_WEIGHT},
+            ],
+        },
+    )
+    cfg.curriculum["peck_bob_weight"] = CurriculumTermCfg(
+        func=microduck_mdp.reward_weight,
+        params={
+            "reward_name": "peck_beak_bob",
+            "weight_stages": [
+                {"step": 0,         "weight": 0.0},
+                {"step": 400 * 24,  "weight": 1.0},
             ],
         },
     )
