@@ -7705,3 +7705,348 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Peck task — from the sit, extend one leg and peck at that foot (cat-grooming).
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Command: twist slot vx = peck flag ∈ {0 = SIT, 1 = PECK}. Like SitStandCommand
+# the term slews an internal target blend ``alpha`` (0 = SIT pose, 1 = PECK pose)
+# at a constant rate and every pose/height reward tracks that MOVING target —
+# being ahead of the ramp pays nothing, so a gentle reach is the argmax (the
+# no-jackpot rule). Deployment: constant [1, 0, 0] for duration_s, then the
+# manifest's idle [0, 0, 0] for unwind_s folds the leg back into the sit.
+
+
+class PeckCommand(UniformVelocityCommand):
+    """cmd = [peck_flag, 0, 0] with dwell-time resampling and a slewed blend.
+
+    ``alpha`` is initialised per episode from ``env._peck_spawn_alpha`` (written
+    by ``reset_peck_spawn``: 0 for a seated spawn, the spawn blend for a
+    reverse-curriculum mid-reach spawn) on the first compute of the episode —
+    the command manager resets BEFORE the spawn event runs.
+    """
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        self._peck_prob = float(cfg.peck_prob)
+        self._ramp_s = float(cfg.ramp_s)
+        self._env_ref = env
+        self._alpha = torch.zeros(self.num_envs, device=self.device)
+
+    @property
+    def command(self) -> torch.Tensor:
+        return self.vel_command_b
+
+    @property
+    def alpha(self) -> torch.Tensor:
+        return self._alpha
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        n = len(env_ids)
+        if n == 0:
+            return
+        peck = (torch.rand(n, device=self.device) < self._peck_prob).float()
+        self.vel_command_b[env_ids] = 0.0
+        self.vel_command_b[env_ids, 0] = peck
+
+    def compute(self, dt: float) -> None:
+        super().compute(dt)
+        fresh = self._env_ref.episode_length_buf <= 1
+        if fresh.any():
+            spawn = getattr(self._env_ref, "_peck_spawn_alpha", None)
+            init = spawn if spawn is not None else torch.zeros_like(self._alpha)
+            self._alpha = torch.where(fresh, init, self._alpha)
+        step = dt / max(self._ramp_s, 1e-6)
+        delta = self.vel_command_b[:, 0] - self._alpha
+        self._alpha += torch.clamp(delta, -step, step)
+
+    def _update_command(self) -> None:
+        pass
+
+    def _update_metrics(self) -> None:
+        pass
+
+
+@_dataclass(kw_only=True)
+class PeckCommandCfg(UniformVelocityCommandCfg):
+    class_type: type = PeckCommand
+    # Probability that a resample commands PECK (vs hold / return to SIT).
+    peck_prob: float = 0.75
+    # Seconds for the target blend to traverse SIT↔PECK in full.
+    ramp_s: float = 1.5
+
+    def build(self, env: ManagerBasedRlEnv) -> "PeckCommand":
+        return PeckCommand(self, env)
+
+
+def _peck_alpha(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
+    term = env.command_manager.get_term(command_name)
+    alpha = getattr(term, "alpha", None)
+    if alpha is not None:
+        return alpha
+    return env.command_manager.get_command(command_name)[:, 0]
+
+
+def _peck_pose_target(
+    env: ManagerBasedRlEnv, command_name: str, sit_pose: list, peck_pose: list
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """(alpha, per-env 14-joint target) on the slewed SIT→PECK blend."""
+    alpha = _peck_alpha(env, command_name)
+    sit = torch.tensor(sit_pose, device=env.device, dtype=torch.float)
+    peck = torch.tensor(peck_pose, device=env.device, dtype=torch.float)
+    return alpha, sit + alpha.unsqueeze(-1) * (peck - sit)
+
+
+def _trunk_z(env: ManagerBasedRlEnv) -> torch.Tensor:
+    asset = env.scene["robot"]
+    return torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+
+
+def peck_pose_match(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sit_pose: list,
+    peck_pose: list,
+    joint_indices: list,
+    std: float = 0.5,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Gaussian joint match vs the slewed SIT→PECK target (mean over joints)."""
+    asset = env.scene[asset_cfg.name]
+    _, target = _peck_pose_target(env, command_name, sit_pose, peck_pose)
+    q = _servo_joint_pos(env, asset)[:, joint_indices]
+    return torch.exp(-((q - target[:, joint_indices]) / std) ** 2).mean(dim=-1)
+
+
+def peck_pose_l1(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sit_pose: list,
+    peck_pose: list,
+    joint_indices: list,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """L1 companion (≤ 0, POSITIVE weight): constant pull toward the target."""
+    asset = env.scene[asset_cfg.name]
+    _, target = _peck_pose_target(env, command_name, sit_pose, peck_pose)
+    q = _servo_joint_pos(env, asset)[:, joint_indices]
+    return -torch.abs(q - target[:, joint_indices]).mean(dim=-1)
+
+
+def peck_height_gaussian(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sit_z: float,
+    peck_z: float,
+    std: float = 0.02,
+) -> torch.Tensor:
+    """Gaussian on trunk z vs the slewed SIT_Z→PECK_Z target."""
+    alpha = _peck_alpha(env, command_name)
+    target_z = sit_z + alpha * (peck_z - sit_z)
+    return torch.exp(-((_trunk_z(env) - target_z) / std) ** 2)
+
+
+def _peck_beak_and_target(
+    env: ManagerBasedRlEnv,
+    foot_body: str,
+    beak_offset_in_foot: tuple,
+    beak_site: str = "mouth_tip",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """(beak tip world pos, peck target point world pos) — both [B, 3].
+
+    The target point is the beak tip's position in the foot (ankle) body frame,
+    MEASURED at the robot-recorded peck pose — so it follows the foot wherever
+    the leg actually ends up.
+    """
+    asset: Entity = env.scene["robot"]
+    if not hasattr(env, "_peck_ids"):
+        site_ids, _ = asset.find_sites(beak_site)
+        body_ids, _ = asset.find_bodies(f"^{foot_body}$")
+        env._peck_ids = (site_ids[0], body_ids[0])
+    site_id, body_id = env._peck_ids
+    beak = asset.data.site_pos_w[:, site_id]
+    foot_p = asset.data.body_link_pos_w[:, body_id]
+    foot_q = asset.data.body_link_quat_w[:, body_id]
+    off = torch.tensor(beak_offset_in_foot, device=env.device, dtype=torch.float)
+    target = foot_p + quat_apply(foot_q, off.expand(foot_p.shape[0], 3))
+    return torch.nan_to_num(beak), torch.nan_to_num(target)
+
+
+def peck_beak_proximity(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    foot_body: str,
+    beak_offset_in_foot: tuple,
+    std: float = 0.03,
+) -> torch.Tensor:
+    """exp(-(|beak − target| / std)²) × alpha.
+
+    Scaled by the SLEWED blend, not the flag: it ramps in with the reach and
+    out with the unwind, so arriving early buys nothing and a seated hold
+    (alpha 0) never pays for dropping the head.
+    """
+    beak, target = _peck_beak_and_target(env, foot_body, beak_offset_in_foot)
+    d = (beak - target).norm(dim=-1)
+    return torch.exp(-((d / std) ** 2)) * _peck_alpha(env, command_name)
+
+
+def peck_beak_target_b(
+    env: ManagerBasedRlEnv,
+    foot_body: str,
+    beak_offset_in_foot: tuple,
+) -> torch.Tensor:
+    """CRITIC obs: (target − beak) in the trunk frame [B, 3]."""
+    beak, target = _peck_beak_and_target(env, foot_body, beak_offset_in_foot)
+    asset: Entity = env.scene["robot"]
+    return quat_apply_inverse(asset.data.root_link_quat_w, target - beak)
+
+
+def peck_alpha_obs(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
+    """CRITIC obs: the slewed target blend [B, 1] (the actor sees only the flag)."""
+    return _peck_alpha(env, command_name).unsqueeze(-1)
+
+
+class peck_rhythm:
+    """Pays one reward per GOOD peck: a head→foot touchdown after a real lift.
+
+    Per env it tracks the time since the head last touched the target foot
+    (``air``) and how high the beak rose above its lowest point since then
+    (``lift``, world z of the beak tip — a foot bouncing up into a still head
+    does not count). On a touchdown:
+
+        pay = min(air, t_max) / t_max   if air ≥ t_min and lift ≥ lift_min
+
+    Gait-air-time logic applied to the beak: touches faster than t_min (buzzing
+    / vibrating on the foot) pay nothing; lifts longer than t_max pay no more,
+    so the best RATE is a lift of ≈ t_max then a touch — a rhythmic ~2 Hz peck.
+    Active only once the reach is complete (flag 1 and alpha ≥ alpha_min);
+    the state keeps updating regardless so the first peck after arrival is
+    measured correctly. Returns ≥ 0 → POSITIVE weight.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        n = env.num_envs
+        self._air = torch.zeros(n, device=env.device)
+        self._z_min = torch.full((n,), float("inf"), device=env.device)
+        self._z_max = torch.full((n,), -float("inf"), device=env.device)
+        self._was = torch.zeros(n, dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        self._air[env_ids] = 0.0
+        self._z_min[env_ids] = float("inf")
+        self._z_max[env_ids] = -float("inf")
+        self._was[env_ids] = False
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        command_name: str,
+        sensor_name: str,
+        foot_body: str,
+        beak_offset_in_foot: tuple,
+        t_min: float = 0.15,
+        t_max: float = 0.4,
+        lift_min: float = 0.012,
+        alpha_min: float = 0.95,
+    ) -> torch.Tensor:
+        found = env.scene[sensor_name].data.found
+        touch = torch.nan_to_num(found.float()).sum(dim=-1) > 0
+        beak, _ = _peck_beak_and_target(env, foot_body, beak_offset_in_foot)
+        z = beak[:, 2]
+
+        touchdown = touch & ~self._was
+        lift = self._z_max - z
+        good = touchdown & (self._air >= t_min) & (lift >= lift_min)
+        pay = torch.clamp(self._air, max=t_max) / t_max * good.float()
+
+        flag = env.command_manager.get_command(command_name)[:, 0]
+        active = (flag > 0.5) & (_peck_alpha(env, command_name) >= alpha_min)
+        pay = pay * active.float()
+
+        # State update: in contact → reset the air phase at the contact point.
+        dt = env.step_dt
+        self._air = torch.where(touch, torch.zeros_like(self._air), self._air + dt)
+        self._z_max = torch.where(touch, z, torch.maximum(self._z_max, z))
+        self._was = touch
+        return pay
+
+
+def peck_impact_cost(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    force_threshold: float = 3.0,
+) -> torch.Tensor:
+    """Head-on-foot contact force above ``force_threshold`` N, normalised.
+
+    Cost ≥ 0 → NEGATIVE weight. The resting head weighs ≈ 2.4 N, so a gentle
+    peck or resting the beak on the foot is free; slamming is charged linearly.
+    """
+    force = env.scene[sensor_name].data.force
+    f = torch.nan_to_num(force).norm(dim=-1).sum(dim=-1)
+    return torch.clamp(f - force_threshold, min=0.0) / force_threshold
+
+
+def self_collision_cost_excluding(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    exclude_sensor_name: str,
+) -> torch.Tensor:
+    """Self-contact count minus the contacts of an ALLOWED pair (≥ 0, NEGATIVE weight).
+
+    The peck goal is itself a self-contact (head on the extended foot); the
+    stock self_collision_cost would charge the policy for succeeding.
+    """
+    total = torch.nan_to_num(env.scene[sensor_name].data.found.float()).sum(dim=-1)
+    allowed = torch.nan_to_num(env.scene[exclude_sensor_name].data.found.float()).sum(dim=-1)
+    return torch.clamp(total - allowed, min=0.0)
+
+
+def reset_peck_spawn(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    sit_pose: list,
+    peck_pose: list,
+    mid_prob: float = 0.3,
+    mid_alpha_range: tuple = (0.3, 1.0),
+    joint_noise_std: float = 0.05,
+    tilt_max: float = math.radians(6),
+    z_range: tuple = (0.062, 0.072),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+):
+    """Seated spawn; a ``mid_prob`` fraction starts partway along SIT→PECK.
+
+    Reverse-curriculum spawns: the reach's last mile and the return-to-sit both
+    get on-policy data from step 0. The spawn blend is stored in
+    ``env._peck_spawn_alpha`` so PeckCommand starts its slewed target there.
+    """
+    if env_ids is None or len(env_ids) == 0:
+        return
+    set_random_ground_state(
+        env, env_ids, asset_cfg=asset_cfg,
+        face_down_prob=0.0, face_up_prob=0.0, sitting_prob=1.0, standing_prob=0.0,
+        sitting_z_min=z_range[0], sitting_z_max=z_range[1], sitting_tilt_max=tilt_max,
+    )
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    n = len(env_ids)
+    if not hasattr(env, "_peck_spawn_alpha"):
+        env._peck_spawn_alpha = torch.zeros(env.num_envs, device=env.device)
+    lo, hi = mid_alpha_range
+    mid = torch.rand(n, device=env.device) < mid_prob
+    a = torch.where(mid, lo + (hi - lo) * torch.rand(n, device=env.device), torch.zeros(n, device=env.device))
+    env._peck_spawn_alpha[env_ids] = a
+
+    asset: Entity = env.scene[asset_cfg.name]
+    servo_ids = _servo_joint_ids(env, asset)
+    cols = torch.tensor([7 + j for j in servo_ids], device=env.device, dtype=torch.long)
+    sit = torch.tensor(sit_pose, device=env.device, dtype=torch.float)
+    peck = torch.tensor(peck_pose, device=env.device, dtype=torch.float)
+    q = sit + a.unsqueeze(-1) * (peck - sit)
+    q = q + torch.randn(n, len(cols), device=env.device) * joint_noise_std
+    env.sim.data.qpos[env_ids.unsqueeze(1), cols.unsqueeze(0)] = q
+    env.sim.data.qvel[env_ids.unsqueeze(1), (cols - 1).unsqueeze(0)] = 0.0
