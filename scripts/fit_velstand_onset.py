@@ -2,9 +2,10 @@
 
     uv run scripts/fit_velstand_onset.py v10/velstand.onnx v8/velstand.onnx candidate.onnx
 
-The student keeps its observation normalizer and hidden layers. The fit uses
-v8's upright locomotion examples and v10's examples of the other commands and
-recovery poses. See docs/velstand_policy.md for the rehearsal and its limits.
+The student keeps its observation normalizer and hidden layers. It learns
+from v8 demonstrations of gait onset, turning and course correction under
+the original requested twist. Standing and recovery labels come from v10.
+See docs/velstand_policy.md for the simulator and paired benchmark commands.
 """
 
 import argparse

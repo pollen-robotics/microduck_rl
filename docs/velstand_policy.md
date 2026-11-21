@@ -278,15 +278,24 @@ set on the Hub is updated by hand (replace `velstand.onnx`, edit only its manife
 
 With set v10 on the backlash scene, the duck can keep walking at 0.15 m/s after
 walking at 0.20 m/s, yet barely move when the same 0.15 m/s command starts from
-a stand. In-place turns also depend on the starting state and direction.
+a stand. The same effect occurs in the first gait-onset fit at ±0.5 rad/s.
+From a stand, the trunk turned about +8° or −10° in 8 s. One second at ±1 rad/s
+before the same slow command was enough to sustain a turn in either direction.
+The v8 teacher also has a direction-dependent threshold. In four fresh starts
+it turned about +15° at +0.5 rad/s and +242° to +256° at +0.6 rad/s.
 [microduck#597](https://github.com/pollen-robotics/microduck/issues/597)
 
 `scripts/fit_velstand_onset.py` builds an experimental actor for this simulator.
-It fits the last linear layer of v10 to v8 actions during upright, slow forward
-walks and in-place turns. Both actors see the same command. The remaining labels
-come from v10, including examples of holding still and getting up. The ONNX
-records the hashes of both input policies. Small turns can still stall, and a
-straight walk can drift in heading. Hardware transfer has not been evaluated.
+During training, v8 gets a stronger yaw command to demonstrate starting a turn.
+For straight walks, it steers back toward the initial heading and line using
+the simulated trunk pose. Each demonstration pairs the original observation
+and requested twist with the resulting action. The fitted actor uses the
+usual 61 observations and 14 actions in `robotd`. The training set also includes
+v10 examples of holding still, getting up and following other commands.
+To preserve the first step at 0.15 m/s, short demonstrations begin from both
+SIT and STAND. For their first second the teacher gets a forward cue that ramps
+to 0.20 m/s. The fit gives these short examples triple weight and updates only
+v10's final linear layer. The ONNX records the hashes of both source policies.
 
 From this checkout, set `duck` to the companion microduck checkout. These commands
 build the candidate and start a new simulator state with the other v10 policies.
@@ -306,5 +315,29 @@ cp "$DUCK_SIM_STATE/candidate.onnx" "$DUCK_SIM_STATE/policies/current/velstand.o
 ```
 
 Use a microduck checkout without a local `policies/velstand.onnx`, which takes
-precedence over the simulator state. For a turn, start a fresh simulation and
-run `drive 0 1.0` or `drive 0 -1.0` after standing up.
+precedence over the simulator state. For a turn, start a fresh simulation,
+let the duck stand up and run `drive 0 0.5` or `drive 0 -0.5`. Start fresh
+for each direction. An exact 0.5 rad/s turn would cover 229° in 8 s. Measure
+the accumulated signed heading change to include turns that cross ±180°.
+
+The CPU benchmark runs nine commands from 12 perturbed starting placements
+and tests get-up from 20 placements for each of six postures. It records every
+trial, including stalls. Walking distance and lateral drift are measured along
+and across the starting heading. A blank time to the first 2 cm means the duck
+never reached that distance. Run both actors on the same fold for a paired
+comparison. Use `--fold reserve` for a second set of placements.
+
+```bash
+uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/base/current/velstand.onnx" v10.csv
+uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/candidate.onnx" candidate.csv
+```
+
+Across both folds (24 placements per command, 8 s each), the first gait-onset
+fit turned a median +8° / −10° at ±0.5 rad/s. With these demonstrations it
+turned +184° / −275°. Two positive turns with small head-pose offsets advanced
+less than 15°. Replaying those placements with a neutral head gave +197° and
++175°. The median translation was 11 cm at +0.5 and 7 cm at −0.5. At 0.15 m/s,
+median absolute course error fell from 28° to 18° and lateral displacement
+from 14 cm to 10 cm. Both actors recovered in 240/240 get-up trials across the
+two folds. These results are from the backlash simulator. Hardware performance
+has yet to be measured.
