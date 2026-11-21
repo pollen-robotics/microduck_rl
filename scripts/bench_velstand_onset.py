@@ -3,10 +3,13 @@
     uv run scripts/bench_velstand_onset.py candidate.onnx results.csv
 
 Run each actor with the same fold to compare identical initial placements.
+Use --head-poses for walks, turns and get-up tests with additional starting
+postures and paired replays of the same placement with a neutral head.
 """
 
 import argparse
 import csv
+import random
 from pathlib import Path
 
 import numpy as np
@@ -30,13 +33,15 @@ def _tick(policy, actor, gains, target):
     _apply_action(policy, actor(policy.get_observations()), gains)
 
 
-def _motion(policy, actor, gains, command, seed, index):
+def _motion(policy, actor, gains, command, seed, index, *, pose="STAND", head=None, settle_ticks=None):
     rng = np.random.default_rng(seed)
-    _reset(policy, rng)
-    if index % 3 == 2:
+    _reset(policy, rng, start_keyframe=pose)
+    if head is not None:
+        policy.head_offset[:] = head
+    elif index % 3 == 2:
         policy.head_offset[:] = rng.uniform(-0.1, 0.1, 4)
     rest = np.zeros(3)
-    for _ in range(_SETTLE_TICKS[index]):
+    for _ in range(_SETTLE_TICKS[index] if settle_ticks is None else settle_ticks):
         _tick(policy, actor, gains, rest)
 
     target = np.array([command[0], 0, command[1]])
@@ -68,19 +73,50 @@ def _recovery(policy, actor, gains, pose, seed):
     return (pose, seed, 0, 0, int(recovered), "", "", "", "")
 
 
+def _head_placements(fold):
+    """Create independent placements and neutral-head controls with identical joint jitter."""
+    sequence, low = (198151, 3100000) if fold == "primary" else (334621, 6400000)
+    rng = random.Random(sequence)
+    placements = []
+    for i, seed in enumerate(rng.sample(range(low, low + 500000), 24)):
+        pose = ("STAND", "SIT", "FOLD", "STAND", "FOLD", "SIT")[i % 6]
+        head = tuple(round(rng.uniform(-0.12, 0.12), 6) for _ in range(4)) if i % 3 else (0,) * 4
+        settle = rng.randrange(90, 125) if pose == "STAND" else rng.randrange(145, 170)
+        placements.append((seed, pose, settle, head, False))
+        if i in (2, 7, 13, 20):
+            placements.append((seed, pose, settle, (0,) * 4, True))
+    recovery_seeds = [rng.sample(range(low + 600000 + i * 20000, low + 620000 + i * 20000), 20)
+                      for i in range(len(_POSES))]
+    return placements, recovery_seeds
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("actor", type=Path)
     parser.add_argument("output", type=Path, help="new per-trial CSV")
     parser.add_argument("--fold", choices=_FOLDS, default="primary")
+    parser.add_argument("--head-poses", action="store_true",
+                        help="use settled STAND, SIT and FOLD starts with head offsets and matched neutral controls")
     args = parser.parse_args()
     actor = _Actor(args.actor)
     policy, gains = _make_policy(actor)
     motion_seeds, first_recovery_seed = _FOLDS[args.fold]
     with args.output.open("x", newline="") as output:
         writer = csv.writer(output)
-        writer.writerow(("case", "seed", "vx", "wz", "upright", "forward_cm", "lateral_cm",
-                         "degrees", "first_2cm_s"))
+        columns = ("case", "seed", "vx", "wz", "upright", "forward_cm", "lateral_cm", "degrees", "first_2cm_s")
+        if args.head_poses:
+            writer.writerow((*columns, "start_pose", "settle_ticks", "neck_pitch", "head_pitch", "head_yaw",
+                             "head_roll", "paired_control"))
+            placements, recovery_seeds = _head_placements(args.fold)
+            for command in _COMMANDS:
+                for seed, pose, settle, head, control in placements:
+                    row = _motion(policy, actor, gains, command, seed, 0, pose=pose, head=head, settle_ticks=settle)
+                    writer.writerow((*row, pose, settle, *head, int(control)))
+            for pose, seeds in zip(_POSES, recovery_seeds):
+                for seed in seeds:
+                    writer.writerow((*_recovery(policy, actor, gains, pose, seed), pose, "", "", "", "", "", ""))
+            return
+        writer.writerow(columns)
         for command in _COMMANDS:
             for index, seed in enumerate(motion_seeds):
                 writer.writerow(_motion(policy, actor, gains, command, seed, index))

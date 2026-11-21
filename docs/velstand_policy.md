@@ -332,12 +332,39 @@ uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/base/current/velstand.on
 uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/candidate.onnx" candidate.csv
 ```
 
-Across both folds (24 placements per command, 8 s each), the first gait-onset
-fit turned a median +8° / −10° at ±0.5 rad/s. With these demonstrations it
-turned +184° / −275°. Two positive turns with small head-pose offsets advanced
-less than 15°. Replaying those placements with a neutral head gave +197° and
-+175°. The median translation was 11 cm at +0.5 and 7 cm at −0.5. At 0.15 m/s,
-median absolute course error fell from 28° to 18° and lateral displacement
-from 14 cm to 10 cm. Both actors recovered in 240/240 get-up trials across the
-two folds. These results are from the backlash simulator. Hardware performance
-has yet to be measured.
+### Slow turns with a head-pose command
+
+Before yaw calibration, the fitted actor turned a median +184° / −275° at
+±0.5 rad/s on the original 24 placements. Two positive turns stopped near
++15° and +12°. Setting the head command at the same time as yaw reproduced
+both stalls even from a neutral head position. Clearing the head command at
+turn onset gave +181° and +174°. In the first placement head roll alone
+reproduced the stall. In the second, none of the four axes alone did.
+
+The experimental ONNX uses the norm of the ten leg joint velocities to
+strengthen the internal yaw cue while the legs are nearly still. At a requested
++0.5 rad/s, the cue falls from +1.0 to +0.575 rad/s as that norm rises from
+0 to 3 rad/s. At −0.5 it changes from −0.70 to −0.275 rad/s. These values were
+calibrated in CPU MuJoCo. The correction tapers to zero as the requested yaw
+rate moves away from ±0.5 rad/s or the requested linear speed increases.
+Forward, lateral and head commands pass through unchanged. The simulator's
+default forward speed is 0.15 m/s.
+
+Use `--head-poses` to exercise this case. Each fold includes 24 independent
+starts from STAND, SIT and FOLD, 16 with head offsets. Four additional rows per
+command replay an offset placement with a neutral head, marked `paired_control=1`.
+Exclude those repeats when computing the 24-placement median. Each fold also
+includes 120 get-up trials.
+
+```bash
+uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/candidate.onnx" head-primary.csv --head-poses
+uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/candidate.onnx" head-reserve.csv --head-poses --fold reserve
+```
+
+Median turns at +0.5 / −0.5 rad/s were +230° / −229° on the first fold and
++231° / −226° on the second. All 48 starts in each direction exceeded a quarter
+of the requested angle. The two previously stalled placements turned +232°
+and +198°. The same forward and get-up trials reproduced the uncalibrated
+actor's trajectories and outcomes. Turning still translates the trunk around
+9–11 cm. At +0.65 rad/s a separate sweep recorded one new stall in 24 starts.
+Hardware performance has yet to be measured.

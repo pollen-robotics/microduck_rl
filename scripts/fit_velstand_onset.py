@@ -3,9 +3,9 @@
     uv run scripts/fit_velstand_onset.py v10/velstand.onnx v8/velstand.onnx candidate.onnx
 
 The student keeps its observation normalizer and hidden layers. It learns
-from v8 demonstrations of gait onset, turning and course correction under
-the original requested twist. Standing and recovery labels come from v10.
-See docs/velstand_policy.md for the simulator and paired benchmark commands.
+from v8 locomotion demonstrations and v10 standing and recovery examples.
+The export also calibrates the internal yaw cue during slow in-place turns.
+See docs/velstand_policy.md for simulator and paired benchmark commands.
 """
 
 import argparse
@@ -18,6 +18,7 @@ import onnxruntime as ort
 from onnx import TensorProto, helper, numpy_helper
 
 from velstand_onset_rollouts import collect_examples
+from velstand_turn_calibration import calibrate_slow_turns
 
 
 def fit_head(model, observations, actions, ridge=0.001):
@@ -68,6 +69,7 @@ def main():
     model = onnx.load(args.base)
     observations, actions = collect_examples(args.base, args.teacher)
     fit_head(model, observations, actions)
+    calibrate_slow_turns(model)
     # Retain the deployment contract. Source run/checkpoint metadata belongs
     # to the input graph, while this file comes from an offline fit.
     contract = {"joint_names", "joint_stiffness", "joint_damping", "default_joint_pos",
