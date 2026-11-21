@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import onnxruntime as ort
+import pytest
 from onnx import TensorProto, helper, numpy_helper
 
 
@@ -26,7 +27,25 @@ def test_head_controls_replay_the_same_start(monkeypatch):
         assert len({s for group in recovery for s in group}) == 120
 
 
-def test_turn_calibration_preserves_other_observations_and_commands(monkeypatch):
+def test_paired_head_benchmark_matches_every_shifted_start(monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    from bench_velstand_onset import _paired_placements
+
+    used_seeds = set()
+    for fold in ("primary", "reserve"):
+        rows, _ = _paired_placements(fold)
+        shifted = {seed: (pose, ticks, head) for seed, pose, ticks, head, control in rows if not control}
+        neutral = {seed: (pose, ticks, head) for seed, pose, ticks, head, control in rows if control}
+        assert len(rows) == 60 and len(shifted) == len(neutral) == 30
+        assert shifted.keys() == neutral.keys() and used_seeds.isdisjoint(shifted)
+        used_seeds.update(shifted)
+        for seed, (pose, ticks, head) in shifted.items():
+            assert neutral[seed] == (pose, ticks, (0,) * 4)
+            assert len(head) == 4 and any(head)
+
+
+@pytest.fixture
+def calibration_engine(monkeypatch):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
     from velstand_turn_calibration import calibrate_slow_turns
 
@@ -45,23 +64,60 @@ def test_turn_calibration_preserves_other_observations_and_commands(monkeypatch)
         "observation_names": "base_ang_vel,projected_gravity,joint_pos,joint_vel,actions,command,head_command,body_command",
     })
     calibrate_slow_turns(model)
-    engine = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
-    for vx, vy, yaw, leg_speed, expected in (
-        (0, 0, 0.5, 0, 1.0), (0, 0, -0.5, 0, -0.70),
-        (0, 0, 0.5, 3, 0.575), (0, 0, -0.5, 4, -0.275),
-        (0, 0, 0.5, 1.5, 0.7875), (0, 0, 0, 2, 0), (0.15, 0, 0, 0, 0),
-        (0.15, 0, 0.5, 0, 0.5), (0, 0.12, -0.5, 2, -0.5),
-        (0, 0, -0.30, 0, -0.30), (0, 0, 1.0, 0, 1.0),
+    return ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+
+
+def test_turn_calibration_preserves_other_observations_and_commands(calibration_engine):
+    right_pivot_vx = -0.085
+    right_steady_shift = 0.39
+    # At -0.5 rad/s the window weight is 0.5. Still legs receive an additional onset cue.
+    right_steady_yaw = -0.5 + 0.5 * right_steady_shift
+    right_start_yaw = right_steady_yaw - 0.5 * 0.85
+    for vx, vy, yaw, leg_speed, expected_vx, expected_yaw in (
+        (0, 0, 0.5, 0, 0, 1.0), (0, 0, -0.5, 0, right_pivot_vx, right_start_yaw),
+        (0, 0, 0.5, 3, 0, 0.575), (0, 0, -0.5, 4, right_pivot_vx, right_steady_yaw),
+        (0, 0, 0.5, 1.5, 0, 0.7875), (0, 0, 0, 2, 0, 0), (0.15, 0, 0, 0, 0.15, 0),
+        (0.15, 0, 0.5, 0, 0.15, 0.5), (0, 0.12, -0.5, 2, 0, -0.5),
+        (0.05, 0, -0.5, 3, 0.05 + 0.5 * right_pivot_vx, -0.5 + 0.25 * right_steady_shift),
+        (0, 0, -0.30, 0, 0, -0.30), (0, 0, 1.0, 0, 0, 1.0),
     ):
         obs = np.linspace(-0.12, 0.12, 61, dtype=np.float32)
         obs[20:34] = 0
         obs[33] = leg_speed
         obs[25:29] = 5  # Head motion alone must not attenuate the first step.
         obs[48:51] = [vx, vy, yaw]
-        adjusted = engine.run(None, {"obs": obs[None]})[0][0]
-        np.testing.assert_array_equal(adjusted[:50], obs[:50])
+        obs[52] = obs[51]  # Equal neck and head pitch give zero differential head cue.
+        adjusted = calibration_engine.run(None, {"obs": obs[None]})[0][0]
+        np.testing.assert_array_equal(adjusted[:48], obs[:48])
+        assert adjusted[49] == obs[49]
         np.testing.assert_array_equal(adjusted[51:], obs[51:])
-        np.testing.assert_allclose(adjusted[50], expected, atol=1e-7)
+        np.testing.assert_allclose(adjusted[[48, 50]], [expected_vx, expected_yaw], atol=1e-7)
+
+
+def test_positive_yaw_cue_is_monotone_during_startup(calibration_engine):
+    for leg_speed in (0.0, 0.75, 1.5, 3.0, 4.0):
+        obs = np.zeros((1, 61), dtype=np.float32)
+        obs[0, 20] = leg_speed
+        cues = []
+        for requested in np.linspace(0.5, 1.0, 51, dtype=np.float32):
+            obs[0, 50] = requested
+            cues.append(calibration_engine.run(None, {"obs": obs})[0][0, 50])
+        assert np.all(np.diff(cues) >= 0), leg_speed
+        assert cues[-1] == 1.0
+
+
+def test_differential_head_pitch_has_a_bounded_effect_only_on_right_yaw(calibration_engine):
+    for yaw in (-0.5, 0.5):
+        obs = np.zeros((1, 61), dtype=np.float32)
+        obs[0, 50] = yaw
+        neutral = calibration_engine.run(None, {"obs": obs})[0][0, [48, 50]]
+        # At the center of the window the yaw adjustment is half the clipped
+        # head cue. Vary each pitch independently and then saturate both signs.
+        for neck, head, right_yaw_delta in ((0.04, 0, 0.0128), (0, 0.04, -0.0128),
+                                            (0.12, -0.12, 0.06), (-0.12, 0.12, -0.06)):
+            obs[0, 51:53] = [neck, head]
+            adjusted = calibration_engine.run(None, {"obs": obs})[0][0, [48, 50]]
+            np.testing.assert_allclose(adjusted - neutral, [0, right_yaw_delta if yaw < 0 else 0], atol=1e-7)
 
 
 def test_turn_labels_preserve_the_requested_twist(monkeypatch):

@@ -3,8 +3,8 @@
     uv run scripts/bench_velstand_onset.py candidate.onnx results.csv
 
 Run each actor with the same fold to compare identical initial placements.
-Use --head-poses for walks, turns and get-up tests with additional starting
-postures and paired replays of the same placement with a neutral head.
+Use --head-poses for additional starting postures, or --paired-heads to replay
+every placement with and without a four-axis head command.
 """
 
 import argparse
@@ -17,7 +17,7 @@ import numpy as np
 from velstand_onset_rollouts import _Actor, _apply_action, _heading, _make_policy, _reset
 
 
-_COMMANDS = ((0, 0), (0.15, 0), (0.20, 0), (0, 0.5), (0, -0.5), (0, 1), (0, -1),
+_COMMANDS = ((0, 0), (0.15, 0), (0.20, 0), (0, 0.5), (0, -0.5), (0, 0.65), (0, -0.65), (0, 1), (0, -1),
              (0.15, 0.5), (0.20, -0.5))
 _FOLDS = {
     "primary": ((8920, 8963, 9029, 9067, 9151, 9173, 9257, 9283, 9323, 9397, 9431, 9461), 25100),
@@ -56,8 +56,9 @@ def _motion(policy, actor, gains, command, seed, index, *, pose="STAND", head=No
     forward, lateral = c * dx + s * dy, -s * dx + c * dy
     heading = np.rad2deg(np.unwrap(yaw)[-1] - yaw[0])
     crossings = np.flatnonzero(forward >= 2)
+    radius = np.hypot(dx, dy)
     return ("motion", seed, *command, int(min(z) > 0.095), forward[-1], lateral[-1], heading,
-            crossings[0] / 50 if crossings.size else "")
+            crossings[0] / 50 if crossings.size else "", radius[-1], max(radius))
 
 
 def _recovery(policy, actor, gains, pose, seed):
@@ -70,7 +71,7 @@ def _recovery(policy, actor, gains, pose, seed):
         _tick(policy, actor, gains, rest)
         if tick >= 275:
             recovered &= root[2] > 0.095 and policy.data.xmat[trunk, 8] > 0.9
-    return (pose, seed, 0, 0, int(recovered), "", "", "", "")
+    return (pose, seed, 0, 0, int(recovered), "", "", "", "", "", "")
 
 
 def _head_placements(fold):
@@ -90,24 +91,44 @@ def _head_placements(fold):
     return placements, recovery_seeds
 
 
+def _paired_placements(fold):
+    """Replay every placement with a fixed four-axis head offset and a neutral head."""
+    sequence, low = (6421971, 101000000) if fold == "primary" else (9865613, 162000000)
+    rng = random.Random(sequence)
+    placements = []
+    for i, seed in enumerate(rng.sample(range(low, low + 400000), 30)):
+        pose = ("STAND", "SIT", "FOLD")[i % 3]
+        settle = rng.randrange(90, 125) if pose == "STAND" else rng.randrange(145, 170)
+        head = tuple(round(rng.uniform(-0.12, 0.12), 6) for _ in range(4))
+        placements.append((seed, pose, settle, head, False))
+        placements.append((seed, pose, settle, (0,) * 4, True))
+    recovery_seeds = [rng.sample(range(low + 500000 + i * 11000, low + 510000 + i * 11000), 20)
+                      for i in range(len(_POSES))]
+    return placements, recovery_seeds
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("actor", type=Path)
     parser.add_argument("output", type=Path, help="new per-trial CSV")
     parser.add_argument("--fold", choices=_FOLDS, default="primary")
-    parser.add_argument("--head-poses", action="store_true",
-                        help="use settled STAND, SIT and FOLD starts with head offsets and matched neutral controls")
+    starts = parser.add_mutually_exclusive_group()
+    starts.add_argument("--head-poses", action="store_true",
+                        help="use settled STAND, SIT and FOLD starts with head offsets and four neutral controls")
+    starts.add_argument("--paired-heads", action="store_true",
+                        help="run 30 placements twice, once with the offset and once with a neutral head")
     args = parser.parse_args()
     actor = _Actor(args.actor)
     policy, gains = _make_policy(actor)
     motion_seeds, first_recovery_seed = _FOLDS[args.fold]
     with args.output.open("x", newline="") as output:
         writer = csv.writer(output)
-        columns = ("case", "seed", "vx", "wz", "upright", "forward_cm", "lateral_cm", "degrees", "first_2cm_s")
-        if args.head_poses:
+        columns = ("case", "seed", "vx", "wz", "upright", "forward_cm", "lateral_cm", "degrees", "first_2cm_s",
+                   "end_radius_cm", "max_radius_cm")
+        if args.head_poses or args.paired_heads:
             writer.writerow((*columns, "start_pose", "settle_ticks", "neck_pitch", "head_pitch", "head_yaw",
                              "head_roll", "paired_control"))
-            placements, recovery_seeds = _head_placements(args.fold)
+            placements, recovery_seeds = (_paired_placements if args.paired_heads else _head_placements)(args.fold)
             for command in _COMMANDS:
                 for seed, pose, settle, head, control in placements:
                     row = _motion(policy, actor, gains, command, seed, 0, pose=pose, head=head, settle_ticks=settle)

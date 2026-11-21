@@ -320,12 +320,15 @@ let the duck stand up and run `drive 0 0.5` or `drive 0 -0.5`. Start fresh
 for each direction. An exact 0.5 rad/s turn would cover 229° in 8 s. Measure
 the accumulated signed heading change to include turns that cross ±180°.
 
-The CPU benchmark runs nine commands from 12 perturbed starting placements
+The CPU benchmark runs eleven commands from 12 perturbed starting placements
 and tests get-up from 20 placements for each of six postures. It records every
 trial, including stalls. Walking distance and lateral drift are measured along
 and across the starting heading. A blank time to the first 2 cm means the duck
-never reached that distance. Run both actors on the same fold for a paired
-comparison. Use `--fold reserve` for a second set of placements.
+never reached that distance. For pivots, `end_radius_cm` is the horizontal distance
+from the trunk's starting point after 8 s. `max_radius_cm` is the greatest such
+distance at any 50 Hz sample, including turns that come back toward the origin.
+Run both actors on the same fold for a paired comparison. Use `--fold reserve`
+for a second set of placements.
 
 ```bash
 uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/base/current/velstand.onnx" v10.csv
@@ -344,11 +347,10 @@ reproduced the stall. In the second, none of the four axes alone did.
 The experimental ONNX uses the norm of the ten leg joint velocities to
 strengthen the internal yaw cue while the legs are nearly still. At a requested
 +0.5 rad/s, the cue falls from +1.0 to +0.575 rad/s as that norm rises from
-0 to 3 rad/s. At −0.5 it changes from −0.70 to −0.275 rad/s. These values were
-calibrated in CPU MuJoCo. The correction tapers to zero as the requested yaw
-rate moves away from ±0.5 rad/s or the requested linear speed increases.
-Forward, lateral and head commands pass through unchanged. The simulator's
-default forward speed is 0.15 m/s.
+0 to 3 rad/s. With a neutral head at −0.5 it changes from −0.73 to −0.305 rad/s.
+These values were calibrated in CPU MuJoCo. The correction tapers to zero as
+the requested yaw rate moves away from ±0.5 rad/s or the requested linear
+speed increases. The simulator's default forward speed is 0.15 m/s.
 
 Use `--head-poses` to exercise this case. Each fold includes 24 independent
 starts from STAND, SIT and FOLD, 16 with head offsets. Four additional rows per
@@ -361,10 +363,55 @@ uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/candidate.onnx" head-pri
 uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/candidate.onnx" head-reserve.csv --head-poses --fold reserve
 ```
 
-Median turns at +0.5 / −0.5 rad/s were +230° / −229° on the first fold and
-+231° / −226° on the second. All 48 starts in each direction exceeded a quarter
-of the requested angle. The two previously stalled placements turned +232°
-and +198°. The same forward and get-up trials reproduced the uncalibrated
-actor's trajectories and outcomes. Turning still translates the trunk around
-9–11 cm. At +0.65 rad/s a separate sweep recorded one new stall in 24 starts.
-Hardware performance has yet to be measured.
+### Starting at +0.65 rad/s and turning about the starting point
+
+The first yaw calibration (`42c0d3f4`) restored the two +0.5 starts to +232°
+and +198°. At +0.65 rad/s, one shifted-head SIT start then turned only +17°
+in 8 s (target +298°). To reproduce it, use `--head-poses --fold primary` and
+inspect seed `3519081`. As the filtered request rose from +0.514 to +0.580,
+the internal yaw cue *fell* from +0.858 to +0.742 rad/s. Both feet stayed
+loaded for all 400 ticks. Bypassing the old correction on ticks 4–10 alone
+gave +251°. Bypassing it after tick 20 still gave +17°.
+
+Above +0.5 the new correction fades at unit slope, reaching zero at +1.0.
+At a given leg speed the internal yaw cue can now stay level or rise as the
+request increases. The same SIT start transfers its weight to one foot and
+turns +266°.
+
+At −0.5 rad/s the previous actor accumulated about 25 cm of forward motion
+in its rotating trunk frame. The new calibration feeds the actor a backward
+cue of 0.085 m/s at the center of the right-turn window. Neck pitch and head
+pitch affect the turn angle in opposite directions. The difference between
+their requested offsets adjusts the internal yaw cue by up to ±0.06 rad/s.
+The head command itself still goes to the actor.
+
+Use `--paired-heads` to compare two revisions. Each fold has 30 independent
+placements (ten each for STAND, SIT and FOLD). Each placement is run twice,
+with a four-axis head offset within ±0.12 rad and with a neutral head. Each
+fold also runs 120 get-ups from six postures.
+
+```bash
+uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/candidate.onnx" paired-primary.csv --paired-heads
+uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/candidate.onnx" paired-reserve.csv --paired-heads --fold reserve
+```
+
+The table compares the previous calibration (`42c0d3f4`) with this one.
+Each entry is the median of 60 runs on that fold, including the neutral replays.
+Angle error is the absolute difference from the requested angle in each run.
+
+| Eight-second measurement | Previous → current, primary | Previous → current, reserve |
+| --- | ---: | ---: |
+| Angle at +0.65 rad/s (target +298°) | +256° → +285° | +254° → +283° |
+| Angle at +0.5 rad/s (target +229°) | +232° → +232° | +232° → +232° |
+| Angle at −0.5 rad/s (target −229°) | −230° → −227° | −231° → −227° |
+| Absolute angle error at −0.5 rad/s | 5.5° → 3.3° | 7.5° → 3.8° |
+| Endpoint distance at −0.5 rad/s | 11.1 → 1.5 cm | 10.6 → 1.7 cm |
+| Maximum distance at −0.5 rad/s | 13.3 → 2.3 cm | 13.4 → 2.2 cm |
+
+The reserve fold contained another shifted-head SIT stall at +0.65 rad/s
+(seed `162282558`), which improved from +16° to +250°. All 120 final runs
+per direction at ±0.5 rad/s reached at least a quarter of the requested turn.
+At 0.15 m/s both actors reached 30 cm in 119/120 runs. In the remaining
+placement both moved only 0.77 cm. Both actors recovered on all 240 get-ups
+with both feet supporting the robot for the final 0.5 s. Hardware transfer
+has yet to be measured.
