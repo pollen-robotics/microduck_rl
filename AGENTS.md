@@ -233,7 +233,7 @@ Never launch a long run without one.
   `pollen-robotics/microduck-training` record it (`onnx[]` in each `bundle.json`, matched by sha256).
   For an ONNX not bundled yet, `scripts/find_onnx_source.py` finds the run
   by exact weight match against wandb checkpoints (2026-09: walk =
-  441tzs6d@3750, stand = 69u48n8l@9750; 2026-10 Hub v7 velstand = j4i6yoq2@1250,
+  441tzs6d@3750, stand = 69u48n8l@9750; Hub velstand v7 = v9 (current) = j4i6yoq2@1250,
   lineage in `docs/velstand_policy.md`, sitstand in `docs/sitstand_policy.md`).
 - Watch per-iteration: mean reward rising AND episode length behaving as the
   task demands; every penalty term ≤ 0; the MAIN task term actually growing
