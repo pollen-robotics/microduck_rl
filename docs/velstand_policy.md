@@ -273,3 +273,38 @@ uv run python claude_experiments/velstand_rise_battery.py output.onnx --backlash
 Always export through `scripts/export.py` (obs normalizer is baked into the ONNX). The official
 set on the Hub is updated by hand (replace `velstand.onnx`, edit only its manifest entry, commit,
 `create_tag vN`); `uv run publish` is for single-policy repos.
+
+## Slow gait starts in duck-sim
+
+With set v10 on the backlash scene, the duck can keep walking at 0.15 m/s after
+walking at 0.20 m/s, yet barely move when the same 0.15 m/s command starts from
+a stand. In-place turns also depend on the starting state and direction.
+[microduck#597](https://github.com/pollen-robotics/microduck/issues/597)
+
+`scripts/fit_velstand_onset.py` builds an experimental actor for this simulator.
+It fits the last linear layer of v10 to v8 actions during upright, slow forward
+walks and in-place turns. Both actors see the same command. The remaining labels
+come from v10, including examples of holding still and getting up. The ONNX
+records the hashes of both input policies. Small turns can still stall, and a
+straight walk can drift in heading. Hardware transfer has not been evaluated.
+
+From this checkout, set `duck` to the companion microduck checkout. These commands
+build the candidate and start a new simulator state with the other v10 policies.
+
+```bash
+export DUCK_SIM_RL="$PWD" DUCK_SIM_STATE="$(mktemp -d)" DUCK_SIM_VIEWER=0
+POLICY_VERSION=v10 sh "$duck/scripts/seed-policies.sh" "$DUCK_SIM_STATE/base"
+uv run hf download pollen-robotics/microduck-policies velstand.onnx --revision v8 --local-dir "$DUCK_SIM_STATE/v8"
+uv run scripts/fit_velstand_onset.py "$DUCK_SIM_STATE/base/current/velstand.onnx" \
+  "$DUCK_SIM_STATE/v8/velstand.onnx" "$DUCK_SIM_STATE/candidate.onnx"
+mkdir -p "$DUCK_SIM_STATE/policies/current"
+cp "$DUCK_SIM_STATE/base/current/"*.onnx "$DUCK_SIM_STATE/policies/current/"
+cp "$DUCK_SIM_STATE/candidate.onnx" "$DUCK_SIM_STATE/policies/current/velstand.onnx"
+"$duck/scripts/duck-sim" up
+"$duck/scripts/duck-sim" drive
+"$duck/scripts/duck-sim" down
+```
+
+Use a microduck checkout without a local `policies/velstand.onnx`, which takes
+precedence over the simulator state. For a turn, start a fresh simulation and
+run `drive 0 1.0` or `drive 0 -1.0` after standing up.

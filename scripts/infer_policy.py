@@ -218,7 +218,7 @@ class PolicyInference:
                  sitstand_onnx_path=None,
                  kick_left_onnx_path=None, kick_right_onnx_path=None,
                  roulade_onnx_path=None,
-                 kick_duration=3.0, roulade_duration=2.0):
+                 kick_duration=3.0, roulade_duration=2.0, *, walking_session=None):
         self.bam_ctrl = bam_ctrl  # bam.mujoco.MujocoController (None = legacy position actuators)
         self.model = model
         self.data = data
@@ -233,11 +233,12 @@ class PolicyInference:
         self.new_cmd_obs = new_cmd_obs
 
         # Load walking policy
-        self.walking_session = None
+        self.walking_session = walking_session
         self.default_gait_period_from_onnx = None
-        if walking_onnx_path:
+        if self.walking_session is None and walking_onnx_path:
             print(f"Loading walking policy from: {walking_onnx_path}")
             self.walking_session = ort.InferenceSession(walking_onnx_path)
+        if self.walking_session is not None:
             w_input_shape = self.walking_session.get_inputs()[0].shape
             w_output_shape = self.walking_session.get_outputs()[0].shape
             print(f"Walking policy input: {self.walking_session.get_inputs()[0].name}, shape: {w_input_shape}")
