@@ -124,6 +124,7 @@ from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg, SYMMETRY_CFG
 
 # Microduck-specific rough terrain: much gentler than the default ROUGH_TERRAINS_CFG.
 # The robot can only lift its feet ~1-2 cm, so steps are capped at 1.5 cm.
+# Each rough task must deep-copy this template before changing its settings.
 MICRODUCK_ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
     size=(8.0, 8.0),
     border_width=20.0,
@@ -750,7 +751,9 @@ def make_microduck_velocity_env_cfg(
         cfg.scene.terrain.terrain_generator = None
     else:
         cfg.scene.terrain.terrain_type = "generator"
-        cfg.scene.terrain.terrain_generator = MICRODUCK_ROUGH_TERRAINS_CFG
+        cfg.scene.terrain.terrain_generator = deepcopy(MICRODUCK_ROUGH_TERRAINS_CFG)
+        # Training rows form a difficulty ladder; play samples random terrain.
+        cfg.scene.terrain.terrain_generator.curriculum = not play
 
         # Soften terrain box contacts: adjacent boxes at different heights create
         # hard edges that destabilise the contact solver and produce NaN forces.
@@ -769,7 +772,6 @@ def make_microduck_velocity_env_cfg(
         cfg.sim.mujoco.ls_iterations = 50  # was 20
 
         if play:
-            cfg.scene.terrain.terrain_generator.curriculum = False
             cfg.scene.terrain.terrain_generator.num_cols = 5
             cfg.scene.terrain.terrain_generator.num_rows = 5
 
