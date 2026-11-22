@@ -463,3 +463,62 @@ a fresh boot with `drive 0 0.65`. The respective targets are +229° and +298°.
 ```json
 {"jsonrpc":"2.0","id":1,"method":"robot.head","params":{"neck_pitch":-0.067575,"head_pitch":-0.071532,"head_yaw":-0.011921,"head_roll":0.016375}}
 ```
+
+### Repeating straight walks and right pivots in robotd
+
+The earlier 0.20 m/s comparison used one boot per actor. To measure the spread,
+we compared revisions `4136174e` and `b4a9069d` on 52 pairs of fresh
+`robotd` boots in the backlash scene. The order of the two actors was
+balanced on each of two ports. Each boot started from SIT. After the daemon
+reported standing, we sent a neutral head command or the four offsets above
+and waited 0.5 s. The straight and right-turn commands were
+`duck-sim drive 0.20 0` and `duck-sim drive 0 -0.5`. Each ran for eight
+seconds. Use a fresh boot for every drive, including repeats of the same actor.
+
+| Command and measurement over 8 s | Pairs | Previous | Current | Paired change [95% interval] |
+| --- | ---: | ---: | ---: | ---: |
+| 0.20 m/s, absolute heading change (°) | 16 | 10.5 | 9.0 | -1.5 [-4.0, +2.5] |
+| 0.20 m/s, absolute lateral travel (cm) | 16 | 5.6 | 5.4 | +0.3 [-3.9, +2.3] |
+| 0.20 m/s, forward travel (cm) | 16 | 73.4 | 73.7 | -0.2 [-1.2, +0.7] |
+| −0.5 rad/s, neutral head, endpoint distance (cm) | 12 | 1.48 | 1.62 | +0.24 [-0.87, +0.45] |
+| −0.5 rad/s, neutral head, maximum distance (cm) | 12 | 2.01 | 1.88 | -0.18 [-0.53, +0.10] |
+| −0.5 rad/s, held head, endpoint distance (cm) | 12 | 1.29 | 1.80 | +0.40 [+0.16, +0.79] |
+| −0.5 rad/s, held head, maximum distance (cm) | 12 | 2.10 | 2.25 | +0.21 [-0.09, +1.75] |
+
+Previous and current are medians of the individual boots. The last column is
+the median change within pairs and its 95% bootstrap interval, resampling
+pairs within each port and order. For lateral travel, project the change in
+`trunk[:2]` from the simulator body socket (`read`) onto the sideways axis at the start of the drive.
+For the maximum distance, take the largest horizontal distance from that
+starting point across the 20 Hz trace and both endpoints. The angle is the
+accumulated heading reported by the stock drive.
+
+At 0.20 m/s both actors drifted. The current actor finished between −1°
+and +19° from its initial heading. The earlier increase from +6° to +15°
+did not repeat across pairs. At −0.5 rad/s with a neutral head, the median
+angle was −224.5° before and −223° after. With the held head it was −218.5°
+and −216°. The held-head endpoint moved farther from the start in 9 of 12
+pairs. Its paired increase was 0.40 cm. A second, distribution-free 95%
+interval for that increase spans −0.03 to +1.21 cm. The peak excursion and
+angle show no clear increase across the same boots.
+
+On identical physics trajectories the actors gave identical actions at both
+commands. In a separate simulation with the same actor and eight starting
+states, waiting three extra control ticks (60 ms) before sending 0.20 m/s
+changed the final angle by a median of 9.6° in absolute value. The timing of
+the first step can therefore produce differences of the size seen in a single
+pair. Individual cold boots also differ in their control and contact state.
+
+The current actor with the held head turned +220°, +223°, +224° and +265°
+at +0.5 rad/s (target +229°). At +0.65 rad/s it turned +284° to +294°
+(target +298°). The default 0.15 m/s drive started on all four boots with
+each actor, with median forward travel of 60.7 and 60.6 cm. Time to the first
+2 cm increased in all four pairs, by a median of 0.09 s.
+
+A separate get-up check placed the already-running simulated duck on its back,
+front or side using a test fixture in the MuJoCo body. The stock daemon and
+its fall handling stayed active. We verified floor contact outside the soles
+before each attempt. Both actors recovered on six of six placements, with
+both feet bearing weight throughout the last second. Median time to the first
+0.5 s of continuous support was 1.45 s before and 1.73 s after. The daemon
+engaged its fall reflex on three and four of the six boots, respectively.
