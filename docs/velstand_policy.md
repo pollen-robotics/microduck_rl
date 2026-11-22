@@ -273,3 +273,341 @@ uv run python claude_experiments/velstand_rise_battery.py output.onnx --backlash
 Always export through `scripts/export.py` (obs normalizer is baked into the ONNX). The official
 set on the Hub is updated by hand (replace `velstand.onnx`, edit only its manifest entry, commit,
 `create_tag vN`); `uv run publish` is for single-policy repos.
+
+## Slow gait starts in duck-sim
+
+With set v10 on the backlash scene, the duck can keep walking at 0.15 m/s after
+walking at 0.20 m/s, yet barely move when the same 0.15 m/s command starts from
+a stand. The same effect occurs in the first gait-onset fit at ±0.5 rad/s.
+From a stand, the trunk turned about +8° or −10° in 8 s. One second at ±1 rad/s
+before the same slow command was enough to sustain a turn in either direction.
+The v8 teacher also has a direction-dependent threshold. In four fresh starts
+it turned about +15° at +0.5 rad/s and +242° to +256° at +0.6 rad/s.
+[microduck#597](https://github.com/pollen-robotics/microduck/issues/597)
+
+`scripts/fit_velstand_onset.py` builds an experimental actor for this simulator.
+During training, v8 gets a stronger yaw command to demonstrate starting a turn.
+For straight walks, it steers back toward the initial heading and line using
+the simulated trunk pose. Each demonstration pairs the original observation
+and requested twist with the resulting action. The fitted actor uses the
+usual 61 observations and 14 actions in `robotd`. The training set also includes
+v10 examples of holding still, getting up and following other commands.
+To preserve the first step at 0.15 m/s, short demonstrations begin from both
+SIT and STAND. For their first second the teacher gets a forward cue that ramps
+to 0.20 m/s. The fit gives these short examples triple weight and updates only
+v10's final linear layer. The ONNX records the hashes of both source policies.
+
+From this checkout, set `duck` to the companion microduck checkout. These commands
+build the candidate and start a new simulator state with the other v10 policies.
+
+```bash
+export DUCK_SIM_RL="$PWD" DUCK_SIM_STATE="$(mktemp -d)" DUCK_SIM_VIEWER=0
+POLICY_VERSION=v10 sh "$duck/scripts/seed-policies.sh" "$DUCK_SIM_STATE/base"
+uv run hf download pollen-robotics/microduck-policies velstand.onnx --revision v8 --local-dir "$DUCK_SIM_STATE/v8"
+uv run scripts/fit_velstand_onset.py "$DUCK_SIM_STATE/base/current/velstand.onnx" \
+  "$DUCK_SIM_STATE/v8/velstand.onnx" "$DUCK_SIM_STATE/candidate.onnx"
+mkdir -p "$DUCK_SIM_STATE/policies/current"
+cp "$DUCK_SIM_STATE/base/current/"*.onnx "$DUCK_SIM_STATE/policies/current/"
+cp "$DUCK_SIM_STATE/candidate.onnx" "$DUCK_SIM_STATE/policies/current/velstand.onnx"
+"$duck/scripts/duck-sim" up
+"$duck/scripts/duck-sim" drive
+"$duck/scripts/duck-sim" down
+```
+
+Use a microduck checkout without a local `policies/velstand.onnx`, which takes
+precedence over the simulator state. For a turn, start a fresh simulation,
+let the duck stand up and run `drive 0 0.5` or `drive 0 -0.5`. Start fresh
+for each direction. An exact 0.5 rad/s turn would cover 229° in 8 s. Measure
+the accumulated signed heading change to include turns that cross ±180°.
+
+The CPU benchmark runs eleven commands from 12 perturbed starting placements
+and tests get-up from 20 placements for each of six postures. It records every
+trial, including stalls. Walking distance and lateral drift are measured along
+and across the starting heading. A blank time to the first 2 cm means the duck
+never reached that distance. For pivots, `end_radius_cm` is the horizontal distance
+from the trunk's starting point after 8 s. `max_radius_cm` is the greatest such
+distance at any 50 Hz sample, including turns that come back toward the origin.
+Run both actors on the same fold for a paired comparison. Use `--fold reserve`
+for a second set of placements.
+
+```bash
+uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/base/current/velstand.onnx" v10.csv
+uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/candidate.onnx" candidate.csv
+```
+
+### Slow turns with a head-pose command
+
+Before yaw calibration, the fitted actor turned a median +184° / −275° at
+±0.5 rad/s on the original 24 placements. Two positive turns stopped near
++15° and +12°. Setting the head command at the same time as yaw reproduced
+both stalls even from a neutral head position. Clearing the head command at
+turn onset gave +181° and +174°. In the first placement head roll alone
+reproduced the stall. In the second, none of the four axes alone did.
+
+The experimental ONNX uses the norm of the ten leg joint velocities to
+strengthen the internal yaw cue while the legs are nearly still. At a requested
++0.5 rad/s, the cue falls from +1.0 to +0.575 rad/s as that norm rises from
+0 to 3 rad/s. With a neutral head at −0.5 it changes from −0.73 to −0.305 rad/s.
+These values were calibrated in CPU MuJoCo. The correction tapers to zero as
+the requested yaw rate moves away from ±0.5 rad/s or the requested linear
+speed increases. The simulator's default forward speed is 0.15 m/s.
+
+Use `--head-poses` to exercise this case. Each fold includes 24 independent
+starts from STAND, SIT and FOLD, 16 with head offsets. Four additional rows per
+command replay an offset placement with a neutral head, marked `paired_control=1`.
+Exclude those repeats when computing the 24-placement median. Each fold also
+includes 120 get-up trials.
+
+```bash
+uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/candidate.onnx" head-primary.csv --head-poses
+uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/candidate.onnx" head-reserve.csv --head-poses --fold reserve
+```
+
+### Starting at +0.65 rad/s and turning about the starting point
+
+The first yaw calibration (`42c0d3f4`) restored the two +0.5 starts to +232°
+and +198°. At +0.65 rad/s, one shifted-head SIT start then turned only +17°
+in 8 s (target +298°). To reproduce it, use `--head-poses --fold primary` and
+inspect seed `3519081`. As the filtered request rose from +0.514 to +0.580,
+the internal yaw cue *fell* from +0.858 to +0.742 rad/s. Both feet stayed
+loaded for all 400 ticks. Bypassing the old correction on ticks 4–10 alone
+gave +251°. Bypassing it after tick 20 still gave +17°.
+
+Above +0.5 the new correction fades at unit slope, reaching zero at +1.0.
+At a given leg speed the internal yaw cue can now stay level or rise as the
+request increases. The same SIT start transfers its weight to one foot and
+turns +266°.
+
+At −0.5 rad/s the previous actor accumulated about 25 cm of forward motion
+in its rotating trunk frame. The new calibration feeds the actor a backward
+cue of 0.085 m/s at the center of the right-turn window. Neck pitch and head
+pitch affect the turn angle in opposite directions. The difference between
+their requested offsets adjusts the internal yaw cue by up to ±0.06 rad/s.
+The head command itself still goes to the actor.
+
+Use `--paired-heads` to compare two revisions. Each fold has 30 independent
+placements (ten each for STAND, SIT and FOLD). Each placement is run twice,
+with a four-axis head offset within ±0.12 rad and with a neutral head. Each
+fold also runs 120 get-ups from six postures.
+
+```bash
+uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/candidate.onnx" paired-primary.csv --paired-heads
+uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/candidate.onnx" paired-reserve.csv --paired-heads --fold reserve
+```
+
+The table compares the two calibration revisions `42c0d3f4` and `4136174e`.
+Each entry is the median of 60 runs on that fold, including the neutral replays.
+Angle error is the absolute difference from the requested angle in each run.
+
+| Eight-second measurement | Primary | Reserve |
+| --- | ---: | ---: |
+| Angle at +0.65 rad/s (target +298°) | +256° → +285° | +254° → +283° |
+| Angle at +0.5 rad/s (target +229°) | +232° → +232° | +232° → +232° |
+| Angle at −0.5 rad/s (target −229°) | −230° → −227° | −231° → −227° |
+| Absolute angle error at −0.5 rad/s | 5.5° → 3.3° | 7.5° → 3.8° |
+| Endpoint distance at −0.5 rad/s | 11.1 → 1.5 cm | 10.6 → 1.7 cm |
+| Maximum distance at −0.5 rad/s | 13.3 → 2.3 cm | 13.4 → 2.2 cm |
+
+The reserve fold contained another shifted-head SIT stall at +0.65 rad/s
+(seed `162282558`), which improved from +16° to +250°. All 120 final runs
+per direction at ±0.5 rad/s reached at least a quarter of the requested turn.
+At 0.15 m/s both actors reached 30 cm in 119/120 runs. In the remaining
+placement both moved only 0.77 cm. Both actors recovered on all 240 get-ups
+with both feet supporting the robot for the final 0.5 s. Hardware transfer
+has yet to be measured.
+
+### Holding the head during a positive turn
+
+On revision `4136174e`, holding neck pitch, head pitch, head yaw and head roll
+at (−0.068, −0.072, −0.012, +0.016) rad shortened an eight-second turn at
+both +0.5 and +0.65 rad/s. The daemon reported the requested head pose and
+the simulated joints followed it. The duck kept stepping. In matched SIT
+rollouts at +0.5 rad/s, a full gait cycle took 0.38 s with either head pose,
+but the trunk turned 9.6° per cycle with the offset versus 11.4° with a
+neutral head. At +0.65 the corresponding angles were 11.2° and 13.4°.
+Applying the offset only after the first 1.5 s also shortened the turn.
+
+Negative neck pitch alone accounted for most of this loss. Boosting yaw
+from the head command alone sometimes produced a faster gait in `robotd`,
+with an eight-second turn near +295° at +0.5 rad/s. On those boots the
+measured neck pitch stayed close to its target. On the slower gait the neck
+settled farther below it. The actor now uses both the requested offset and
+the measured joint position relative to home to limit the boost. It blends
+the correction in as the legs start moving. The right pivot retains its
+previous calibration.
+
+The table compares eight-second turns with the held head on 48 new matched
+placements, 16 each from SIT, STAND and FOLD.
+
+| Command | Median angle, previous → revised | Median absolute error, previous → revised |
+| --- | ---: | ---: |
+| +0.5 rad/s | +202.1° → +225.5° | 27.1° → 4.3° |
+| +0.65 rad/s | +248.8° → +297.1° | 49.1° → 4.0° |
+
+To replay that head command with matched neutral controls, run the benchmark
+on each actor. On each of 30 STAND, SIT and FOLD placements it settles the
+duck with a neutral head, slews the head command for 16 ticks at zero twist,
+then holds the target throughout the eight-second drive. The control replays
+the same placement and wait. Add `--fold reserve` for another 30 placements.
+
+```bash
+uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/candidate.onnx" held-head.csv \
+  --held-head -0.067575 -0.071532 -0.011921 0.016375
+```
+
+For a daemon run, start a fresh SIT simulation and send the following line to
+the simulator's JSON-RPC socket at `$DUCK_SIM_STATE/duck.sock`. Wait for the
+head to settle, then run `"$duck/scripts/duck-sim" drive 0 0.5`. Repeat from
+a fresh boot with `drive 0 0.65`. The respective targets are +229° and +298°.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"robot.head","params":{"neck_pitch":-0.067575,"head_pitch":-0.071532,"head_yaw":-0.011921,"head_roll":0.016375}}
+```
+
+### Repeating straight walks and right pivots in robotd
+
+The earlier 0.20 m/s comparison used one boot per actor. To measure the spread,
+we compared revisions `4136174e` and `b4a9069d` on 52 pairs of fresh
+`robotd` boots in the backlash scene. The order of the two actors was
+balanced on each of two ports. Each boot started from SIT. After the daemon
+reported standing, we sent a neutral head command or the four offsets above
+and waited 0.5 s. The straight and right-turn commands were
+`duck-sim drive 0.20 0` and `duck-sim drive 0 -0.5`. Each ran for eight
+seconds. Use a fresh boot for every drive, including repeats of the same actor.
+
+| Command and measurement over 8 s | Pairs | Previous | Current | Paired change [95% interval] |
+| --- | ---: | ---: | ---: | ---: |
+| 0.20 m/s, absolute heading change (°) | 16 | 10.5 | 9.0 | -1.5 [-4.0, +2.5] |
+| 0.20 m/s, absolute lateral travel (cm) | 16 | 5.6 | 5.4 | +0.3 [-3.9, +2.3] |
+| 0.20 m/s, forward travel (cm) | 16 | 73.4 | 73.7 | -0.2 [-1.2, +0.7] |
+| −0.5 rad/s, neutral head, endpoint distance (cm) | 12 | 1.48 | 1.62 | +0.24 [-0.87, +0.45] |
+| −0.5 rad/s, neutral head, maximum distance (cm) | 12 | 2.01 | 1.88 | -0.18 [-0.53, +0.10] |
+| −0.5 rad/s, held head, endpoint distance (cm) | 12 | 1.29 | 1.80 | +0.40 [+0.16, +0.79] |
+| −0.5 rad/s, held head, maximum distance (cm) | 12 | 2.10 | 2.25 | +0.21 [-0.09, +1.75] |
+
+Previous and current are medians of the individual boots. The last column is
+the median change within pairs and its 95% bootstrap interval, resampling
+pairs within each port and order. For lateral travel, project the change in
+`trunk[:2]` from the simulator body socket (`read`) onto the sideways axis at the start of the drive.
+For the maximum distance, take the largest horizontal distance from that
+starting point across the 20 Hz trace and both endpoints. The angle is the
+accumulated heading reported by the stock drive.
+
+At 0.20 m/s both actors drifted. The current actor finished between −1°
+and +19° from its initial heading. The earlier increase from +6° to +15°
+did not repeat across pairs. At −0.5 rad/s with a neutral head, the median
+angle was −224.5° before and −223° after. With the held head it was −218.5°
+and −216°. The held-head endpoint moved farther from the start in 9 of 12
+pairs. Its paired increase was 0.40 cm. A second, distribution-free 95%
+interval for that increase spans −0.03 to +1.21 cm. The peak excursion and
+angle show no clear increase across the same boots.
+
+On identical physics trajectories the actors gave identical actions at both
+commands. In a separate simulation with the same actor and eight starting
+states, waiting three extra control ticks (60 ms) before sending 0.20 m/s
+changed the final angle by a median of 9.6° in absolute value. The timing of
+the first step can therefore produce differences of the size seen in a single
+pair. Individual cold boots also differ in their control and contact state.
+
+The current actor with the held head turned +220°, +223°, +224° and +265°
+at +0.5 rad/s (target +229°). At +0.65 rad/s it turned +284° to +294°
+(target +298°). The default 0.15 m/s drive started on all four boots with
+each actor, with median forward travel of 60.7 and 60.6 cm. Time to the first
+2 cm increased in all four pairs, by a median of 0.09 s.
+
+A separate get-up check placed the already-running simulated duck on its back,
+front or side using a test fixture in the MuJoCo body. The stock daemon and
+its fall handling stayed active. We verified floor contact outside the soles
+before each attempt. Both actors recovered on six of six placements, with
+both feet bearing weight throughout the last second. Median time to the first
+0.5 s of continuous support was 1.45 s before and 1.73 s after. The daemon
+engaged its fall reflex on three and four of the six boots, respectively.
+
+### Reproducing an occasional long left turn
+
+With the held head offsets above, the fitted actor from `b4a9069d` sometimes
+turns more than +260° in an eight-second `drive 0 0.5`. The target is +229.2°.
+The stock simulator advances four 5 ms physics steps together. The daemon
+reads the joints and IMU, runs the policy, then writes motor targets in a
+separate request. If physics advances between those requests, the previous
+targets drive the next 20 ms of movement.
+
+In 17 baseline traces we identified which target actually drove the position
+servos from their reported positions, velocities and simulated motor currents.
+During the three long turns (+262°, +262°, +310°), the previous target
+accounted for 43%, 70% and 94% of the identifiable 20 ms updates, respectively.
+The other 14 turns ended at +220° to +239°, with at most 9% using the previous
+target. In the long turns the duck rotated farther per stride even as its
+cadence fell.
+
+To reproduce this timing on matched CPU MuJoCo starts, apply every third
+drive target after its physics batch. Run both commands on the same fold.
+The normal benchmark writes each target before the batch. Both schedules
+use the same observation layout, target filter and four physics steps per tick.
+
+```bash
+uv run scripts/fit_velstand_onset.py "$DUCK_SIM_STATE/base/current/velstand.onnx" \
+  "$DUCK_SIM_STATE/v8/velstand.onnx" "$DUCK_SIM_STATE/damped.onnx" --damp-left-turn
+for model in candidate damped; do
+  uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/$model.onnx" "$model-delay.csv" \
+    --held-head -0.067575 -0.071532 -0.011921 0.016375 --delay-every 3
+done
+```
+
+The optional fit uses trunk angular velocity projected onto the world vertical
+and measured neck position to reduce the internal left-turn command while the
+duck is stepping. The correction fades between +0.5 and +0.65 rad/s. On the
+30 paired starts above, the median held-head turn at +0.5 fell from +272.6°
+(range +261.7° to +282.1°) to +225.1° (+215.8° to +237.5°). At +0.65 the
+same timing produced +344.3° and +347.0° (target +297.9°).
+
+On stock `robotd` (`56424efe`, backlash scene), both actors started from SIT on each
+of 56 pairs of fresh boots. Each pair used one port, and actor order was balanced. We
+waited 0.5 s after setting the head and ran the stock eight-second drive. The table
+gives boot medians and, in brackets, angle ranges.
+
+At +0.5 with the held head, 1/32 default turns and 0/32 damped turns exceeded +250°.
+Neither fit exceeded +260° or fell below +200°. The paired median change in absolute
+error was −0.18° (95% bootstrap interval −2.82° to +1.00°). With zero events in 32
+damped boots, the one-sided 95% upper bound for turns above +250° is 8.9%. The +260°
+boot used the previous target in 129 of 351 identifiable 20 ms updates. Four damped
+boots used it in 51–71% of such updates and still ended at +225° to +239°. In a
+separate six-pair test, a simulator fixture delayed every third target by one 20 ms
+batch while running the same daemon. The default median was +270.5° (260° to 298°) and
+the damped median was +225° (223° to 239°). Turns above +250° numbered 6/6 and 0/6,
+respectively.
+
+At +0.65 the first four pairs included +346° on the default fit and +354° on the
+damped fit. In eight additional pairs requested after the +354° result, angles were
++299° (287° to 351°) and +297° (288° to 350°), respectively. The number exceeding the
++297.9° target by more than 30° was 1/8 and 1/8.
+
+Both fits recovered in 6/6 fresh daemon boots from loaded back, front and side
+placements. Median time to the start of 0.5 s of continuous two-foot support was 1.34
+s and 1.38 s. With identical physics timing the straight walks at 0.15 and 0.20 m/s,
+right pivots and all 240 paired get-ups produced identical observations and actions.
+
+| Stock eight-second drive | Measurement | Pairs | Default fit | Damped fit |
+| --- | --- | ---: | ---: | ---: |
+| +0.5 rad/s, held head | Angle (°) | 32 | 226.0 [215.0, 260.0] | 226.0 [219.0, 239.0] |
+| +0.5 rad/s, held head | Absolute angular error (°) | 32 | 4.7 | 3.2 |
+| +0.5 rad/s, held head | Endpoint / peak distance (cm) | 32 | 12.2 / 12.8 | 10.6 / 12.0 |
+| +0.65 rad/s, held head | Angle (°) | 4 | 295.5 [291.0, 346.0] | 293.0 [289.0, 354.0] |
+| −0.5 rad/s, held head | Angle (°) | 4 | -217.0 | -222.0 |
+| −0.5 rad/s, held head | Endpoint / peak distance (cm) | 4 | 1.6 / 2.2 | 1.2 / 2.2 |
+| −0.5 rad/s, neutral | Angle (°) | 4 | -228.5 | -223.5 |
+| −0.5 rad/s, neutral | Endpoint / peak distance (cm) | 4 | 0.6 / 1.7 | 1.6 / 2.2 |
+| +0.5 rad/s, neutral | Angle (°) | 4 | 231.0 | 232.0 |
+| 0.15 m/s, neutral | Forward travel (cm) / time to first 2 cm (s) | 4 | 61.0 / 0.99 | 61.2 / 0.93 |
+| 0.20 m/s, neutral | Forward travel (cm) / absolute lateral travel (cm) | 4 | 73.4 / 5.1 | 74.1 / 4.7 |
+
+If the neck stays near its target during a slow stride, the damper can sustain
+a reduction even when the trunk is already turning too slowly. On one
+matched FOLD start with another head command, both fits reached 10° in 0.40 s,
+but the full turn fell from +193.9° to +139.7°. Removing only the additional
+neck brake recovered +183.9° on that placement. Across 24 matched starts at
++0.4 rad/s with the original held head, one default and two damped turns
+reached less than a quarter of the requested angle. For these reasons,
+`--damp-left-turn` is an explicit simulator experiment. The standard fit
+reproduces the earlier ONNX byte for byte, and `duck-sim drive` defaults to
+0.15 m/s.
