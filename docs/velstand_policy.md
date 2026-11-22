@@ -395,11 +395,11 @@ uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/candidate.onnx" paired-p
 uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/candidate.onnx" paired-reserve.csv --paired-heads --fold reserve
 ```
 
-The table compares the previous calibration (`42c0d3f4`) with this one.
+The table compares the two calibration revisions `42c0d3f4` and `4136174e`.
 Each entry is the median of 60 runs on that fold, including the neutral replays.
 Angle error is the absolute difference from the requested angle in each run.
 
-| Eight-second measurement | Previous → current, primary | Previous → current, reserve |
+| Eight-second measurement | Primary | Reserve |
 | --- | ---: | ---: |
 | Angle at +0.65 rad/s (target +298°) | +256° → +285° | +254° → +283° |
 | Angle at +0.5 rad/s (target +229°) | +232° → +232° | +232° → +232° |
@@ -415,3 +415,51 @@ At 0.15 m/s both actors reached 30 cm in 119/120 runs. In the remaining
 placement both moved only 0.77 cm. Both actors recovered on all 240 get-ups
 with both feet supporting the robot for the final 0.5 s. Hardware transfer
 has yet to be measured.
+
+### Holding the head during a positive turn
+
+On revision `4136174e`, holding neck pitch, head pitch, head yaw and head roll
+at (−0.068, −0.072, −0.012, +0.016) rad shortened an eight-second turn at
+both +0.5 and +0.65 rad/s. The daemon reported the requested head pose and
+the simulated joints followed it. The duck kept stepping. In matched SIT
+rollouts at +0.5 rad/s, a full gait cycle took 0.38 s with either head pose,
+but the trunk turned 9.6° per cycle with the offset versus 11.4° with a
+neutral head. At +0.65 the corresponding angles were 11.2° and 13.4°.
+Applying the offset only after the first 1.5 s also shortened the turn.
+
+Negative neck pitch alone accounted for most of this loss. Boosting yaw
+from the head command alone sometimes produced a faster gait in `robotd`,
+with an eight-second turn near +295° at +0.5 rad/s. On those boots the
+measured neck pitch stayed close to its target. On the slower gait the neck
+settled farther below it. The actor now uses both the requested offset and
+the measured joint position relative to home to limit the boost. It blends
+the correction in as the legs start moving. The right pivot retains its
+previous calibration.
+
+The table compares eight-second turns with the held head on 48 new matched
+placements, 16 each from SIT, STAND and FOLD.
+
+| Command | Median angle, previous → revised | Median absolute error, previous → revised |
+| --- | ---: | ---: |
+| +0.5 rad/s | +202.1° → +225.5° | 27.1° → 4.3° |
+| +0.65 rad/s | +248.8° → +297.1° | 49.1° → 4.0° |
+
+To replay that head command with matched neutral controls, run the benchmark
+on each actor. On each of 30 STAND, SIT and FOLD placements it settles the
+duck with a neutral head, slews the head command for 16 ticks at zero twist,
+then holds the target throughout the eight-second drive. The control replays
+the same placement and wait. Add `--fold reserve` for another 30 placements.
+
+```bash
+uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/candidate.onnx" held-head.csv \
+  --held-head -0.067575 -0.071532 -0.011921 0.016375
+```
+
+For a daemon run, start a fresh SIT simulation and send the following line to
+the simulator's JSON-RPC socket at `$DUCK_SIM_STATE/duck.sock`. Wait for the
+head to settle, then run `"$duck/scripts/duck-sim" drive 0 0.5`. Repeat from
+a fresh boot with `drive 0 0.65`. The respective targets are +229° and +298°.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"robot.head","params":{"neck_pitch":-0.067575,"head_pitch":-0.071532,"head_yaw":-0.011921,"head_roll":0.016375}}
+```

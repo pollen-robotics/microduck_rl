@@ -94,30 +94,62 @@ def test_turn_calibration_preserves_other_observations_and_commands(calibration_
         np.testing.assert_allclose(adjusted[[48, 50]], [expected_vx, expected_yaw], atol=1e-7)
 
 
-def test_positive_yaw_cue_is_monotone_during_startup(calibration_engine):
-    for leg_speed in (0.0, 0.75, 1.5, 3.0, 4.0):
+def test_positive_yaw_cue_is_monotone_at_fixed_neck_pose_and_leg_speed(calibration_engine):
+    requests = np.linspace(0.30, 1.05, 76, dtype=np.float32)
+    for neck, measured in ((0, 0), (-0.1, -0.1), (-0.1, -0.12), (-0.1, -0.2), (-0.5, -1.0)):
+        for leg_speed in (0.0, 0.75, 1.5, 3.0, 4.0):
+            obs = np.zeros((1, 61), dtype=np.float32)
+            obs[0, 51] = neck
+            obs[0, 11] = measured  # sixth joint position, relative to the default pose
+            obs[0, 20] = leg_speed
+            cues = []
+            for requested in requests:
+                obs[0, 50] = requested
+                cues.append(calibration_engine.run(None, {"obs": obs})[0][0, 50])
+            assert np.all(np.diff(cues) >= -np.finfo(np.float32).eps), (neck, measured, leg_speed)
+            assert cues[-1] == requests[-1]
+
+
+def test_left_turn_cue_depends_on_measured_neck_pitch_during_motion(calibration_engine):
+    for vx, yaw, leg_speed, neck, measured, expected_yaw in (
+        (0, 0.5, 3, -0.1, -0.1, 0.575),   # at the requested position
+        (0, 0.5, 3, -0.1, -0.08, 0.575),  # above the request
+        (0, 0.5, 3, -0.1, -0.12, 0.630),  # correction limited by the measured difference
+        (0, 0.5, 3, -0.1, -0.2, 0.685),   # correction limited by the requested neck angle
+        (0, 0.65, 3, -0.1, -0.1, 0.7275),
+        (0, 0.65, 3, -0.1, -0.12, 0.822),
+        (0, 0.65, 3, -0.5, -1.0, 0.9825),  # combined upper limit
+        (0, 0.65, 3, 0.1, -0.2, 0.7275),   # positive neck request
+        (0, 0.65, 0, -0.1, -0.2, 1.0),     # still legs retain the previous onset cue
+        (0, 0, 3, -0.1, -0.2, 0),
+        (0.15, 0, 3, -0.1, -0.2, 0),
+        (0.15, 0.65, 3, -0.1, -0.2, 0.65),
+    ):
         obs = np.zeros((1, 61), dtype=np.float32)
+        obs[0, 11] = measured
         obs[0, 20] = leg_speed
-        cues = []
-        for requested in np.linspace(0.5, 1.0, 51, dtype=np.float32):
-            obs[0, 50] = requested
-            cues.append(calibration_engine.run(None, {"obs": obs})[0][0, 50])
-        assert np.all(np.diff(cues) >= 0), leg_speed
-        assert cues[-1] == 1.0
+        obs[0, 48:51] = [vx, 0, yaw]
+        obs[0, 51:55] = [neck, 0.07, -0.09, 0.03]
+        adjusted = calibration_engine.run(None, {"obs": obs})[0]
+        np.testing.assert_allclose(adjusted[0, 50], expected_yaw, atol=1e-7)
+        np.testing.assert_array_equal(adjusted[:, :50], obs[:, :50])
+        np.testing.assert_array_equal(adjusted[:, 51:], obs[:, 51:])
 
 
-def test_differential_head_pitch_has_a_bounded_effect_only_on_right_yaw(calibration_engine):
-    for yaw in (-0.5, 0.5):
+def test_right_turn_retains_the_bounded_commanded_pitch_cue(calibration_engine):
+    for leg_speed in (0.0, 3.0):
         obs = np.zeros((1, 61), dtype=np.float32)
-        obs[0, 50] = yaw
+        obs[0, 50] = -0.5
+        obs[0, 20] = leg_speed
         neutral = calibration_engine.run(None, {"obs": obs})[0][0, [48, 50]]
         # At the center of the window the yaw adjustment is half the clipped
         # head cue. Vary each pitch independently and then saturate both signs.
         for neck, head, right_yaw_delta in ((0.04, 0, 0.0128), (0, 0.04, -0.0128),
                                             (0.12, -0.12, 0.06), (-0.12, 0.12, -0.06)):
             obs[0, 51:53] = [neck, head]
+            obs[0, 11] = neck - 0.2
             adjusted = calibration_engine.run(None, {"obs": obs})[0][0, [48, 50]]
-            np.testing.assert_allclose(adjusted - neutral, [0, right_yaw_delta if yaw < 0 else 0], atol=1e-7)
+            np.testing.assert_allclose(adjusted - neutral, [0, right_yaw_delta], atol=1e-7)
 
 
 def test_turn_labels_preserve_the_requested_twist(monkeypatch):
