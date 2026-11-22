@@ -57,12 +57,16 @@ def _make_policy(actor):
     return policy, gains
 
 
-def _apply_action(policy, action, gains):
+def _apply_action(policy, action, gains, *, after_physics=False):
     # robotd filters each motor target against the previous target at 50 Hz.
     policy.last_action = action.copy()
     target_positions = policy.default_pose + policy.action_scale * action
+    # A daemon write can arrive just after the simulator advances its 20 ms batch.
+    if after_physics:
+        mujoco.mj_step(policy.model, policy.data, nstep=_SUBSTEPS)
     policy.data.ctrl[:] = (1 - gains) * policy.data.ctrl + gains * target_positions
-    mujoco.mj_step(policy.model, policy.data, nstep=_SUBSTEPS)
+    if not after_physics:
+        mujoco.mj_step(policy.model, policy.data, nstep=_SUBSTEPS)
 
 
 def _reset(policy, rng, posture=None, *, start_keyframe="STAND"):

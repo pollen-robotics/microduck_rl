@@ -9,6 +9,33 @@ import pytest
 from onnx import TensorProto, helper, numpy_helper
 
 
+@pytest.mark.parametrize("after_physics", [False, True])
+def test_motor_write_can_cross_a_physics_batch(monkeypatch, after_physics):
+    import mujoco
+
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    from velstand_onset_rollouts import _apply_action
+
+    model = mujoco.MjModel.from_xml_string("""
+        <mujoco><option timestep=".005"/><worldbody><body>
+          <joint name="hinge"/><geom type="sphere" size=".1"/>
+        </body></worldbody><actuator><position joint="hinge" kp="2"/></actuator></mujoco>
+    """)
+    data, reference = mujoco.MjData(model), mujoco.MjData(model)
+    policy = SimpleNamespace(model=model, data=data, default_pose=np.zeros(1), action_scale=1.0)
+    for action in (0.4, -0.2, 0.1):
+        target = 0.3 * reference.ctrl.copy() + 0.7 * action
+        if not after_physics:
+            reference.ctrl[:] = target
+        mujoco.mj_step(model, reference, nstep=4)
+        reference.ctrl[:] = target
+        _apply_action(policy, np.array([action]), np.array([0.7]), after_physics=after_physics)
+        np.testing.assert_allclose(data.qpos, reference.qpos, atol=1e-14)
+        np.testing.assert_allclose(data.qvel, reference.qvel, atol=1e-14)
+        np.testing.assert_allclose(data.ctrl, target)
+        assert data.time == reference.time
+
+
 def test_head_controls_replay_the_same_start(monkeypatch):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
     from bench_velstand_onset import _head_placements
@@ -44,8 +71,13 @@ def test_paired_head_benchmark_matches_every_shifted_start(monkeypatch):
             assert len(head) == 4 and any(head)
 
 
+@pytest.fixture(params=[False, True], ids=["default", "damped"])
+def damp_left_turn(request):
+    return request.param
+
+
 @pytest.fixture
-def calibration_engine(monkeypatch):
+def calibration_engine(monkeypatch, damp_left_turn):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
     from velstand_turn_calibration import calibrate_slow_turns
 
@@ -63,7 +95,7 @@ def calibration_engine(monkeypatch):
         "joint_names": ",".join(joints),
         "observation_names": "base_ang_vel,projected_gravity,joint_pos,joint_vel,actions,command,head_command,body_command",
     })
-    calibrate_slow_turns(model)
+    calibrate_slow_turns(model, damp_left_turn=damp_left_turn)
     return ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
 
 
@@ -94,11 +126,14 @@ def test_turn_calibration_preserves_other_observations_and_commands(calibration_
         np.testing.assert_allclose(adjusted[[48, 50]], [expected_vx, expected_yaw], atol=1e-7)
 
 
-def test_positive_yaw_cue_is_monotone_at_fixed_neck_pose_and_leg_speed(calibration_engine):
+@pytest.mark.parametrize("world_yaw_rate", [-0.57, 0.0, 1.5])
+def test_positive_yaw_cue_is_monotone_at_fixed_neck_pose_and_leg_speed(calibration_engine, world_yaw_rate):
     requests = np.linspace(0.30, 1.05, 76, dtype=np.float32)
     for neck, measured in ((0, 0), (-0.1, -0.1), (-0.1, -0.12), (-0.1, -0.2), (-0.5, -1.0)):
         for leg_speed in (0.0, 0.75, 1.5, 3.0, 4.0):
             obs = np.zeros((1, 61), dtype=np.float32)
+            obs[0, 2] = world_yaw_rate
+            obs[0, 5] = -1
             obs[0, 51] = neck
             obs[0, 11] = measured  # sixth joint position, relative to the default pose
             obs[0, 20] = leg_speed
@@ -110,21 +145,22 @@ def test_positive_yaw_cue_is_monotone_at_fixed_neck_pose_and_leg_speed(calibrati
             assert cues[-1] == requests[-1]
 
 
-def test_left_turn_cue_depends_on_measured_neck_pitch_during_motion(calibration_engine):
-    for vx, yaw, leg_speed, neck, measured, expected_yaw in (
-        (0, 0.5, 3, -0.1, -0.1, 0.575),   # at the requested position
-        (0, 0.5, 3, -0.1, -0.08, 0.575),  # above the request
-        (0, 0.5, 3, -0.1, -0.12, 0.630),  # correction limited by the measured difference
-        (0, 0.5, 3, -0.1, -0.2, 0.685),   # correction limited by the requested neck angle
-        (0, 0.65, 3, -0.1, -0.1, 0.7275),
-        (0, 0.65, 3, -0.1, -0.12, 0.822),
-        (0, 0.65, 3, -0.5, -1.0, 0.9825),  # combined upper limit
-        (0, 0.65, 3, 0.1, -0.2, 0.7275),   # positive neck request
-        (0, 0.65, 0, -0.1, -0.2, 1.0),     # still legs retain the previous onset cue
-        (0, 0, 3, -0.1, -0.2, 0),
-        (0.15, 0, 3, -0.1, -0.2, 0),
-        (0.15, 0.65, 3, -0.1, -0.2, 0.65),
+def test_left_turn_cue_depends_on_measured_neck_pitch_during_motion(calibration_engine, damp_left_turn):
+    for vx, yaw, leg_speed, neck, measured, default_yaw, damped_yaw in (
+        (0, 0.5, 3, -0.1, -0.1, 0.575, 0.425),   # at the requested position
+        (0, 0.5, 3, -0.1, -0.08, 0.575, 0.425),  # above the request
+        (0, 0.5, 3, -0.1, -0.12, 0.630, 0.635),  # limited by the measured difference
+        (0, 0.5, 3, -0.1, -0.2, 0.685, 0.845),   # limited by the requested neck angle
+        (0, 0.65, 3, -0.1, -0.1, 0.7275, 0.7275),
+        (0, 0.65, 3, -0.1, -0.12, 0.822, 0.822),
+        (0, 0.65, 3, -0.5, -1.0, 0.9825, 0.9825),  # combined upper limit
+        (0, 0.65, 3, 0.1, -0.2, 0.7275, 0.7275),   # positive neck request
+        (0, 0.65, 0, -0.1, -0.2, 1.0, 1.0),        # still legs retain the onset cue
+        (0, 0, 3, -0.1, -0.2, 0, 0),
+        (0.15, 0, 3, -0.1, -0.2, 0, 0),
+        (0.15, 0.65, 3, -0.1, -0.2, 0.65, 0.65),
     ):
+        expected_yaw = damped_yaw if damp_left_turn else default_yaw
         obs = np.zeros((1, 61), dtype=np.float32)
         obs[0, 11] = measured
         obs[0, 20] = leg_speed
@@ -134,6 +170,22 @@ def test_left_turn_cue_depends_on_measured_neck_pitch_during_motion(calibration_
         np.testing.assert_allclose(adjusted[0, 50], expected_yaw, atol=1e-7)
         np.testing.assert_array_equal(adjusted[:, :50], obs[:, :50])
         np.testing.assert_array_equal(adjusted[:, 51:], obs[:, 51:])
+
+
+def test_optional_left_turn_damper_uses_world_vertical(calibration_engine, damp_left_turn):
+    obs = np.zeros((1, 61), dtype=np.float32)
+    obs[0, 4] = -1  # Tilting the trunk puts world yaw on the second gyro axis.
+    obs[0, 11] = -0.1
+    obs[0, 20] = 3
+    obs[0, 50:52] = (0.5, -0.1)
+    for gyro, damped_yaw in (
+        ((0, 0, 1.5), 0.425),   # spin about a horizontal axis
+        ((0, 0.62, 0), 0.395),  # 0.03 rad/s above the stride allowance
+        ((0, 1.5, 0), 0.355),   # lower limit on the moving cue
+    ):
+        obs[0, :3] = gyro
+        result = calibration_engine.run(None, {"obs": obs})[0][0, 50]
+        np.testing.assert_allclose(result, damped_yaw if damp_left_turn else 0.575, atol=1e-7)
 
 
 def test_right_turn_retains_the_bounded_commanded_pitch_cue(calibration_engine):

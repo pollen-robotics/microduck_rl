@@ -4,14 +4,15 @@ import numpy as np
 from onnx import helper, numpy_helper
 
 
-def calibrate_slow_turns(model):
+def calibrate_slow_turns(model, *, damp_left_turn=False):
     """Calibrate the fitted actor's twist input before the baked normalizer.
 
     With almost stationary legs, a stronger cue gets the first step underway.
-    Once walking, the fitted actor needs a slightly larger positive cue and a
-    smaller negative cue. During a right pivot the actor also tends to walk
-    forward. Both corrections fade with distance from pure ±0.5 rad/s and
-    with translational speed. All units refer to raw observations.
+    Once walking, measured neck pitch adjusts the left cue. The optional
+    damper also uses trunk rotation to trim fast strides with a lowered neck.
+    The right pivot uses a smaller turn cue and a backward cue to reduce
+    forward travel. These corrections fade with distance from pure ±0.5 rad/s
+    and with translational speed. All units refer to raw observations.
     """
     graph = model.graph
     observation = graph.input[0]
@@ -62,13 +63,13 @@ def calibrate_slow_turns(model):
     pitch_shift = op("Mul", "pitch_shift", pitch_difference, constant("pitch_gain", 0.64))
     bounded_pitch = op("Clip", "bounded_pitch", pitch_shift, constant("pitch_min", -0.12), constant("pitch_max", 0.12))
     right_shift = op("Add", "right_with_head", constant("right_shift", 0.39), bounded_pitch)
-    # With negative neck pitch the left gait turns less per stride. Blend the
-    # measured steady corrections at +0.5 and +0.65 while keeping the still-leg cue.
+    # Blend the steady corrections at +0.5 and +0.65 while keeping the still-leg cue.
     above_half = op("Sub", "yaw_above_half", yaw, half)
     blend = op("Clip", "positive_rate_blend", op("Mul", "scaled_positive_rate", above_half,
                                                  constant("inverse_rate_span", 1 / 0.15)), zero, one)
-    neck_gain = op("Add", "neck_gain", constant("neck_gain_at_half", 2.2),
-                   op("Mul", "neck_gain_increment", blend, constant("neck_gain_span", 3.2)))
+    if not damp_left_turn:
+        neck_gain = op("Add", "neck_gain", constant("neck_gain_at_half", 2.2),
+                       op("Mul", "neck_gain_increment", blend, constant("neck_gain_span", 3.2)))
     negative_neck = op("Relu", "negative_neck", op("Neg", "reversed_neck", neck))
     # The same request can give a faster gait when the neck stays near its
     # target. Both the command and the measured pitch are offsets from home.
@@ -76,12 +77,36 @@ def calibrate_slow_turns(model):
     neck_error = op("Sub", "neck_error", neck, measured_neck)
     limit = op("Mul", "neck_error_limit", neck_error, constant("neck_error_gain", 2.5))
     extension = op("Max", "neck_extension", zero, op("Min", "limited_extension", negative_neck, limit))
+    if damp_left_turn:
+        # Preserve the stronger upper-rate neck cue during slow, loaded strides.
+        neck_gain = constant("neck_gain", 5.4)
     neck_shift = op("Mul", "neck_shift", extension, neck_gain)
     # At +0.65 the window weighs 0.35. Even a neutral head needs a further
     # 0.025 rad/s once stepping. Bound the total steady gain below the onset gain.
     rate_shift = op("Mul", "upper_rate_shift", blend, constant("upper_trim", 0.025 / 0.35))
     extra = op("Clip", "bounded_left_shift", op("Add", "left_gait_shift", neck_shift, rate_shift),
                zero, constant("left_shift_limit", 0.8))
+    if damp_left_turn:
+        # A fast stride rotates the trunk farther while the lowered neck stays
+        # near its target. Allow for normal within-stride gyro peaks, then brake
+        # excess rotation about the world vertical. Gravity points downward.
+        downward = op("ReduceSum", "downward_rate",
+                      op("Mul", "gyro_gravity", columns("turn_gyro", [0, 1, 2]),
+                         columns("turn_gravity", [3, 4, 5])), axis, keepdims=1)
+        excess = op("Sub", "excess_left_rate", op("Neg", "vertical_rate", downward),
+                    op("Add", "rate_limit", yaw, constant("stride_rate_allowance", 0.09)))
+        brake = op("Clip", "brake", op("Mul", "proportional_brake", excess,
+                   constant("brake_gain", 2.0)), zero, one)
+        brake = op("Add", "gait_brake", brake, op("Mul", "unloaded_neck_brake",
+                   op("Sub", "unloaded_neck", negative_neck, extension), constant("unloaded_gain", 3.0)))
+        head_weight = op("Min", "head_weight", one,
+                         op("Mul", "scaled_deflection", negative_neck, constant("deflection_scale", 14.0)))
+        brake_weight = op("Mul", "brake_weight", head_weight, op("Sub", "low_rate", one, blend))
+        # Below +0.5 the turn weight rises by 0.5/0.15 per rad/s. The combined
+        # shift must stay above -0.30 to keep the cue increasing along that ramp.
+        # Adding the left offset (0.15) to this floor gives -0.29.
+        extra = op("Max", "damped_shift", constant("minimum_steady_shift", -0.44),
+                   op("Sub", "damped_neck_shift", extra, op("Mul", "steady_brake", brake, brake_weight)))
     moving = op("Sub", "moving", one, stillness)
     moving_shift = op("Mul", "moving_left_shift", moving, extra)
     left_shift = op("Add", "left_with_head", constant("left_shift", 0.15), moving_shift)

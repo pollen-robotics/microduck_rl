@@ -522,3 +522,92 @@ before each attempt. Both actors recovered on six of six placements, with
 both feet bearing weight throughout the last second. Median time to the first
 0.5 s of continuous support was 1.45 s before and 1.73 s after. The daemon
 engaged its fall reflex on three and four of the six boots, respectively.
+
+### Reproducing an occasional long left turn
+
+With the held head offsets above, the fitted actor from `b4a9069d` sometimes
+turns more than +260° in an eight-second `drive 0 0.5`. The target is +229.2°.
+The stock simulator advances four 5 ms physics steps together. The daemon
+reads the joints and IMU, runs the policy, then writes motor targets in a
+separate request. If physics advances between those requests, the previous
+targets drive the next 20 ms of movement.
+
+In 17 baseline traces we identified which target actually drove the position
+servos from their reported positions, velocities and simulated motor currents.
+During the three long turns (+262°, +262°, +310°), the previous target
+accounted for 43%, 70% and 94% of the identifiable 20 ms updates, respectively.
+The other 14 turns ended at +220° to +239°, with at most 9% using the previous
+target. In the long turns the duck rotated farther per stride even as its
+cadence fell.
+
+To reproduce this timing on matched CPU MuJoCo starts, apply every third
+drive target after its physics batch. Run both commands on the same fold.
+The normal benchmark writes each target before the batch. Both schedules
+use the same observation layout, target filter and four physics steps per tick.
+
+```bash
+uv run scripts/fit_velstand_onset.py "$DUCK_SIM_STATE/base/current/velstand.onnx" \
+  "$DUCK_SIM_STATE/v8/velstand.onnx" "$DUCK_SIM_STATE/damped.onnx" --damp-left-turn
+for model in candidate damped; do
+  uv run scripts/bench_velstand_onset.py "$DUCK_SIM_STATE/$model.onnx" "$model-delay.csv" \
+    --held-head -0.067575 -0.071532 -0.011921 0.016375 --delay-every 3
+done
+```
+
+The optional fit uses trunk angular velocity projected onto the world vertical
+and measured neck position to reduce the internal left-turn command while the
+duck is stepping. The correction fades between +0.5 and +0.65 rad/s. On the
+30 paired starts above, the median held-head turn at +0.5 fell from +272.6°
+(range +261.7° to +282.1°) to +225.1° (+215.8° to +237.5°). At +0.65 the
+same timing produced +344.3° and +347.0° (target +297.9°).
+
+On stock `robotd` (`56424efe`, backlash scene), both actors started from SIT on each
+of 56 pairs of fresh boots. Each pair used one port, and actor order was balanced. We
+waited 0.5 s after setting the head and ran the stock eight-second drive. The table
+gives boot medians and, in brackets, angle ranges.
+
+At +0.5 with the held head, 1/32 default turns and 0/32 damped turns exceeded +250°.
+Neither fit exceeded +260° or fell below +200°. The paired median change in absolute
+error was −0.18° (95% bootstrap interval −2.82° to +1.00°). With zero events in 32
+damped boots, the one-sided 95% upper bound for turns above +250° is 8.9%. The +260°
+boot used the previous target in 129 of 351 identifiable 20 ms updates. Four damped
+boots used it in 51–71% of such updates and still ended at +225° to +239°. In a
+separate six-pair test, a simulator fixture delayed every third target by one 20 ms
+batch while running the same daemon. The default median was +270.5° (260° to 298°) and
+the damped median was +225° (223° to 239°). Turns above +250° numbered 6/6 and 0/6,
+respectively.
+
+At +0.65 the first four pairs included +346° on the default fit and +354° on the
+damped fit. In eight additional pairs requested after the +354° result, angles were
++299° (287° to 351°) and +297° (288° to 350°), respectively. The number exceeding the
++297.9° target by more than 30° was 1/8 and 1/8.
+
+Both fits recovered in 6/6 fresh daemon boots from loaded back, front and side
+placements. Median time to the start of 0.5 s of continuous two-foot support was 1.34
+s and 1.38 s. With identical physics timing the straight walks at 0.15 and 0.20 m/s,
+right pivots and all 240 paired get-ups produced identical observations and actions.
+
+| Stock eight-second drive | Measurement | Pairs | Default fit | Damped fit |
+| --- | --- | ---: | ---: | ---: |
+| +0.5 rad/s, held head | Angle (°) | 32 | 226.0 [215.0, 260.0] | 226.0 [219.0, 239.0] |
+| +0.5 rad/s, held head | Absolute angular error (°) | 32 | 4.7 | 3.2 |
+| +0.5 rad/s, held head | Endpoint / peak distance (cm) | 32 | 12.2 / 12.8 | 10.6 / 12.0 |
+| +0.65 rad/s, held head | Angle (°) | 4 | 295.5 [291.0, 346.0] | 293.0 [289.0, 354.0] |
+| −0.5 rad/s, held head | Angle (°) | 4 | -217.0 | -222.0 |
+| −0.5 rad/s, held head | Endpoint / peak distance (cm) | 4 | 1.6 / 2.2 | 1.2 / 2.2 |
+| −0.5 rad/s, neutral | Angle (°) | 4 | -228.5 | -223.5 |
+| −0.5 rad/s, neutral | Endpoint / peak distance (cm) | 4 | 0.6 / 1.7 | 1.6 / 2.2 |
+| +0.5 rad/s, neutral | Angle (°) | 4 | 231.0 | 232.0 |
+| 0.15 m/s, neutral | Forward travel (cm) / time to first 2 cm (s) | 4 | 61.0 / 0.99 | 61.2 / 0.93 |
+| 0.20 m/s, neutral | Forward travel (cm) / absolute lateral travel (cm) | 4 | 73.4 / 5.1 | 74.1 / 4.7 |
+
+If the neck stays near its target during a slow stride, the damper can sustain
+a reduction even when the trunk is already turning too slowly. On one
+matched FOLD start with another head command, both fits reached 10° in 0.40 s,
+but the full turn fell from +193.9° to +139.7°. Removing only the additional
+neck brake recovered +183.9° on that placement. Across 24 matched starts at
++0.4 rad/s with the original held head, one default and two damped turns
+reached less than a quarter of the requested angle. For these reasons,
+`--damp-left-turn` is an explicit simulator experiment. The standard fit
+reproduces the earlier ONNX byte for byte, and `duck-sim drive` defaults to
+0.15 m/s.

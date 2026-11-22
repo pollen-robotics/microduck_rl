@@ -28,16 +28,16 @@ _SETTLE_TICKS = (90, 101, 113, 122, 97, 109, 119, 94, 106, 117, 98, 111)
 _POSES = ("SIT", "FOLD", "back", "face", "left", "right")
 
 
-def _tick(policy, actor, gains, target, head_target=None):
+def _tick(policy, actor, gains, target, head_target=None, *, after_physics=False):
     policy.vel_cmd += 0.2 * (target - policy.vel_cmd)
     if head_target is not None:
         policy.head_offset += 0.2 * (head_target - policy.head_offset)
     policy._update_command()
-    _apply_action(policy, actor(policy.get_observations()), gains)
+    _apply_action(policy, actor(policy.get_observations()), gains, after_physics=after_physics)
 
 
 def _motion(policy, actor, gains, command, seed, index, *, pose="STAND", head=None, settle_ticks=None,
-            slew_head=False):
+            slew_head=False, delay_every=0):
     rng = np.random.default_rng(seed)
     _reset(policy, rng, start_keyframe=pose)
     if head is not None and not slew_head:
@@ -55,8 +55,9 @@ def _motion(policy, actor, gains, command, seed, index, *, pose="STAND", head=No
     target = np.array([command[0], 0, command[1]])
     root = policy.data.joint("trunk_base_freejoint").qpos
     poses = [(*root[:3], _heading(root[3:]))]
-    for _ in range(400):
-        _tick(policy, actor, gains, target, head_target)
+    for tick in range(400):
+        delayed = delay_every > 0 and tick % delay_every == 0
+        _tick(policy, actor, gains, target, head_target, after_physics=delayed)
         poses.append((*root[:3], _heading(root[3:])))
     x, y, z, yaw = np.asarray(poses).T
     dx, dy = 100 * (x - x[0]), 100 * (y - y[0])
@@ -120,6 +121,8 @@ def main():
     parser.add_argument("actor", type=Path)
     parser.add_argument("output", type=Path, help="new per-trial CSV")
     parser.add_argument("--fold", choices=_FOLDS, default="primary")
+    parser.add_argument("--delay-every", type=int, default=0, metavar="N",
+                        help="apply one drive target after physics every N ticks, starting with the first (0 disables)")
     starts = parser.add_mutually_exclusive_group()
     starts.add_argument("--head-poses", action="store_true",
                         help="use settled STAND, SIT and FOLD starts with head offsets and four neutral controls")
@@ -128,6 +131,8 @@ def main():
     starts.add_argument("--held-head", type=float, nargs=4, metavar=("NECK", "PITCH", "YAW", "ROLL"),
                         help="slew to these offsets (radians) after settling and replay each start with a neutral head")
     args = parser.parse_args()
+    if args.delay_every < 0:
+        parser.error("--delay-every must be nonnegative")
     if args.held_head is not None and not np.isfinite(args.held_head).all():
         parser.error("Head offsets must be finite radians")
     actor = _Actor(args.actor)
@@ -146,7 +151,7 @@ def main():
                     if args.held_head is not None and not control:
                         head = args.held_head
                     row = _motion(policy, actor, gains, command, seed, 0, pose=pose, head=head, settle_ticks=settle,
-                                  slew_head=args.held_head is not None)
+                                  slew_head=args.held_head is not None, delay_every=args.delay_every)
                     writer.writerow((*row, pose, settle, *head, int(control)))
             for pose, seeds in zip(_POSES, recovery_seeds):
                 for seed in seeds:
@@ -155,7 +160,7 @@ def main():
         writer.writerow(columns)
         for command in _COMMANDS:
             for index, seed in enumerate(motion_seeds):
-                writer.writerow(_motion(policy, actor, gains, command, seed, index))
+                writer.writerow(_motion(policy, actor, gains, command, seed, index, delay_every=args.delay_every))
         for index, pose in enumerate(_POSES):
             for seed in range(first_recovery_seed + 20 * index, first_recovery_seed + 20 * (index + 1)):
                 writer.writerow(_recovery(policy, actor, gains, pose, seed))

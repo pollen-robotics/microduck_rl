@@ -62,6 +62,10 @@ def main():
     parser.add_argument("base", type=Path, help="v10 velstand.onnx")
     parser.add_argument("teacher", type=Path, help="v8 velstand.onnx")
     parser.add_argument("output", type=Path, help="new ONNX file for rehearsal in duck-sim")
+    parser.add_argument(
+        "--damp-left-turn", action="store_true",
+        help="experimentally damp low-rate left turns with a lowered neck in simulation",
+    )
     args = parser.parse_args()
     if args.output.exists():
         parser.error(f"Choose a new output path. {args.output} already exists.")
@@ -69,7 +73,7 @@ def main():
     model = onnx.load(args.base)
     observations, actions = collect_examples(args.base, args.teacher)
     fit_head(model, observations, actions)
-    calibrate_slow_turns(model)
+    calibrate_slow_turns(model, damp_left_turn=args.damp_left_turn)
     # Retain the deployment contract. Source run/checkpoint metadata belongs
     # to the input graph, while this file comes from an offline fit.
     contract = {"joint_names", "joint_stiffness", "joint_damping", "default_joint_pos",
